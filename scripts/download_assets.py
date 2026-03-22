@@ -75,6 +75,9 @@ def main() -> None:
         sys.exit(1)
 
     version = sys.argv[1]
+    # Strip leading "v" if present
+    if version.startswith("v"):
+        version = version[1:]
     dist_dir = Path("dist")
     dist_dir.mkdir(exist_ok=True)
 
