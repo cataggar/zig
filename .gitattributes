@@ -23,3 +23,5 @@ lib/libcxx/** linguist-vendored
 lib/libcxxabi/** linguist-vendored
 lib/libtsan/** linguist-vendored
 lib/libunwind/** linguist-vendored
+
+.github/workflows/*.lock.yml linguist-generated=true merge=ours
