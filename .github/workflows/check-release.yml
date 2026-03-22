@@ -1,0 +1,52 @@
+name: Check for new Zig release
+
+on:
+  schedule:
+    - cron: "0 8 * * *" # Daily at 08:00 UTC
+  workflow_dispatch: {} # Allow manual triggers
+
+permissions: {}
+
+jobs:
+  check-and-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to push tags
+    outputs:
+      new_versions: ${{ steps.check.outputs.new_versions }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-release
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Check for new release
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run scripts/check_zig_release.py
+
+      - name: Create and push tags
+        if: steps.check.outputs.new_versions != ''
+        env:
+          NEW_VERSIONS: ${{ steps.check.outputs.new_versions }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for tag in $(echo "${NEW_VERSIONS}" | jq -r '.[]'); do
+            echo "Creating tag ${tag}"
+            git tag "${tag}"
+            git push origin "${tag}"
+          done
+
+      - name: Trigger publish workflow
+        if: steps.check.outputs.new_versions != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSIONS: ${{ steps.check.outputs.new_versions }}
+        run: |
+          for tag in $(echo "${NEW_VERSIONS}" | jq -r '.[]'); do
+            version="${tag#v}"
+            echo "Triggering publish for ${version}"
+            gh workflow run publish.yml -f version="${version}"
+          done
