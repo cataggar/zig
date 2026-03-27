@@ -1079,7 +1079,6 @@ const src_files = [_][]const u8{
     "musl/src/misc/nftw.c",
     "musl/src/misc/openpty.c",
     "musl/src/misc/ptsname.c",
-    "musl/src/misc/pty.c",
     "musl/src/misc/realpath.c",
     "musl/src/misc/setdomainname.c",
     "musl/src/misc/setpriority.c",
