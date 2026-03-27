@@ -306,6 +306,142 @@ fn pwritevLinux(fd: c_int, iov: [*]const linux.iovec_const, count: c_int, offset
     return errnoSize(linux.pwritev(fd, iov, @intCast(@as(c_uint, @bitCast(count))), offset));
 }
 
+fn alarmLinux(seconds: c_uint) callconv(.c) c_uint {
+    // setitimer syscall uses itimerval (usec), but Zig wraps it with itimerspec.
+    // The memory layout is identical, so nsec field holds microseconds at ABI level.
+    const it = linux.itimerspec{
+        .it_interval = .{ .sec = 0, .nsec = 0 },
+        .it_value = .{ .sec = @intCast(seconds), .nsec = 0 },
+    };
+    var old: linux.itimerspec = undefined;
+    _ = linux.setitimer(0, &it, &old); // ITIMER_REAL = 0
+    return @intCast(@as(u64, @intCast(old.it_value.sec)) + @as(u64, if (old.it_value.nsec != 0) 1 else 0));
+}
+
+fn faccessatLinux(fd: c_int, path: [*:0]const c_char, mode: c_int, flags: c_int) callconv(.c) c_int {
+    return errno(linux.faccessat(fd, @ptrCast(path), @bitCast(mode), @bitCast(flags)));
+}
+
+fn getcwdLinux(buf: ?[*]u8, size: usize) callconv(.c) ?[*]u8 {
+    if (buf) |b| {
+        if (size == 0) {
+            std.c._errno().* = @intFromEnum(linux.E.INVAL);
+            return null;
+        }
+        const rc: isize = @bitCast(linux.getcwd(b, size));
+        if (rc < 0) {
+            std.c._errno().* = @intCast(-rc);
+            return null;
+        }
+        if (rc == 0 or b[0] != '/') {
+            std.c._errno().* = @intFromEnum(linux.E.NOENT);
+            return null;
+        }
+        return b;
+    } else {
+        std.c._errno().* = @intFromEnum(linux.E.INVAL);
+        return null;
+    }
+}
+
+fn gethostnameLinux(name: [*]u8, len: usize) callconv(.c) c_int {
+    var uts: linux.utsname = undefined;
+    const rc: isize = @bitCast(linux.uname(&uts));
+    if (rc < 0) {
+        std.c._errno().* = @intCast(-rc);
+        return -1;
+    }
+    const nodename: [*]const u8 = &uts.nodename;
+    const max_len = @min(len, @as(usize, 65));
+    var i: usize = 0;
+    while (i < max_len) : (i += 1) {
+        name[i] = nodename[i];
+        if (nodename[i] == 0) return 0;
+    }
+    if (i > 0) name[i - 1] = 0;
+    return 0;
+}
+
+fn niceLinux(inc: c_int) callconv(.c) c_int {
+    const NZERO: c_int = 20;
+    var prio: c_int = inc;
+    if (inc > -2 * NZERO and inc < 2 * NZERO) {
+        // Kernel getpriority returns 20-nice (1..40), negative on error
+        const gp: isize = @bitCast(linux.syscall2(.getpriority, 0, 0));
+        if (gp < 0) {
+            std.c._errno().* = @intCast(-gp);
+            return -1;
+        }
+        prio += NZERO - @as(c_int, @intCast(gp));
+    }
+    if (prio > NZERO - 1) prio = NZERO - 1;
+    if (prio < -NZERO) prio = -NZERO;
+    const sp: isize = @bitCast(linux.syscall3(
+        .setpriority,
+        0,
+        0,
+        @as(usize, @bitCast(@as(isize, prio))),
+    ));
+    if (sp < 0) {
+        const err: c_int = @intCast(-sp);
+        std.c._errno().* = if (err == @intFromEnum(linux.E.ACCES)) @intFromEnum(linux.E.PERM) else err;
+        return -1;
+    }
+    return prio;
+}
+
+fn pauseLinux() callconv(.c) c_int {
+    return errno(linux.pause());
+}
+
+fn readlinkLinux(path: [*:0]const c_char, buf: [*]u8, bufsiz: usize) callconv(.c) isize {
+    return errnoSize(linux.readlink(@ptrCast(path), buf, bufsiz));
+}
+
+fn readlinkatLinux(fd: c_int, path: [*:0]const c_char, buf: [*]u8, bufsiz: usize) callconv(.c) isize {
+    return errnoSize(linux.readlinkat(fd, @ptrCast(path), buf, bufsiz));
+}
+
+fn sleepLinux(seconds: c_uint) callconv(.c) c_uint {
+    var tv = linux.timespec{ .sec = @intCast(seconds), .nsec = 0 };
+    const rc: isize = @bitCast(linux.nanosleep(&tv, &tv));
+    if (rc != 0) return @intCast(@max(tv.sec, 0));
+    return 0;
+}
+
+fn tcgetpgrpLinux(fd: c_int) callconv(.c) linux.pid_t {
+    var pgrp: linux.pid_t = undefined;
+    const rc = errno(linux.tcgetpgrp(fd, &pgrp));
+    if (rc < 0) return rc;
+    return pgrp;
+}
+
+fn tcsetpgrpLinux(fd: c_int, pgrp: linux.pid_t) callconv(.c) c_int {
+    return errno(linux.tcsetpgrp(fd, &pgrp));
+}
+
+fn truncateLinux(path: [*:0]const c_char, length: linux.off_t) callconv(.c) c_int {
+    return errno(linux.syscall2(.truncate, @intFromPtr(path), @as(usize, @bitCast(length))));
+}
+
+fn ualarmLinux(value: c_uint, interval: c_uint) callconv(.c) c_uint {
+    const it = linux.itimerspec{
+        .it_interval = .{ .sec = 0, .nsec = @intCast(interval) },
+        .it_value = .{ .sec = 0, .nsec = @intCast(value) },
+    };
+    var old: linux.itimerspec = undefined;
+    _ = linux.setitimer(0, &it, &old); // ITIMER_REAL = 0
+    // nsec field holds microseconds at ABI level (kernel itimerval.usec)
+    return @intCast(@as(u64, @intCast(old.it_value.sec)) * 1000000 + @as(u64, @intCast(old.it_value.nsec)));
+}
+
+fn usleepLinux(useconds: c_uint) callconv(.c) c_int {
+    const tv = linux.timespec{
+        .sec = @intCast(useconds / 1000000),
+        .nsec = @intCast(@as(u64, useconds % 1000000) * 1000),
+    };
+    return errno(linux.nanosleep(&tv, null));
+}
 fn setuidLinux(uid: linux.uid_t) callconv(.c) c_int {
     return errno(linux.setuid(uid));
 }
