@@ -682,7 +682,6 @@ const src_files = [_][]const u8{
     "musl/src/ldso/x86_64/tlsdesc.s",
     "musl/src/legacy/cuserid.c",
     "musl/src/legacy/daemon.c",
-    "musl/src/legacy/err.c",
     "musl/src/legacy/euidaccess.c",
     "musl/src/legacy/ftw.c",
     "musl/src/legacy/futimes.c",
