@@ -22,6 +22,18 @@ comptime {
         symbol(&chrootLinux, "chroot");
         symbol(&ctermidLinux, "ctermid");
         symbol(&dupLinux, "dup");
+        symbol(&dup2Linux, "dup2");
+        symbol(&dup3Linux, "__dup3");
+        symbol(&dup3Linux, "dup3");
+
+        symbol(&fchdirLinux, "fchdir");
+        symbol(&fchownLinux, "fchown");
+        symbol(&fdatasyncLinux, "fdatasync");
+        symbol(&fsyncLinux, "fsync");
+        symbol(&ftruncateLinux, "ftruncate");
+        symbol(&ftruncateLinux, "ftruncate64");
+        symbol(&isattyLinux, "isatty");
+        symbol(&pipe2Linux, "pipe2");
 
         symbol(&getegidLinux, "getegid");
         symbol(&geteuidLinux, "geteuid");
@@ -210,6 +222,46 @@ fn unlinkatLinux(fd: c_int, path: [*:0]const c_char, flags: c_int) callconv(.c) 
 
 fn execveLinux(path: [*:0]const c_char, argv: [*:null]const ?[*:0]c_char, envp: [*:null]const ?[*:0]c_char) callconv(.c) c_int {
     return errno(linux.execve(@ptrCast(path), @ptrCast(argv), @ptrCast(envp)));
+}
+
+fn dup2Linux(old_fd: c_int, new_fd: c_int) callconv(.c) c_int {
+    return errno(linux.dup2(old_fd, new_fd));
+}
+
+fn dup3Linux(old_fd: c_int, new_fd: c_int, flags: c_int) callconv(.c) c_int {
+    return errno(linux.dup3(old_fd, new_fd, @bitCast(flags)));
+}
+
+fn fchdirLinux(fd: c_int) callconv(.c) c_int {
+    return errno(linux.fchdir(fd));
+}
+
+fn fchownLinux(fd: c_int, owner: linux.uid_t, group: linux.gid_t) callconv(.c) c_int {
+    return errno(linux.fchown(fd, owner, group));
+}
+
+fn fdatasyncLinux(fd: c_int) callconv(.c) c_int {
+    return errno(linux.fdatasync(fd));
+}
+
+fn fsyncLinux(fd: c_int) callconv(.c) c_int {
+    return errno(linux.fsync(fd));
+}
+
+fn ftruncateLinux(fd: c_int, length: linux.off_t) callconv(.c) c_int {
+    return errno(linux.ftruncate(fd, length));
+}
+
+fn isattyLinux(fd: c_int) callconv(.c) c_int {
+    var wsz: linux.winsize = undefined;
+    if (errno(linux.ioctl(fd, linux.T.IOCGWINSZ, @intFromPtr(&wsz))) == 0) return 1;
+    if (std.c._errno().* != @intFromEnum(linux.E.BADF))
+        std.c._errno().* = @intFromEnum(linux.E.NOTTY);
+    return 0;
+}
+
+fn pipe2Linux(fd: *[2]c_int, flags: c_int) callconv(.c) c_int {
+    return errno(linux.pipe2(@ptrCast(fd), @bitCast(flags)));
 }
 
 fn lseekLinux(fd: c_int, offset: linux.off_t, whence: c_int) callconv(.c) linux.off_t {
