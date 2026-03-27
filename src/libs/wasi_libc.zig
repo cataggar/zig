@@ -981,8 +981,6 @@ const libc_top_half_src_files = [_][]const u8{
     "wasi/libc-top-half/musl/src/env/__stack_chk_fail.c",
     "wasi/libc-top-half/musl/src/env/unsetenv.c",
     "wasi/libc-top-half/musl/src/errno/strerror.c",
-    "wasi/libc-top-half/musl/src/exit/atexit.c",
-    "wasi/libc-top-half/musl/src/exit/at_quick_exit.c",
     "wasi/libc-top-half/musl/src/exit/exit.c",
     "wasi/libc-top-half/musl/src/fcntl/creat.c",
     "wasi/libc-top-half/musl/src/internal/defsysinfo.c",
