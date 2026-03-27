@@ -81,6 +81,8 @@ comptime {
     _ = @import("c/sys/reboot.zig");
     _ = @import("c/sys/utsname.zig");
 
+    _ = @import("c/env.zig");
+    _ = @import("c/exit.zig");
     _ = @import("c/unistd.zig");
     _ = @import("c/wchar.zig");
 }
