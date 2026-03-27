@@ -519,7 +519,6 @@ const src_files = [_][]const u8{
     "musl/src/complex/ctanl.c",
     "musl/src/conf/confstr.c",
     "musl/src/conf/fpathconf.c",
-    "musl/src/conf/legacy.c",
     "musl/src/conf/pathconf.c",
     "musl/src/conf/sysconf.c",
     "musl/src/crypt/crypt_blowfish.c",
