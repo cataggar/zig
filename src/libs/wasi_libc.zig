@@ -609,7 +609,6 @@ const libc_top_half_src_files = [_][]const u8{
     "musl/src/complex/ctanl.c",
     "musl/src/conf/confstr.c",
     "musl/src/conf/legacy.c",
-    "musl/src/conf/pathconf.c",
     "musl/src/crypt/crypt_blowfish.c",
     "musl/src/crypt/crypt.c",
     "musl/src/crypt/crypt_des.c",
@@ -971,7 +970,6 @@ const libc_top_half_src_files = [_][]const u8{
     "musl/src/time/timespec_get.c",
     "musl/src/time/__year_to_secs.c",
 
-    "wasi/libc-top-half/musl/src/conf/fpathconf.c",
     "wasi/libc-top-half/musl/src/conf/sysconf.c",
     "wasi/libc-top-half/musl/src/dirent/alphasort.c",
     "wasi/libc-top-half/musl/src/dirent/versionsort.c",
