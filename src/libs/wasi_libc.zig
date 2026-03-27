@@ -806,7 +806,6 @@ const libc_top_half_src_files = [_][]const u8{
     "musl/src/misc/gethostid.c",
     "musl/src/misc/getopt.c",
     "musl/src/misc/getopt_long.c",
-    "musl/src/misc/getsubopt.c",
     "musl/src/misc/realpath.c",
     "musl/src/multibyte/btowc.c",
     "musl/src/multibyte/c16rtomb.c",
