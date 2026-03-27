@@ -5,6 +5,7 @@ const linux = std.os.linux;
 
 const symbol = @import("../c.zig").symbol;
 const errno = @import("../c.zig").errno;
+const errnoSize = @import("../c.zig").errnoSize;
 
 comptime {
     if (builtin.target.isMuslLibC()) {
@@ -34,6 +35,24 @@ comptime {
         symbol(&getpidLinux, "getpid");
         symbol(&getppidLinux, "getppid");
         symbol(&getuidLinux, "getuid");
+
+        symbol(&lseekLinux, "__lseek");
+        symbol(&lseekLinux, "lseek");
+        symbol(&lseekLinux, "lseek64");
+
+        symbol(&readLinux, "read");
+        symbol(&readvLinux, "readv");
+        symbol(&preadLinux, "pread");
+        symbol(&preadLinux, "pread64");
+        symbol(&preadvLinux, "preadv");
+        symbol(&preadvLinux, "preadv64");
+
+        symbol(&writeLinux, "write");
+        symbol(&writevLinux, "writev");
+        symbol(&pwriteLinux, "pwrite");
+        symbol(&pwriteLinux, "pwrite64");
+        symbol(&pwritevLinux, "pwritev");
+        symbol(&pwritevLinux, "pwritev64");
 
         symbol(&rmdirLinux, "rmdir");
         symbol(&linkLinux, "link");
@@ -191,6 +210,48 @@ fn unlinkatLinux(fd: c_int, path: [*:0]const c_char, flags: c_int) callconv(.c) 
 
 fn execveLinux(path: [*:0]const c_char, argv: [*:null]const ?[*:0]c_char, envp: [*:null]const ?[*:0]c_char) callconv(.c) c_int {
     return errno(linux.execve(@ptrCast(path), @ptrCast(argv), @ptrCast(envp)));
+}
+
+fn lseekLinux(fd: c_int, offset: linux.off_t, whence: c_int) callconv(.c) linux.off_t {
+    const signed: isize = @bitCast(linux.lseek(fd, offset, @intCast(@as(c_uint, @bitCast(whence)))));
+    if (signed < 0) {
+        @branchHint(.unlikely);
+        std.c._errno().* = @intCast(-signed);
+        return -1;
+    }
+    return signed;
+}
+
+fn readLinux(fd: c_int, buf: [*]u8, count: usize) callconv(.c) isize {
+    return errnoSize(linux.read(fd, buf, count));
+}
+
+fn readvLinux(fd: c_int, iov: [*]const linux.iovec, count: c_int) callconv(.c) isize {
+    return errnoSize(linux.readv(fd, iov, @intCast(@as(c_uint, @bitCast(count)))));
+}
+
+fn preadLinux(fd: c_int, buf: [*]u8, count: usize, offset: linux.off_t) callconv(.c) isize {
+    return errnoSize(linux.pread(fd, buf, count, offset));
+}
+
+fn preadvLinux(fd: c_int, iov: [*]const linux.iovec, count: c_int, offset: linux.off_t) callconv(.c) isize {
+    return errnoSize(linux.preadv(fd, iov, @intCast(@as(c_uint, @bitCast(count))), offset));
+}
+
+fn writeLinux(fd: c_int, buf: [*]const u8, count: usize) callconv(.c) isize {
+    return errnoSize(linux.write(fd, buf, count));
+}
+
+fn writevLinux(fd: c_int, iov: [*]const linux.iovec_const, count: c_int) callconv(.c) isize {
+    return errnoSize(linux.writev(fd, iov, @intCast(@as(c_uint, @bitCast(count)))));
+}
+
+fn pwriteLinux(fd: c_int, buf: [*]const u8, count: usize, offset: linux.off_t) callconv(.c) isize {
+    return errnoSize(linux.pwrite(fd, buf, count, offset));
+}
+
+fn pwritevLinux(fd: c_int, iov: [*]const linux.iovec_const, count: c_int, offset: linux.off_t) callconv(.c) isize {
+    return errnoSize(linux.pwritev(fd, iov, @intCast(@as(c_uint, @bitCast(count))), offset));
 }
 
 fn swab(noalias src_ptr: *const anyopaque, noalias dest_ptr: *anyopaque, n: isize) callconv(.c) void {
