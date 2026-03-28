@@ -1005,7 +1005,6 @@ const libc_top_half_src_files = [_][]const u8{
     "wasi/libc-top-half/musl/src/math/__rem_pio2l.c",
     "wasi/libc-top-half/musl/src/math/sinh.c",
     "wasi/libc-top-half/musl/src/math/sinhf.c",
-    "wasi/libc-top-half/musl/src/misc/fmtmsg.c",
     "wasi/libc-top-half/musl/src/misc/nftw.c",
     "wasi/libc-top-half/musl/src/prng/random.c",
     "wasi/libc-top-half/musl/src/regex/glob.c",

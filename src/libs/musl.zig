@@ -1055,7 +1055,6 @@ const src_files = [_][]const u8{
     "musl/src/misc/a64l.c",
     "musl/src/misc/basename.c",
     "musl/src/misc/dirname.c",
-    "musl/src/misc/fmtmsg.c",
     "musl/src/misc/forkpty.c",
     "musl/src/misc/getauxval.c",
     "musl/src/misc/get_current_dir_name.c",
