@@ -1076,7 +1076,6 @@ const src_files = [_][]const u8{
     "musl/src/misc/lockf.c",
     "musl/src/misc/login_tty.c",
     "musl/src/misc/mntent.c",
-    "musl/src/misc/nftw.c",
     "musl/src/misc/openpty.c",
     "musl/src/misc/ptsname.c",
     "musl/src/misc/pty.c",
