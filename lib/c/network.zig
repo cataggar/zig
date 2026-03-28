@@ -413,7 +413,62 @@ const _ns_flagdata_sym = [16][2]c_int{
     .{ 0x0010, 4 },  .{ 0x000f, 0 },  .{ 0x0000, 0 },  .{ 0x0000, 0 },
     .{ 0x0000, 0 },  .{ 0x0000, 0 },  .{ 0x0000, 0 },  .{ 0x0000, 0 },
 };
-fn rtnetlink_enumerate_impl(_: c_int, _: c_int, _: *const fn (?*anyopaque, *nlmsghdr) callconv(.c) c_int, _: ?*anyopaque) callconv(.c) c_int { return -1; }
+fn rtnetlink_enumerate_impl(link_af: c_int, addr_af: c_int, cb: *const fn (?*anyopaque, *nlmsghdr) callconv(.c) c_int, ctx: ?*anyopaque) callconv(.c) c_int {
+    const PF_NETLINK = 16;
+    const NETLINK_ROUTE = 0;
+    const SOCK_RAW = 3;
+    const SOCK_CLOEXEC: c_int = @as(c_int, @truncate(@as(u32, 0o2000000)));
+    const RTM_GETLINK: u16 = 18;
+    const RTM_GETADDR: u16 = 22;
+
+    const fd = c.socket_fn(PF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if (fd < 0) return -1;
+    defer _ = linux.close(fd);
+
+    var r = netlink_enumerate(fd, 1, RTM_GETLINK, @intCast(link_af), cb, ctx);
+    if (r == 0) r = netlink_enumerate(fd, 2, RTM_GETADDR, @intCast(addr_af), cb, ctx);
+    return r;
+}
+
+fn netlink_enumerate(fd: c_int, seq: u32, msg_type: u16, af: u8, cb: *const fn (?*anyopaque, *nlmsghdr) callconv(.c) c_int, ctx: ?*anyopaque) c_int {
+    const NLM_F_DUMP: u16 = 0x100 | 0x200;
+    const NLM_F_REQUEST: u16 = 1;
+    const NLMSG_DONE: u16 = 3;
+    const NLMSG_ERROR: u16 = 2;
+    const MSG_DONTWAIT = 0x40;
+
+    const hdr_size = @sizeOf(nlmsghdr);
+    const req_size = hdr_size + 4; // aligned rtgenmsg
+
+    var buf: [8192]u8 align(4) = [1]u8{0} ** 8192;
+    // Build request
+    const req: *nlmsghdr = @alignCast(@ptrCast(&buf));
+    req.nlmsg_len = req_size;
+    req.nlmsg_type = msg_type;
+    req.nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
+    req.nlmsg_seq = seq;
+    buf[hdr_size] = af; // rtgen_family
+
+    if (c.send_fn(fd, @ptrCast(&buf), req_size, 0) < 0) return -1;
+
+    while (true) {
+        const r = c.recv_fn(fd, @ptrCast(&buf), 8192, MSG_DONTWAIT);
+        if (r <= 0) return -1;
+        const rlen: usize = @intCast(r);
+
+        // Walk nlmsghdr chain
+        var pos: usize = 0;
+        while (pos + hdr_size <= rlen) {
+            const h: *nlmsghdr = @alignCast(@ptrCast(buf[pos..].ptr));
+            if (h.nlmsg_len < hdr_size or h.nlmsg_len > rlen - pos) break;
+            if (h.nlmsg_type == NLMSG_DONE) return 0;
+            if (h.nlmsg_type == NLMSG_ERROR) return -1;
+            const ret = cb(ctx, h);
+            if (ret != 0) return ret;
+            pos += (h.nlmsg_len + 3) & ~@as(u32, 3); // NETLINK_ALIGN
+        }
+    }
+}
 fn lookup_serv_impl(_: [*]service, _: [*:0]const u8, _: c_int, _: c_int, _: c_int) callconv(.c) c_int { return -1; }
 fn lookup_name_impl(_: [*]address, _: [*]u8, _: [*:0]const u8, _: c_int, _: c_int) callconv(.c) c_int { return -1; }
 fn get_resolv_conf_impl(_: *resolvconf, _: [*]u8, _: usize) callconv(.c) c_int { return -1; }
