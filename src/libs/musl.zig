@@ -572,7 +572,6 @@ const src_files = [_][]const u8{
     "musl/src/env/__reset_tls.c",
     "musl/src/env/secure_getenv.c",
     "musl/src/env/setenv.c",
-    "musl/src/env/__stack_chk_fail.c",
     "musl/src/env/unsetenv.c",
     "musl/src/errno/__errno_location.c",
     "musl/src/errno/strerror.c",
