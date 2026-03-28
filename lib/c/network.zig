@@ -1611,7 +1611,147 @@ fn getaddrinfo_impl(host: ?[*:0]const u8, serv: ?[*:0]const u8, hint: ?*const ad
     res.* = &out[0].ai;
     return 0;
 }
-fn getnameinfo_impl(_: *const anyopaque, _: linux.socklen_t, _: ?[*]u8, _: linux.socklen_t, _: ?[*]u8, _: linux.socklen_t, _: c_int) callconv(.c) c_int { return -1; }
+fn getnameinfo_impl(sa_ptr: *const anyopaque, sl: linux.socklen_t, node: ?[*]u8, nodelen: linux.socklen_t, serv: ?[*]u8, servlen: linux.socklen_t, flags: c_int) callconv(.c) c_int {
+    const AF_INET: c_int = 2;
+    const AF_INET6: c_int = 10;
+    const NI_NUMERICHOST: c_int = 1;
+    const NI_NUMERICSERV: c_int = 2;
+    const NI_DGRAM: c_int = 16;
+    const NI_NAMEREQD: c_int = 8;
+    const EAI_FAMILY: c_int = -6;
+    const EAI_OVERFLOW: c_int = -12;
+    const EAI_NONAME: c_int = -2;
+    const RR_PTR: c_int = 12;
+    const PTR_MAX = 78; // 64 + sizeof ".in-addr.arpa"
+
+    const sa_bytes: [*]const u8 = @ptrCast(sa_ptr);
+    const af: c_int = @as(c_int, sa_bytes[0]) | (@as(c_int, sa_bytes[1]) << 8);
+
+    var a: [*]const u8 = undefined;
+    var scopeid: u32 = 0;
+    var port: u16 = 0;
+    var ptr: [PTR_MAX]u8 = undefined;
+
+    switch (af) {
+        AF_INET => {
+            if (sl < @sizeOf(linux.sockaddr.in)) return EAI_FAMILY;
+            const sin: *const linux.sockaddr.in = @alignCast(@ptrCast(sa_ptr));
+            a = @ptrCast(&sin.addr);
+            port = c.ntohs(sin.port);
+            mkptr4(&ptr, a);
+        },
+        AF_INET6 => {
+            if (sl < @sizeOf(linux.sockaddr.in6)) return EAI_FAMILY;
+            const sin6: *const linux.sockaddr.in6 = @alignCast(@ptrCast(sa_ptr));
+            a = @ptrCast(&sin6.addr);
+            port = c.ntohs(sin6.port);
+            scopeid = sin6.scope_id;
+            if (c.memcmp(@ptrCast(a), "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff", 12) != 0)
+                mkptr6(&ptr, a)
+            else
+                mkptr4(&ptr, a + 12);
+        },
+        else => return EAI_FAMILY,
+    }
+
+    if (node) |n| {
+        if (nodelen > 0) {
+            var buf: [256]u8 = .{0} ** 256;
+            if ((flags & NI_NUMERICHOST) == 0) {
+                // Try DNS reverse lookup
+                var query: [18 + PTR_MAX]u8 = undefined;
+                var reply: [512]u8 = undefined;
+                const qlen = c.res_mkquery_fn(0, @ptrCast(&ptr), 1, RR_PTR, null, 0, null, &query, query.len);
+                if (qlen > 0) {
+                    query[3] = 0; // clear AD flag
+                    const rlen = c.res_send_fn(&query, qlen, &reply, 512);
+                    if (rlen > 0) {
+                        const rl: usize = @intCast(if (rlen > 512) 512 else rlen);
+                        _ = rl;
+                        _ = c.dns_parse_fn(&reply, rlen, &gnaiDnsCallback, @ptrCast(&buf));
+                    }
+                }
+            }
+            if (buf[0] == 0) {
+                if ((flags & NI_NAMEREQD) != 0) return EAI_NONAME;
+                _ = c.inet_ntop(af, @ptrCast(a), &buf, 256);
+            }
+            const blen = c.strlen(@ptrCast(&buf));
+            if (blen >= nodelen) return EAI_OVERFLOW;
+            _ = c.strcpy(n, @ptrCast(&buf));
+        }
+    }
+
+    if (serv) |s| {
+        if (servlen > 0) {
+            var buf: [32]u8 = .{0} ** 32;
+            if ((flags & NI_NUMERICSERV) == 0) {
+                reverseServices(&buf, port, (flags & NI_DGRAM) != 0);
+            }
+            if (buf[0] == 0) {
+                _ = c.snprintf(&buf, 32, "%d", @as(c_int, port));
+            }
+            const blen = c.strlen(@ptrCast(&buf));
+            if (blen >= servlen) return EAI_OVERFLOW;
+            _ = c.strcpy(s, @ptrCast(&buf));
+        }
+    }
+    return 0;
+}
+
+fn gnaiDnsCallback(_: ?*anyopaque, rr: c_int, data: *const anyopaque, _: c_int, packet: *const anyopaque, plen: c_int) callconv(.c) c_int {
+    _ = rr;
+    _ = data;
+    _ = packet;
+    _ = plen;
+    // Simplified: skip PTR record parsing for now
+    return 0;
+}
+
+fn mkptr4(s: [*]u8, ip: [*]const u8) void {
+    _ = c.snprintf(s, 78, "%d.%d.%d.%d.in-addr.arpa", @as(c_int, ip[3]), @as(c_int, ip[2]), @as(c_int, ip[1]), @as(c_int, ip[0]));
+}
+
+fn mkptr6(s: [*]u8, ip: [*]const u8) void {
+    const hex = "0123456789abcdef";
+    var pos: usize = 0;
+    var i: i32 = 15;
+    while (i >= 0) : (i -= 1) {
+        const idx: usize = @intCast(i);
+        s[pos] = hex[ip[idx] & 15]; pos += 1; s[pos] = '.'; pos += 1;
+        s[pos] = hex[ip[idx] >> 4]; pos += 1; s[pos] = '.'; pos += 1;
+    }
+    const suffix = "ip6.arpa";
+    @memcpy(s[pos..][0..suffix.len], suffix);
+    s[pos + suffix.len] = 0;
+}
+
+fn reverseServices(buf: [*]u8, port: u16, dgram: bool) void {
+    var _buf: [1032]u8 = undefined;
+    var _f: [256]u8 align(8) = undefined;
+    const f = c.fopen_rb_ca("/etc/services", @ptrCast(&_f), &_buf, 1032);
+    if (f == null) return;
+    var line: [128]u8 = undefined;
+    while (c.fgets_fn(&line, 128, f) != null) {
+        if (c.strchr_fn(@ptrCast(&line), '#')) |p| { p[0] = '\n'; (p + 1)[0] = 0; }
+        // Skip to port number
+        var pi: usize = 0;
+        while (line[pi] != 0 and !isSpace(line[pi])) pi += 1;
+        const name_end = pi;
+        if (line[pi] == 0) continue;
+        pi += 1;
+        var end: [*:0]u8 = undefined;
+        const svport = c.strtoul(@ptrCast(line[pi..].ptr), @ptrCast(&end), 10);
+        if (svport != port) continue;
+        if (dgram and c.strncmp(@ptrCast(end), "/udp", 4) != 0) continue;
+        if (!dgram and c.strncmp(@ptrCast(end), "/tcp", 4) != 0) continue;
+        if (name_end > 32) continue;
+        _ = c.memcpy(@ptrCast(buf), @ptrCast(&line), name_end);
+        buf[name_end] = 0;
+        break;
+    }
+    c.fclose_ca(f);
+}
 fn gethostbyname2_r_impl(name: [*:0]const u8, af: c_int, h: *hostent, buf_ptr: [*]u8, buflen: usize, res: *?*hostent, err: *c_int) callconv(.c) c_int {
     const AF_INET6: c_int = 10;
     const HOST_NOT_FOUND: c_int = 1;
