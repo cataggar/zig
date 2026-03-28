@@ -69,6 +69,7 @@ comptime {
         _ = @import("c/malloc.zig");
     }
     _ = @import("c/math.zig");
+    _ = @import("c/sched.zig");
     _ = @import("c/search.zig");
     _ = @import("c/stdlib.zig");
     _ = @import("c/string.zig");
