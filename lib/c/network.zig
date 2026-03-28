@@ -241,12 +241,159 @@ comptime {
 // For now, they satisfy the symbol requirements but the actual
 // logic needs to be filled in per-function.
 
-fn freeaddrinfo_impl(_: ?*addrinfo) callconv(.c) void {}
-fn res_send_impl(_: [*]const u8, _: c_int, _: [*]u8, _: c_int) callconv(.c) c_int { return -1; }
-fn res_querydomain_impl(_: [*:0]const u8, _: [*:0]const u8, _: c_int, _: c_int, _: [*]u8, _: c_int) callconv(.c) c_int { return -1; }
-fn res_query_impl(_: [*:0]const u8, _: c_int, _: c_int, _: [*]u8, _: c_int) callconv(.c) c_int { return -1; }
-fn res_mkquery_impl(_: c_int, _: [*:0]const u8, _: c_int, _: c_int, _: ?*const anyopaque, _: c_int, _: ?*const anyopaque, _: [*]u8, _: c_int) callconv(.c) c_int { return -1; }
-fn lookup_ipliteral_impl(_: [*]address, _: [*:0]const u8, _: c_int) callconv(.c) c_int { return -1; }
+fn freeaddrinfo_impl(p_init: ?*addrinfo) callconv(.c) void {
+    var p = p_init orelse return;
+    // Count chain length
+    var cnt: usize = 1;
+    while (p.ai_next) |next| : (cnt += 1) {
+        p = next;
+    }
+    // p now points to last addrinfo. Compute aibuf pointer.
+    // aibuf.ai is at offset 0, so *aibuf == *addrinfo for the ai field.
+    const b_last: *aibuf = @alignCast(@fieldParentPtr("ai", p));
+    var b: *aibuf = @ptrFromInt(@intFromPtr(b_last) - @as(usize, @intCast(b_last.slot)) * @sizeOf(aibuf));
+    // Atomic decrement of refcount
+    const prev = @atomicRmw(c_short, &b.ref, .Sub, @intCast(cnt), .seq_cst);
+    if (prev == @as(c_short, @intCast(cnt))) {
+        c.free(@ptrCast(b));
+    }
+}
+fn res_send_impl(msg: [*]const u8, msglen: c_int, answer: [*]u8, anslen: c_int) callconv(.c) c_int {
+    var conf: resolvconf = undefined;
+    var search: [256]u8 = undefined;
+    if (c.get_resolv_conf_fn(&conf, &search, search.len) < 0) return -1;
+    if (anslen < 512) {
+        var buf: [512]u8 = undefined;
+        const qp = [1][*]const u8{msg};
+        const ql = [1]c_int{msglen};
+        var ap = [1][*]u8{&buf};
+        var al = [1]c_int{@as(c_int, 512)};
+        const r = c.res_msend_rc_fn(1, &qp, &ql, &ap, &al, 512, &conf);
+        if (r >= 0) _ = c.memcpy(@ptrCast(answer), @ptrCast(&buf), @intCast(if (al[0] < anslen) al[0] else anslen));
+        return r;
+    }
+    const qp = [1][*]const u8{msg};
+    const ql = [1]c_int{msglen};
+    var ap = [1][*]u8{answer};
+    var al = [1]c_int{anslen};
+    const r = c.res_msend_rc_fn(1, &qp, &ql, &ap, &al, anslen, &conf);
+    if (r < 0 or al[0] == 0) return -1;
+    return al[0];
+}
+fn res_querydomain_impl(name: [*:0]const u8, domain: [*:0]const u8, class: c_int, @"type": c_int, dest: [*]u8, len: c_int) callconv(.c) c_int {
+    var tmp: [255]u8 = undefined;
+    const nl = c.strnlen(@ptrCast(name), 255);
+    const dl = c.strnlen(@ptrCast(domain), 255);
+    if (nl + dl + 1 > 254) return -1;
+    _ = c.memcpy(@ptrCast(&tmp), @ptrCast(name), nl);
+    tmp[nl] = '.';
+    _ = c.memcpy(@ptrCast(@as([*]u8, &tmp) + nl + 1), @ptrCast(domain), dl + 1);
+    return res_query_impl(@ptrCast(&tmp), class, @"type", dest, len);
+}
+fn res_query_impl(name: [*:0]const u8, class: c_int, @"type": c_int, dest: [*]u8, len: c_int) callconv(.c) c_int {
+    var q: [280]u8 = undefined;
+    const ql = c.res_mkquery_fn(0, name, class, @"type", null, 0, null, &q, 280);
+    if (ql < 0) return ql;
+    const r = res_send_impl(&q, ql, dest, len);
+    if (r < 12) {
+        c.h_errno_ptr.* = 2; // TRY_AGAIN
+        return -1;
+    }
+    if ((dest[3] & 15) == 3) {
+        c.h_errno_ptr.* = 1; // HOST_NOT_FOUND
+        return -1;
+    }
+    if ((dest[3] & 15) == 0 and dest[6] == 0 and dest[7] == 0) {
+        c.h_errno_ptr.* = 4; // NO_DATA
+        return -1;
+    }
+    return r;
+}
+fn res_mkquery_impl(op: c_int, dname: [*:0]const u8, class: c_int, @"type": c_int, _: ?*const anyopaque, _: c_int, _: ?*const anyopaque, buf: [*]u8, buflen: c_int) callconv(.c) c_int {
+    _ = op;
+    if (buflen < 18) return -1;
+    var ts: linux.timespec = undefined;
+    _ = c.clock_gettime_fn(0, &ts); // CLOCK_REALTIME
+    const id: u16 = @truncate(@as(u64, @bitCast(ts.tv_nsec)) >> 16);
+
+    @memset(buf[0..@intCast(buflen)], 0);
+    buf[0] = @intCast(id >> 8);
+    buf[1] = @intCast(id & 0xff);
+    buf[2] = 1; // RD flag
+    buf[5] = 1; // QDCOUNT = 1
+
+    // Encode domain name
+    var i: usize = 12;
+    const name = dname;
+    var j: usize = 0;
+    while (name[j] != 0) {
+        // Find next dot or end
+        var k: usize = j;
+        while (name[k] != 0 and name[k] != '.') k += 1;
+        const label_len = k - j;
+        if (label_len == 0 or label_len > 63) return -1;
+        if (i + label_len + 1 >= @as(usize, @intCast(buflen))) return -1;
+        buf[i] = @intCast(label_len);
+        i += 1;
+        for (j..k) |m| {
+            buf[i] = name[m];
+            i += 1;
+        }
+        j = k;
+        if (name[j] == '.') j += 1;
+    }
+    if (i + 5 > @as(usize, @intCast(buflen))) return -1;
+    buf[i] = 0; // root label
+    i += 1;
+    buf[i] = @intCast((@as(c_uint, @bitCast(@"type")) >> 8) & 0xff);
+    buf[i + 1] = @intCast(@as(c_uint, @bitCast(@"type")) & 0xff);
+    buf[i + 2] = @intCast((@as(c_uint, @bitCast(class)) >> 8) & 0xff);
+    buf[i + 3] = @intCast(@as(c_uint, @bitCast(class)) & 0xff);
+    return @intCast(i + 4);
+}
+fn lookup_ipliteral_impl(buf: [*]address, name: [*:0]const u8, family: c_int) callconv(.c) c_int {
+    var a4: [4]u8 = undefined;
+    if (family != 10) { // not AF_INET6
+        if (c.inet_aton(name, @ptrCast(&a4)) != 0) {
+            buf[0] = std.mem.zeroes(address);
+            buf[0].family = 2; // AF_INET
+            @memcpy(buf[0].addr[0..4], &a4);
+            return 1;
+        }
+    }
+    // Try IPv6
+    var a6: [16]u8 = undefined;
+    // Check for scope ID (%interface)
+    var name_buf: [256]u8 = undefined;
+    var actual_name: [*:0]const u8 = name;
+    var scopeid: c_uint = 0;
+    // Find '%' in name
+    var pct: usize = 0;
+    while (name[pct] != 0 and name[pct] != '%') pct += 1;
+    if (name[pct] == '%') {
+        if (pct >= 255) return -1; // EAI_NONAME
+        @memcpy(name_buf[0..pct], name[0..pct]);
+        name_buf[pct] = 0;
+        actual_name = @ptrCast(&name_buf);
+        // Parse scope ID
+        const scope_str: [*:0]const u8 = @ptrCast(name + pct + 1);
+        scopeid = c.if_nametoindex(scope_str);
+        if (scopeid == 0) {
+            // Try as numeric
+            var end: [*:0]u8 = undefined;
+            scopeid = @intCast(c.strtoul(scope_str, @ptrCast(&end), 10));
+            if (end == scope_str) return -2; // EAI_NONAME
+        }
+    }
+    if (c.inet_pton(10, actual_name, @ptrCast(&a6)) <= 0) return 0;
+    if (family == 2) return -2; // AF_INET requested but got v6: EAI_NONAME
+
+    buf[0] = std.mem.zeroes(address);
+    buf[0].family = 10; // AF_INET6
+    buf[0].scopeid = scopeid;
+    @memcpy(buf[0].addr[0..16], &a6);
+    return 1;
+}
 fn dn_comp_impl(_: [*:0]const u8, _: [*]u8, _: c_int, _: ?[*]?[*]u8, _: ?[*]?[*]u8) callconv(.c) c_int { return -1; }
 fn ns_get16_impl(cp: [*]const u8) callconv(.c) c_uint { return @as(c_uint, cp[0]) << 8 | cp[1]; }
 fn ns_get32_impl(cp: [*]const u8) callconv(.c) c_ulong { return @as(c_ulong, cp[0]) << 24 | @as(c_ulong, cp[1]) << 16 | @as(c_ulong, cp[2]) << 8 | cp[3]; }
@@ -255,7 +402,11 @@ fn ns_put32_impl(l: c_ulong, cp: [*]u8) callconv(.c) void { cp[0] = @intCast(l >
 fn ns_initparse_impl(_: [*]const u8, _: c_int, _: *anyopaque) callconv(.c) c_int { return -1; }
 fn ns_skiprr_impl(_: [*]const u8, _: [*]const u8, _: c_int, _: c_int) callconv(.c) c_int { return -1; }
 fn ns_parserr_impl(_: *anyopaque, _: c_int, _: c_int, _: *anyopaque) callconv(.c) c_int { return -1; }
-fn ns_name_uncompress_impl(_: [*]const u8, _: [*]const u8, _: [*]const u8, _: [*]u8, _: usize) callconv(.c) c_int { return -1; }
+fn ns_name_uncompress_impl(msg: [*]const u8, eom: [*]const u8, src: [*]const u8, dst: [*]u8, dstsiz: usize) callconv(.c) c_int {
+    const r = c.dn_expand_fn(msg, eom, src, dst, @intCast(dstsiz));
+    if (r < 0) std.c._errno().* = @intFromEnum(linux.E.MSGSIZE);
+    return r;
+}
 const _ns_flagdata_sym = [16][2]c_int{
     .{ 0x8000, 15 }, .{ 0x7800, 11 }, .{ 0x0400, 10 }, .{ 0x0200, 9 },
     .{ 0x0100, 8 },  .{ 0x0080, 7 },  .{ 0x0040, 6 },  .{ 0x0020, 5 },
