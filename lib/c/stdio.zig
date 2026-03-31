@@ -25,6 +25,12 @@ comptime {
         symbol(&getwc, "getwc");
         symbol(&putwc, "putwc");
 
+        // Character I/O wrappers (getchar.c, putchar.c, getchar_unlocked.c, putchar_unlocked.c)
+        symbol(&getchar, "getchar");
+        symbol(&putchar, "putchar");
+        symbol(&getchar_unlocked, "getchar_unlocked");
+        symbol(&putchar_unlocked, "putchar_unlocked");
+
         // Word I/O (getw.c, putw.c)
         symbol(&getw, "getw");
         symbol(&putw, "putw");
@@ -90,6 +96,26 @@ fn putw(x: c_int, f: ?*FILE) callconv(.c) c_int {
     return @as(c_int, @intCast(fwrite_fn(&val, @sizeOf(c_int), 1, f))) - 1;
 }
 
+/// getchar.c: int getchar(void)
+fn getchar() callconv(.c) c_int {
+    return fgetc_fn(stdin_ext.*);
+}
+
+/// putchar.c: int putchar(int c)
+fn putchar(c: c_int) callconv(.c) c_int {
+    return fputc_fn(c, stdout_ext.*);
+}
+
+/// getchar_unlocked.c: int getchar_unlocked(void)
+fn getchar_unlocked() callconv(.c) c_int {
+    return getc_unlocked_fn(stdin_ext.*);
+}
+
+/// putchar_unlocked.c: int putchar_unlocked(int c)
+fn putchar_unlocked(c: c_int) callconv(.c) c_int {
+    return putc_unlocked_fn(c, stdout_ext.*);
+}
+
 // Extern references to musl C functions that are still compiled from C sources.
 const setvbuf_fn = @extern(*const fn (?*FILE, ?[*]u8, c_int, usize) callconv(.c) c_int, .{ .name = "setvbuf" });
 const getdelim_fn = @extern(*const fn (?*[*]u8, ?*usize, c_int, ?*FILE) callconv(.c) ssize_t, .{ .name = "getdelim" });
@@ -97,5 +123,9 @@ const fgetwc_fn = @extern(*const fn (?*FILE) callconv(.c) wint_t, .{ .name = "fg
 const fputwc_fn = @extern(*const fn (wchar_t, ?*FILE) callconv(.c) wint_t, .{ .name = "fputwc" });
 const fread_fn = @extern(*const fn (*anyopaque, usize, usize, ?*FILE) callconv(.c) usize, .{ .name = "fread" });
 const fwrite_fn = @extern(*const fn (*const anyopaque, usize, usize, ?*FILE) callconv(.c) usize, .{ .name = "fwrite" });
+const fgetc_fn = @extern(*const fn (?*FILE) callconv(.c) c_int, .{ .name = "fgetc" });
+const fputc_fn = @extern(*const fn (c_int, ?*FILE) callconv(.c) c_int, .{ .name = "fputc" });
+const getc_unlocked_fn = @extern(*const fn (?*FILE) callconv(.c) c_int, .{ .name = "getc_unlocked" });
+const putc_unlocked_fn = @extern(*const fn (c_int, ?*FILE) callconv(.c) c_int, .{ .name = "putc_unlocked" });
 const stdin_ext = @extern(*const ?*FILE, .{ .name = "stdin" });
 const stdout_ext = @extern(*const ?*FILE, .{ .name = "stdout" });
