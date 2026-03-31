@@ -1373,23 +1373,23 @@ const src_files = [_][]const u8{
     "musl/src/stat/utimensat.c",
     "musl/src/stat/__xstat.c",
     "musl/src/stdio/asprintf.c",
-    "musl/src/stdio/clearerr.c",
+    //"musl/src/stdio/clearerr.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/dprintf.c",
     "musl/src/stdio/ext2.c",
     "musl/src/stdio/ext.c",
     "musl/src/stdio/fclose.c",
     "musl/src/stdio/__fclose_ca.c",
     "musl/src/stdio/__fdopen.c",
-    "musl/src/stdio/feof.c",
-    "musl/src/stdio/ferror.c",
+    //"musl/src/stdio/feof.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/ferror.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fflush.c",
     "musl/src/stdio/fgetc.c",
     "musl/src/stdio/fgetln.c",
-    "musl/src/stdio/fgetpos.c",
+    //"musl/src/stdio/fgetpos.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fgets.c",
     "musl/src/stdio/fgetwc.c",
     "musl/src/stdio/fgetws.c",
-    "musl/src/stdio/fileno.c",
+    //"musl/src/stdio/fileno.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/flockfile.c",
     "musl/src/stdio/fmemopen.c",
     "musl/src/stdio/__fmodeflags.c",
@@ -1405,7 +1405,7 @@ const src_files = [_][]const u8{
     "musl/src/stdio/freopen.c",
     "musl/src/stdio/fscanf.c",
     "musl/src/stdio/fseek.c",
-    "musl/src/stdio/fsetpos.c",
+    //"musl/src/stdio/fsetpos.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/ftell.c",
     "musl/src/stdio/ftrylockfile.c",
     "musl/src/stdio/funlockfile.c",
@@ -1443,7 +1443,7 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/putwchar.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/remove.c",
     "musl/src/stdio/rename.c",
-    "musl/src/stdio/rewind.c",
+    //"musl/src/stdio/rewind.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/scanf.c",
     //"musl/src/stdio/setbuf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/setbuffer.c", // migrated to lib/c/stdio.zig
