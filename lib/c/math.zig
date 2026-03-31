@@ -59,6 +59,9 @@ comptime {
         symbol(&cosh, "cosh");
         symbol(&exp10, "exp10");
         symbol(&exp10f, "exp10f");
+        symbol(&fma_, "fma");
+        symbol(&fmaf_, "fmaf");
+        symbol(&fmal_, "fmal");
         symbol(&hypot, "hypot");
         symbol(&modf, "modf");
         symbol(&pow, "pow");
@@ -338,6 +341,23 @@ test "rint" {
     // Exact half rounds to nearest even (banker's rounding)
     try expectEqual(@as(f64, 2.0), rint(2.5));
     try expectEqual(@as(f64, 4.0), rint(3.5));
+}
+
+fn fma_(x: f64, y: f64, z: f64) callconv(.c) f64 {
+    return @mulAdd(f64, x, y, z);
+}
+
+fn fmaf_(x: f32, y: f32, z: f32) callconv(.c) f32 {
+    return @mulAdd(f32, x, y, z);
+}
+
+fn fmal_(x: c_longdouble, y: c_longdouble, z: c_longdouble) callconv(.c) c_longdouble {
+    return @mulAdd(c_longdouble, x, y, z);
+}
+
+test "fma" {
+    try expectEqual(@as(f64, 7.0), fma_(2.0, 3.0, 1.0));
+    try expectEqual(@as(f32, 7.0), fmaf_(2.0, 3.0, 1.0));
 }
 
 fn tanh(x: f64) callconv(.c) f64 {
