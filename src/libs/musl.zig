@@ -1401,17 +1401,17 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/fputs.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fputwc.c",
     "musl/src/stdio/fputws.c",
-    "musl/src/stdio/fread.c",
+    //"musl/src/stdio/fread.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/freopen.c",
     "musl/src/stdio/fscanf.c",
-    "musl/src/stdio/fseek.c",
+    //"musl/src/stdio/fseek.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/fsetpos.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/ftell.c",
+    //"musl/src/stdio/ftell.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/ftrylockfile.c",
     "musl/src/stdio/funlockfile.c",
     "musl/src/stdio/fwide.c",
     "musl/src/stdio/fwprintf.c",
-    "musl/src/stdio/fwrite.c",
+    //"musl/src/stdio/fwrite.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fwscanf.c",
     "musl/src/stdio/getc.c",
     //"musl/src/stdio/getchar.c", // migrated to lib/c/stdio.zig
@@ -1448,7 +1448,7 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/setbuf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/setbuffer.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/setlinebuf.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/setvbuf.c",
+    //"musl/src/stdio/setvbuf.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/snprintf.c",
     "musl/src/stdio/sprintf.c",
     "musl/src/stdio/sscanf.c",
