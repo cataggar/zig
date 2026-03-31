@@ -1398,7 +1398,7 @@ const src_files = [_][]const u8{
     "musl/src/stdio/__fopen_rb_ca.c",
     "musl/src/stdio/fprintf.c",
     "musl/src/stdio/fputc.c",
-    "musl/src/stdio/fputs.c",
+    //"musl/src/stdio/fputs.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fputwc.c",
     "musl/src/stdio/fputws.c",
     "musl/src/stdio/fread.c",
@@ -1419,7 +1419,7 @@ const src_files = [_][]const u8{
     "musl/src/stdio/getc_unlocked.c",
     "musl/src/stdio/getdelim.c",
     //"musl/src/stdio/getline.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/gets.c",
+    //"musl/src/stdio/gets.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/getw.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/getwc.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/getwchar.c", // migrated to lib/c/stdio.zig
@@ -1437,7 +1437,7 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/putchar.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/putchar_unlocked.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/putc_unlocked.c",
-    "musl/src/stdio/puts.c",
+    //"musl/src/stdio/puts.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/putw.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/putwc.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/putwchar.c", // migrated to lib/c/stdio.zig
@@ -1469,7 +1469,7 @@ const src_files = [_][]const u8{
     "musl/src/stdio/__toread.c",
     "musl/src/stdio/__towrite.c",
     "musl/src/stdio/__uflow.c",
-    "musl/src/stdio/ungetc.c",
+    //"musl/src/stdio/ungetc.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/ungetwc.c",
     "musl/src/stdio/vasprintf.c",
     "musl/src/stdio/vdprintf.c",
