@@ -60,6 +60,12 @@ comptime {
         symbol(&exp10, "exp10");
         symbol(&exp10f, "exp10f");
         symbol(&hypot, "hypot");
+        symbol(&llrint_, "llrint");
+        symbol(&llrintf_, "llrintf");
+        symbol(&llrintl_, "llrintl");
+        symbol(&lrint_, "lrint");
+        symbol(&lrintf_, "lrintf");
+        symbol(&lrintl_, "lrintl");
         symbol(&modf, "modf");
         symbol(&pow, "pow");
         symbol(&pow10, "pow10");
@@ -338,6 +344,69 @@ test "rint" {
     // Exact half rounds to nearest even (banker's rounding)
     try expectEqual(@as(f64, 2.0), rint(2.5));
     try expectEqual(@as(f64, 4.0), rint(3.5));
+}
+
+fn lrint_(x: f64) callconv(.c) c_long {
+    return @intFromFloat(rint(x));
+}
+
+fn lrintf_(x: f32) callconv(.c) c_long {
+    // f32 can be exactly represented as f64
+    return lrint_(@floatCast(x));
+}
+
+fn lrintl_(x: c_longdouble) callconv(.c) c_long {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => lrint_(@floatCast(x)),
+        else => @intFromFloat(rintLdImpl(x)),
+    };
+}
+
+fn llrint_(x: f64) callconv(.c) c_longlong {
+    return @intFromFloat(rint(x));
+}
+
+fn llrintf_(x: f32) callconv(.c) c_longlong {
+    return llrint_(@floatCast(x));
+}
+
+fn llrintl_(x: c_longdouble) callconv(.c) c_longlong {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => llrint_(@floatCast(x)),
+        else => @intFromFloat(rintLdImpl(x)),
+    };
+}
+
+/// Banker's rounding for c_longdouble (used when c_longdouble is wider than f64).
+fn rintLdImpl(x: c_longdouble) c_longdouble {
+    const toint: c_longdouble = 1.0 / @as(c_longdouble, math.floatEps(c_longdouble));
+    const fractional_bits = math.floatFractionalBits(c_longdouble);
+    const exponent_bits = math.floatExponentBits(c_longdouble);
+    const IntType = std.meta.Int(.unsigned, @typeInfo(c_longdouble).float.bits);
+    const a: IntType = @bitCast(x);
+    const bias = (@as(IntType, 1) << (exponent_bits - 1)) - 1;
+    const e = (a >> fractional_bits) & ((@as(IntType, 1) << exponent_bits) - 1);
+    const s = a >> (fractional_bits + exponent_bits);
+
+    if (e >= bias + fractional_bits) return x;
+    var y: c_longdouble = if (s == 1) x - toint + toint else x + toint - toint;
+    if (y == 0) y = 0 * x; // preserve sign
+    return y;
+}
+
+test "lrint" {
+    try expectEqual(@as(c_long, 2), lrint_(2.3));
+    try expectEqual(@as(c_long, -2), lrint_(-2.3));
+    try expectEqual(@as(c_long, 2), lrint_(2.5)); // banker's rounding
+    try expectEqual(@as(c_long, 4), lrint_(3.5));
+    try expectEqual(@as(c_long, 2), lrintf_(2.3));
+}
+
+test "llrint" {
+    try expectEqual(@as(c_longlong, 2), llrint_(2.3));
+    try expectEqual(@as(c_longlong, -2), llrint_(-2.3));
+    try expectEqual(@as(c_longlong, 2), llrint_(2.5));
+    try expectEqual(@as(c_longlong, 2), llrintf_(2.3));
 }
 
 fn tanh(x: f64) callconv(.c) f64 {
