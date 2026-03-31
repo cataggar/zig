@@ -115,6 +115,31 @@ comptime {
         symbol(&fwrite, "fwrite_unlocked");
         symbol(&fread, "fread");
         symbol(&fread, "fread_unlocked");
+
+        // String read (fgets.c)
+        symbol(&fgets, "fgets");
+        symbol(&fgets, "fgets_unlocked");
+
+        // GNU extensions (ext.c, ext2.c)
+        symbol(&_flushlbf, "_flushlbf");
+        symbol(&__fsetlocking, "__fsetlocking");
+        symbol(&__fwriting, "__fwriting");
+        symbol(&__freading, "__freading");
+        symbol(&__freadable, "__freadable");
+        symbol(&__fwritable, "__fwritable");
+        symbol(&__flbf, "__flbf");
+        symbol(&__fbufsize, "__fbufsize");
+        symbol(&__fpending, "__fpending");
+        symbol(&__fpurge, "__fpurge");
+        symbol(&__fpurge, "fpurge");
+        symbol(&__freadahead, "__freadahead");
+        symbol(&__freadptr, "__freadptr");
+        symbol(&__freadptrinc, "__freadptrinc");
+        symbol(&__fseterr, "__fseterr");
+
+        // File operations (remove.c, rename.c)
+        symbol(&remove_fn, "remove");
+        symbol(&rename_fn, "rename");
     }
 }
 
@@ -537,6 +562,158 @@ fn fread(destv: [*]u8, size: usize, nmemb: usize, f: *FILE) callconv(.c) usize {
     return nmemb;
 }
 
+// --- String read (fgets.c) ---
+
+/// fgets.c: char *fgets(char *restrict s, int n, FILE *restrict f)
+fn fgets(s: [*]u8, n_arg: c_int, f: *FILE) callconv(.c) ?[*]u8 {
+    var p = s;
+    var n = n_arg;
+
+    const need_unlock = flock(f);
+
+    if (n <= 1) {
+        f.mode |= @bitCast(@as(c_uint, @bitCast(f.mode)) -% 1);
+        funlock(f, need_unlock);
+        if (n < 1) return null;
+        s[0] = 0;
+        return s;
+    }
+    n -= 1;
+
+    while (n > 0) {
+        if (f.rpos != f.rend) {
+            const rpos = f.rpos.?;
+            const rend = f.rend.?;
+            const avail = @intFromPtr(rend) - @intFromPtr(rpos);
+            const z = std.mem.indexOfScalar(u8, rpos[0..avail], '\n');
+            const k_raw = if (z) |idx| idx + 1 else avail;
+            const k = @min(k_raw, @as(usize, @intCast(n)));
+            @memcpy(p[0..k], rpos[0..k]);
+            f.rpos = rpos + k;
+            p += k;
+            n -= @intCast(k);
+            if (z != null or n == 0) break;
+        }
+        const c = getc_unlocked_fn(@ptrCast(f));
+        if (c < 0) {
+            if (p == s or f.flags & F_EOF == 0) {
+                funlock(f, need_unlock);
+                return null;
+            }
+            break;
+        }
+        n -= 1;
+        p[0] = @intCast(@as(c_uint, @bitCast(c)));
+        p += 1;
+        if (@as(u8, @intCast(@as(c_uint, @bitCast(c)))) == '\n') break;
+    }
+    p[0] = 0;
+
+    funlock(f, need_unlock);
+    return s;
+}
+
+// --- GNU extensions (ext.c) ---
+
+/// _flushlbf: flush all line-buffered streams
+fn _flushlbf() callconv(.c) void {
+    _ = fflush_fn(null);
+}
+
+/// __fsetlocking: set locking type (no-op in musl)
+fn __fsetlocking(_: *FILE, _: c_int) callconv(.c) c_int {
+    return 0;
+}
+
+/// __fwriting: check if stream is in write mode
+fn __fwriting(f: *FILE) callconv(.c) c_int {
+    return @intFromBool(f.flags & F_NORD != 0 or f.wend != null);
+}
+
+/// __freading: check if stream is in read mode
+fn __freading(f: *FILE) callconv(.c) c_int {
+    return @intFromBool(f.flags & F_NOWR != 0 or f.rend != null);
+}
+
+/// __freadable: check if stream is readable
+fn __freadable(f: *FILE) callconv(.c) c_int {
+    return @intFromBool(f.flags & F_NORD == 0);
+}
+
+/// __fwritable: check if stream is writable
+fn __fwritable(f: *FILE) callconv(.c) c_int {
+    return @intFromBool(f.flags & F_NOWR == 0);
+}
+
+/// __flbf: check if stream is line-buffered
+fn __flbf(f: *FILE) callconv(.c) c_int {
+    return @intFromBool(f.lbf >= 0);
+}
+
+/// __fbufsize: get stream buffer size
+fn __fbufsize(f: *FILE) callconv(.c) usize {
+    return f.buf_size;
+}
+
+/// __fpending: get pending write data size
+fn __fpending(f: *FILE) callconv(.c) usize {
+    return if (f.wend != null) @intFromPtr(f.wpos.?) - @intFromPtr(f.wbase.?) else 0;
+}
+
+/// __fpurge: discard all pending data
+fn __fpurge(f: *FILE) callconv(.c) c_int {
+    f.wpos = null;
+    f.wbase = null;
+    f.wend = null;
+    f.rpos = null;
+    f.rend = null;
+    return 0;
+}
+
+// --- GNU extensions (ext2.c) ---
+
+/// __freadahead: bytes available for reading
+fn __freadahead(f: *FILE) callconv(.c) usize {
+    return if (f.rend != null) @intFromPtr(f.rend.?) - @intFromPtr(f.rpos.?) else 0;
+}
+
+/// __freadptr: get pointer to read buffer
+fn __freadptr(f: *FILE, sizep: *usize) callconv(.c) ?[*]const u8 {
+    if (f.rpos == f.rend) return null;
+    sizep.* = @intFromPtr(f.rend.?) - @intFromPtr(f.rpos.?);
+    return f.rpos;
+}
+
+/// __freadptrinc: advance read pointer
+fn __freadptrinc(f: *FILE, inc: usize) callconv(.c) void {
+    f.rpos = f.rpos.? + inc;
+}
+
+/// __fseterr: set error flag on stream
+fn __fseterr(f: *FILE) callconv(.c) void {
+    f.flags |= F_ERR;
+}
+
+// --- File operations (remove.c, rename.c) ---
+
+const linux = std.os.linux;
+const c_errno = @import("../c.zig").errno;
+
+/// remove.c: int remove(const char *path)
+fn remove_fn(path: [*:0]const u8) callconv(.c) c_int {
+    var r = linux.unlinkat(linux.AT.FDCWD, @ptrCast(path), 0);
+    const signed: isize = @bitCast(r);
+    if (signed == -@as(isize, @intFromEnum(linux.E.ISDIR))) {
+        r = linux.unlinkat(linux.AT.FDCWD, @ptrCast(path), linux.AT.REMOVEDIR);
+    }
+    return c_errno(r);
+}
+
+/// rename.c: int rename(const char *old, const char *new)
+fn rename_fn(old: [*:0]const u8, new: [*:0]const u8) callconv(.c) c_int {
+    return c_errno(linux.renameat2(linux.AT.FDCWD, @ptrCast(old), linux.AT.FDCWD, @ptrCast(new), 0));
+}
+
 // Extern references to musl C functions that are still compiled from C sources.
 const getdelim_fn = @extern(*const fn (?*[*]u8, ?*usize, c_int, ?*FILE) callconv(.c) ssize_t, .{ .name = "getdelim" });
 const fgetwc_fn = @extern(*const fn (?*FILE) callconv(.c) wint_t, .{ .name = "fgetwc" });
@@ -551,3 +728,4 @@ const lockfile_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__
 const unlockfile_fn = @extern(*const fn (*FILE) callconv(.c) void, .{ .name = "__unlockfile" });
 const toread_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__toread" });
 const towrite_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__towrite" });
+const fflush_fn = @extern(*const fn (?*FILE) callconv(.c) c_int, .{ .name = "fflush" });
