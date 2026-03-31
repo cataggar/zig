@@ -43,6 +43,9 @@ comptime {
         symbol(&nan, "nan");
         symbol(&nanf, "nanf");
         symbol(&nanl, "nanl");
+        symbol(&nearbyint_, "nearbyint");
+        symbol(&nearbyintf_, "nearbyintf");
+        symbol(&nearbyintl_, "nearbyintl");
         symbol(&tanhf, "tanhf");
     }
 
@@ -71,6 +74,8 @@ comptime {
         symbol(&copysign, "copysign");
         symbol(&copysignf, "copysignf");
         symbol(&rint, "rint");
+        symbol(&rintf_, "rintf");
+        symbol(&rintl_, "rintl");
     }
 
     symbol(&copysignl, "copysignl");
@@ -305,6 +310,60 @@ fn rint(x: f64) callconv(.c) f64 {
     return y;
 }
 
+fn rintf_(x: f32) callconv(.c) f32 {
+    const toint: f32 = 1.0 / @as(f32, math.floatEps(f32));
+    const a: u32 = @bitCast(x);
+    const e = a >> 23 & 0xff;
+    const s = a >> 31;
+    var y: f32 = undefined;
+
+    if (e >= 0x7f + 23) {
+        return x;
+    }
+    if (s == 1) {
+        y = x - toint + toint;
+    } else {
+        y = x + toint - toint;
+    }
+    if (y == 0) {
+        return if (s == 1) -@as(f32, 0.0) else 0;
+    }
+    return y;
+}
+
+fn rintl_(x: c_longdouble) callconv(.c) c_longdouble {
+    // Dispatch based on c_longdouble width
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => rint(@floatCast(x)),
+        else => rintLongDouble(x),
+    };
+}
+
+fn rintLongDouble(x: c_longdouble) c_longdouble {
+    const toint: c_longdouble = 1.0 / @as(c_longdouble, math.floatEps(c_longdouble));
+    const fractional_bits = math.floatFractionalBits(c_longdouble);
+    const exponent_bits = math.floatExponentBits(c_longdouble);
+    const IntType = std.meta.Int(.unsigned, @typeInfo(c_longdouble).float.bits);
+    const a: IntType = @bitCast(x);
+    const bias = (@as(IntType, 1) << (exponent_bits - 1)) - 1;
+    const e = (a >> fractional_bits) & ((@as(IntType, 1) << exponent_bits) - 1);
+    const s = a >> (fractional_bits + exponent_bits);
+    var y: c_longdouble = undefined;
+
+    if (e >= bias + fractional_bits) {
+        return x;
+    }
+    if (s == 1) {
+        y = x - toint + toint;
+    } else {
+        y = x + toint - toint;
+    }
+    if (y == 0) {
+        return 0 * x; // preserve sign
+    }
+    return y;
+}
+
 test "rint" {
     // Positive numbers round correctly
     try expectEqual(@as(f64, 42.0), rint(42.2));
@@ -338,6 +397,32 @@ test "rint" {
     // Exact half rounds to nearest even (banker's rounding)
     try expectEqual(@as(f64, 2.0), rint(2.5));
     try expectEqual(@as(f64, 4.0), rint(3.5));
+
+    // rintf tests
+    try expectEqual(@as(f32, 42.0), rintf_(42.2));
+    try expectEqual(@as(f32, 42.0), rintf_(41.8));
+    try expectEqual(@as(f32, -6.0), rintf_(-5.9));
+    try expectEqual(@as(f32, 2.0), rintf_(2.5));
+    try expectEqual(@as(f32, 4.0), rintf_(3.5));
+}
+
+fn nearbyint_(x: f64) callconv(.c) f64 {
+    return rint(x);
+}
+
+fn nearbyintf_(x: f32) callconv(.c) f32 {
+    return rintf_(x);
+}
+
+fn nearbyintl_(x: c_longdouble) callconv(.c) c_longdouble {
+    return rintl_(x);
+}
+
+test "nearbyint" {
+    try expectEqual(@as(f64, 2.0), nearbyint_(2.3));
+    try expectEqual(@as(f64, -2.0), nearbyint_(-2.3));
+    try expectEqual(@as(f32, 2.0), nearbyintf_(2.3));
+    try expectEqual(@as(f32, -2.0), nearbyintf_(-2.3));
 }
 
 fn tanh(x: f64) callconv(.c) f64 {
