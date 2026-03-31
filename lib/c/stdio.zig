@@ -86,6 +86,15 @@ comptime {
         symbol(&rewind, "rewind");
         symbol(&fgetpos, "fgetpos");
         symbol(&fsetpos, "fsetpos");
+
+        // String I/O (fputs.c, puts.c, gets.c)
+        symbol(&fputs, "fputs");
+        symbol(&fputs, "fputs_unlocked");
+        symbol(&puts, "puts");
+        symbol(&gets, "gets");
+
+        // Unget (ungetc.c)
+        symbol(&ungetc, "ungetc");
     }
 }
 
@@ -240,6 +249,78 @@ fn fsetpos(f: *FILE, pos: *const i64) callconv(.c) c_int {
     return fseeko_fn(f, pos.*, 0); // SEEK_SET = 0
 }
 
+// --- String I/O functions ---
+
+/// fputs.c: int fputs(const char *restrict s, FILE *restrict f)
+fn fputs(s: [*:0]const u8, f: *FILE) callconv(.c) c_int {
+    const l = std.mem.len(s);
+    return @as(c_int, @intCast(@intFromBool(fwrite_fn(s, 1, l, f) == l))) - 1;
+}
+
+/// puts.c: int puts(const char *s)
+fn puts(s: [*:0]const u8) callconv(.c) c_int {
+    const stdout_ptr: *FILE = @ptrCast(stdout_ext.*);
+    const need_unlock = flock(stdout_ptr);
+    const r: c_int = -@as(c_int, @intFromBool(fputs(s, stdout_ptr) < 0 or putc_unlocked_fn('\n', stdout_ext.*) < 0));
+    funlock(stdout_ptr, need_unlock);
+    return r;
+}
+
+/// gets.c: char *gets(char *s)
+fn gets(s: [*]u8) callconv(.c) ?[*]u8 {
+    var i: usize = 0;
+    const stdin_ptr: *FILE = @ptrCast(stdin_ext.*);
+    const need_unlock = flock(stdin_ptr);
+    while (true) {
+        const c = getc_unlocked_fn(stdin_ext.*);
+        if (c == EOF or c == '\n') {
+            s[i] = 0;
+            if (c != '\n' and (stdin_ptr.flags & F_EOF == 0 or i == 0)) {
+                funlock(stdin_ptr, need_unlock);
+                return null;
+            }
+            break;
+        }
+        s[i] = @intCast(@as(c_uint, @bitCast(c)));
+        i += 1;
+    }
+    funlock(stdin_ptr, need_unlock);
+    return s;
+}
+
+// --- Unget functions ---
+
+/// Musl UNGET constant (from stdio_impl.h)
+const UNGET = 8;
+
+/// ungetc.c: int ungetc(int c, FILE *f)
+fn ungetc(c: c_int, f: *FILE) callconv(.c) c_int {
+    if (c == EOF) return c;
+
+    const need_unlock = flock(f);
+
+    if (f.rpos == null) _ = toread_fn(f);
+    if (f.rpos == null) {
+        funlock(f, need_unlock);
+        return EOF;
+    }
+    // Check: f->rpos <= f->buf - UNGET
+    const buf_addr = @intFromPtr(f.buf.?);
+    const rpos_addr = @intFromPtr(f.rpos.?);
+    if (rpos_addr <= buf_addr -% UNGET) {
+        funlock(f, need_unlock);
+        return EOF;
+    }
+
+    const rpos = f.rpos.?;
+    f.rpos = rpos - 1;
+    (rpos - 1)[0] = @intCast(@as(c_uint, @bitCast(c)));
+    f.flags &= ~F_EOF;
+
+    funlock(f, need_unlock);
+    return @as(c_int, @intCast(@as(c_uint, @bitCast(c)) & 0xff));
+}
+
 // Extern references to musl C functions that are still compiled from C sources.
 const setvbuf_fn = @extern(*const fn (?*FILE, ?[*]u8, c_int, usize) callconv(.c) c_int, .{ .name = "setvbuf" });
 const getdelim_fn = @extern(*const fn (?*[*]u8, ?*usize, c_int, ?*FILE) callconv(.c) ssize_t, .{ .name = "getdelim" });
@@ -258,3 +339,4 @@ const unlockfile_fn = @extern(*const fn (*FILE) callconv(.c) void, .{ .name = "_
 const fseeko_unlocked_fn = @extern(*const fn (*FILE, i64, c_int) callconv(.c) c_int, .{ .name = "__fseeko_unlocked" });
 const fseeko_fn = @extern(*const fn (*FILE, i64, c_int) callconv(.c) c_int, .{ .name = "__fseeko" });
 const ftello_fn = @extern(*const fn (*FILE) callconv(.c) i64, .{ .name = "__ftello" });
+const toread_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__toread" });
