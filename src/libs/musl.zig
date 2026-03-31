@@ -1418,11 +1418,11 @@ const src_files = [_][]const u8{
     "musl/src/stdio/getchar_unlocked.c",
     "musl/src/stdio/getc_unlocked.c",
     "musl/src/stdio/getdelim.c",
-    "musl/src/stdio/getline.c",
+    //"musl/src/stdio/getline.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/gets.c",
-    "musl/src/stdio/getw.c",
-    "musl/src/stdio/getwc.c",
-    "musl/src/stdio/getwchar.c",
+    //"musl/src/stdio/getw.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/getwc.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/getwchar.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/__lockfile.c",
     "musl/src/stdio/ofl_add.c",
     "musl/src/stdio/ofl.c",
@@ -1438,16 +1438,16 @@ const src_files = [_][]const u8{
     "musl/src/stdio/putchar_unlocked.c",
     "musl/src/stdio/putc_unlocked.c",
     "musl/src/stdio/puts.c",
-    "musl/src/stdio/putw.c",
-    "musl/src/stdio/putwc.c",
-    "musl/src/stdio/putwchar.c",
+    //"musl/src/stdio/putw.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/putwc.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/putwchar.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/remove.c",
     "musl/src/stdio/rename.c",
     "musl/src/stdio/rewind.c",
     "musl/src/stdio/scanf.c",
-    "musl/src/stdio/setbuf.c",
-    "musl/src/stdio/setbuffer.c",
-    "musl/src/stdio/setlinebuf.c",
+    //"musl/src/stdio/setbuf.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/setbuffer.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/setlinebuf.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/setvbuf.c",
     "musl/src/stdio/snprintf.c",
     "musl/src/stdio/sprintf.c",
