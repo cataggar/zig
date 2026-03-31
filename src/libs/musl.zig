@@ -1565,14 +1565,14 @@ const src_files = [_][]const u8{
     "musl/src/thread/arm/__set_thread_area.c",
     "musl/src/thread/arm/syscall_cp.s",
     "musl/src/thread/arm/__unmapself.s",
-    "musl/src/thread/call_once.c",
+    //"musl/src/thread/call_once.c", // migrated to lib/c/thread.zig
     "musl/src/thread/clone.c",
-    "musl/src/thread/cnd_broadcast.c",
+    //"musl/src/thread/cnd_broadcast.c", // migrated to lib/c/thread.zig
     //"musl/src/thread/cnd_destroy.c", // migrated to lib/c/thread.zig
-    "musl/src/thread/cnd_init.c",
-    "musl/src/thread/cnd_signal.c",
-    "musl/src/thread/cnd_timedwait.c",
-    "musl/src/thread/cnd_wait.c",
+    //"musl/src/thread/cnd_init.c", // migrated to lib/c/thread.zig
+    //"musl/src/thread/cnd_signal.c", // migrated to lib/c/thread.zig
+    //"musl/src/thread/cnd_timedwait.c", // migrated to lib/c/thread.zig
+    //"musl/src/thread/cnd_wait.c", // migrated to lib/c/thread.zig
     "musl/src/thread/default_attr.c",
     "musl/src/thread/hexagon/clone.s",
     "musl/src/thread/hexagon/__set_thread_area.s",
@@ -1602,11 +1602,11 @@ const src_files = [_][]const u8{
     "musl/src/thread/mips/syscall_cp.s",
     "musl/src/thread/mips/__unmapself.s",
     //"musl/src/thread/mtx_destroy.c", // migrated to lib/c/thread.zig
-    "musl/src/thread/mtx_init.c",
-    "musl/src/thread/mtx_lock.c",
-    "musl/src/thread/mtx_timedlock.c",
-    "musl/src/thread/mtx_trylock.c",
-    "musl/src/thread/mtx_unlock.c",
+    //"musl/src/thread/mtx_init.c", // migrated to lib/c/thread.zig
+    //"musl/src/thread/mtx_lock.c", // migrated to lib/c/thread.zig
+    //"musl/src/thread/mtx_timedlock.c", // migrated to lib/c/thread.zig
+    //"musl/src/thread/mtx_trylock.c", // migrated to lib/c/thread.zig
+    //"musl/src/thread/mtx_unlock.c", // migrated to lib/c/thread.zig
     "musl/src/thread/powerpc64/clone.s",
     "musl/src/thread/powerpc64/__set_thread_area.s",
     "musl/src/thread/powerpc64/syscall_cp.s",
@@ -1668,7 +1668,7 @@ const src_files = [_][]const u8{
     //"musl/src/thread/pthread_mutex_getprioceiling.c", // migrated to lib/c/thread.zig
     //"musl/src/thread/pthread_mutex_init.c", // migrated to lib/c/thread.zig
     "musl/src/thread/pthread_mutex_lock.c",
-    "musl/src/thread/pthread_mutex_setprioceiling.c",
+    //"musl/src/thread/pthread_mutex_setprioceiling.c", // migrated to lib/c/thread.zig
     "musl/src/thread/pthread_mutex_timedlock.c",
     "musl/src/thread/pthread_mutex_trylock.c",
     "musl/src/thread/pthread_mutex_unlock.c",
@@ -1715,8 +1715,8 @@ const src_files = [_][]const u8{
     "musl/src/thread/s390x/__tls_get_offset.s",
     "musl/src/thread/s390x/__unmapself.s",
     //"musl/src/thread/sem_destroy.c", // migrated to lib/c/thread.zig
-    "musl/src/thread/sem_getvalue.c",
-    "musl/src/thread/sem_init.c",
+    //"musl/src/thread/sem_getvalue.c", // migrated to lib/c/thread.zig
+    //"musl/src/thread/sem_init.c", // migrated to lib/c/thread.zig
     "musl/src/thread/sem_open.c",
     "musl/src/thread/sem_post.c",
     "musl/src/thread/sem_timedwait.c",
@@ -1731,12 +1731,12 @@ const src_files = [_][]const u8{
     "musl/src/thread/thrd_exit.c",
     "musl/src/thread/thrd_join.c",
     "musl/src/thread/thrd_sleep.c",
-    "musl/src/thread/thrd_yield.c",
+    //"musl/src/thread/thrd_yield.c", // migrated to lib/c/thread.zig
     "musl/src/thread/__timedwait.c",
     "musl/src/thread/tls.c",
     "musl/src/thread/__tls_get_addr.c",
-    "musl/src/thread/tss_create.c",
-    "musl/src/thread/tss_delete.c",
+    //"musl/src/thread/tss_create.c", // migrated to lib/c/thread.zig
+    //"musl/src/thread/tss_delete.c", // migrated to lib/c/thread.zig
     "musl/src/thread/tss_set.c",
     "musl/src/thread/__unmapself.c",
     "musl/src/thread/vmlock.c",

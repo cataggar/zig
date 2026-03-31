@@ -84,6 +84,33 @@ comptime {
         symbol(&pthread_rwlock_init, "pthread_rwlock_init");
         symbol(&pthread_cond_init, "pthread_cond_init");
         symbol(&pthread_barrier_init, "pthread_barrier_init");
+
+        // Prioceiling set (not supported)
+        symbol(&pthread_mutex_setprioceiling, "pthread_mutex_setprioceiling");
+
+        // Semaphore init/getvalue
+        symbol(&sem_init, "sem_init");
+        symbol(&sem_getvalue, "sem_getvalue");
+
+        // C11 thread init and yield
+        symbol(&cnd_init, "cnd_init");
+        symbol(&mtx_init, "mtx_init");
+        symbol(&thrd_yield, "thrd_yield");
+
+        // C11 thread wrappers (depend on musl internal functions)
+        if (builtin.link_libc) {
+            symbol(&call_once, "call_once");
+            symbol(&tss_create, "tss_create");
+            symbol(&tss_delete, "tss_delete");
+            symbol(&cnd_signal, "cnd_signal");
+            symbol(&cnd_broadcast, "cnd_broadcast");
+            symbol(&cnd_timedwait, "cnd_timedwait");
+            symbol(&cnd_wait, "cnd_wait");
+            symbol(&mtx_lock, "mtx_lock");
+            symbol(&mtx_timedlock, "mtx_timedlock");
+            symbol(&mtx_trylock, "mtx_trylock");
+            symbol(&mtx_unlock, "mtx_unlock");
+        }
     }
 }
 
@@ -171,6 +198,10 @@ fn pthread_equal(a: std.c.pthread_t, b: std.c.pthread_t) callconv(.c) c_int {
 fn eint(e: E) c_int {
     return @intCast(@intFromEnum(e));
 }
+
+// Comptime errno constants for use in switch cases.
+const c_EBUSY: c_int = @intCast(@intFromEnum(E.BUSY));
+const c_ETIMEDOUT: c_int = @intCast(@intFromEnum(E.TIMEDOUT));
 
 // --- Musl internal type definitions ---
 // These match the musl libc type layouts exactly.
@@ -453,7 +484,8 @@ fn pthread_spin_unlock(s: *c_int) callconv(.c) c_int {
 const mutex_size = if (@sizeOf(c_ulong) == 8) @as(usize, 40) else 24;
 const pthread_mutex_impl = extern struct {
     _m_type: c_int = 0,
-    _padding: [mutex_size - @sizeOf(c_int)]u8 = [_]u8{0} ** (mutex_size - @sizeOf(c_int)),
+    _m_lock: c_int = 0,
+    _padding: [mutex_size - 2 * @sizeOf(c_int)]u8 = [_]u8{0} ** (mutex_size - 2 * @sizeOf(c_int)),
 };
 
 fn pthread_mutex_init(m: *pthread_mutex_impl, a: ?*const pthread_mutexattr_t) callconv(.c) c_int {
@@ -505,5 +537,132 @@ fn pthread_barrier_init(b: *pthread_barrier_impl, a: ?*const pthread_barrierattr
     b.* = .{};
     b._b_limit = @bitCast((count -% 1) | if (a) |attr| attr.__attr else 0);
     return 0;
+}
+
+// Priority ceiling set is not supported by musl (same as get).
+
+fn pthread_mutex_setprioceiling(m: ?*anyopaque, ceiling: c_int, old: ?*c_int) callconv(.c) c_int {
+    _ = m;
+    _ = ceiling;
+    _ = old;
+    return eint(.INVAL);
+}
+
+// --- Semaphore init/getvalue ---
+
+const sem_val_len = 4 * @sizeOf(c_long) / @sizeOf(c_int);
+const sem_impl = extern struct {
+    __val: [sem_val_len]c_int = [_]c_int{0} ** sem_val_len,
+};
+
+fn sem_init(sem: *sem_impl, pshared: c_int, value: c_uint) callconv(.c) c_int {
+    if (value > 0x7fffffff) {
+        std.c._errno().* = @intCast(@intFromEnum(E.INVAL));
+        return -1;
+    }
+    sem.__val[0] = @bitCast(value);
+    sem.__val[1] = 0;
+    sem.__val[2] = if (pshared != 0) 0 else 128;
+    return 0;
+}
+
+fn sem_getvalue(sem: *const sem_impl, valp: *c_int) callconv(.c) c_int {
+    valp.* = sem.__val[0] & 0x7fffffff;
+    return 0;
+}
+
+// --- C11 thread functions ---
+
+fn cnd_init(c: *pthread_cond_impl) callconv(.c) c_int {
+    c.* = .{};
+    return 0; // thrd_success
+}
+
+fn mtx_init(m: *pthread_mutex_impl, @"type": c_int) callconv(.c) c_int {
+    m.* = .{};
+    // mtx_recursive (1) maps to PTHREAD_MUTEX_RECURSIVE (1)
+    m._m_type = if (@"type" & 1 != 0) 1 else 0;
+    return 0; // thrd_success
+}
+
+fn thrd_yield() callconv(.c) void {
+    _ = std.os.linux.syscall0(.sched_yield);
+}
+
+// C11 thread wrappers that delegate to musl internal pthread functions.
+// Gated behind builtin.link_libc since they depend on C-provided symbols.
+
+fn call_once(flag: *c_int, func: *const fn () callconv(.c) void) callconv(.c) void {
+    const __pthread_once = @extern(*const fn (*c_int, *const fn () callconv(.c) void) callconv(.c) c_int, .{ .name = "__pthread_once" });
+    _ = __pthread_once(flag, func);
+}
+
+fn tss_create(tss: *c_uint, dtor: ?*const fn (?*anyopaque) callconv(.c) void) callconv(.c) c_int {
+    const __pthread_key_create = @extern(*const fn (*c_uint, ?*const fn (?*anyopaque) callconv(.c) void) callconv(.c) c_int, .{ .name = "__pthread_key_create" });
+    return if (__pthread_key_create(tss, dtor) != 0) 1 else 0; // thrd_error : thrd_success
+}
+
+fn tss_delete(key: c_uint) callconv(.c) void {
+    const __pthread_key_delete = @extern(*const fn (c_uint) callconv(.c) c_int, .{ .name = "__pthread_key_delete" });
+    _ = __pthread_key_delete(key);
+}
+
+fn cnd_signal(c: ?*anyopaque) callconv(.c) c_int {
+    const __private_cond_signal = @extern(*const fn (?*anyopaque, c_int) callconv(.c) c_int, .{ .name = "__private_cond_signal" });
+    return __private_cond_signal(c, 1);
+}
+
+fn cnd_broadcast(c: ?*anyopaque) callconv(.c) c_int {
+    const __private_cond_signal = @extern(*const fn (?*anyopaque, c_int) callconv(.c) c_int, .{ .name = "__private_cond_signal" });
+    return __private_cond_signal(c, -1);
+}
+
+fn cnd_timedwait(c: ?*anyopaque, m: ?*anyopaque, ts: ?*const anyopaque) callconv(.c) c_int {
+    const __pthread_cond_timedwait = @extern(*const fn (?*anyopaque, ?*anyopaque, ?*const anyopaque) callconv(.c) c_int, .{ .name = "__pthread_cond_timedwait" });
+    const ret = __pthread_cond_timedwait(c, m, ts);
+    return switch (ret) {
+        0 => 0, // thrd_success
+        c_ETIMEDOUT => 3, // thrd_timedout
+        else => 1, // thrd_error
+    };
+}
+
+fn cnd_wait(c: ?*anyopaque, m: ?*anyopaque) callconv(.c) c_int {
+    return cnd_timedwait(c, m, null);
+}
+
+fn mtx_lock(m: *pthread_mutex_impl) callconv(.c) c_int {
+    if (m._m_type == 0 and @cmpxchgWeak(c_int, &m._m_lock, 0, c_EBUSY, .seq_cst, .seq_cst) == null) {
+        return 0; // thrd_success - fast path for PTHREAD_MUTEX_NORMAL
+    }
+    return mtx_timedlock(@ptrCast(m), null);
+}
+
+fn mtx_timedlock(m: ?*anyopaque, ts: ?*const anyopaque) callconv(.c) c_int {
+    const __pthread_mutex_timedlock = @extern(*const fn (?*anyopaque, ?*const anyopaque) callconv(.c) c_int, .{ .name = "__pthread_mutex_timedlock" });
+    const ret = __pthread_mutex_timedlock(m, ts);
+    return switch (ret) {
+        0 => 0, // thrd_success
+        c_ETIMEDOUT => 3, // thrd_timedout
+        else => 1, // thrd_error
+    };
+}
+
+fn mtx_trylock(m: *pthread_mutex_impl) callconv(.c) c_int {
+    if (m._m_type == 0) {
+        return if (@cmpxchgStrong(c_int, &m._m_lock, 0, c_EBUSY, .seq_cst, .seq_cst) != null) 4 else 0;
+    }
+    const __pthread_mutex_trylock = @extern(*const fn (?*anyopaque) callconv(.c) c_int, .{ .name = "__pthread_mutex_trylock" });
+    const ret = __pthread_mutex_trylock(@ptrCast(m));
+    return switch (ret) {
+        0 => 0, // thrd_success
+        c_EBUSY => 4, // thrd_busy
+        else => 1, // thrd_error
+    };
+}
+
+fn mtx_unlock(mtx: ?*anyopaque) callconv(.c) c_int {
+    const __pthread_mutex_unlock = @extern(*const fn (?*anyopaque) callconv(.c) c_int, .{ .name = "__pthread_mutex_unlock" });
+    return __pthread_mutex_unlock(mtx);
 }
 
