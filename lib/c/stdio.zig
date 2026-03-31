@@ -2,7 +2,42 @@ const builtin = @import("builtin");
 const std = @import("std");
 const symbol = @import("../c.zig").symbol;
 
-const FILE = opaque {};
+/// Musl internal FILE struct layout (struct _IO_FILE from stdio_impl.h).
+/// Only used when targeting musl libc.
+const FILE = extern struct {
+    flags: c_uint,
+    rpos: ?[*]u8,
+    rend: ?[*]u8,
+    close_fn: ?*const anyopaque,
+    wend: ?[*]u8,
+    wpos: ?[*]u8,
+    mustbezero_1: ?[*]u8,
+    wbase: ?[*]u8,
+    read_fn: ?*const anyopaque,
+    write_fn: ?*const anyopaque,
+    seek_fn: ?*const anyopaque,
+    buf: ?[*]u8,
+    buf_size: usize,
+    prev: ?*FILE,
+    next: ?*FILE,
+    fd: c_int,
+    pipe_pid: c_int,
+    lockcount: c_long,
+    mode: c_int,
+    lock: c_int,
+    lbf: c_int,
+    cookie: ?*anyopaque,
+    off: i64,
+    getln_buf: ?[*]u8,
+    mustbezero_2: ?*anyopaque,
+    shend: ?[*]u8,
+    shlim: i64,
+    shcnt: i64,
+    prev_locked: ?*FILE,
+    next_locked: ?*FILE,
+    locale: ?*anyopaque,
+};
+
 const wchar_t = std.c.wchar_t;
 const wint_t = std.c.wint_t;
 const ssize_t = isize;
@@ -34,6 +69,23 @@ comptime {
         // Word I/O (getw.c, putw.c)
         symbol(&getw, "getw");
         symbol(&putw, "putw");
+
+        // Stream status (feof.c, ferror.c, clearerr.c, fileno.c)
+        symbol(&feof_fn, "feof");
+        symbol(&feof_fn, "feof_unlocked");
+        symbol(&feof_fn, "_IO_feof_unlocked");
+        symbol(&ferror_fn, "ferror");
+        symbol(&ferror_fn, "ferror_unlocked");
+        symbol(&ferror_fn, "_IO_ferror_unlocked");
+        symbol(&clearerr, "clearerr");
+        symbol(&clearerr, "clearerr_unlocked");
+        symbol(&fileno, "fileno");
+        symbol(&fileno, "fileno_unlocked");
+
+        // Positioning (rewind.c, fgetpos.c, fsetpos.c)
+        symbol(&rewind, "rewind");
+        symbol(&fgetpos, "fgetpos");
+        symbol(&fsetpos, "fsetpos");
     }
 }
 
@@ -116,6 +168,78 @@ fn putchar_unlocked(c: c_int) callconv(.c) c_int {
     return putc_unlocked_fn(c, stdout_ext.*);
 }
 
+// --- Stream status functions ---
+
+/// Musl FILE flag constants (from stdio_impl.h)
+const F_EOF: c_uint = 16;
+const F_ERR: c_uint = 32;
+
+/// Implements musl FLOCK(f) macro: ((f)->lock>=0 ? __lockfile((f)) : 0)
+inline fn flock(f: *FILE) c_int {
+    return if (f.lock >= 0) lockfile_fn(f) else 0;
+}
+
+/// Implements musl FUNLOCK(f) macro
+inline fn funlock(f: *FILE, need_unlock: c_int) void {
+    if (need_unlock != 0) unlockfile_fn(f);
+}
+
+/// feof.c: int feof(FILE *f)
+fn feof_fn(f: *FILE) callconv(.c) c_int {
+    const need_unlock = flock(f);
+    const ret: c_int = @intFromBool(f.flags & F_EOF != 0);
+    funlock(f, need_unlock);
+    return ret;
+}
+
+/// ferror.c: int ferror(FILE *f)
+fn ferror_fn(f: *FILE) callconv(.c) c_int {
+    const need_unlock = flock(f);
+    const ret: c_int = @intFromBool(f.flags & F_ERR != 0);
+    funlock(f, need_unlock);
+    return ret;
+}
+
+/// clearerr.c: void clearerr(FILE *f)
+fn clearerr(f: *FILE) callconv(.c) void {
+    const need_unlock = flock(f);
+    f.flags &= ~(F_EOF | F_ERR);
+    funlock(f, need_unlock);
+}
+
+/// fileno.c: int fileno(FILE *f)
+fn fileno(f: *FILE) callconv(.c) c_int {
+    const need_unlock = flock(f);
+    const fd = f.fd;
+    funlock(f, need_unlock);
+    if (fd < 0) {
+        std.c._errno().* = @intFromEnum(std.os.linux.E.BADF);
+        return -1;
+    }
+    return fd;
+}
+
+/// rewind.c: void rewind(FILE *f)
+fn rewind(f: *FILE) callconv(.c) void {
+    const need_unlock = flock(f);
+    _ = fseeko_unlocked_fn(f, 0, 0); // SEEK_SET = 0
+    f.flags &= ~F_ERR;
+    funlock(f, need_unlock);
+}
+
+/// fgetpos.c: int fgetpos(FILE *f, fpos_t *pos)
+fn fgetpos(f: *FILE, pos: *i64) callconv(.c) c_int {
+    const off = ftello_fn(f);
+    if (off < 0) return -1;
+    pos.* = off;
+    return 0;
+}
+
+/// fsetpos.c: int fsetpos(FILE *f, const fpos_t *pos)
+fn fsetpos(f: *FILE, pos: *const i64) callconv(.c) c_int {
+    return fseeko_fn(f, pos.*, 0); // SEEK_SET = 0
+}
+
 // Extern references to musl C functions that are still compiled from C sources.
 const setvbuf_fn = @extern(*const fn (?*FILE, ?[*]u8, c_int, usize) callconv(.c) c_int, .{ .name = "setvbuf" });
 const getdelim_fn = @extern(*const fn (?*[*]u8, ?*usize, c_int, ?*FILE) callconv(.c) ssize_t, .{ .name = "getdelim" });
@@ -129,3 +253,8 @@ const getc_unlocked_fn = @extern(*const fn (?*FILE) callconv(.c) c_int, .{ .name
 const putc_unlocked_fn = @extern(*const fn (c_int, ?*FILE) callconv(.c) c_int, .{ .name = "putc_unlocked" });
 const stdin_ext = @extern(*const ?*FILE, .{ .name = "stdin" });
 const stdout_ext = @extern(*const ?*FILE, .{ .name = "stdout" });
+const lockfile_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__lockfile" });
+const unlockfile_fn = @extern(*const fn (*FILE) callconv(.c) void, .{ .name = "__unlockfile" });
+const fseeko_unlocked_fn = @extern(*const fn (*FILE, i64, c_int) callconv(.c) c_int, .{ .name = "__fseeko_unlocked" });
+const fseeko_fn = @extern(*const fn (*FILE, i64, c_int) callconv(.c) c_int, .{ .name = "__fseeko" });
+const ftello_fn = @extern(*const fn (*FILE) callconv(.c) i64, .{ .name = "__ftello" });
