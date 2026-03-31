@@ -1553,7 +1553,7 @@ const src_files = [_][]const u8{
     "musl/src/thread/i386/tls.s",
     "musl/src/thread/i386/__unmapself.s",
     "musl/src/thread/__lock.c",
-    "musl/src/thread/lock_ptc.c",
+    //"musl/src/thread/lock_ptc.c", // migrated to lib/c/thread.zig
     "musl/src/thread/loongarch64/clone.s",
     "musl/src/thread/loongarch64/__set_thread_area.s",
     "musl/src/thread/loongarch64/syscall_cp.s",
@@ -1628,12 +1628,12 @@ const src_files = [_][]const u8{
     "musl/src/thread/pthread_kill.c",
     "musl/src/thread/pthread_mutexattr_destroy.c",
     "musl/src/thread/pthread_mutexattr_init.c",
-    "musl/src/thread/pthread_mutexattr_setprotocol.c",
+    //"musl/src/thread/pthread_mutexattr_setprotocol.c", // migrated to lib/c/thread.zig
     "musl/src/thread/pthread_mutexattr_setpshared.c",
-    "musl/src/thread/pthread_mutexattr_setrobust.c",
+    //"musl/src/thread/pthread_mutexattr_setrobust.c", // migrated to lib/c/thread.zig
     "musl/src/thread/pthread_mutexattr_settype.c",
     "musl/src/thread/pthread_mutex_consistent.c",
-    "musl/src/thread/pthread_mutex_destroy.c",
+    //"musl/src/thread/pthread_mutex_destroy.c", // migrated to lib/c/thread.zig
     "musl/src/thread/pthread_mutex_getprioceiling.c",
     "musl/src/thread/pthread_mutex_init.c",
     "musl/src/thread/pthread_mutex_lock.c",
@@ -1641,7 +1641,7 @@ const src_files = [_][]const u8{
     "musl/src/thread/pthread_mutex_timedlock.c",
     "musl/src/thread/pthread_mutex_trylock.c",
     "musl/src/thread/pthread_mutex_unlock.c",
-    "musl/src/thread/pthread_once.c",
+    //"musl/src/thread/pthread_once.c", // migrated to lib/c/thread.zig
     "musl/src/thread/pthread_rwlockattr_destroy.c",
     "musl/src/thread/pthread_rwlockattr_init.c",
     "musl/src/thread/pthread_rwlockattr_setpshared.c",
