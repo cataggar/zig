@@ -179,6 +179,29 @@ comptime {
 
         // Error output (perror.c)
         symbol(&perror_impl, "perror");
+
+        // Wide formatting wrappers (wprintf.c, fwprintf.c, swprintf.c)
+        symbol(&wprintf_impl, "wprintf");
+        symbol(&fwprintf_impl, "fwprintf");
+        symbol(&swprintf_impl, "swprintf");
+
+        // Wide scanning wrappers (wscanf.c, fwscanf.c, swscanf.c)
+        symbol(&wscanf_impl, "wscanf");
+        symbol(&wscanf_impl, "__isoc99_wscanf");
+        symbol(&fwscanf_impl, "fwscanf");
+        symbol(&fwscanf_impl, "__isoc99_fwscanf");
+        symbol(&swscanf_impl, "swscanf");
+        symbol(&swscanf_impl, "__isoc99_swscanf");
+
+        // Wide v* delegation (vwprintf.c, vwscanf.c)
+        symbol(&vwprintf_impl, "vwprintf");
+        symbol(&vwscanf_impl, "vwscanf");
+        symbol(&vwscanf_impl, "__isoc99_vwscanf");
+
+        // Narrow v* delegation (vprintf.c, vscanf.c)
+        symbol(&vprintf_impl, "vprintf");
+        symbol(&vscanf_impl, "vscanf");
+        symbol(&vscanf_impl, "__isoc99_vscanf");
     }
 }
 
@@ -951,6 +974,76 @@ fn perror_impl(msg: ?[*:0]const u8) callconv(.c) void {
     funlock(f, need_unlock);
 }
 
+// --- Wide formatting wrappers (wprintf.c, fwprintf.c, swprintf.c) ---
+
+/// wprintf.c: int wprintf(const wchar_t *restrict fmt, ...)
+fn wprintf_impl(fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vfwprintf_fn(stdout_ext.*, fmt, ap);
+}
+
+/// fwprintf.c: int fwprintf(FILE *restrict f, const wchar_t *restrict fmt, ...)
+fn fwprintf_impl(f: ?*FILE, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vfwprintf_fn(f, fmt, ap);
+}
+
+/// swprintf.c: int swprintf(wchar_t *restrict s, size_t n, const wchar_t *restrict fmt, ...)
+fn swprintf_impl(s: [*]wchar_t, n: usize, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vswprintf_fn(s, n, fmt, ap);
+}
+
+// --- Wide scanning wrappers (wscanf.c, fwscanf.c, swscanf.c) ---
+
+/// wscanf.c: int wscanf(const wchar_t *restrict fmt, ...)
+fn wscanf_impl(fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vfwscanf_fn(stdin_ext.*, fmt, ap);
+}
+
+/// fwscanf.c: int fwscanf(FILE *restrict f, const wchar_t *restrict fmt, ...)
+fn fwscanf_impl(f: ?*FILE, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vfwscanf_fn(f, fmt, ap);
+}
+
+/// swscanf.c: int swscanf(const wchar_t *restrict s, const wchar_t *restrict fmt, ...)
+fn swscanf_impl(s: [*:0]const wchar_t, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vswscanf_fn(s, fmt, ap);
+}
+
+// --- Wide v* delegation (vwprintf.c, vwscanf.c) ---
+
+/// vwprintf.c: int vwprintf(const wchar_t *restrict fmt, va_list ap)
+fn vwprintf_impl(fmt: [*:0]const wchar_t, ap: VaList) callconv(.c) c_int {
+    return vfwprintf_fn(stdout_ext.*, fmt, ap);
+}
+
+/// vwscanf.c: int vwscanf(const wchar_t *restrict fmt, va_list ap)
+fn vwscanf_impl(fmt: [*:0]const wchar_t, ap: VaList) callconv(.c) c_int {
+    return vfwscanf_fn(stdin_ext.*, fmt, ap);
+}
+
+// --- Narrow v* delegation (vprintf.c, vscanf.c) ---
+
+/// vprintf.c: int vprintf(const char *restrict fmt, va_list ap)
+fn vprintf_impl(fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
+    return vfprintf_fn(stdout_ext.*, fmt, ap);
+}
+
+/// vscanf.c: int vscanf(const char *restrict fmt, va_list ap)
+fn vscanf_impl(fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
+    return vfscanf_fn(stdin_ext.*, fmt, ap);
+}
+
 // Extern references to musl C functions that are still compiled from C sources.
 const getdelim_fn = @extern(*const fn (?*[*]u8, ?*usize, c_int, ?*FILE) callconv(.c) ssize_t, .{ .name = "getdelim" });
 const fgetwc_fn = @extern(*const fn (?*FILE) callconv(.c) wint_t, .{ .name = "fgetwc" });
@@ -970,3 +1063,7 @@ const vdprintf_fn = @extern(*const fn (c_int, [*:0]const u8, VaList) callconv(.c
 const vscanf_fn = @extern(*const fn ([*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vscanf" });
 const vfscanf_fn = @extern(*const fn (?*FILE, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vfscanf" });
 const vsscanf_fn = @extern(*const fn ([*:0]const u8, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vsscanf" });
+const vfwprintf_fn = @extern(*const fn (?*FILE, [*:0]const wchar_t, VaList) callconv(.c) c_int, .{ .name = "vfwprintf" });
+const vfwscanf_fn = @extern(*const fn (?*FILE, [*:0]const wchar_t, VaList) callconv(.c) c_int, .{ .name = "vfwscanf" });
+const vswprintf_fn = @extern(*const fn ([*]wchar_t, usize, [*:0]const wchar_t, VaList) callconv(.c) c_int, .{ .name = "vswprintf" });
+const vswscanf_fn = @extern(*const fn ([*:0]const wchar_t, [*:0]const wchar_t, VaList) callconv(.c) c_int, .{ .name = "vswscanf" });

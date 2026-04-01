@@ -1410,9 +1410,9 @@ const src_files = [_][]const u8{
     "musl/src/stdio/ftrylockfile.c",
     "musl/src/stdio/funlockfile.c",
     "musl/src/stdio/fwide.c",
-    "musl/src/stdio/fwprintf.c",
+    //"musl/src/stdio/fwprintf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/fwrite.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/fwscanf.c",
+    //"musl/src/stdio/fwscanf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/getc.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/getchar.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/getchar_unlocked.c", // migrated to lib/c/stdio.zig
@@ -1461,8 +1461,8 @@ const src_files = [_][]const u8{
     "musl/src/stdio/__stdio_write.c",
     "musl/src/stdio/stdout.c",
     "musl/src/stdio/__stdout_write.c",
-    "musl/src/stdio/swprintf.c",
-    "musl/src/stdio/swscanf.c",
+    //"musl/src/stdio/swprintf.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/swscanf.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/tempnam.c",
     "musl/src/stdio/tmpfile.c",
     "musl/src/stdio/tmpnam.c",
@@ -1477,17 +1477,17 @@ const src_files = [_][]const u8{
     "musl/src/stdio/vfscanf.c",
     "musl/src/stdio/vfwprintf.c",
     "musl/src/stdio/vfwscanf.c",
-    "musl/src/stdio/vprintf.c",
-    "musl/src/stdio/vscanf.c",
+    //"musl/src/stdio/vprintf.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/vscanf.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/vsnprintf.c",
     "musl/src/stdio/vsprintf.c",
     "musl/src/stdio/vsscanf.c",
     "musl/src/stdio/vswprintf.c",
     "musl/src/stdio/vswscanf.c",
-    "musl/src/stdio/vwprintf.c",
-    "musl/src/stdio/vwscanf.c",
-    "musl/src/stdio/wprintf.c",
-    "musl/src/stdio/wscanf.c",
+    //"musl/src/stdio/vwprintf.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/vwscanf.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/wprintf.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/wscanf.c", // migrated to lib/c/stdio.zig
     "musl/src/stdlib/atof.c",
     "musl/src/stdlib/ecvt.c",
     "musl/src/stdlib/fcvt.c",
