@@ -77,6 +77,7 @@ comptime {
         symbol(&pow, "pow");
         symbol(&pow10, "pow10");
         symbol(&pow10f, "pow10f");
+        symbol(&rintl, "rintl");
         symbol(&sinh_, "sinh");
         symbol(&sinhf_, "sinhf");
         symbol(&sinhl_, "sinhl");
@@ -88,6 +89,7 @@ comptime {
         symbol(&copysign, "copysign");
         symbol(&copysignf, "copysignf");
         symbol(&rint, "rint");
+        symbol(&rintf, "rintf");
     }
 
     symbol(&copysignl, "copysignl");
@@ -431,6 +433,51 @@ test "rint" {
     // Exact half rounds to nearest even (banker's rounding)
     try expectEqual(@as(f64, 2.0), rint(2.5));
     try expectEqual(@as(f64, 4.0), rint(3.5));
+}
+
+fn rintf(x: f32) callconv(.c) f32 {
+    const toint: f32 = 1.0 / @as(f32, math.floatEps(f32));
+    const a: u32 = @bitCast(x);
+    const e = a >> 23 & 0xff;
+    const s = a >> 31;
+    var y: f32 = undefined;
+
+    if (e >= 0x7f + 23) {
+        return x;
+    }
+    if (s == 1) {
+        y = x - toint + toint;
+    } else {
+        y = x + toint - toint;
+    }
+    if (y == 0) {
+        return if (s == 1) @as(f32, -0.0) else 0;
+    }
+    return y;
+}
+
+test "rintf" {
+    try expectEqual(@as(f32, 42.0), rintf(42.2));
+    try expectEqual(@as(f32, 42.0), rintf(41.8));
+    try expectEqual(@as(f32, -6.0), rintf(-5.9));
+    try expectEqual(@as(f32, -6.0), rintf(-6.1));
+    try expectEqual(@as(f32, 5.0), rintf(5.0));
+    try expectEqual(@as(f32, 0.0), rintf(0.0));
+    try expectEqual(@as(f32, 2.0), rintf(2.5));
+    try expectEqual(@as(f32, 4.0), rintf(3.5));
+}
+
+fn rintl(x: c_longdouble) callconv(.c) c_longdouble {
+    const toint: c_longdouble = 1.0 / @as(c_longdouble, math.floatEps(c_longdouble));
+
+    // NaN or already-integer (includes Inf since Inf >= toint)
+    if (x != x or @abs(x) >= toint) return x;
+
+    // Use copysign to detect negative zero
+    const is_neg = math.copysign(@as(c_longdouble, 1.0), x) < 0;
+    const y = if (is_neg) x - toint + toint else x + toint - toint;
+    if (y == 0) return if (is_neg) @as(c_longdouble, -0.0) else @as(c_longdouble, 0);
+    return y;
 }
 
 fn sinh_(x: f64) callconv(.c) f64 {
