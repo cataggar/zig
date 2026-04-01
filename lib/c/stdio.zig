@@ -215,6 +215,13 @@ comptime {
 
         // Allocation formatting (vasprintf.c)
         symbol(&vasprintf_impl, "vasprintf");
+
+        // FD formatting (vdprintf.c)
+        symbol(&vdprintf_impl, "vdprintf");
+
+        // Line reading (getdelim.c)
+        symbol(&getdelim_impl, "getdelim");
+        symbol(&getdelim_impl, "__getdelim");
     }
 }
 
@@ -242,7 +249,7 @@ fn setlinebuf(f: ?*FILE) callconv(.c) void {
 
 /// getline.c: ssize_t getline(char **s, size_t *n, FILE *f)
 fn getline(s: ?*[*]u8, n: ?*usize, f: ?*FILE) callconv(.c) ssize_t {
-    return getdelim_fn(s, n, '\n', f);
+    return getdelim_impl(s, n, '\n', f);
 }
 
 /// getwchar.c: wint_t getwchar(void)
@@ -1049,7 +1056,7 @@ fn fgetln_impl(f_opaque: ?*FILE, plen: *usize) callconv(.c) ?[*]u8 {
     }
     if (ret == null) {
         var tmp_n: usize = 0;
-        const l = getdelim_fn(@ptrCast(&f.getln_buf), &tmp_n, '\n', f_opaque);
+        const l = getdelim_impl(@ptrCast(&f.getln_buf), &tmp_n, '\n', f_opaque);
         if (l > 0) {
             plen.* = @intCast(l);
             ret = f.getln_buf;
@@ -1080,6 +1087,129 @@ fn vasprintf_impl(s: *?[*]u8, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int
     const ptr: ?*anyopaque = malloc_fn(size + 1) orelse return -1;
     s.* = @ptrCast(ptr);
     return vsnprintf_fn(s.*.?, size + 1, fmt, ap_src);
+}
+
+// --- FD formatting (vdprintf.c) ---
+
+/// vdprintf.c: int vdprintf(int fd, const char *restrict fmt, va_list ap)
+fn vdprintf_impl(fd: c_int, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
+    var f = std.mem.zeroes(FILE);
+    f.fd = fd;
+    f.lbf = EOF;
+    f.write_fn = stdio_write_ext;
+    f.buf = @ptrCast(@constCast(fmt));
+    f.buf_size = 0;
+    f.lock = -1;
+    return vfprintf_fn(@ptrCast(&f), fmt, ap);
+}
+
+// --- Line reading (getdelim.c) ---
+
+/// getdelim.c: ssize_t getdelim(char **restrict s, size_t *restrict n, int delim, FILE *restrict f)
+fn getdelim_impl(s_raw: ?*[*]u8, n_raw: ?*usize, delim: c_int, f_opaque: ?*FILE) callconv(.c) ssize_t {
+    const f: *FILE = @ptrCast(f_opaque orelse return -1);
+    const need_unlock = flock(f);
+
+    const n = n_raw orelse {
+        setModeErr(f);
+        funlock(f, need_unlock);
+        setErrno(.INVAL);
+        return -1;
+    };
+    // Reinterpret as *?[*]u8 so we can handle null inner pointer.
+    const s: *?[*]u8 = @ptrCast(s_raw orelse {
+        setModeErr(f);
+        funlock(f, need_unlock);
+        setErrno(.INVAL);
+        return -1;
+    });
+
+    if (s.* == null) n.* = 0;
+
+    var i: usize = 0;
+    while (true) {
+        var z: ?[*]u8 = null;
+        var k: usize = 0;
+
+        if (f.rpos != f.rend) {
+            const rpos = f.rpos.?;
+            const buf_len = @intFromPtr(f.rend.?) - @intFromPtr(rpos);
+            z = memchr_fn(rpos, delim, buf_len);
+            k = if (z) |zp|
+                @intFromPtr(zp) - @intFromPtr(rpos) + 1
+            else
+                buf_len;
+        }
+
+        if (i + k >= n.*) {
+            var m = i + k + 2;
+            if (z == null and m < std.math.maxInt(usize) / 4) m += m / 2;
+            if (!getdelimRealloc(s, n, m)) {
+                const m2 = i + k + 2;
+                if (!getdelimRealloc(s, n, m2)) {
+                    // Copy as much as fits and ensure no pushback remains.
+                    const nk = n.* -| i;
+                    if (nk > 0) {
+                        @memcpy((s.*).?[i..][0..nk], f.rpos.?[0..nk]);
+                        f.rpos = f.rpos.? + nk;
+                    }
+                    setModeErr(f);
+                    funlock(f, need_unlock);
+                    setErrno(.NOMEM);
+                    return -1;
+                }
+            }
+        }
+
+        if (k > 0) {
+            @memcpy((s.*).?[i..][0..k], f.rpos.?[0..k]);
+            f.rpos = f.rpos.? + k;
+            i += k;
+        }
+
+        if (z != null) break;
+
+        const c = getc_unlocked_impl(f);
+        if (c == EOF) {
+            if (i == 0 or (f.flags & F_EOF == 0)) {
+                funlock(f, need_unlock);
+                return -1;
+            }
+            break;
+        }
+
+        if (i + 1 >= n.*) {
+            // Push byte back for next iteration's realloc.
+            f.rpos = f.rpos.? - 1;
+            f.rpos.?[0] = @truncate(@as(c_uint, @bitCast(c)));
+        } else {
+            const uc: u8 = @truncate(@as(c_uint, @bitCast(c)));
+            (s.*).?[i] = uc;
+            i += 1;
+            if (c == delim) break;
+        }
+    }
+    (s.*).?[i] = 0;
+
+    funlock(f, need_unlock);
+    return @intCast(i);
+}
+
+fn getdelimRealloc(s: *?[*]u8, n: *usize, m: usize) bool {
+    const old: ?*anyopaque = if (s.*) |p| @ptrCast(p) else null;
+    const new_ptr = realloc_fn(old, m) orelse return false;
+    s.* = @ptrCast(new_ptr);
+    n.* = m;
+    return true;
+}
+
+fn setModeErr(f: *FILE) void {
+    f.mode |= @bitCast(@as(c_uint, @bitCast(f.mode)) -% 1);
+    f.flags |= F_ERR;
+}
+
+fn setErrno(e: std.os.linux.E) void {
+    std.c._errno().* = @intCast(@intFromEnum(e));
 }
 
 // --- Wide formatting wrappers (wprintf.c, fwprintf.c, swprintf.c) ---
@@ -1153,7 +1283,6 @@ fn vscanf_impl(fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
 }
 
 // Extern references to musl C functions that are still compiled from C sources.
-const getdelim_fn = @extern(*const fn (?*[*]u8, ?*usize, c_int, ?*FILE) callconv(.c) ssize_t, .{ .name = "getdelim" });
 const fgetwc_fn = @extern(*const fn (?*FILE) callconv(.c) wint_t, .{ .name = "fgetwc" });
 const fputwc_fn = @extern(*const fn (wchar_t, ?*FILE) callconv(.c) wint_t, .{ .name = "fputwc" });
 const stdin_ext = @extern(*const ?*FILE, .{ .name = "stdin" });
@@ -1178,3 +1307,5 @@ const vswscanf_fn = @extern(*const fn ([*:0]const wchar_t, [*:0]const wchar_t, V
 const memchr_fn = @extern(*const fn (?[*]const u8, c_int, usize) callconv(.c) ?[*]u8, .{ .name = "memchr" });
 const lseek_fn = @extern(*const fn (c_int, i64, c_int) callconv(.c) i64, .{ .name = "__lseek" });
 const malloc_fn = @extern(*const fn (usize) callconv(.c) ?*anyopaque, .{ .name = "malloc" });
+const realloc_fn = @extern(*const fn (?*anyopaque, usize) callconv(.c) ?*anyopaque, .{ .name = "realloc" });
+const stdio_write_ext = @extern(*const fn (*FILE, [*]const u8, usize) callconv(.c) usize, .{ .name = "__stdio_write" });
