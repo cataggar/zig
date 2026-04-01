@@ -160,6 +160,25 @@ comptime {
         // File operations (remove.c, rename.c)
         symbol(&remove_fn, "remove");
         symbol(&rename_fn, "rename");
+
+        // Formatting wrappers (fprintf.c, printf.c, snprintf.c, sprintf.c, asprintf.c, dprintf.c)
+        symbol(&fprintf_impl, "fprintf");
+        symbol(&printf_impl, "printf");
+        symbol(&snprintf_impl, "snprintf");
+        symbol(&sprintf_impl, "sprintf");
+        symbol(&asprintf_impl, "asprintf");
+        symbol(&dprintf_impl, "dprintf");
+
+        // Scanning wrappers (scanf.c, fscanf.c, sscanf.c)
+        symbol(&scanf_impl, "scanf");
+        symbol(&scanf_impl, "__isoc99_scanf");
+        symbol(&fscanf_impl, "fscanf");
+        symbol(&fscanf_impl, "__isoc99_fscanf");
+        symbol(&sscanf_impl, "sscanf");
+        symbol(&sscanf_impl, "__isoc99_sscanf");
+
+        // Error output (perror.c)
+        symbol(&perror_impl, "perror");
     }
 }
 
@@ -838,12 +857,116 @@ fn rename_fn(old: [*:0]const u8, new: [*:0]const u8) callconv(.c) c_int {
     return c_errno(linux.renameat2(linux.AT.FDCWD, @ptrCast(old), linux.AT.FDCWD, @ptrCast(new), 0));
 }
 
+// --- Formatting wrappers (fprintf.c, printf.c, snprintf.c, sprintf.c, asprintf.c, dprintf.c) ---
+
+const VaList = std.builtin.VaList;
+
+/// fprintf.c: int fprintf(FILE *restrict f, const char *restrict fmt, ...)
+fn fprintf_impl(f: ?*FILE, fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vfprintf_fn(f, fmt, ap);
+}
+
+/// printf.c: int printf(const char *restrict fmt, ...)
+fn printf_impl(fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vfprintf_fn(stdout_ext.*, fmt, ap);
+}
+
+/// snprintf.c: int snprintf(char *restrict s, size_t n, const char *restrict fmt, ...)
+fn snprintf_impl(s: [*]u8, n: usize, fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vsnprintf_fn(s, n, fmt, ap);
+}
+
+/// sprintf.c: int sprintf(char *restrict s, const char *restrict fmt, ...)
+fn sprintf_impl(s: [*]u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vsprintf_fn(s, fmt, ap);
+}
+
+/// asprintf.c: int asprintf(char **s, const char *fmt, ...)
+fn asprintf_impl(s: *?[*]u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vasprintf_fn(s, fmt, ap);
+}
+
+/// dprintf.c: int dprintf(int fd, const char *restrict fmt, ...)
+fn dprintf_impl(fd: c_int, fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vdprintf_fn(fd, fmt, ap);
+}
+
+// --- Scanning wrappers (scanf.c, fscanf.c, sscanf.c) ---
+
+/// scanf.c: int scanf(const char *restrict fmt, ...)
+fn scanf_impl(fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vscanf_fn(fmt, ap);
+}
+
+/// fscanf.c: int fscanf(FILE *restrict f, const char *restrict fmt, ...)
+fn fscanf_impl(f: ?*FILE, fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vfscanf_fn(f, fmt, ap);
+}
+
+/// sscanf.c: int sscanf(const char *restrict s, const char *restrict fmt, ...)
+fn sscanf_impl(s: [*:0]const u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vsscanf_fn(s, fmt, ap);
+}
+
+// --- Error output (perror.c) ---
+
+/// perror.c: void perror(const char *msg)
+fn perror_impl(msg: ?[*:0]const u8) callconv(.c) void {
+    const f: *FILE = @ptrCast(stderr_ext.*);
+    const errstr = strerror_fn(std.c._errno().*);
+    const need_unlock = flock(f);
+    // Save stderr's orientation and encoding rule, since perror is not
+    // permitted to change them.
+    const old_locale = f.locale;
+    const old_mode = f.mode;
+    if (msg) |m| {
+        if (m[0] != 0) {
+            _ = fwrite(m, std.mem.len(m), 1, f);
+            _ = fputc_impl(':', f);
+            _ = fputc_impl(' ', f);
+        }
+    }
+    _ = fwrite(errstr, std.mem.len(errstr), 1, f);
+    _ = fputc_impl('\n', f);
+    f.mode = old_mode;
+    f.locale = old_locale;
+    funlock(f, need_unlock);
+}
+
 // Extern references to musl C functions that are still compiled from C sources.
 const getdelim_fn = @extern(*const fn (?*[*]u8, ?*usize, c_int, ?*FILE) callconv(.c) ssize_t, .{ .name = "getdelim" });
 const fgetwc_fn = @extern(*const fn (?*FILE) callconv(.c) wint_t, .{ .name = "fgetwc" });
 const fputwc_fn = @extern(*const fn (wchar_t, ?*FILE) callconv(.c) wint_t, .{ .name = "fputwc" });
 const stdin_ext = @extern(*const ?*FILE, .{ .name = "stdin" });
 const stdout_ext = @extern(*const ?*FILE, .{ .name = "stdout" });
+const stderr_ext = @extern(*const ?*FILE, .{ .name = "stderr" });
 const lockfile_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__lockfile" });
 const unlockfile_fn = @extern(*const fn (*FILE) callconv(.c) void, .{ .name = "__unlockfile" });
 const fflush_fn = @extern(*const fn (?*FILE) callconv(.c) c_int, .{ .name = "fflush" });
+const strerror_fn = @extern(*const fn (c_int) callconv(.c) [*:0]const u8, .{ .name = "strerror" });
+const vfprintf_fn = @extern(*const fn (?*FILE, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vfprintf" });
+const vsnprintf_fn = @extern(*const fn ([*]u8, usize, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vsnprintf" });
+const vsprintf_fn = @extern(*const fn ([*]u8, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vsprintf" });
+const vasprintf_fn = @extern(*const fn (*?[*]u8, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vasprintf" });
+const vdprintf_fn = @extern(*const fn (c_int, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vdprintf" });
+const vscanf_fn = @extern(*const fn ([*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vscanf" });
+const vfscanf_fn = @extern(*const fn (?*FILE, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vfscanf" });
+const vsscanf_fn = @extern(*const fn ([*:0]const u8, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vsscanf" });
