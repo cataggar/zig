@@ -203,6 +203,17 @@ comptime {
         symbol(&vscanf_impl, "vscanf");
         symbol(&vscanf_impl, "__isoc99_vscanf");
 
+        // Narrow v*s... (vsnprintf.c, vsprintf.c, vsscanf.c)
+        symbol(&vsnprintf_impl, "vsnprintf");
+        symbol(&vsprintf_impl, "vsprintf");
+        symbol(&vsscanf_impl, "vsscanf");
+        symbol(&vsscanf_impl, "__isoc99_vsscanf");
+
+        // Wide v*sw... (vswprintf.c, vswscanf.c)
+        symbol(&vswprintf_impl, "vswprintf");
+        symbol(&vswscanf_impl, "vswscanf");
+        symbol(&vswscanf_impl, "__isoc99_vswscanf");
+
         // Internal helpers (__fmodeflags.c, __fclose_ca.c)
         symbol(&fmodeflags_impl, "__fmodeflags");
         symbol(&fclose_ca_impl, "__fclose_ca");
@@ -922,28 +933,28 @@ fn printf_impl(fmt: [*:0]const u8, ...) callconv(.c) c_int {
 fn snprintf_impl(s: [*]u8, n: usize, fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
-    return vsnprintf_fn(s, n, fmt, ap);
+    return vsnprintf_impl(s, n, fmt, ap);
 }
 
 /// sprintf.c: int sprintf(char *restrict s, const char *restrict fmt, ...)
 fn sprintf_impl(s: [*]u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
-    return vsprintf_fn(s, fmt, ap);
+    return vsprintf_impl(s, fmt, ap);
 }
 
 /// asprintf.c: int asprintf(char **s, const char *fmt, ...)
 fn asprintf_impl(s: *?[*]u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
-    return vasprintf_fn(s, fmt, ap);
+    return vasprintf_impl(s, fmt, ap);
 }
 
 /// dprintf.c: int dprintf(int fd, const char *restrict fmt, ...)
 fn dprintf_impl(fd: c_int, fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
-    return vdprintf_fn(fd, fmt, ap);
+    return vdprintf_impl(fd, fmt, ap);
 }
 
 // --- Scanning wrappers (scanf.c, fscanf.c, sscanf.c) ---
@@ -952,7 +963,7 @@ fn dprintf_impl(fd: c_int, fmt: [*:0]const u8, ...) callconv(.c) c_int {
 fn scanf_impl(fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
-    return vscanf_fn(fmt, ap);
+    return vscanf_impl(fmt, ap);
 }
 
 /// fscanf.c: int fscanf(FILE *restrict f, const char *restrict fmt, ...)
@@ -966,7 +977,7 @@ fn fscanf_impl(f: ?*FILE, fmt: [*:0]const u8, ...) callconv(.c) c_int {
 fn sscanf_impl(s: [*:0]const u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
-    return vsscanf_fn(s, fmt, ap);
+    return vsscanf_impl(s, fmt, ap);
 }
 
 // --- Error output (perror.c) ---
@@ -1080,13 +1091,13 @@ fn vasprintf_impl(s: *?[*]u8, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int
     var ap_src = ap;
     var ap_copy = @cVaCopy(&ap_src);
     var dummy: [1]u8 = undefined;
-    const l = vsnprintf_fn(&dummy, 0, fmt, ap_copy);
+    const l = vsnprintf_impl(&dummy, 0, fmt, ap_copy);
     @cVaEnd(&ap_copy);
     if (l < 0) return -1;
     const size: usize = @intCast(l);
     const ptr: ?*anyopaque = malloc_fn(size + 1) orelse return -1;
     s.* = @ptrCast(ptr);
-    return vsnprintf_fn(s.*.?, size + 1, fmt, ap_src);
+    return vsnprintf_impl(s.*.?, size + 1, fmt, ap_src);
 }
 
 // --- FD formatting (vdprintf.c) ---
@@ -1212,6 +1223,182 @@ fn setErrno(e: std.os.linux.E) void {
     std.c._errno().* = @intCast(@intFromEnum(e));
 }
 
+// --- vsnprintf.c ---
+
+const SnCookie = extern struct {
+    s: [*]u8,
+    n: usize,
+};
+
+fn sn_write(f: *FILE, s: [*]const u8, l: usize) callconv(.c) usize {
+    const c: *SnCookie = @ptrCast(@alignCast(f.cookie.?));
+    const wbase = f.wbase orelse @as([*]u8, @ptrCast(@constCast(s)));
+    const wpos = f.wpos orelse wbase;
+    const len2 = @intFromPtr(wpos) - @intFromPtr(wbase);
+    const k1 = @min(c.n, len2);
+    if (k1 > 0) {
+        @memcpy(c.s[0..k1], @as([*]const u8, @ptrCast(wbase))[0..k1]);
+        c.s += k1;
+        c.n -= k1;
+    }
+    const k2 = @min(c.n, l);
+    if (k2 > 0) {
+        @memcpy(c.s[0..k2], s[0..k2]);
+        c.s += k2;
+        c.n -= k2;
+    }
+    c.s[0] = 0;
+    f.wpos = f.buf;
+    f.wbase = f.buf;
+    return l;
+}
+
+/// vsnprintf.c: int vsnprintf(char *restrict s, size_t n, const char *restrict fmt, va_list ap)
+fn vsnprintf_impl(s: [*]u8, n: usize, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
+    var buf: [1]u8 = undefined;
+    var dummy: [1]u8 = undefined;
+    var c = SnCookie{
+        .s = if (n != 0) s else &dummy,
+        .n = if (n != 0) n - 1 else 0,
+    };
+    var f = std.mem.zeroes(FILE);
+    f.lbf = EOF;
+    f.write_fn = &sn_write;
+    f.lock = -1;
+    f.buf = &buf;
+    f.cookie = @ptrCast(&c);
+    c.s[0] = 0;
+    return vfprintf_fn(@ptrCast(&f), fmt, ap);
+}
+
+// --- vsprintf.c ---
+
+/// vsprintf.c: int vsprintf(char *restrict s, const char *restrict fmt, va_list ap)
+fn vsprintf_impl(s: [*]u8, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
+    return vsnprintf_impl(s, std.math.maxInt(c_int), fmt, ap);
+}
+
+// --- vsscanf.c ---
+
+fn string_read(f: *FILE, buf: [*]u8, len: usize) callconv(.c) usize {
+    const src: [*]const u8 = @ptrCast(@alignCast(f.cookie.?));
+    const k_limit = len +| 256;
+    const k = if (memchr_fn(src, 0, k_limit)) |end|
+        @intFromPtr(end) - @intFromPtr(src)
+    else
+        k_limit;
+    const actual = @min(len, k);
+    @memcpy(buf[0..actual], src[0..actual]);
+    f.rpos = @ptrCast(@constCast(src + actual));
+    f.rend = @ptrCast(@constCast(src + k));
+    f.cookie = @ptrCast(@constCast(src + k));
+    return actual;
+}
+
+/// vsscanf.c: int vsscanf(const char *restrict s, const char *restrict fmt, va_list ap)
+fn vsscanf_impl(s: [*:0]const u8, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
+    var f = std.mem.zeroes(FILE);
+    f.buf = @ptrCast(@constCast(s));
+    f.cookie = @ptrCast(@constCast(s));
+    f.read_fn = &string_read;
+    f.lock = -1;
+    return vfscanf_fn(@ptrCast(&f), fmt, ap);
+}
+
+// --- vswprintf.c ---
+
+fn sw_write(f: *FILE, s: [*]const u8, l: usize) callconv(.c) usize {
+    const l0 = l;
+    var i: c_int = 0;
+    const c: *SwCookie = @ptrCast(@alignCast(f.cookie.?));
+    // Flush pending buffered data if s is not the write base
+    if (f.wbase) |wbase| {
+        if (@intFromPtr(s) != @intFromPtr(wbase)) {
+            const wpos = f.wpos orelse @as([*]u8, wbase);
+            const base_len = @intFromPtr(wpos) - @intFromPtr(wbase);
+            if (sw_write(f, @ptrCast(wbase), base_len) == @as(usize, @bitCast(@as(isize, -1)))) {
+                return @bitCast(@as(isize, -1));
+            }
+        }
+    }
+    var src = s;
+    var remain = l;
+    while (c.l > 0 and remain > 0) {
+        i = mbtowc_fn(@ptrCast(c.ws), @ptrCast(src), remain);
+        if (i < 0) break;
+        const step: usize = if (i == 0) 1 else @intCast(i);
+        src += step;
+        remain -= step;
+        c.l -= 1;
+        c.ws += 1;
+    }
+    c.ws[0] = 0;
+    if (i < 0) {
+        f.wpos = null;
+        f.wbase = null;
+        f.wend = null;
+        f.flags |= F_ERR;
+        return @bitCast(@as(isize, @intCast(i)));
+    }
+    f.wend = f.buf.? + f.buf_size;
+    f.wpos = f.buf;
+    f.wbase = f.buf;
+    return l0;
+}
+
+const SwCookie = extern struct {
+    ws: [*]wchar_t,
+    l: usize,
+};
+
+/// vswprintf.c: int vswprintf(wchar_t *restrict s, size_t n, const wchar_t *restrict fmt, va_list ap)
+fn vswprintf_impl(s: [*]wchar_t, n: usize, fmt: [*:0]const wchar_t, ap: VaList) callconv(.c) c_int {
+    var buf: [256]u8 = undefined;
+    var c = SwCookie{ .ws = s, .l = n -| 1 };
+    var f = std.mem.zeroes(FILE);
+    f.lbf = EOF;
+    f.write_fn = &sw_write;
+    f.lock = -1;
+    f.buf = &buf;
+    f.buf_size = buf.len;
+    f.cookie = @ptrCast(&c);
+    if (n == 0) return -1;
+    const r = vfwprintf_fn(@ptrCast(&f), fmt, ap);
+    _ = sw_write(&f, @ptrCast(&f), 0);
+    return if (r >= @as(c_int, @intCast(n))) @as(c_int, -1) else r;
+}
+
+// --- vswscanf.c ---
+
+fn wstring_read(f: *FILE, buf: [*]u8, len: usize) callconv(.c) usize {
+    var src: ?[*:0]const wchar_t = @ptrCast(@alignCast(f.cookie orelse return 0));
+    const k = wcsrtombs_fn(@ptrCast(f.buf), &src, f.buf_size, null);
+    if (k == @as(usize, @bitCast(@as(isize, -1)))) {
+        f.rpos = null;
+        f.rend = null;
+        return 0;
+    }
+    f.rpos = f.buf;
+    f.rend = f.buf.? + k;
+    f.cookie = @ptrCast(@constCast(src));
+    if (len == 0 or k == 0) return 0;
+    buf[0] = f.rpos.?[0];
+    f.rpos = f.rpos.? + 1;
+    return 1;
+}
+
+/// vswscanf.c: int vswscanf(const wchar_t *restrict s, const wchar_t *restrict fmt, va_list ap)
+fn vswscanf_impl(s: [*:0]const wchar_t, fmt: [*:0]const wchar_t, ap: VaList) callconv(.c) c_int {
+    var buf: [256]u8 = undefined;
+    var f = std.mem.zeroes(FILE);
+    f.buf = &buf;
+    f.buf_size = buf.len;
+    f.cookie = @ptrCast(@constCast(s));
+    f.read_fn = &wstring_read;
+    f.lock = -1;
+    return vfwscanf_fn(@ptrCast(&f), fmt, ap);
+}
+
 // --- Wide formatting wrappers (wprintf.c, fwprintf.c, swprintf.c) ---
 
 /// wprintf.c: int wprintf(const wchar_t *restrict fmt, ...)
@@ -1232,7 +1419,7 @@ fn fwprintf_impl(f: ?*FILE, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
 fn swprintf_impl(s: [*]wchar_t, n: usize, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
-    return vswprintf_fn(s, n, fmt, ap);
+    return vswprintf_impl(s, n, fmt, ap);
 }
 
 // --- Wide scanning wrappers (wscanf.c, fwscanf.c, swscanf.c) ---
@@ -1255,7 +1442,7 @@ fn fwscanf_impl(f: ?*FILE, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
 fn swscanf_impl(s: [*:0]const wchar_t, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
-    return vswscanf_fn(s, fmt, ap);
+    return vswscanf_impl(s, fmt, ap);
 }
 
 // --- Wide v* delegation (vwprintf.c, vwscanf.c) ---
@@ -1293,19 +1480,13 @@ const unlockfile_fn = @extern(*const fn (*FILE) callconv(.c) void, .{ .name = "_
 const fflush_fn = @extern(*const fn (?*FILE) callconv(.c) c_int, .{ .name = "fflush" });
 const strerror_fn = @extern(*const fn (c_int) callconv(.c) [*:0]const u8, .{ .name = "strerror" });
 const vfprintf_fn = @extern(*const fn (?*FILE, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vfprintf" });
-const vsnprintf_fn = @extern(*const fn ([*]u8, usize, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vsnprintf" });
-const vsprintf_fn = @extern(*const fn ([*]u8, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vsprintf" });
-const vasprintf_fn = @extern(*const fn (*?[*]u8, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vasprintf" });
-const vdprintf_fn = @extern(*const fn (c_int, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vdprintf" });
-const vscanf_fn = @extern(*const fn ([*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vscanf" });
-const vfscanf_fn = @extern(*const fn (?*FILE, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vfscanf" });
-const vsscanf_fn = @extern(*const fn ([*:0]const u8, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vsscanf" });
 const vfwprintf_fn = @extern(*const fn (?*FILE, [*:0]const wchar_t, VaList) callconv(.c) c_int, .{ .name = "vfwprintf" });
+const vfscanf_fn = @extern(*const fn (?*FILE, [*:0]const u8, VaList) callconv(.c) c_int, .{ .name = "vfscanf" });
 const vfwscanf_fn = @extern(*const fn (?*FILE, [*:0]const wchar_t, VaList) callconv(.c) c_int, .{ .name = "vfwscanf" });
-const vswprintf_fn = @extern(*const fn ([*]wchar_t, usize, [*:0]const wchar_t, VaList) callconv(.c) c_int, .{ .name = "vswprintf" });
-const vswscanf_fn = @extern(*const fn ([*:0]const wchar_t, [*:0]const wchar_t, VaList) callconv(.c) c_int, .{ .name = "vswscanf" });
 const memchr_fn = @extern(*const fn (?[*]const u8, c_int, usize) callconv(.c) ?[*]u8, .{ .name = "memchr" });
 const lseek_fn = @extern(*const fn (c_int, i64, c_int) callconv(.c) i64, .{ .name = "__lseek" });
 const malloc_fn = @extern(*const fn (usize) callconv(.c) ?*anyopaque, .{ .name = "malloc" });
 const realloc_fn = @extern(*const fn (?*anyopaque, usize) callconv(.c) ?*anyopaque, .{ .name = "realloc" });
 const stdio_write_ext = @extern(*const fn (*FILE, [*]const u8, usize) callconv(.c) usize, .{ .name = "__stdio_write" });
+const mbtowc_fn = @extern(*const fn (?*wchar_t, ?[*]const u8, usize) callconv(.c) c_int, .{ .name = "mbtowc" });
+const wcsrtombs_fn = @extern(*const fn (?[*]u8, *?[*:0]const wchar_t, usize, ?*anyopaque) callconv(.c) usize, .{ .name = "wcsrtombs" });

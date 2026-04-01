@@ -1479,11 +1479,11 @@ const src_files = [_][]const u8{
     "musl/src/stdio/vfwscanf.c",
     //"musl/src/stdio/vprintf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/vscanf.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/vsnprintf.c",
-    "musl/src/stdio/vsprintf.c",
-    "musl/src/stdio/vsscanf.c",
-    "musl/src/stdio/vswprintf.c",
-    "musl/src/stdio/vswscanf.c",
+    //"musl/src/stdio/vsnprintf.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/vsprintf.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/vsscanf.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/vswprintf.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/vswscanf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/vwprintf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/vwscanf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/wprintf.c", // migrated to lib/c/stdio.zig
