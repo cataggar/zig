@@ -60,6 +60,20 @@ comptime {
         symbol(&getwc, "getwc");
         symbol(&putwc, "putwc");
 
+        // Character I/O (fgetc.c, fputc.c, getc.c, putc.c, getc_unlocked.c, putc_unlocked.c)
+        symbol(&getc_unlocked_impl, "getc_unlocked");
+        symbol(&getc_unlocked_impl, "fgetc_unlocked");
+        symbol(&getc_unlocked_impl, "_IO_getc_unlocked");
+        symbol(&putc_unlocked_impl, "putc_unlocked");
+        symbol(&putc_unlocked_impl, "fputc_unlocked");
+        symbol(&putc_unlocked_impl, "_IO_putc_unlocked");
+        symbol(&fgetc_impl, "fgetc");
+        symbol(&fgetc_impl, "getc");
+        symbol(&fgetc_impl, "_IO_getc");
+        symbol(&fputc_impl, "fputc");
+        symbol(&fputc_impl, "putc");
+        symbol(&fputc_impl, "_IO_putc");
+
         // Character I/O wrappers (getchar.c, putchar.c, getchar_unlocked.c, putchar_unlocked.c)
         symbol(&getchar, "getchar");
         symbol(&putchar, "putchar");
@@ -202,24 +216,66 @@ fn putw(x: c_int, f: ?*FILE) callconv(.c) c_int {
     return @as(c_int, @intCast(fwrite(@ptrCast(&val), @sizeOf(c_int), 1, @ptrCast(f)))) - 1;
 }
 
+/// getc_unlocked.c: int getc_unlocked(FILE *f)
+/// Implements musl's getc_unlocked macro:
+///   ((f)->rpos != (f)->rend) ? *(f)->rpos++ : __uflow((f))
+fn getc_unlocked_impl(f: *FILE) callconv(.c) c_int {
+    if (f.rpos != f.rend) {
+        const c = f.rpos.?[0];
+        f.rpos = f.rpos.? + 1;
+        return c;
+    }
+    return uflow_fn(f);
+}
+
+/// putc_unlocked.c: int putc_unlocked(int c, FILE *f)
+/// Implements musl's putc_unlocked macro:
+///   ((unsigned char)(c)!=(f)->lbf && (f)->wpos!=(f)->wend)
+///     ? *(f)->wpos++ = (unsigned char)(c) : __overflow((f),(unsigned char)(c))
+fn putc_unlocked_impl(c: c_int, f: *FILE) callconv(.c) c_int {
+    const uc: u8 = @truncate(@as(c_uint, @bitCast(c)));
+    if (uc != @as(u8, @truncate(@as(c_uint, @bitCast(f.lbf)))) and f.wpos != f.wend) {
+        f.wpos.?[0] = uc;
+        f.wpos = f.wpos.? + 1;
+        return uc;
+    }
+    return overflow_fn(f, uc);
+}
+
+/// fgetc.c / getc.c: int fgetc(FILE *f)
+fn fgetc_impl(f: *FILE) callconv(.c) c_int {
+    const need_unlock = flock(f);
+    const c = getc_unlocked_impl(f);
+    funlock(f, need_unlock);
+    return c;
+}
+
+/// fputc.c / putc.c: int fputc(int c, FILE *f)
+fn fputc_impl(c: c_int, f: *FILE) callconv(.c) c_int {
+    const need_unlock = flock(f);
+    const result = putc_unlocked_impl(c, f);
+    funlock(f, need_unlock);
+    return result;
+}
+
 /// getchar.c: int getchar(void)
 fn getchar() callconv(.c) c_int {
-    return fgetc_fn(stdin_ext.*);
+    return fgetc_impl(@ptrCast(stdin_ext.*));
 }
 
 /// putchar.c: int putchar(int c)
 fn putchar(c: c_int) callconv(.c) c_int {
-    return fputc_fn(c, stdout_ext.*);
+    return fputc_impl(c, @ptrCast(stdout_ext.*));
 }
 
 /// getchar_unlocked.c: int getchar_unlocked(void)
 fn getchar_unlocked() callconv(.c) c_int {
-    return getc_unlocked_fn(stdin_ext.*);
+    return getc_unlocked_impl(@ptrCast(stdin_ext.*));
 }
 
 /// putchar_unlocked.c: int putchar_unlocked(int c)
 fn putchar_unlocked(c: c_int) callconv(.c) c_int {
-    return putc_unlocked_fn(c, stdout_ext.*);
+    return putc_unlocked_impl(c, @ptrCast(stdout_ext.*));
 }
 
 // --- Stream status functions ---
@@ -306,7 +362,7 @@ fn fputs(s: [*:0]const u8, f: *FILE) callconv(.c) c_int {
 fn puts(s: [*:0]const u8) callconv(.c) c_int {
     const stdout_ptr: *FILE = @ptrCast(stdout_ext.*);
     const need_unlock = flock(stdout_ptr);
-    const r: c_int = -@as(c_int, @intFromBool(fputs(s, stdout_ptr) < 0 or putc_unlocked_fn('\n', stdout_ext.*) < 0));
+    const r: c_int = -@as(c_int, @intFromBool(fputs(s, stdout_ptr) < 0 or putc_unlocked_impl('\n', stdout_ptr) < 0));
     funlock(stdout_ptr, need_unlock);
     return r;
 }
@@ -317,7 +373,7 @@ fn gets(s: [*]u8) callconv(.c) ?[*]u8 {
     const stdin_ptr: *FILE = @ptrCast(stdin_ext.*);
     const need_unlock = flock(stdin_ptr);
     while (true) {
-        const c = getc_unlocked_fn(stdin_ext.*);
+        const c = getc_unlocked_impl(stdin_ptr);
         if (c == EOF or c == '\n') {
             s[i] = 0;
             if (c != '\n' and (stdin_ptr.flags & F_EOF == 0 or i == 0)) {
@@ -594,7 +650,7 @@ fn fgets(s: [*]u8, n_arg: c_int, f: *FILE) callconv(.c) ?[*]u8 {
             n -= @intCast(k);
             if (z != null or n == 0) break;
         }
-        const c = getc_unlocked_fn(@ptrCast(f));
+        const c = getc_unlocked_impl(@ptrCast(f));
         if (c < 0) {
             if (p == s or f.flags & F_EOF == 0) {
                 funlock(f, need_unlock);
@@ -718,10 +774,8 @@ fn rename_fn(old: [*:0]const u8, new: [*:0]const u8) callconv(.c) c_int {
 const getdelim_fn = @extern(*const fn (?*[*]u8, ?*usize, c_int, ?*FILE) callconv(.c) ssize_t, .{ .name = "getdelim" });
 const fgetwc_fn = @extern(*const fn (?*FILE) callconv(.c) wint_t, .{ .name = "fgetwc" });
 const fputwc_fn = @extern(*const fn (wchar_t, ?*FILE) callconv(.c) wint_t, .{ .name = "fputwc" });
-const fgetc_fn = @extern(*const fn (?*FILE) callconv(.c) c_int, .{ .name = "fgetc" });
-const fputc_fn = @extern(*const fn (c_int, ?*FILE) callconv(.c) c_int, .{ .name = "fputc" });
-const getc_unlocked_fn = @extern(*const fn (?*FILE) callconv(.c) c_int, .{ .name = "getc_unlocked" });
-const putc_unlocked_fn = @extern(*const fn (c_int, ?*FILE) callconv(.c) c_int, .{ .name = "putc_unlocked" });
+const uflow_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__uflow" });
+const overflow_fn = @extern(*const fn (*FILE, c_int) callconv(.c) c_int, .{ .name = "__overflow" });
 const stdin_ext = @extern(*const ?*FILE, .{ .name = "stdin" });
 const stdout_ext = @extern(*const ?*FILE, .{ .name = "stdout" });
 const lockfile_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__lockfile" });
