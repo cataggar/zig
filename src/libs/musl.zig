@@ -1417,7 +1417,7 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/getchar.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/getchar_unlocked.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/getc_unlocked.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/getdelim.c",
+    //"musl/src/stdio/getdelim.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/getline.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/gets.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/getw.c", // migrated to lib/c/stdio.zig
@@ -1472,7 +1472,7 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/ungetc.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/ungetwc.c",
     //"musl/src/stdio/vasprintf.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/vdprintf.c",
+    //"musl/src/stdio/vdprintf.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/vfprintf.c",
     "musl/src/stdio/vfscanf.c",
     "musl/src/stdio/vfwprintf.c",
