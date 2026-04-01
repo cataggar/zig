@@ -209,6 +209,12 @@ comptime {
 
         // BSD extension (fgetln.c)
         symbol(&fgetln_impl, "fgetln");
+
+        // Internal I/O (__stdio_seek.c)
+        symbol(&stdio_seek_impl, "__stdio_seek");
+
+        // Allocation formatting (vasprintf.c)
+        symbol(&vasprintf_impl, "vasprintf");
     }
 }
 
@@ -1053,6 +1059,29 @@ fn fgetln_impl(f_opaque: ?*FILE, plen: *usize) callconv(.c) ?[*]u8 {
     return ret;
 }
 
+// --- Internal I/O (__stdio_seek.c) ---
+
+/// __stdio_seek.c: off_t __stdio_seek(FILE *f, off_t off, int whence)
+fn stdio_seek_impl(f: *FILE, off: i64, whence: c_int) callconv(.c) i64 {
+    return lseek_fn(f.fd, off, whence);
+}
+
+// --- Allocation formatting (vasprintf.c) ---
+
+/// vasprintf.c: int vasprintf(char **s, const char *fmt, va_list ap)
+fn vasprintf_impl(s: *?[*]u8, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
+    var ap_src = ap;
+    var ap_copy = @cVaCopy(&ap_src);
+    var dummy: [1]u8 = undefined;
+    const l = vsnprintf_fn(&dummy, 0, fmt, ap_copy);
+    @cVaEnd(&ap_copy);
+    if (l < 0) return -1;
+    const size: usize = @intCast(l);
+    const ptr: ?*anyopaque = malloc_fn(size + 1) orelse return -1;
+    s.* = @ptrCast(ptr);
+    return vsnprintf_fn(s.*.?, size + 1, fmt, ap_src);
+}
+
 // --- Wide formatting wrappers (wprintf.c, fwprintf.c, swprintf.c) ---
 
 /// wprintf.c: int wprintf(const wchar_t *restrict fmt, ...)
@@ -1147,3 +1176,5 @@ const vfwscanf_fn = @extern(*const fn (?*FILE, [*:0]const wchar_t, VaList) callc
 const vswprintf_fn = @extern(*const fn ([*]wchar_t, usize, [*:0]const wchar_t, VaList) callconv(.c) c_int, .{ .name = "vswprintf" });
 const vswscanf_fn = @extern(*const fn ([*:0]const wchar_t, [*:0]const wchar_t, VaList) callconv(.c) c_int, .{ .name = "vswscanf" });
 const memchr_fn = @extern(*const fn (?[*]const u8, c_int, usize) callconv(.c) ?[*]u8, .{ .name = "memchr" });
+const lseek_fn = @extern(*const fn (c_int, i64, c_int) callconv(.c) i64, .{ .name = "__lseek" });
+const malloc_fn = @extern(*const fn (usize) callconv(.c) ?*anyopaque, .{ .name = "malloc" });

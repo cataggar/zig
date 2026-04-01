@@ -1488,7 +1488,7 @@ const src_files = [_][]const u8{
     "musl/src/stdio/__stdio_close.c",
     "musl/src/stdio/__stdio_exit.c",
     "musl/src/stdio/__stdio_read.c",
-    "musl/src/stdio/__stdio_seek.c",
+    //"musl/src/stdio/__stdio_seek.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/__stdio_write.c",
     "musl/src/stdio/stdout.c",
     "musl/src/stdio/__stdout_write.c",
@@ -1502,7 +1502,7 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/__uflow.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/ungetc.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/ungetwc.c",
-    "musl/src/stdio/vasprintf.c",
+    //"musl/src/stdio/vasprintf.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/vdprintf.c",
     "musl/src/stdio/vfprintf.c",
     "musl/src/stdio/vfscanf.c",
