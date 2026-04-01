@@ -1428,7 +1428,7 @@ const src_files = [_][]const u8{
     "musl/src/stdio/ofl.c",
     "musl/src/stdio/open_memstream.c",
     "musl/src/stdio/open_wmemstream.c",
-    "musl/src/stdio/__overflow.c",
+    //"musl/src/stdio/__overflow.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/pclose.c",
     "musl/src/stdio/perror.c",
     "musl/src/stdio/popen.c",
@@ -1466,9 +1466,9 @@ const src_files = [_][]const u8{
     "musl/src/stdio/tempnam.c",
     "musl/src/stdio/tmpfile.c",
     "musl/src/stdio/tmpnam.c",
-    "musl/src/stdio/__toread.c",
-    "musl/src/stdio/__towrite.c",
-    "musl/src/stdio/__uflow.c",
+    //"musl/src/stdio/__toread.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/__towrite.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/__uflow.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/ungetc.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/ungetwc.c",
     "musl/src/stdio/vasprintf.c",

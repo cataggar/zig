@@ -74,6 +74,12 @@ comptime {
         symbol(&fputc_impl, "putc");
         symbol(&fputc_impl, "_IO_putc");
 
+        // Internal buffer transitions (__toread.c, __towrite.c, __uflow.c, __overflow.c)
+        symbol(&toread_impl, "__toread");
+        symbol(&towrite_impl, "__towrite");
+        symbol(&uflow_impl, "__uflow");
+        symbol(&overflow_impl, "__overflow");
+
         // Character I/O wrappers (getchar.c, putchar.c, getchar_unlocked.c, putchar_unlocked.c)
         symbol(&getchar, "getchar");
         symbol(&putchar, "putchar");
@@ -216,6 +222,68 @@ fn putw(x: c_int, f: ?*FILE) callconv(.c) c_int {
     return @as(c_int, @intCast(fwrite(@ptrCast(&val), @sizeOf(c_int), 1, @ptrCast(f)))) - 1;
 }
 
+// --- Internal buffer transitions (__toread.c, __towrite.c, __uflow.c, __overflow.c) ---
+
+/// __toread.c: int __toread(FILE *f)
+/// Transition FILE from write mode to read mode.
+fn toread_impl(f: *FILE) callconv(.c) c_int {
+    f.mode |= @bitCast(@as(c_uint, @bitCast(f.mode)) -% 1);
+    if (f.wpos != f.wbase) {
+        _ = f.write_fn.?(f, @ptrCast(&[0]u8{}), 0);
+    }
+    f.wpos = null;
+    f.wbase = null;
+    f.wend = null;
+    if (f.flags & F_NORD != 0) {
+        f.flags |= F_ERR;
+        return EOF;
+    }
+    const end = f.buf.? + f.buf_size;
+    f.rpos = end;
+    f.rend = end;
+    return if (f.flags & F_EOF != 0) EOF else 0;
+}
+
+/// __towrite.c: int __towrite(FILE *f)
+/// Transition FILE from read mode to write mode.
+fn towrite_impl(f: *FILE) callconv(.c) c_int {
+    f.mode |= @bitCast(@as(c_uint, @bitCast(f.mode)) -% 1);
+    if (f.flags & F_NOWR != 0) {
+        f.flags |= F_ERR;
+        return EOF;
+    }
+    f.rpos = null;
+    f.rend = null;
+    f.wpos = f.buf;
+    f.wbase = f.buf;
+    f.wend = f.buf.? + f.buf_size;
+    return 0;
+}
+
+/// __uflow.c: int __uflow(FILE *f)
+/// Refill read buffer and return one byte, or EOF.
+fn uflow_impl(f: *FILE) callconv(.c) c_int {
+    var c: u8 = undefined;
+    if (toread_impl(f) == 0 and f.read_fn.?(f, @as([*]u8, @ptrCast(&c)), 1) == 1) return c;
+    return EOF;
+}
+
+/// __overflow.c: int __overflow(FILE *f, int _c)
+/// Write one byte through the buffer, flushing if needed.
+fn overflow_impl(f: *FILE, _c: c_int) callconv(.c) c_int {
+    var c: u8 = @truncate(@as(c_uint, @bitCast(_c)));
+    if (f.wend == null and towrite_impl(f) != 0) return EOF;
+    if (f.wpos != f.wend and @as(c_int, c) != f.lbf) {
+        f.wpos.?[0] = c;
+        f.wpos = f.wpos.? + 1;
+        return c;
+    }
+    if (f.write_fn.?(f, @as([*]const u8, @ptrCast(&c)), 1) != 1) return EOF;
+    return c;
+}
+
+// --- Character I/O (fgetc.c, fputc.c, getc.c, putc.c, getc_unlocked.c, putc_unlocked.c) ---
+
 /// getc_unlocked.c: int getc_unlocked(FILE *f)
 /// Implements musl's getc_unlocked macro:
 ///   ((f)->rpos != (f)->rend) ? *(f)->rpos++ : __uflow((f))
@@ -225,7 +293,7 @@ fn getc_unlocked_impl(f: *FILE) callconv(.c) c_int {
         f.rpos = f.rpos.? + 1;
         return c;
     }
-    return uflow_fn(f);
+    return uflow_impl(f);
 }
 
 /// putc_unlocked.c: int putc_unlocked(int c, FILE *f)
@@ -239,7 +307,7 @@ fn putc_unlocked_impl(c: c_int, f: *FILE) callconv(.c) c_int {
         f.wpos = f.wpos.? + 1;
         return uc;
     }
-    return overflow_fn(f, uc);
+    return overflow_impl(f, uc);
 }
 
 /// fgetc.c / getc.c: int fgetc(FILE *f)
@@ -400,7 +468,7 @@ fn ungetc(c: c_int, f: *FILE) callconv(.c) c_int {
 
     const need_unlock = flock(f);
 
-    if (f.rpos == null) _ = toread_fn(f);
+    if (f.rpos == null) _ = toread_impl(f);
     if (f.rpos == null) {
         funlock(f, need_unlock);
         return EOF;
@@ -545,7 +613,7 @@ fn ftell(f: *FILE) callconv(.c) c_long {
 fn __fwritex(s: [*]const u8, l_arg: usize, f: *FILE) callconv(.c) usize {
     var l = l_arg;
 
-    if (f.wend == null and towrite_fn(f) != 0) return 0;
+    if (f.wend == null and towrite_impl(f) != 0) return 0;
 
     if (l > @intFromPtr(f.wend.?) - @intFromPtr(f.wpos.?)) return f.write_fn.?(f, s, l);
 
@@ -605,7 +673,7 @@ fn fread(destv: [*]u8, size: usize, nmemb: usize, f: *FILE) callconv(.c) usize {
     // Read the remainder directly
     var dest = destv + (len - l);
     while (l > 0) {
-        const k = if (toread_fn(f) != 0) @as(usize, 0) else f.read_fn.?(f, dest, l);
+        const k = if (toread_impl(f) != 0) @as(usize, 0) else f.read_fn.?(f, dest, l);
         if (k == 0) {
             funlock(f, need_unlock);
             return (len - l) / size;
@@ -774,12 +842,8 @@ fn rename_fn(old: [*:0]const u8, new: [*:0]const u8) callconv(.c) c_int {
 const getdelim_fn = @extern(*const fn (?*[*]u8, ?*usize, c_int, ?*FILE) callconv(.c) ssize_t, .{ .name = "getdelim" });
 const fgetwc_fn = @extern(*const fn (?*FILE) callconv(.c) wint_t, .{ .name = "fgetwc" });
 const fputwc_fn = @extern(*const fn (wchar_t, ?*FILE) callconv(.c) wint_t, .{ .name = "fputwc" });
-const uflow_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__uflow" });
-const overflow_fn = @extern(*const fn (*FILE, c_int) callconv(.c) c_int, .{ .name = "__overflow" });
 const stdin_ext = @extern(*const ?*FILE, .{ .name = "stdin" });
 const stdout_ext = @extern(*const ?*FILE, .{ .name = "stdout" });
 const lockfile_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__lockfile" });
 const unlockfile_fn = @extern(*const fn (*FILE) callconv(.c) void, .{ .name = "__unlockfile" });
-const toread_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__toread" });
-const towrite_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__towrite" });
 const fflush_fn = @extern(*const fn (?*FILE) callconv(.c) c_int, .{ .name = "fflush" });
