@@ -1372,9 +1372,9 @@ const src_files = [_][]const u8{
     "musl/src/stat/umask.c",
     "musl/src/stat/utimensat.c",
     "musl/src/stat/__xstat.c",
-    "musl/src/stdio/asprintf.c",
+    //"musl/src/stdio/asprintf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/clearerr.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/dprintf.c",
+    //"musl/src/stdio/dprintf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/ext2.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/ext.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fclose.c",
@@ -1396,14 +1396,14 @@ const src_files = [_][]const u8{
     "musl/src/stdio/fopen.c",
     "musl/src/stdio/fopencookie.c",
     "musl/src/stdio/__fopen_rb_ca.c",
-    "musl/src/stdio/fprintf.c",
+    //"musl/src/stdio/fprintf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/fputc.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/fputs.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fputwc.c",
     "musl/src/stdio/fputws.c",
     //"musl/src/stdio/fread.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/freopen.c",
-    "musl/src/stdio/fscanf.c",
+    //"musl/src/stdio/fscanf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/fseek.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/fsetpos.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/ftell.c", // migrated to lib/c/stdio.zig
@@ -1430,9 +1430,9 @@ const src_files = [_][]const u8{
     "musl/src/stdio/open_wmemstream.c",
     //"musl/src/stdio/__overflow.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/pclose.c",
-    "musl/src/stdio/perror.c",
+    //"musl/src/stdio/perror.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/popen.c",
-    "musl/src/stdio/printf.c",
+    //"musl/src/stdio/printf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/putc.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/putchar.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/putchar_unlocked.c", // migrated to lib/c/stdio.zig
@@ -1444,14 +1444,14 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/remove.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/rename.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/rewind.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/scanf.c",
+    //"musl/src/stdio/scanf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/setbuf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/setbuffer.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/setlinebuf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/setvbuf.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/snprintf.c",
-    "musl/src/stdio/sprintf.c",
-    "musl/src/stdio/sscanf.c",
+    //"musl/src/stdio/snprintf.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/sprintf.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/sscanf.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/stderr.c",
     "musl/src/stdio/stdin.c",
     "musl/src/stdio/__stdio_close.c",
