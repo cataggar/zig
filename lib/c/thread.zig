@@ -84,6 +84,105 @@ comptime {
 
             // C11 thread helpers
             symbol(&thrd_yield_fn, "thrd_yield");
+
+            // Attribute operations (pthread_attr_*)
+            symbol(&attr_destroy_fn, "pthread_attr_destroy");
+            symbol(&attr_init_fn, "pthread_attr_init");
+            symbol(&attr_setdetachstate_fn, "pthread_attr_setdetachstate");
+            symbol(&attr_setguardsize_fn, "pthread_attr_setguardsize");
+            symbol(&attr_setinheritsched_fn, "pthread_attr_setinheritsched");
+            symbol(&attr_setschedparam_fn, "pthread_attr_setschedparam");
+            symbol(&attr_setschedpolicy_fn, "pthread_attr_setschedpolicy");
+            symbol(&attr_setscope_fn, "pthread_attr_setscope");
+            symbol(&attr_setstack_fn, "pthread_attr_setstack");
+            symbol(&attr_setstacksize_fn, "pthread_attr_setstacksize");
+
+            // Attribute getters (pthread_attr_get.c)
+            symbol(&attr_getdetachstate_fn, "pthread_attr_getdetachstate");
+            symbol(&attr_getguardsize_fn, "pthread_attr_getguardsize");
+            symbol(&attr_getinheritsched_fn, "pthread_attr_getinheritsched");
+            symbol(&attr_getschedparam_fn, "pthread_attr_getschedparam");
+            symbol(&attr_getschedpolicy_fn, "pthread_attr_getschedpolicy");
+            symbol(&attr_getscope_fn, "pthread_attr_getscope");
+            symbol(&attr_getstack_fn, "pthread_attr_getstack");
+            symbol(&attr_getstacksize_fn, "pthread_attr_getstacksize");
+
+            // Barrier attr operations
+            symbol(&barrierattr_destroy_fn, "pthread_barrierattr_destroy");
+            symbol(&barrierattr_init_fn, "pthread_barrierattr_init");
+            symbol(&barrierattr_setpshared_fn, "pthread_barrierattr_setpshared");
+            symbol(&barrierattr_getpshared_fn, "pthread_barrierattr_getpshared");
+
+            // Condvar attr operations
+            symbol(&condattr_destroy_fn, "pthread_condattr_destroy");
+            symbol(&condattr_init_fn, "pthread_condattr_init");
+            symbol(&condattr_setclock_fn, "pthread_condattr_setclock");
+            symbol(&condattr_setpshared_fn, "pthread_condattr_setpshared");
+            symbol(&condattr_getclock_fn, "pthread_condattr_getclock");
+            symbol(&condattr_getpshared_fn, "pthread_condattr_getpshared");
+
+            // Mutex attr operations
+            symbol(&mutexattr_destroy_fn, "pthread_mutexattr_destroy");
+            symbol(&mutexattr_init_fn, "pthread_mutexattr_init");
+            symbol(&mutexattr_setprotocol_fn, "pthread_mutexattr_setprotocol");
+            symbol(&mutexattr_setpshared_fn, "pthread_mutexattr_setpshared");
+            symbol(&mutexattr_setrobust_fn, "pthread_mutexattr_setrobust");
+            symbol(&mutexattr_settype_fn, "pthread_mutexattr_settype");
+            symbol(&mutexattr_getprotocol_fn, "pthread_mutexattr_getprotocol");
+            symbol(&mutexattr_getpshared_fn, "pthread_mutexattr_getpshared");
+            symbol(&mutexattr_getrobust_fn, "pthread_mutexattr_getrobust");
+            symbol(&mutexattr_gettype_fn, "pthread_mutexattr_gettype");
+
+            // RWLock attr operations
+            symbol(&rwlockattr_destroy_fn, "pthread_rwlockattr_destroy");
+            symbol(&rwlockattr_init_fn, "pthread_rwlockattr_init");
+            symbol(&rwlockattr_setpshared_fn, "pthread_rwlockattr_setpshared");
+            symbol(&rwlockattr_getpshared_fn, "pthread_rwlockattr_getpshared");
+
+            // Mutex init/destroy/prioceiling
+            symbol(&mutex_destroy_fn, "pthread_mutex_destroy");
+            symbol(&mutex_init_fn, "pthread_mutex_init");
+            symbol(&mutex_getprioceiling_fn, "pthread_mutex_getprioceiling");
+            symbol(&mutex_setprioceiling_fn, "pthread_mutex_setprioceiling");
+
+            // Semaphore simple operations
+            symbol(&sem_destroy_fn, "sem_destroy");
+            symbol(&sem_getvalue_fn, "sem_getvalue");
+            symbol(&sem_init_fn, "sem_init");
+            symbol(&sem_unlink_fn, "sem_unlink");
+            symbol(&sem_wait_fn, "sem_wait");
+
+            // C11 cnd_* wrappers
+            symbol(&call_once_fn, "call_once");
+            symbol(&cnd_broadcast_fn2, "cnd_broadcast");
+            symbol(&cnd_destroy_fn2, "cnd_destroy");
+            symbol(&cnd_init_fn2, "cnd_init");
+            symbol(&cnd_signal_fn2, "cnd_signal");
+            symbol(&cnd_timedwait_fn, "cnd_timedwait");
+            symbol(&cnd_wait_fn2, "cnd_wait");
+
+            // C11 mtx_* wrappers
+            symbol(&mtx_destroy_fn, "mtx_destroy");
+            symbol(&mtx_init_fn, "mtx_init");
+            symbol(&mtx_lock_fn, "mtx_lock");
+            symbol(&mtx_timedlock_fn, "mtx_timedlock");
+            symbol(&mtx_trylock_fn, "mtx_trylock");
+            symbol(&mtx_unlock_fn, "mtx_unlock");
+
+            // C11 thrd_* wrappers
+            symbol(&thrd_create_fn, "thrd_create");
+            symbol(&thrd_exit_fn, "thrd_exit");
+            symbol(&thrd_join_fn, "thrd_join");
+            symbol(&thrd_sleep_fn, "thrd_sleep");
+
+            // C11 tss_* wrappers
+            symbol(&tss_create_fn, "tss_create");
+            symbol(&tss_delete_fn, "tss_delete");
+            symbol(&tss_set_fn, "tss_set");
+
+            // pthread_setattr_default_np / pthread_getattr_default_np
+            symbol(&setattr_default_np_fn, "pthread_setattr_default_np");
+            symbol(&getattr_default_np_fn, "pthread_getattr_default_np");
         }
     }
 }
@@ -1042,4 +1141,699 @@ fn pthread_equal_fn(a: usize, b: usize) callconv(.c) c_int {
 // --- thrd_yield.c ---
 fn thrd_yield_fn() callconv(.c) void {
     _ = linux.syscall0(.sched_yield);
+}
+
+// ============================================================
+// Attribute struct field offsets
+// ============================================================
+
+// __SU = sizeof(size_t) / sizeof(int)
+const SU: usize = @sizeOf(usize) / @sizeOf(c_int);
+
+// pthread_attr_t field indices:
+//   __s[0..2]  = stacksize, guardsize, stackaddr (usize-indexed)
+//   __i[3*SU+0..3] = detach, sched, policy, prio (c_int-indexed)
+const attr_i_detach: usize = 3 * SU;
+const attr_i_sched: usize = 3 * SU + 1;
+const attr_i_policy: usize = 3 * SU + 2;
+const attr_i_prio: usize = 3 * SU + 3;
+
+const PTHREAD_STACK_MIN: usize = 2048;
+const SIZE_MAX: usize = std.math.maxInt(usize);
+const PTHREAD_SCOPE_SYSTEM: c_int = 0;
+const PTHREAD_SCOPE_PROCESS: c_int = 1;
+const DEFAULT_STACK_MAX: c_uint = 8 << 20;
+const DEFAULT_GUARD_MAX: c_uint = 1 << 20;
+const SEM_VALUE_MAX: c_int = 0x7fffffff;
+
+// C11 thread return codes
+const thrd_success: c_int = 0;
+const thrd_busy: c_int = 1;
+const thrd_error: c_int = 2;
+const thrd_nomem: c_int = 3;
+const thrd_timedout: c_int = 4;
+
+// C11 mutex type flags
+const mtx_recursive: c_int = 1;
+
+// POSIX mutex types
+const PTHREAD_MUTEX_NORMAL: c_int = 0;
+const PTHREAD_MUTEX_RECURSIVE: c_int = 1;
+
+// POSIX cancellation constants
+const PTHREAD_CANCEL_DISABLE: c_int = 1;
+
+// POSIX priority protocol
+const PTHREAD_PRIO_NONE: c_int = 0;
+const PTHREAD_PRIO_INHERIT: c_int = 1;
+const PTHREAD_PRIO_PROTECT: c_int = 2;
+
+// ============================================================
+// pthread_attr_t operations
+// ============================================================
+
+// --- pthread_attr_destroy.c ---
+fn attr_destroy_fn(_: *anyopaque) callconv(.c) c_int {
+    return 0;
+}
+
+// --- pthread_attr_init.c ---
+fn attr_init_fn(a: *anyopaque) callconv(.c) c_int {
+    const a_s: [*]usize = @ptrCast(@alignCast(a));
+    const a_i: [*]c_int = @ptrCast(@alignCast(a));
+    const n = if (@sizeOf(usize) == 8) 14 else 9;
+    @memset(@as([*]u8, @ptrCast(a))[0 .. n * @sizeOf(c_int)], 0);
+    const __acquire_ptc_ext = @extern(*const fn () callconv(.c) void, .{ .name = "__acquire_ptc" });
+    const __release_ptc_ext = @extern(*const fn () callconv(.c) void, .{ .name = "__release_ptc" });
+    __acquire_ptc_ext();
+    a_s[0] = @as(*const usize, @ptrCast(@alignCast(&__default_stacksize))).*;
+    a_s[1] = @as(*const usize, @ptrCast(@alignCast(&__default_guardsize))).*;
+    _ = a_i; // suppress unused
+    __release_ptc_ext();
+    return 0;
+}
+
+// --- pthread_attr_setdetachstate.c ---
+fn attr_setdetachstate_fn(a: *anyopaque, state: c_int) callconv(.c) c_int {
+    if (@as(c_uint, @bitCast(state)) > 1) return eint(.INVAL);
+    const a_i: [*]c_int = @ptrCast(@alignCast(a));
+    a_i[attr_i_detach] = state;
+    return 0;
+}
+
+// --- pthread_attr_setguardsize.c ---
+fn attr_setguardsize_fn(a: *anyopaque, size: usize) callconv(.c) c_int {
+    if (size > SIZE_MAX / 8) return eint(.INVAL);
+    const a_s: [*]usize = @ptrCast(@alignCast(a));
+    a_s[1] = size;
+    return 0;
+}
+
+// --- pthread_attr_setinheritsched.c ---
+fn attr_setinheritsched_fn(a: *anyopaque, inherit: c_int) callconv(.c) c_int {
+    if (@as(c_uint, @bitCast(inherit)) > 1) return eint(.INVAL);
+    const a_i: [*]c_int = @ptrCast(@alignCast(a));
+    a_i[attr_i_sched] = inherit;
+    return 0;
+}
+
+// --- pthread_attr_setschedparam.c ---
+// sched_param has sched_priority as first (and only) int field
+fn attr_setschedparam_fn(a: *anyopaque, param: *const c_int) callconv(.c) c_int {
+    const a_i: [*]c_int = @ptrCast(@alignCast(a));
+    a_i[attr_i_prio] = param.*;
+    return 0;
+}
+
+// --- pthread_attr_setschedpolicy.c ---
+fn attr_setschedpolicy_fn(a: *anyopaque, policy: c_int) callconv(.c) c_int {
+    const a_i: [*]c_int = @ptrCast(@alignCast(a));
+    a_i[attr_i_policy] = policy;
+    return 0;
+}
+
+// --- pthread_attr_setscope.c ---
+fn attr_setscope_fn(_: *anyopaque, scope: c_int) callconv(.c) c_int {
+    return switch (scope) {
+        PTHREAD_SCOPE_SYSTEM => 0,
+        PTHREAD_SCOPE_PROCESS => eint(.OPNOTSUPP),
+        else => eint(.INVAL),
+    };
+}
+
+// --- pthread_attr_setstack.c ---
+fn attr_setstack_fn(a: *anyopaque, addr: usize, size: usize) callconv(.c) c_int {
+    if (size -% PTHREAD_STACK_MIN > SIZE_MAX / 4) return eint(.INVAL);
+    const a_s: [*]usize = @ptrCast(@alignCast(a));
+    a_s[2] = addr + size; // _a_stackaddr
+    a_s[0] = size; // _a_stacksize
+    return 0;
+}
+
+// --- pthread_attr_setstacksize.c ---
+fn attr_setstacksize_fn(a: *anyopaque, size: usize) callconv(.c) c_int {
+    if (size -% PTHREAD_STACK_MIN > SIZE_MAX / 4) return eint(.INVAL);
+    const a_s: [*]usize = @ptrCast(@alignCast(a));
+    a_s[2] = 0; // _a_stackaddr = 0
+    a_s[0] = size; // _a_stacksize
+    return 0;
+}
+
+// --- pthread_attr_get.c (getters) ---
+
+fn attr_getdetachstate_fn(a: *const anyopaque, state: *c_int) callconv(.c) c_int {
+    const a_i: [*]const c_int = @ptrCast(@alignCast(a));
+    state.* = a_i[attr_i_detach];
+    return 0;
+}
+
+fn attr_getguardsize_fn(a: *const anyopaque, size: *usize) callconv(.c) c_int {
+    const a_s: [*]const usize = @ptrCast(@alignCast(a));
+    size.* = a_s[1];
+    return 0;
+}
+
+fn attr_getinheritsched_fn(a: *const anyopaque, inherit: *c_int) callconv(.c) c_int {
+    const a_i: [*]const c_int = @ptrCast(@alignCast(a));
+    inherit.* = a_i[attr_i_sched];
+    return 0;
+}
+
+fn attr_getschedparam_fn(a: *const anyopaque, param: *c_int) callconv(.c) c_int {
+    const a_i: [*]const c_int = @ptrCast(@alignCast(a));
+    param.* = a_i[attr_i_prio];
+    return 0;
+}
+
+fn attr_getschedpolicy_fn(a: *const anyopaque, policy: *c_int) callconv(.c) c_int {
+    const a_i: [*]const c_int = @ptrCast(@alignCast(a));
+    policy.* = a_i[attr_i_policy];
+    return 0;
+}
+
+fn attr_getscope_fn(_: *const anyopaque, scope: *c_int) callconv(.c) c_int {
+    scope.* = PTHREAD_SCOPE_SYSTEM;
+    return 0;
+}
+
+fn attr_getstack_fn(a: *const anyopaque, addr: *usize, size: *usize) callconv(.c) c_int {
+    const a_s: [*]const usize = @ptrCast(@alignCast(a));
+    if (a_s[2] == 0) return eint(.INVAL); // no _a_stackaddr
+    size.* = a_s[0];
+    addr.* = a_s[2] - size.*;
+    return 0;
+}
+
+fn attr_getstacksize_fn(a: *const anyopaque, size: *usize) callconv(.c) c_int {
+    const a_s: [*]const usize = @ptrCast(@alignCast(a));
+    size.* = a_s[0];
+    return 0;
+}
+
+// ============================================================
+// Barrier attr operations
+// ============================================================
+
+// --- pthread_barrierattr_destroy.c ---
+fn barrierattr_destroy_fn(_: *anyopaque) callconv(.c) c_int {
+    return 0;
+}
+
+// --- pthread_barrierattr_init.c ---
+fn barrierattr_init_fn(a: *c_uint) callconv(.c) c_int {
+    a.* = 0;
+    return 0;
+}
+
+// --- pthread_barrierattr_setpshared.c ---
+fn barrierattr_setpshared_fn(a: *c_int, pshared: c_int) callconv(.c) c_int {
+    if (@as(c_uint, @bitCast(pshared)) > 1) return eint(.INVAL);
+    a.* = if (pshared != 0) INT_MIN else 0;
+    return 0;
+}
+
+// --- pthread_barrierattr_getpshared.c ---
+fn barrierattr_getpshared_fn(a: *const c_uint, pshared: *c_int) callconv(.c) c_int {
+    pshared.* = @intFromBool(a.* != 0);
+    return 0;
+}
+
+// ============================================================
+// Condvar attr operations
+// ============================================================
+
+// --- pthread_condattr_destroy.c ---
+fn condattr_destroy_fn(_: *anyopaque) callconv(.c) c_int {
+    return 0;
+}
+
+// --- pthread_condattr_init.c ---
+fn condattr_init_fn(a: *c_int) callconv(.c) c_int {
+    a.* = 0;
+    return 0;
+}
+
+// --- pthread_condattr_setclock.c ---
+fn condattr_setclock_fn(a: *c_int, clk: c_int) callconv(.c) c_int {
+    if (clk < 0) return eint(.INVAL);
+    // clk-2U < 2 catches clk==2 and clk==3 (CLOCK_MONOTONIC_RAW, etc.)
+    if (@as(c_uint, @bitCast(clk)) -% 2 < 2) return eint(.INVAL);
+    a.* = (a.* & @as(c_int, @bitCast(@as(c_uint, 0x80000000)))) | clk;
+    return 0;
+}
+
+// --- pthread_condattr_setpshared.c ---
+fn condattr_setpshared_fn(a: *c_uint, pshared: c_int) callconv(.c) c_int {
+    if (@as(c_uint, @bitCast(pshared)) > 1) return eint(.INVAL);
+    a.* = (a.* & 0x7fffffff) | (@as(c_uint, @bitCast(pshared)) << 31);
+    return 0;
+}
+
+// --- pthread_condattr_getclock.c ---
+fn condattr_getclock_fn(a: *const c_int, clk: *c_int) callconv(.c) c_int {
+    clk.* = a.* & 0x7fffffff;
+    return 0;
+}
+
+// --- pthread_condattr_getpshared.c ---
+fn condattr_getpshared_fn(a: *const c_uint, pshared: *c_int) callconv(.c) c_int {
+    pshared.* = @intCast(a.* >> 31);
+    return 0;
+}
+
+// ============================================================
+// Mutex attr operations
+// ============================================================
+
+// --- pthread_mutexattr_destroy.c ---
+fn mutexattr_destroy_fn(_: *anyopaque) callconv(.c) c_int {
+    return 0;
+}
+
+// --- pthread_mutexattr_init.c ---
+fn mutexattr_init_fn(a: *c_uint) callconv(.c) c_int {
+    a.* = 0;
+    return 0;
+}
+
+// --- pthread_mutexattr_setprotocol.c ---
+var check_pi_result: c_int = -1;
+fn mutexattr_setprotocol_fn(a: *c_uint, protocol: c_int) callconv(.c) c_int {
+    switch (protocol) {
+        PTHREAD_PRIO_NONE => {
+            a.* &= ~@as(c_uint, 8);
+            return 0;
+        },
+        PTHREAD_PRIO_INHERIT => {
+            var r = @atomicLoad(c_int, &check_pi_result, .seq_cst);
+            if (r < 0) {
+                var lk: c_int = 0;
+                const rc: isize = @bitCast(linux.syscall4(.futex, @intFromPtr(&lk), 6, 0, 0)); // FUTEX_LOCK_PI=6
+                r = -@as(c_int, @truncate(rc));
+                @atomicStore(c_int, &check_pi_result, r, .seq_cst);
+            }
+            if (r != 0) return r;
+            a.* |= 8;
+            return 0;
+        },
+        PTHREAD_PRIO_PROTECT => return eint(.OPNOTSUPP),
+        else => return eint(.INVAL),
+    }
+}
+
+// --- pthread_mutexattr_setpshared.c ---
+fn mutexattr_setpshared_fn(a: *c_uint, pshared: c_int) callconv(.c) c_int {
+    if (@as(c_uint, @bitCast(pshared)) > 1) return eint(.INVAL);
+    a.* = (a.* & ~@as(c_uint, 128)) | (@as(c_uint, @bitCast(pshared)) << 7);
+    return 0;
+}
+
+// --- pthread_mutexattr_setrobust.c ---
+var check_robust_result: c_int = -1;
+fn mutexattr_setrobust_fn(a: *c_uint, robust: c_int) callconv(.c) c_int {
+    if (@as(c_uint, @bitCast(robust)) > 1) return eint(.INVAL);
+    if (robust != 0) {
+        var r = @atomicLoad(c_int, &check_robust_result, .seq_cst);
+        if (r < 0) {
+            var p: usize = undefined;
+            var l: usize = undefined;
+            const rc: isize = @bitCast(linux.syscall3(.get_robust_list, 0, @intFromPtr(&p), @intFromPtr(&l)));
+            r = -@as(c_int, @truncate(rc));
+            @atomicStore(c_int, &check_robust_result, r, .seq_cst);
+        }
+        if (r != 0) return r;
+        a.* |= 4;
+        return 0;
+    }
+    a.* &= ~@as(c_uint, 4);
+    return 0;
+}
+
+// --- pthread_mutexattr_settype.c ---
+fn mutexattr_settype_fn(a: *c_uint, t: c_int) callconv(.c) c_int {
+    if (@as(c_uint, @bitCast(t)) > 2) return eint(.INVAL);
+    a.* = (a.* & ~@as(c_uint, 3)) | @as(c_uint, @bitCast(t));
+    return 0;
+}
+
+// --- pthread_mutexattr_getprotocol.c ---
+fn mutexattr_getprotocol_fn(a: *const c_uint, protocol: *c_int) callconv(.c) c_int {
+    protocol.* = @intCast((a.* / 8) % 2);
+    return 0;
+}
+
+// --- pthread_mutexattr_getpshared.c ---
+fn mutexattr_getpshared_fn(a: *const c_uint, pshared: *c_int) callconv(.c) c_int {
+    pshared.* = @intCast((a.* / 128) % 2);
+    return 0;
+}
+
+// --- pthread_mutexattr_getrobust.c ---
+fn mutexattr_getrobust_fn(a: *const c_uint, robust: *c_int) callconv(.c) c_int {
+    robust.* = @intCast((a.* / 4) % 2);
+    return 0;
+}
+
+// --- pthread_mutexattr_gettype.c ---
+fn mutexattr_gettype_fn(a: *const c_uint, t: *c_int) callconv(.c) c_int {
+    t.* = @intCast(a.* & 3);
+    return 0;
+}
+
+// ============================================================
+// RWLock attr operations
+// ============================================================
+
+// --- pthread_rwlockattr_destroy.c ---
+fn rwlockattr_destroy_fn(_: *anyopaque) callconv(.c) c_int {
+    return 0;
+}
+
+// --- pthread_rwlockattr_init.c ---
+fn rwlockattr_init_fn(a: *anyopaque) callconv(.c) c_int {
+    const a_i: [*]c_int = @ptrCast(@alignCast(a));
+    a_i[0] = 0;
+    a_i[1] = 0;
+    return 0;
+}
+
+// --- pthread_rwlockattr_setpshared.c ---
+fn rwlockattr_setpshared_fn(a: *c_int, pshared: c_int) callconv(.c) c_int {
+    if (@as(c_uint, @bitCast(pshared)) > 1) return eint(.INVAL);
+    a.* = pshared;
+    return 0;
+}
+
+// --- pthread_rwlockattr_getpshared.c ---
+fn rwlockattr_getpshared_fn(a: *const c_int, pshared: *c_int) callconv(.c) c_int {
+    pshared.* = a.*;
+    return 0;
+}
+
+// ============================================================
+// Mutex init / destroy / prioceiling
+// ============================================================
+
+// --- pthread_mutex_destroy.c ---
+fn mutex_destroy_fn(m: *anyopaque) callconv(.c) c_int {
+    const m_i: [*]c_int = @ptrCast(@alignCast(m));
+    if (m_i[0] > 128) { // _m_type > 128 → process-shared with nontrivial type
+        const __vm_wait_ext = @extern(*const fn () callconv(.c) void, .{ .name = "__vm_wait" });
+        __vm_wait_ext();
+    }
+    return 0;
+}
+
+// --- pthread_mutex_init.c ---
+fn mutex_init_fn(m: *anyopaque, a: ?*const c_uint) callconv(.c) c_int {
+    const size = if (@sizeOf(usize) == 8) 14 * @sizeOf(c_int) else 6 * @sizeOf(c_int);
+    @memset(@as([*]u8, @ptrCast(m))[0..size], 0);
+    if (a) |attr| {
+        const m_i: [*]c_int = @ptrCast(@alignCast(m));
+        m_i[0] = @bitCast(attr.*); // _m_type = a->__attr
+    }
+    return 0;
+}
+
+// --- pthread_mutex_getprioceiling.c ---
+fn mutex_getprioceiling_fn(_: *const anyopaque, _: *c_int) callconv(.c) c_int {
+    return eint(.INVAL);
+}
+
+// --- pthread_mutex_setprioceiling.c ---
+fn mutex_setprioceiling_fn(_: *anyopaque, _: c_int, _: ?*c_int) callconv(.c) c_int {
+    return eint(.INVAL);
+}
+
+// ============================================================
+// Semaphore simple operations
+// ============================================================
+
+// --- sem_destroy.c ---
+fn sem_destroy_fn(_: *anyopaque) callconv(.c) c_int {
+    return 0;
+}
+
+// --- sem_getvalue.c ---
+fn sem_getvalue_fn(sem: *anyopaque, valp: *c_int) callconv(.c) c_int {
+    const s: [*]volatile c_int = @ptrCast(@alignCast(sem));
+    valp.* = s[0] & SEM_VALUE_MAX;
+    return 0;
+}
+
+// --- sem_init.c ---
+fn sem_init_fn(sem: *anyopaque, pshared: c_int, value: c_uint) callconv(.c) c_int {
+    if (@as(c_int, @bitCast(value)) < 0) { // value > SEM_VALUE_MAX
+        // errno = EINVAL
+        const __errno_location = @extern(*const fn () callconv(.c) *c_int, .{ .name = "__errno_location" });
+        __errno_location().* = eint(.INVAL);
+        return -1;
+    }
+    const s: [*]volatile c_int = @ptrCast(@alignCast(sem));
+    s[0] = @bitCast(value);
+    s[1] = 0;
+    s[2] = if (pshared != 0) 0 else 128;
+    return 0;
+}
+
+// --- sem_unlink.c ---
+fn sem_unlink_fn(name: [*:0]const u8) callconv(.c) c_int {
+    const shm_unlink_ext = @extern(*const fn ([*:0]const u8) callconv(.c) c_int, .{ .name = "shm_unlink" });
+    return shm_unlink_ext(name);
+}
+
+// --- sem_wait.c ---
+fn sem_wait_fn(sem: *anyopaque) callconv(.c) c_int {
+    const sem_timedwait_ext = @extern(*const fn (*anyopaque, ?*const anyopaque) callconv(.c) c_int, .{ .name = "sem_timedwait" });
+    return sem_timedwait_ext(sem, null);
+}
+
+// ============================================================
+// C11 cnd_* wrappers
+// ============================================================
+
+// --- call_once.c ---
+fn call_once_fn(flag: *c_int, func: *const fn () callconv(.c) void) callconv(.c) void {
+    const __pthread_once_ext = @extern(*const fn (*c_int, *const fn () callconv(.c) void) callconv(.c) c_int, .{ .name = "__pthread_once" });
+    _ = __pthread_once_ext(flag, func);
+}
+
+// --- cnd_broadcast.c ---
+fn cnd_broadcast_fn2(c: *anyopaque) callconv(.c) c_int {
+    const __priv_cond_sig = @extern(*const fn (*anyopaque, c_int) callconv(.c) c_int, .{ .name = "__private_cond_signal" });
+    return __priv_cond_sig(c, -1);
+}
+
+// --- cnd_destroy.c ---
+fn cnd_destroy_fn2(_: *anyopaque) callconv(.c) void {}
+
+// --- cnd_init.c ---
+fn cnd_init_fn2(c: *anyopaque) callconv(.c) c_int {
+    const bytes: [*]u8 = @ptrCast(c);
+    @memset(bytes[0 .. cond_int_count * @sizeOf(c_int)], 0);
+    return thrd_success;
+}
+
+// --- cnd_signal.c ---
+fn cnd_signal_fn2(c: *anyopaque) callconv(.c) c_int {
+    const __priv_cond_sig = @extern(*const fn (*anyopaque, c_int) callconv(.c) c_int, .{ .name = "__private_cond_signal" });
+    return __priv_cond_sig(c, 1);
+}
+
+// --- cnd_timedwait.c ---
+fn cnd_timedwait_fn(c: *anyopaque, m: *anyopaque, ts: ?*const anyopaque) callconv(.c) c_int {
+    const __pthread_cond_timedwait_ext = @extern(*const fn (*anyopaque, *anyopaque, ?*const anyopaque) callconv(.c) c_int, .{ .name = "__pthread_cond_timedwait" });
+    const ret = __pthread_cond_timedwait_ext(c, m, ts);
+    return switch (ret) {
+        0 => thrd_success,
+        @as(c_int, @intCast(@intFromEnum(E.TIMEDOUT))) => thrd_timedout,
+        else => thrd_error,
+    };
+}
+
+// --- cnd_wait.c ---
+fn cnd_wait_fn2(c: *anyopaque, m: *anyopaque) callconv(.c) c_int {
+    return cnd_timedwait_fn(c, m, null);
+}
+
+// ============================================================
+// C11 mtx_* wrappers
+// ============================================================
+
+// --- mtx_destroy.c ---
+fn mtx_destroy_fn(_: *anyopaque) callconv(.c) void {}
+
+// --- mtx_init.c ---
+fn mtx_init_fn(m: *anyopaque, t: c_int) callconv(.c) c_int {
+    const m_i: [*]c_int = @ptrCast(@alignCast(m));
+    const size = if (@sizeOf(usize) == 8) 14 * @sizeOf(c_int) else 6 * @sizeOf(c_int);
+    @memset(@as([*]u8, @ptrCast(m))[0..size], 0);
+    m_i[0] = if ((t & mtx_recursive) != 0) PTHREAD_MUTEX_RECURSIVE else PTHREAD_MUTEX_NORMAL;
+    return thrd_success;
+}
+
+// --- mtx_lock.c ---
+fn mtx_lock_fn(m: *anyopaque) callconv(.c) c_int {
+    const m_i: [*]c_int = @ptrCast(@alignCast(m));
+    if (m_i[0] == PTHREAD_MUTEX_NORMAL) {
+        if (@cmpxchgStrong(c_int, &m_i[1], 0, eint(.BUSY), .seq_cst, .seq_cst) == null)
+            return thrd_success;
+    }
+    return mtx_timedlock_fn(m, null);
+}
+
+// --- mtx_timedlock.c ---
+fn mtx_timedlock_fn(m: *anyopaque, ts: ?*const anyopaque) callconv(.c) c_int {
+    const __pthread_mutex_timedlock_ext = @extern(*const fn (*anyopaque, ?*const anyopaque) callconv(.c) c_int, .{ .name = "__pthread_mutex_timedlock" });
+    const ret = __pthread_mutex_timedlock_ext(m, ts);
+    return switch (ret) {
+        0 => thrd_success,
+        @as(c_int, @intCast(@intFromEnum(E.TIMEDOUT))) => thrd_timedout,
+        else => thrd_error,
+    };
+}
+
+// --- mtx_trylock.c ---
+fn mtx_trylock_fn(m: *anyopaque) callconv(.c) c_int {
+    const m_i: [*]c_int = @ptrCast(@alignCast(m));
+    if (m_i[0] == PTHREAD_MUTEX_NORMAL) {
+        return if ((@cmpxchgStrong(c_int, &m_i[1], 0, eint(.BUSY), .seq_cst, .seq_cst) orelse 0) & eint(.BUSY) != 0)
+            thrd_busy
+        else
+            thrd_success;
+    }
+    const __pthread_mutex_trylock_ext = @extern(*const fn (*anyopaque) callconv(.c) c_int, .{ .name = "__pthread_mutex_trylock" });
+    const ret = __pthread_mutex_trylock_ext(m);
+    return switch (ret) {
+        0 => thrd_success,
+        eint(.BUSY) => thrd_busy,
+        else => thrd_error,
+    };
+}
+
+// --- mtx_unlock.c ---
+fn mtx_unlock_fn(m: *anyopaque) callconv(.c) c_int {
+    const __pthread_mutex_unlock_ext = @extern(*const fn (*anyopaque) callconv(.c) c_int, .{ .name = "__pthread_mutex_unlock" });
+    return __pthread_mutex_unlock_ext(m);
+}
+
+// ============================================================
+// C11 thrd_* wrappers
+// ============================================================
+
+// --- thrd_create.c ---
+// __ATTRP_C11_THREAD is a sentinel value: (void*)(size_t)-1
+fn thrd_create_fn(thr: *usize, func: *const anyopaque, arg: ?*anyopaque) callconv(.c) c_int {
+    const __pthread_create_ext = @extern(*const fn (*usize, ?*const anyopaque, *const anyopaque, ?*anyopaque) callconv(.c) c_int, .{ .name = "__pthread_create" });
+    const ATTRP_C11: usize = @bitCast(@as(isize, -1));
+    const ret = __pthread_create_ext(thr, @ptrFromInt(ATTRP_C11), func, arg);
+    return switch (ret) {
+        0 => thrd_success,
+        eint(.AGAIN) => thrd_nomem,
+        else => thrd_error,
+    };
+}
+
+// --- thrd_exit.c ---
+fn thrd_exit_fn(result: c_int) callconv(.c) noreturn {
+    const __pthread_exit_ext = @extern(*const fn (?*anyopaque) callconv(.c) noreturn, .{ .name = "__pthread_exit" });
+    __pthread_exit_ext(@ptrFromInt(@as(usize, @bitCast(@as(isize, result)))));
+}
+
+// --- thrd_join.c ---
+fn thrd_join_fn(t: usize, res: ?*c_int) callconv(.c) c_int {
+    const __pthread_join_ext = @extern(*const fn (usize, *?*anyopaque) callconv(.c) c_int, .{ .name = "__pthread_join" });
+    var pthread_res: ?*anyopaque = null;
+    _ = __pthread_join_ext(t, &pthread_res);
+    if (res) |r| {
+        r.* = @truncate(@as(isize, @bitCast(@intFromPtr(pthread_res))));
+    }
+    return thrd_success;
+}
+
+// --- thrd_sleep.c ---
+fn thrd_sleep_fn(req: *const anyopaque, rem: ?*anyopaque) callconv(.c) c_int {
+    const __clock_nanosleep_ext = @extern(*const fn (c_int, c_int, *const anyopaque, ?*anyopaque) callconv(.c) c_int, .{ .name = "__clock_nanosleep" });
+    const ret = -__clock_nanosleep_ext(0, 0, req, rem); // CLOCK_REALTIME = 0
+    if (ret == 0) return 0;
+    if (ret == -eint(.INTR)) return -1;
+    return -2;
+}
+
+// ============================================================
+// C11 tss_* wrappers
+// ============================================================
+
+// --- tss_create.c ---
+fn tss_create_fn(tss: *c_uint, dtor: ?*const anyopaque) callconv(.c) c_int {
+    const __pthread_key_create_ext = @extern(*const fn (*c_uint, ?*const anyopaque) callconv(.c) c_int, .{ .name = "__pthread_key_create" });
+    return if (__pthread_key_create_ext(tss, dtor) != 0) thrd_error else thrd_success;
+}
+
+// --- tss_delete.c ---
+fn tss_delete_fn(key: c_uint) callconv(.c) void {
+    const __pthread_key_delete_ext = @extern(*const fn (c_uint) callconv(.c) c_int, .{ .name = "__pthread_key_delete" });
+    _ = __pthread_key_delete_ext(key);
+}
+
+// --- tss_set.c ---
+// Accesses self->tsd[k] - use struct pthread layout
+fn tss_set_fn(k: c_uint, x: ?*anyopaque) callconv(.c) c_int {
+    const self_addr = selfAddr();
+    const off_tsd: usize = off_map_base + 7 * ptr_size;
+    const tsd_pp: *[*]?*anyopaque = @ptrFromInt(self_addr + off_tsd);
+    const tsd = tsd_pp.*;
+    if (tsd[k] != x) {
+        tsd[k] = x;
+        // tsd_used is at off_tid+18 (1 byte, bitfield byte)
+        const tsd_used: *u8 = @ptrFromInt(self_addr + off_tid + 18);
+        tsd_used.* = 1;
+    }
+    return thrd_success;
+}
+
+// ============================================================
+// pthread_setattr_default_np / pthread_getattr_default_np
+// ============================================================
+
+// --- pthread_setattr_default_np.c ---
+fn setattr_default_np_fn(attrp: *const anyopaque) callconv(.c) c_int {
+    // Reject anything except stack/guard size.
+    // C code: copy attr, zero stacksize+guardsize, check rest is all-zero.
+    const a_s: [*]const usize = @ptrCast(@alignCast(attrp));
+    const n_ints: usize = if (@sizeOf(usize) == 8) 14 else 9;
+    const bytes: [*]const u8 = @ptrCast(attrp);
+    const total_bytes = n_ints * @sizeOf(c_int);
+    const skip_bytes = 2 * @sizeOf(usize); // skip stacksize (__s[0]) and guardsize (__s[1])
+    var j: usize = skip_bytes;
+    while (j < total_bytes) : (j += 1) {
+        if (bytes[j] != 0) return eint(.INVAL);
+    }
+
+    const stack_u: c_uint = @truncate(a_s[0]);
+    const guard_u: c_uint = @truncate(a_s[1]);
+    const stack = @min(stack_u, DEFAULT_STACK_MAX);
+    const guard = @min(guard_u, DEFAULT_GUARD_MAX);
+
+    const __inhibit_ptc_ext = @extern(*const fn () callconv(.c) void, .{ .name = "__inhibit_ptc" });
+    const __release_ptc_ext = @extern(*const fn () callconv(.c) void, .{ .name = "__release_ptc" });
+    __inhibit_ptc_ext();
+    if (stack > __default_stacksize) __default_stacksize = stack;
+    if (guard > __default_guardsize) __default_guardsize = guard;
+    __release_ptc_ext();
+    return 0;
+}
+
+// --- pthread_getattr_default_np (in same file) ---
+fn getattr_default_np_fn(attrp: *anyopaque) callconv(.c) c_int {
+    const a_s: [*]usize = @ptrCast(@alignCast(attrp));
+    const n_ints: usize = if (@sizeOf(usize) == 8) 14 else 9;
+    @memset(@as([*]u8, @ptrCast(attrp))[0 .. n_ints * @sizeOf(c_int)], 0);
+    const __acquire_ptc_ext = @extern(*const fn () callconv(.c) void, .{ .name = "__acquire_ptc" });
+    const __release_ptc_ext = @extern(*const fn () callconv(.c) void, .{ .name = "__release_ptc" });
+    __acquire_ptc_ext();
+    a_s[0] = __default_stacksize;
+    a_s[1] = __default_guardsize;
+    __release_ptc_ext();
+    return 0;
 }
