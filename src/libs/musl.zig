@@ -1421,11 +1421,11 @@ const src_files = [_][]const u8{
     "musl/src/stdio/fgetwc.c",
     "musl/src/stdio/fgetws.c",
     //"musl/src/stdio/fileno.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/flockfile.c",
-    "musl/src/stdio/fmemopen.c",
+    //"musl/src/stdio/flockfile.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/fmemopen.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/__fmodeflags.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fopen.c",
-    "musl/src/stdio/fopencookie.c",
+    //"musl/src/stdio/fopencookie.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/__fopen_rb_ca.c",
     //"musl/src/stdio/fprintf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/fputc.c", // migrated to lib/c/stdio.zig
@@ -1438,8 +1438,8 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/fseek.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/fsetpos.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/ftell.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/ftrylockfile.c",
-    "musl/src/stdio/funlockfile.c",
+    //"musl/src/stdio/ftrylockfile.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/funlockfile.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fwide.c",
     //"musl/src/stdio/fwprintf.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/fwrite.c", // migrated to lib/c/stdio.zig
@@ -1454,11 +1454,11 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/getw.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/getwc.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/getwchar.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/__lockfile.c",
+    //"musl/src/stdio/__lockfile.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/ofl_add.c",
     "musl/src/stdio/ofl.c",
-    "musl/src/stdio/open_memstream.c",
-    "musl/src/stdio/open_wmemstream.c",
+    //"musl/src/stdio/open_memstream.c", // migrated to lib/c/stdio.zig
+    //"musl/src/stdio/open_wmemstream.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/__overflow.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/pclose.c",
     //"musl/src/stdio/perror.c", // migrated to lib/c/stdio.zig
