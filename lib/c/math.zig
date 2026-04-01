@@ -51,6 +51,7 @@ comptime {
         symbol(&acosf, "acosf");
         symbol(&acoshf, "acoshf");
         symbol(&asin, "asin");
+        symbol(&asinf, "asinf");
         symbol(&atan, "atan");
         symbol(&atanf, "atanf");
         symbol(&atanl, "atanl");
@@ -59,6 +60,11 @@ comptime {
         symbol(&cosh, "cosh");
         symbol(&exp10, "exp10");
         symbol(&exp10f, "exp10f");
+        symbol(&fdim_, "fdim");
+        symbol(&fdimf_, "fdimf");
+        symbol(&fdiml_, "fdiml");
+        symbol(&finite_, "finite");
+        symbol(&finitef_, "finitef");
         symbol(&hypot, "hypot");
         symbol(&modf, "modf");
         symbol(&pow, "pow");
@@ -89,6 +95,10 @@ fn acoshf(x: f32) callconv(.c) f32 {
 }
 
 fn asin(x: f64) callconv(.c) f64 {
+    return math.asin(x);
+}
+
+fn asinf(x: f32) callconv(.c) f32 {
     return math.asin(x);
 }
 
@@ -145,6 +155,49 @@ fn exp10(x: f64) callconv(.c) f64 {
 
 fn exp10f(x: f32) callconv(.c) f32 {
     return math.pow(f32, 10.0, x);
+}
+
+fn fdimGeneric(comptime T: type, x: T, y: T) T {
+    if (math.isNan(x)) return x;
+    if (math.isNan(y)) return y;
+    return if (x > y) x - y else 0;
+}
+
+fn fdim_(x: f64, y: f64) callconv(.c) f64 {
+    return fdimGeneric(f64, x, y);
+}
+
+fn fdimf_(x: f32, y: f32) callconv(.c) f32 {
+    return fdimGeneric(f32, x, y);
+}
+
+fn fdiml_(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
+    return fdimGeneric(c_longdouble, x, y);
+}
+
+test "fdim" {
+    try expectEqual(@as(f64, 3.0), fdim_(5.0, 2.0));
+    try expectEqual(@as(f64, 0.0), fdim_(2.0, 5.0));
+    try expect(math.isNan(fdim_(math.nan(f64), 1.0)));
+    try expect(math.isNan(fdim_(1.0, math.nan(f64))));
+    try expectEqual(@as(f32, 3.0), fdimf_(5.0, 2.0));
+    try expectEqual(@as(f32, 0.0), fdimf_(2.0, 5.0));
+}
+
+fn finite_(x: f64) callconv(.c) c_int {
+    return if (math.isFinite(x)) 1 else 0;
+}
+
+fn finitef_(x: f32) callconv(.c) c_int {
+    return if (math.isFinite(x)) 1 else 0;
+}
+
+test "finite" {
+    try expectEqual(@as(c_int, 1), finite_(1.0));
+    try expectEqual(@as(c_int, 0), finite_(math.inf(f64)));
+    try expectEqual(@as(c_int, 0), finite_(math.nan(f64)));
+    try expectEqual(@as(c_int, 1), finitef_(1.0));
+    try expectEqual(@as(c_int, 0), finitef_(math.inf(f32)));
 }
 
 fn hypot(x: f64, y: f64) callconv(.c) f64 {
