@@ -202,6 +202,13 @@ comptime {
         symbol(&vprintf_impl, "vprintf");
         symbol(&vscanf_impl, "vscanf");
         symbol(&vscanf_impl, "__isoc99_vscanf");
+
+        // Internal helpers (__fmodeflags.c, __fclose_ca.c)
+        symbol(&fmodeflags_impl, "__fmodeflags");
+        symbol(&fclose_ca_impl, "__fclose_ca");
+
+        // BSD extension (fgetln.c)
+        symbol(&fgetln_impl, "fgetln");
     }
 }
 
@@ -974,6 +981,78 @@ fn perror_impl(msg: ?[*:0]const u8) callconv(.c) void {
     funlock(f, need_unlock);
 }
 
+// --- Internal helpers (__fmodeflags.c, __fclose_ca.c) ---
+
+/// __fmodeflags.c: int __fmodeflags(const char *mode)
+/// Parse fopen-style mode string to O_* flags.
+fn fmodeflags_impl(mode: [*:0]const u8) callconv(.c) c_int {
+    const O = std.os.linux.O;
+    var o = O{};
+    // Check for '+', 'x', 'e' anywhere in the mode string
+    var has_plus = false;
+    var has_x = false;
+    var has_e = false;
+    {
+        var p = mode;
+        while (p[0] != 0) : (p += 1) {
+            switch (p[0]) {
+                '+' => has_plus = true,
+                'x' => has_x = true,
+                'e' => has_e = true,
+                else => {},
+            }
+        }
+    }
+    if (has_plus)
+        o.ACCMODE = .RDWR
+    else if (mode[0] == 'r')
+        o.ACCMODE = .RDONLY
+    else
+        o.ACCMODE = .WRONLY;
+    if (has_x) o.EXCL = true;
+    if (has_e) o.CLOEXEC = true;
+    if (mode[0] != 'r') o.CREAT = true;
+    if (mode[0] == 'w') o.TRUNC = true;
+    if (mode[0] == 'a') o.APPEND = true;
+    return @bitCast(@as(u32, @bitCast(o)));
+}
+
+/// __fclose_ca.c: int __fclose_ca(FILE *f)
+fn fclose_ca_impl(f: *FILE) callconv(.c) c_int {
+    return f.close_fn.?(f);
+}
+
+// --- BSD extension (fgetln.c) ---
+
+/// fgetln.c: char *fgetln(FILE *f, size_t *plen)
+fn fgetln_impl(f_opaque: ?*FILE, plen: *usize) callconv(.c) ?[*]u8 {
+    const f: *FILE = @ptrCast(f_opaque orelse return null);
+    var ret: ?[*]u8 = null;
+    const need_unlock = flock(f);
+    // Push back one byte to ensure the read buffer is populated.
+    _ = ungetc(getc_unlocked_impl(f), f);
+    if (f.rend) |rend| {
+        const rpos = f.rpos orelse rend;
+        const len = @intFromPtr(rend) - @intFromPtr(rpos);
+        if (memchr_fn(rpos, '\n', len)) |z| {
+            ret = rpos;
+            const z_next: [*]u8 = @ptrCast(z + 1);
+            plen.* = @intFromPtr(z_next) - @intFromPtr(rpos);
+            f.rpos = z_next;
+        }
+    }
+    if (ret == null) {
+        var tmp_n: usize = 0;
+        const l = getdelim_fn(@ptrCast(&f.getln_buf), &tmp_n, '\n', f_opaque);
+        if (l > 0) {
+            plen.* = @intCast(l);
+            ret = f.getln_buf;
+        }
+    }
+    funlock(f, need_unlock);
+    return ret;
+}
+
 // --- Wide formatting wrappers (wprintf.c, fwprintf.c, swprintf.c) ---
 
 /// wprintf.c: int wprintf(const wchar_t *restrict fmt, ...)
@@ -1067,3 +1146,4 @@ const vfwprintf_fn = @extern(*const fn (?*FILE, [*:0]const wchar_t, VaList) call
 const vfwscanf_fn = @extern(*const fn (?*FILE, [*:0]const wchar_t, VaList) callconv(.c) c_int, .{ .name = "vfwscanf" });
 const vswprintf_fn = @extern(*const fn ([*]wchar_t, usize, [*:0]const wchar_t, VaList) callconv(.c) c_int, .{ .name = "vswprintf" });
 const vswscanf_fn = @extern(*const fn ([*:0]const wchar_t, [*:0]const wchar_t, VaList) callconv(.c) c_int, .{ .name = "vswscanf" });
+const memchr_fn = @extern(*const fn (?[*]const u8, c_int, usize) callconv(.c) ?[*]u8, .{ .name = "memchr" });

@@ -1378,13 +1378,13 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/ext2.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/ext.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fclose.c",
-    "musl/src/stdio/__fclose_ca.c",
+    //"musl/src/stdio/__fclose_ca.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/__fdopen.c",
     //"musl/src/stdio/feof.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/ferror.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fflush.c",
     //"musl/src/stdio/fgetc.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/fgetln.c",
+    //"musl/src/stdio/fgetln.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/fgetpos.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/fgets.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fgetwc.c",
@@ -1392,7 +1392,7 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/fileno.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/flockfile.c",
     "musl/src/stdio/fmemopen.c",
-    "musl/src/stdio/__fmodeflags.c",
+    //"musl/src/stdio/__fmodeflags.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fopen.c",
     "musl/src/stdio/fopencookie.c",
     "musl/src/stdio/__fopen_rb_ca.c",
