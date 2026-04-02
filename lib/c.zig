@@ -82,4 +82,8 @@ comptime {
 
     _ = @import("c/unistd.zig");
     _ = @import("c/wchar.zig");
+
+    if (builtin.target.isWasiLibC()) {
+        _ = @import("c/wasi_sources.zig");
+    }
 }
