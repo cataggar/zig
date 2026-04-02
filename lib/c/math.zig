@@ -160,7 +160,11 @@ fn exp10f(x: f32) callconv(.c) f32 {
 fn fdimGeneric(comptime T: type, x: T, y: T) T {
     if (math.isNan(x)) return x;
     if (math.isNan(y)) return y;
-    return if (x > y) x - y else 0;
+    // Use early return to prevent LLVM from converting to branchless select,
+    // which would speculatively compute x - y even when x <= y,
+    // raising an invalid FP exception for cases like fdim(-inf, -inf).
+    if (x > y) return x - y;
+    return 0;
 }
 
 fn fdim_(x: f64, y: f64) callconv(.c) f64 {
@@ -180,8 +184,12 @@ test "fdim" {
     try expectEqual(@as(f64, 0.0), fdim_(2.0, 5.0));
     try expect(math.isNan(fdim_(math.nan(f64), 1.0)));
     try expect(math.isNan(fdim_(1.0, math.nan(f64))));
+    try expectEqual(@as(f64, 0.0), fdim_(-math.inf(f64), -math.inf(f64)));
+    try expectEqual(@as(f64, 0.0), fdim_(math.inf(f64), math.inf(f64)));
+    try expectEqual(math.inf(f64), fdim_(math.inf(f64), -math.inf(f64)));
     try expectEqual(@as(f32, 3.0), fdimf_(5.0, 2.0));
     try expectEqual(@as(f32, 0.0), fdimf_(2.0, 5.0));
+    try expectEqual(@as(f32, 0.0), fdimf_(-math.inf(f32), -math.inf(f32)));
 }
 
 fn finite_(x: f64) callconv(.c) c_int {

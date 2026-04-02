@@ -176,24 +176,44 @@ test approxEqRel {
     }
 }
 
+/// Raise INVALID fpu exception.
 pub fn raiseInvalid() void {
-    // Raise INVALID fpu exception
+    @setFloatMode(.strict);
+    var zero: f32 = 0;
+    _ = &zero;
+    mem.doNotOptimizeAway(zero / zero);
 }
 
+/// Raise UNDERFLOW fpu exception.
 pub fn raiseUnderflow() void {
-    // Raise UNDERFLOW fpu exception
+    @setFloatMode(.strict);
+    var x: f32 = floatTrueMin(f32);
+    _ = &x;
+    mem.doNotOptimizeAway(x * x);
 }
 
+/// Raise OVERFLOW fpu exception.
 pub fn raiseOverflow() void {
-    // Raise OVERFLOW fpu exception
+    @setFloatMode(.strict);
+    var x: f32 = floatMax(f32);
+    _ = &x;
+    mem.doNotOptimizeAway(x + x);
 }
 
+/// Raise INEXACT fpu exception.
 pub fn raiseInexact() void {
-    // Raise INEXACT fpu exception
+    @setFloatMode(.strict);
+    var x: f32 = floatTrueMin(f32);
+    _ = &x;
+    mem.doNotOptimizeAway(@as(f32, 1.0) + x);
 }
 
+/// Raise DIVBYZERO fpu exception.
 pub fn raiseDivByZero() void {
-    // Raise INEXACT fpu exception
+    @setFloatMode(.strict);
+    var zero: f32 = 0;
+    _ = &zero;
+    mem.doNotOptimizeAway(@as(f32, 1.0) / zero);
 }
 
 pub const isNan = @import("math/isnan.zig").isNan;
