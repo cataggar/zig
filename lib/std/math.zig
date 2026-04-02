@@ -176,24 +176,44 @@ test approxEqRel {
     }
 }
 
+/// Raise INVALID fpu exception.
 pub fn raiseInvalid() void {
-    // Raise INVALID fpu exception
+    @setFloatMode(.strict);
+    var zero: f32 = 0;
+    const z = @as(*const volatile f32, @ptrCast(&zero)).*;
+    mem.doNotOptimizeAway(z / z);
 }
 
+/// Raise UNDERFLOW fpu exception.
 pub fn raiseUnderflow() void {
-    // Raise UNDERFLOW fpu exception
+    @setFloatMode(.strict);
+    var x: f32 = floatTrueMin(f32);
+    const v = @as(*const volatile f32, @ptrCast(&x)).*;
+    mem.doNotOptimizeAway(v * v);
 }
 
+/// Raise OVERFLOW fpu exception.
 pub fn raiseOverflow() void {
-    // Raise OVERFLOW fpu exception
+    @setFloatMode(.strict);
+    var x: f32 = floatMax(f32);
+    const v = @as(*const volatile f32, @ptrCast(&x)).*;
+    mem.doNotOptimizeAway(v + v);
 }
 
+/// Raise INEXACT fpu exception.
 pub fn raiseInexact() void {
-    // Raise INEXACT fpu exception
+    @setFloatMode(.strict);
+    var x: f32 = floatTrueMin(f32);
+    const v = @as(*const volatile f32, @ptrCast(&x)).*;
+    mem.doNotOptimizeAway(@as(f32, 1.0) + v);
 }
 
+/// Raise DIVBYZERO fpu exception.
 pub fn raiseDivByZero() void {
-    // Raise INEXACT fpu exception
+    @setFloatMode(.strict);
+    var zero: f32 = 0;
+    const z = @as(*const volatile f32, @ptrCast(&zero)).*;
+    mem.doNotOptimizeAway(@as(f32, 1.0) / z);
 }
 
 pub const isNan = @import("math/isnan.zig").isNan;

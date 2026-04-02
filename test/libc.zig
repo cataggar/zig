@@ -223,9 +223,9 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/hypot.c", true, .{});
     cases.addLibcTestCase("math/hypotf.c", true, .{});
     cases.addLibcTestCase("math/hypotl.c", true, .{});
-    // cases.addLibcTestCase("math/ilogb.c", true, .{});
-    // cases.addLibcTestCase("math/ilogbf.c", true, .{});
-    // cases.addLibcTestCase("math/ilogbl.c", true, .{});
+    cases.addLibcTestCase("math/ilogb.c", true, .{});
+    cases.addLibcTestCase("math/ilogbf.c", true, .{});
+    cases.addLibcTestCase("math/ilogbl.c", true, .{});
     cases.addLibcTestCase("math/isless.c", true, .{});
     // cases.addLibcTestCase("math/j0.c", true, .{});
     cases.addLibcTestCase("math/j0f.c", true, .{});
