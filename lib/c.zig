@@ -82,4 +82,7 @@ comptime {
 
     _ = @import("c/unistd.zig");
     _ = @import("c/wchar.zig");
+
+    _ = @import("c/misc.zig");
+    _ = @import("c/sched.zig");
 }
