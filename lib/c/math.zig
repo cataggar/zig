@@ -352,6 +352,11 @@ fn fmaf_(x: f32, y: f32, z: f32) callconv(.c) f32 {
 }
 
 fn fmal_(x: c_longdouble, y: c_longdouble, z: c_longdouble) callconv(.c) c_longdouble {
+    // Force x*y so the FPU raises UNDERFLOW/OVERFLOW if the intermediate
+    // product underflows or overflows. Hardware fma computes x*y+z atomically
+    // without signaling these exceptions when the final result is normal.
+    const xy = x * y;
+    std.mem.doNotOptimizeAway(xy);
     return @mulAdd(c_longdouble, x, y, z);
 }
 

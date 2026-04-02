@@ -206,7 +206,7 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/floorl.c", true, .{});
     cases.addLibcTestCase("math/fma.c", true, .{});
     cases.addLibcTestCase("math/fmaf.c", true, .{});
-    // cases.addLibcTestCase("math/fmal.c", true, .{});
+    cases.addLibcTestCase("math/fmal.c", true, .{});
     cases.addLibcTestCase("math/fmax.c", true, .{});
     cases.addLibcTestCase("math/fmaxf.c", true, .{});
     cases.addLibcTestCase("math/fmaxl.c", true, .{});
