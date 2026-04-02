@@ -62,6 +62,7 @@ pub fn errno(syscall_return_value: usize) c_int {
 }
 
 comptime {
+    _ = @import("c/crypt.zig");
     _ = @import("c/ctype.zig");
     _ = @import("c/fcntl.zig");
     _ = @import("c/inttypes.zig");
