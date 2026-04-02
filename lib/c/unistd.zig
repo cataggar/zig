@@ -47,6 +47,8 @@ comptime {
         symbol(&unlinkatLinux, "unlinkat");
 
         symbol(&execveLinux, "execve");
+        symbol(&fexecveLinux, "fexecve");
+        symbol(&vforkLinux, "vfork");
     }
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&swab, "swab");
@@ -191,6 +193,28 @@ fn unlinkatLinux(fd: c_int, path: [*:0]const c_char, flags: c_int) callconv(.c) 
 
 fn execveLinux(path: [*:0]const c_char, argv: [*:null]const ?[*:0]c_char, envp: [*:null]const ?[*:0]c_char) callconv(.c) c_int {
     return errno(linux.execve(@ptrCast(path), @ptrCast(argv), @ptrCast(envp)));
+}
+
+fn fexecveLinux(fd: c_int, argv: [*:null]const ?[*:0]c_char, envp: [*:null]const ?[*:0]c_char) callconv(.c) c_int {
+    const r: isize = @bitCast(linux.execveat(fd, "", @ptrCast(argv), @ptrCast(envp), .{ .EMPTY_PATH = true }));
+    if (r != -@as(isize, @intFromEnum(linux.E.NOSYS))) {
+        return errno(@bitCast(r));
+    }
+    // Fallback: construct /proc/self/fd/<fd> path and call execve.
+    var buf: ["/proc/self/fd/".len + 11]u8 = undefined;
+    const proc_path = std.fmt.bufPrintZ(&buf, "/proc/self/fd/{d}", .{@as(u32, @intCast(fd))}) catch unreachable;
+    _ = errno(linux.execve(proc_path.ptr, @ptrCast(argv), @ptrCast(envp)));
+    if (std.c._errno().* == @intFromEnum(linux.E.NOENT)) {
+        std.c._errno().* = @intFromEnum(linux.E.BADF);
+    }
+    return -1;
+}
+
+/// The vfork syscall cannot be safely made from compiled code because the
+/// parent and child share the same stack. This fallback uses fork instead,
+/// matching the behavior of musl's C fallback (vfork.c).
+fn vforkLinux() callconv(.c) c_int {
+    return errno(linux.fork());
 }
 
 fn swab(noalias src_ptr: *const anyopaque, noalias dest_ptr: *anyopaque, n: isize) callconv(.c) void {
