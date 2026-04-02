@@ -291,7 +291,10 @@ struct char_traits<unsigned char>
   }
 
   static _LIBCPP_HIDE_FROM_ABI _LIBCPP_CONSTEXPR_SINCE_CXX17 size_t length(const char_type* __str) _NOEXCEPT {
-    return std::__constexpr_strlen(__str);
+    size_t __len = 0;
+    for (; !eq(__str[__len], char_type(0)); ++__len)
+      ;
+    return __len;
   }
 
   _LIBCPP_HIDE_FROM_ABI static _LIBCPP_CONSTEXPR_SINCE_CXX17 const char_type*

@@ -348,4 +348,6 @@ fn tanhf(x: f32) callconv(.c) f32 {
     return math.tanh(x);
 }
 
-_ = @import("bessel.zig");
+comptime {
+    _ = @import("bessel.zig");
+}

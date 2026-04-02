@@ -29,7 +29,7 @@ const invsqrtpi: f64 = 5.64189583547756279280e-01;
 const tpi: f64 = 6.36619772367581382433e-01;
 
 fn common_j0(ix: u32, x: f64, y0: bool) f64 {
-    var s = math.sin(x);
+    const s = math.sin(x);
     var c = math.cos(x);
     if (y0)
         c = -c;
@@ -88,13 +88,13 @@ pub export fn j0_(x: f64) callconv(.c) f64 {
     return 1 - ax;
 }
 
-const u00: f64 = -7.38042951086872317523e-02;
-const u01: f64 = 1.76666452509181115538e-01;
-const u02: f64 = -1.38185671945596898896e-02;
-const u03: f64 = 3.47453432093683650238e-04;
-const u04: f64 = -3.81407053724364161125e-06;
-const u05: f64 = 1.95590137035022920206e-08;
-const u06: f64 = -3.98205194132103398453e-11;
+const bu00: f64 = -7.38042951086872317523e-02;
+const bu01: f64 = 1.76666452509181115538e-01;
+const bu02: f64 = -1.38185671945596898896e-02;
+const bu03: f64 = 3.47453432093683650238e-04;
+const bu04: f64 = -3.81407053724364161125e-06;
+const bu05: f64 = 1.95590137035022920206e-08;
+const bu06: f64 = -3.98205194132103398453e-11;
 const v01: f64 = 1.27304834834123699328e-02;
 const v02: f64 = 7.60068627350353253702e-05;
 const v03: f64 = 2.59150851840457805467e-07;
@@ -106,9 +106,9 @@ pub export fn y0_(x: f64) callconv(.c) f64 {
     const lx = @as(u32, @truncate(bits));
     
     if ((ix << 1 | lx) == 0)
-        return -1.0 / 0.0;
+        return -math.inf(f64);
     if (ix >> 31 != 0)
-        return 0.0 / 0.0;
+        return math.nan(f64);
     if (ix >= 0x7ff00000)
         return 1 / x;
     
@@ -118,11 +118,11 @@ pub export fn y0_(x: f64) callconv(.c) f64 {
     
     if (ix >= 0x3e400000) {
         const z = x * x;
-        const u = u00 + z * (u01 + z * (u02 + z * (u03 + z * (u04 + z * (u05 + z * u06)))));
+        const u = bu00 + z * (bu01 + z * (bu02 + z * (bu03 + z * (bu04 + z * (bu05 + z * bu06)))));
         const v = 1.0 + z * (v01 + z * (v02 + z * (v03 + z * v04)));
         return u / v + tpi * (j0_(x) * @log(x));
     }
-    return u00 + tpi * @log(x);
+    return bu00 + tpi * @log(x);
 }
 
 const pR8 = [6]f64{
@@ -321,7 +321,7 @@ const invsqrtpi_f: f32 = 5.6418961287e-01;
 const tpi_f: f32 = 6.3661974669e-01;
 
 fn common_j0f(ix: u32, x: f32, y0: bool) f32 {
-    var s = math.sin(x);
+    const s = math.sin(x);
     var c = math.cos(x);
     if (y0)
         c = -c;
@@ -379,13 +379,13 @@ pub export fn j0f_(x: f32) callconv(.c) f32 {
     return 1 - ax;
 }
 
-const u00f: f32 = -7.3804296553e-02;
-const u01f: f32 = 1.7666645348e-01;
-const u02f: f32 = -1.3818567619e-02;
-const u03f: f32 = 3.4745343146e-04;
-const u04f: f32 = -3.8140706238e-06;
-const u05f: f32 = 1.9559013964e-08;
-const u06f: f32 = -3.9820518410e-11;
+const bu00f: f32 = -7.3804296553e-02;
+const bu01f: f32 = 1.7666645348e-01;
+const bu02f: f32 = -1.3818567619e-02;
+const bu03f: f32 = 3.4745343146e-04;
+const bu04f: f32 = -3.8140706238e-06;
+const bu05f: f32 = 1.9559013964e-08;
+const bu06f: f32 = -3.9820518410e-11;
 const v01f: f32 = 1.2730483897e-02;
 const v02f: f32 = 7.6006865129e-05;
 const v03f: f32 = 2.5915085189e-07;
@@ -395,9 +395,9 @@ pub export fn y0f_(x: f32) callconv(.c) f32 {
     const ix = @as(u32, @bitCast(x));
     
     if ((ix & 0x7fffffff) == 0)
-        return -1.0 / 0.0;
+        return -math.inf(f32);
     if (ix >> 31 != 0)
-        return 0.0 / 0.0;
+        return math.nan(f32);
     if (ix >= 0x7f800000)
         return 1 / x;
     
@@ -407,11 +407,11 @@ pub export fn y0f_(x: f32) callconv(.c) f32 {
     
     if (ix >= 0x39000000) {
         const z = x * x;
-        const u = u00f + z * (u01f + z * (u02f + z * (u03f + z * (u04f + z * (u05f + z * u06f)))));
+        const u = bu00f + z * (bu01f + z * (bu02f + z * (bu03f + z * (bu04f + z * (bu05f + z * bu06f)))));
         const v = 1 + z * (v01f + z * (v02f + z * (v03f + z * v04f)));
         return u / v + tpi_f * (j0f_(x) * @log(x));
     }
-    return u00f + tpi_f * @log(x);
+    return bu00f + tpi_f * @log(x);
 }
 
 const pR8f = [6]f32{
@@ -686,9 +686,9 @@ pub export fn y1_(x: f64) callconv(.c) f64 {
     const lx = @as(u32, @truncate(bits));
     
     if ((ix << 1 | lx) == 0)
-        return -1.0 / 0.0;
+        return -math.inf(f64);
     if (ix >> 31 != 0)
-        return 0.0 / 0.0;
+        return math.nan(f64);
     if (ix >= 0x7ff00000)
         return 1 / x;
     
@@ -975,9 +975,9 @@ pub export fn y1f_(x: f32) callconv(.c) f32 {
     const ix = @as(u32, @bitCast(x));
     
     if ((ix & 0x7fffffff) == 0)
-        return -1.0 / 0.0;
+        return -math.inf(f32);
     if (ix >> 31 != 0)
-        return 0.0 / 0.0;
+        return math.nan(f32);
     if (ix >= 0x7f800000)
         return 1 / x;
     
@@ -1273,17 +1273,17 @@ pub export fn jn_(n: c_int, x: f64) callconv(.c) f64 {
             b = 1.0;
             const tmp = nf * @log(@abs(w));
             if (tmp < 7.09782712893383973096e+02) {
-                var i: i32 = @intCast(nm1);
-                while (i > 0) : (i -= 1) {
+                var j: i32 = @intCast(nm1);
+                while (j > 0) : (j -= 1) {
                     const temp = b;
-                    b = b * (2.0 * @as(f64, @floatFromInt(i))) / x_abs - a;
+                    b = b * (2.0 * @as(f64, @floatFromInt(j))) / x_abs - a;
                     a = temp;
                 }
             } else {
-                var i: i32 = @intCast(nm1);
-                while (i > 0) : (i -= 1) {
+                var j: i32 = @intCast(nm1);
+                while (j > 0) : (j -= 1) {
                     const temp = b;
-                    b = b * (2.0 * @as(f64, @floatFromInt(i))) / x_abs - a;
+                    b = b * (2.0 * @as(f64, @floatFromInt(j))) / x_abs - a;
                     a = temp;
                     if (b > 0x1p500) {
                         a /= b;
@@ -1314,7 +1314,7 @@ pub export fn yn_(n: c_int, x: f64) callconv(.c) f64 {
     if ((ix | ((lx | -%lx) >> 31)) > 0x7ff00000)
         return x;
     if (sign_bit != 0 and (ix | lx) != 0)
-        return 0.0 / 0.0;
+        return math.nan(f64);
     if (ix == 0x7ff00000)
         return 0.0;
     
@@ -1435,17 +1435,17 @@ pub export fn jnf_(n: c_int, x: f32) callconv(.c) f32 {
             b = 1.0;
             const tmp = nf * @log(@abs(w));
             if (tmp < 88.721679688) {
-                var i: i32 = @intCast(nm1);
-                while (i > 0) : (i -= 1) {
+                var j: i32 = @intCast(nm1);
+                while (j > 0) : (j -= 1) {
                     const temp = b;
-                    b = 2.0 * @as(f32, @floatFromInt(i)) * b / x_abs - a;
+                    b = 2.0 * @as(f32, @floatFromInt(j)) * b / x_abs - a;
                     a = temp;
                 }
             } else {
-                var i: i32 = @intCast(nm1);
-                while (i > 0) : (i -= 1) {
+                var j: i32 = @intCast(nm1);
+                while (j > 0) : (j -= 1) {
                     const temp = b;
-                    b = 2.0 * @as(f32, @floatFromInt(i)) * b / x_abs - a;
+                    b = 2.0 * @as(f32, @floatFromInt(j)) * b / x_abs - a;
                     a = temp;
                     if (b > 0x1p60) {
                         a /= b;
@@ -1474,7 +1474,7 @@ pub export fn ynf_(n: c_int, x: f32) callconv(.c) f32 {
     if (ix > 0x7f800000)
         return x;
     if (sign_bit != 0 and ix != 0)
-        return 0.0 / 0.0;
+        return math.nan(f32);
     if (ix == 0x7f800000)
         return 0.0;
     
