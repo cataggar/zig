@@ -146,9 +146,9 @@ pub fn addCases(cases: *tests.LibcContext) void {
     // cases.addLibcTestCase("math/acosl.c", true, .{});
     cases.addLibcTestCase("math/asin.c", true, .{});
     cases.addLibcTestCase("math/asinf.c", true, .{});
-    // cases.addLibcTestCase("math/asinh.c", true, .{});
+    cases.addLibcTestCase("math/asinh.c", true, .{});
     cases.addLibcTestCase("math/asinhf.c", true, .{});
-    // cases.addLibcTestCase("math/asinhl.c", true, .{});
+    cases.addLibcTestCase("math/asinhl.c", true, .{});
     cases.addLibcTestCase("math/asinl.c", true, .{});
     cases.addLibcTestCase("math/atan.c", true, .{});
     // cases.addLibcTestCase("math/atan2.c", true, .{});
@@ -312,9 +312,9 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/sincosf.c", true, .{});
     cases.addLibcTestCase("math/sincosl.c", true, .{});
     cases.addLibcTestCase("math/sinf.c", true, .{});
-    // cases.addLibcTestCase("math/sinh.c", true, .{});
+    cases.addLibcTestCase("math/sinh.c", true, .{});
     cases.addLibcTestCase("math/sinhf.c", true, .{});
-    // cases.addLibcTestCase("math/sinhl.c", true, .{});
+    cases.addLibcTestCase("math/sinhl.c", true, .{});
     cases.addLibcTestCase("math/sinl.c", true, .{});
     cases.addLibcTestCase("math/sqrt.c", true, .{});
     cases.addLibcTestCase("math/sqrtf.c", true, .{});

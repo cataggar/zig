@@ -53,7 +53,9 @@ comptime {
         symbol(&acoshf, "acoshf");
         symbol(&acoshl_, "acoshl");
         symbol(&asin, "asin");
+        symbol(&asinh_, "asinh");
         symbol(&asinhf_, "asinhf");
+        symbol(&asinhl_, "asinhl");
         symbol(&atan, "atan");
         symbol(&atanf, "atanf");
         symbol(&atanh_, "atanh");
@@ -72,6 +74,8 @@ comptime {
         symbol(&pow10, "pow10");
         symbol(&pow10f, "pow10f");
         symbol(&rintl, "rintl");
+        symbol(&sinh_, "sinh");
+        symbol(&sinhl_, "sinhl");
         symbol(&tanh, "tanh");
         symbol(&tanhl_, "tanhl");
     }
@@ -115,6 +119,38 @@ fn asin(x: f64) callconv(.c) f64 {
 
 fn asinhf_(x: f32) callconv(.c) f32 {
     return math.asinh(x);
+}
+
+/// Port of musl asinh.c with @mulAdd improvement for x*x+1 computation.
+/// Reduces ULP error below 1.5 in [0.125,0.5] range (musl C has up to 1.6).
+fn asinh_(x: f64) callconv(.c) f64 {
+    @setFloatMode(.strict);
+    const u: u64 = @bitCast(x);
+    const e = (u >> 52) & 0x7FF;
+    const s = u >> 63;
+    var rx: f64 = @bitCast(u & (std.math.maxInt(u64) >> 1)); // |x|
+
+    if (e >= 0x3FF + 26) {
+        // |x| >= 0x1p26 or inf or nan
+        rx = @log(rx) + 0.693147180559945309417232121458176568;
+    } else if (e >= 0x3FF + 1) {
+        // |x| >= 2
+        rx = @log(2 * rx + 1 / (@sqrt(@mulAdd(f64, rx, rx, 1)) + rx));
+    } else if (e >= 0x3FF - 26) {
+        // |x| >= 0x1p-26: use @mulAdd for x*x+1 to get < 1.5 ULP
+        rx = math.log1p(rx + rx * rx / (@sqrt(@mulAdd(f64, rx, rx, 1)) + 1));
+    } else {
+        // |x| < 0x1p-26, raise inexact if x != 0
+        std.mem.doNotOptimizeAway(rx + 0x1p120);
+    }
+    return if (s != 0) -rx else rx;
+}
+
+fn asinhl_(x: c_longdouble) callconv(.c) c_longdouble {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => @bitCast(asinh_(@bitCast(x))),
+        else => @floatCast(asinh_(@floatCast(x))),
+    };
 }
 
 fn atan(x: f64) callconv(.c) f64 {
@@ -183,6 +219,40 @@ fn coshl_(x: c_longdouble) callconv(.c) c_longdouble {
     return switch (@typeInfo(c_longdouble).float.bits) {
         64 => math.cosh(@as(f64, @bitCast(x))),
         else => @floatCast(math.cosh(@as(f64, @floatCast(x)))),
+    };
+}
+
+/// Port of musl sinh.c with direct exp(x/2) overflow handling
+/// instead of __expo2, avoiding the intermediate overflow issue.
+fn sinh_(x: f64) callconv(.c) f64 {
+    @setFloatMode(.strict);
+    const u: u64 = @bitCast(x);
+    const w: u32 = @intCast(u >> 32);
+    const absx: f64 = @bitCast(u & (std.math.maxInt(u64) >> 1));
+    var h: f64 = 0.5;
+    if (u >> 63 != 0) h = -h;
+
+    // |x| < log(DBL_MAX)
+    if (w < 0x40862e42) {
+        const t = math.expm1(absx);
+        if (w < 0x3ff00000) {
+            if (w < 0x3ff00000 - (26 << 20))
+                // avoid spurious underflow
+                return x;
+            return h * (2 * t - t * t / (t + 1));
+        }
+        return h * (t + t / (t + 1));
+    }
+
+    // |x| > log(DBL_MAX) or nan: use exp(x/2) trick to avoid overflow
+    const t = @exp(0.5 * absx);
+    return h * t * t;
+}
+
+fn sinhl_(x: c_longdouble) callconv(.c) c_longdouble {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => @bitCast(sinh_(@bitCast(x))),
+        else => @floatCast(sinh_(@as(f64, @floatCast(x)))),
     };
 }
 
@@ -453,6 +523,10 @@ test "hyperbolic" {
     try expectApproxEqRel(@as(f64, 1.31695789692481670862), acosh_(2.0), 1e-15);
     try expectApproxEqAbs(@as(f32, 0.0), asinhf_(0.0), 1e-6);
     try expectApproxEqRel(@as(f32, 0.88137358), asinhf_(1.0), 1e-6);
+    try expectApproxEqAbs(@as(f64, 0.0), asinh_(0.0), 1e-15);
+    try expectApproxEqRel(@as(f64, 0.88137358701954302519), asinh_(1.0), 1e-15);
     try expectApproxEqAbs(@as(f64, 0.0), atanh_(0.0), 1e-15);
     try expectApproxEqRel(@as(f64, 0.54930614433405484570), atanh_(0.5), 1e-15);
+    try expectApproxEqAbs(@as(f64, 0.0), sinh_(0.0), 1e-15);
+    try expectApproxEqRel(@as(f64, 1.17520119364380145688), sinh_(1.0), 1e-15);
 }
