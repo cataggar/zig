@@ -66,11 +66,7 @@ comptime {
         symbol(&coshl_, "coshl");
         symbol(&exp10, "exp10");
         symbol(&exp10f, "exp10f");
-        symbol(&expm1_, "expm1");
-        symbol(&expm1f_, "expm1f");
         symbol(&hypot, "hypot");
-        symbol(&log1p_, "log1p");
-        symbol(&log1pf_, "log1pf");
         symbol(&modf, "modf");
         symbol(&pow, "pow");
         symbol(&pow10, "pow10");
@@ -198,33 +194,6 @@ fn exp10f(x: f32) callconv(.c) f32 {
     return math.pow(f32, 10.0, x);
 }
 
-fn expm1_(x: f64) callconv(.c) f64 {
-    return math.expm1(x);
-}
-
-fn expm1f_(x: f32) callconv(.c) f32 {
-    return math.expm1(x);
-}
-
-test "expm1" {
-    try expectApproxEqAbs(@as(f64, 0.0), expm1_(0.0), 1e-15);
-    try expectApproxEqRel(@as(f64, 1.71828182845904523536), expm1_(1.0), 1e-15);
-    try expectApproxEqAbs(@as(f32, 0.0), expm1f_(0.0), 1e-6);
-}
-
-fn log1p_(x: f64) callconv(.c) f64 {
-    return math.log1p(x);
-}
-
-fn log1pf_(x: f32) callconv(.c) f32 {
-    return math.log1p(x);
-}
-
-test "log1p" {
-    try expectApproxEqAbs(@as(f64, 0.0), log1p_(0.0), 1e-15);
-    try expectApproxEqRel(@as(f64, 0.69314718055994530942), log1p_(1.0), 1e-15);
-    try expectApproxEqAbs(@as(f32, 0.0), log1pf_(0.0), 1e-6);
-}
 
 fn hypot(x: f64, y: f64) callconv(.c) f64 {
     return math.hypot(x, y);
