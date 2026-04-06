@@ -185,6 +185,7 @@ fn taylor_expm1(comptime T: type, x: T) T {
 /// Uses only basic arithmetic — no @exp.
 fn expm1_wide(comptime T: type, x: T) T {
     if (x == 0) return x;
+    if (math.isNan(x)) return x;
     if (!math.isFinite(x)) {
         if (x > 0) return math.inf(T);
         return -1.0;
