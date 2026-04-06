@@ -596,7 +596,7 @@ fn fcvt_c(x: f64, n_arg: c_int, dp: *c_int, sign_out: *c_int) callconv(.c) [*:0]
         sign_out.* = @intCast(i);
         dp.* = 1;
         if (n > 14) n = 14;
-        return @ptrCast(zeros_str[14 - @as(usize, @intCast(n)) ..].ptr);
+        return @constCast(@ptrCast(zeros_str[14 - @as(usize, @intCast(n)) ..].ptr));
     }
 
     return ecvt_c(x, n - lz, dp, sign_out);
