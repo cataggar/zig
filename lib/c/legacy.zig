@@ -9,7 +9,7 @@ comptime {
     if (builtin.target.isMuslLibC()) {
         symbol(&euidaccessLinux, "euidaccess");
         symbol(&euidaccessLinux, "eaccess");
-        symbol(&isastreamLinux, "isastream");
+        // isastream is exported by stropts.zig
         symbol(&getdtablesizeLinux, "getdtablesize");
         symbol(&getloadavgLinux, "getloadavg");
         // utmpx stubs
@@ -49,7 +49,7 @@ comptime {
             symbol(&getusershell, "getusershell");
             symbol(&daemon, "daemon");
             symbol(&getpagesize, "getpagesize");
-            symbol(&valloc, "valloc");
+            // valloc is exported by malloc.zig
         }
     }
 }
@@ -68,7 +68,7 @@ fn getdtablesizeLinux() callconv(.c) c_int {
     var rl: linux.rlimit = undefined;
     const rc: isize = @bitCast(linux.getrlimit(.NOFILE, &rl));
     if (rc < 0) return std.math.maxInt(c_int);
-    return if (rl.rlim_cur < std.math.maxInt(c_int)) @intCast(rl.rlim_cur) else std.math.maxInt(c_int);
+    return if (rl.cur < std.math.maxInt(c_int)) @intCast(rl.cur) else std.math.maxInt(c_int);
 }
 const SI_LOAD_SHIFT = 16;
 fn getloadavgLinux(a: [*]f64, n_arg: c_int) callconv(.c) c_int {
@@ -92,7 +92,7 @@ fn pututxline(ut: ?*const anyopaque) callconv(.c) ?*anyopaque { _ = ut; return n
 fn updwtmpx(f: ?[*:0]const u8, u: ?*const anyopaque) callconv(.c) void { _ = f; _ = u; }
 fn utmpxname(f: ?[*:0]const u8) callconv(.c) c_int {
     _ = f;
-    std.c._errno().* = @intFromEnum(linux.E.NOTSUP);
+    std.c._errno().* = @intFromEnum(linux.E.OPNOTSUPP);
     return -1;
 }
 
@@ -203,7 +203,7 @@ fn getpass(prompt: [*:0]const u8) callconv(.c) ?[*:0]u8 {
 
     _ = dprintf(fd, "%s", prompt);
 
-    const l = @import("../c.zig").errnoSize(linux.read(fd, @ptrCast(&password_buf), password_buf.len));
+    const l = @import("../c.zig").errno(linux.read(fd, @ptrCast(&password_buf), password_buf.len));
     if (l >= 0) {
         var end: usize = @intCast(l);
         if (end > 0 and password_buf[end - 1] == '\n') end -= 1;
@@ -230,10 +230,10 @@ fn ulimit_fn(cmd: c_int, ...) callconv(.c) c_long {
         var ap = @cVaStart();
         defer @cVaEnd(&ap);
         const val: c_long = @cVaArg(&ap, c_long);
-        rl.rlim_cur = @intCast(@as(u64, 512) * @as(u64, @intCast(val)));
+        rl.cur = @intCast(@as(u64, 512) * @as(u64, @intCast(val)));
         if (setrlimit(RLIMIT_FSIZE, &rl) != 0) return -1;
     }
-    return @intCast(rl.rlim_cur / 512);
+    return @intCast(rl.cur / 512);
 }
 
 // --- err.c (variadic via @cVaStart/@cVaCopy) ---

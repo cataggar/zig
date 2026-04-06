@@ -212,8 +212,8 @@ fn sysconf(name: c_int) callconv(.c) c_long {
     if (v < -256) {
         var rl: linux.rlimit = undefined;
         _ = getrlimit(v & 16383, &rl);
-        if (rl.rlim_cur == std.math.maxInt(usize)) return -1;
-        return if (rl.rlim_cur > std.math.maxInt(c_long)) std.math.maxInt(c_long) else @intCast(rl.rlim_cur);
+        if (rl.cur == std.math.maxInt(usize)) return -1;
+        return if (rl.cur > std.math.maxInt(c_long)) std.math.maxInt(c_long) else @intCast(rl.cur);
     }
 
     // Jump table cases

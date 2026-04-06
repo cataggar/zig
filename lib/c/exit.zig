@@ -15,12 +15,12 @@ comptime {
             symbol(&__assert_fail, "__assert_fail");
             symbol(&at_quick_exit, "at_quick_exit");
             symbol(&__funcs_on_quick_exit, "__funcs_on_quick_exit");
-            symbol(&__at_quick_exit_lockptr, "__at_quick_exit_lockptr");
+            symbol(@ptrCast(&__at_quick_exit_lockptr), "__at_quick_exit_lockptr");
             symbol(&atexit, "atexit");
             symbol(&__cxa_atexit, "__cxa_atexit");
             symbol(&__cxa_finalize, "__cxa_finalize");
             symbol(&__funcs_on_exit, "__funcs_on_exit");
-            symbol(&__atexit_lockptr, "__atexit_lockptr");
+            symbol(@ptrCast(&__atexit_lockptr), "__atexit_lockptr");
             symbol(&quick_exit_fn, "quick_exit");
             symbol(&exit_fn, "exit");
             symbol(&__libc_exit_fini, "__libc_exit_fini");
