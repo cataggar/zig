@@ -631,7 +631,7 @@ fn __fseeko_unlocked(f: *FILE, off_arg: i64, whence: c_int) callconv(.c) c_int {
 
     // Flush write buffer, and report error on failure.
     if (f.wpos != f.wbase) {
-        f.write_fn.?(f, @ptrCast(&[0]u8{}), 0);
+        _ = f.write_fn.?(f, @ptrCast(&[0]u8{}), 0);
         if (f.wpos == null) return -1;
     }
 
@@ -924,7 +924,7 @@ fn remove_fn(path: [*:0]const u8) callconv(.c) c_int {
 
 /// rename.c: int rename(const char *old, const char *new)
 fn rename_fn(old: [*:0]const u8, new: [*:0]const u8) callconv(.c) c_int {
-    return c_errno(linux.renameat2(linux.AT.FDCWD, @ptrCast(old), linux.AT.FDCWD, @ptrCast(new), 0));
+    return c_errno(linux.renameat2(linux.AT.FDCWD, @ptrCast(old), linux.AT.FDCWD, @ptrCast(new), .{}));
 }
 
 // --- Formatting wrappers (fprintf.c, printf.c, snprintf.c, sprintf.c, asprintf.c, dprintf.c) ---
