@@ -71,7 +71,13 @@ comptime {
     if (builtin.target.isMuslLibC()) {
         symbol(&copysign, "copysign");
         symbol(&copysignf, "copysignf");
+        symbol(&__fpclassify, "__fpclassify");
+        symbol(&__fpclassifyf, "__fpclassifyf");
+        symbol(&__fpclassifyl, "__fpclassifyl");
         symbol(&rint, "rint");
+        symbol(&__signbit, "__signbit");
+        symbol(&__signbitf, "__signbitf");
+        symbol(&__signbitl, "__signbitl");
     }
 
     symbol(&copysignl, "copysignl");
@@ -118,6 +124,98 @@ fn cbrt(x: f64) callconv(.c) f64 {
 
 fn cbrtf(x: f32) callconv(.c) f32 {
     return math.cbrt(x);
+}
+
+/// musl FP classification constants (from math.h):
+/// FP_NAN=0, FP_INFINITE=1, FP_ZERO=2, FP_SUBNORMAL=3, FP_NORMAL=4
+
+fn __fpclassify(x: f64) callconv(.c) c_int {
+    const u: u64 = @bitCast(x);
+    const e: u32 = @truncate((u >> 52) & 0x7ff);
+    if (e == 0) return if ((u << 1) != 0) 3 else 2;
+    if (e == 0x7ff) return if ((u << 12) != 0) 0 else 1;
+    return 4;
+}
+
+fn __fpclassifyf(x: f32) callconv(.c) c_int {
+    const u: u32 = @bitCast(x);
+    const e: u32 = (u >> 23) & 0xff;
+    if (e == 0) return if ((u << 1) != 0) 3 else 2;
+    if (e == 0xff) return if ((u << 9) != 0) 0 else 1;
+    return 4;
+}
+
+fn __fpclassifyl(x: c_longdouble) callconv(.c) c_int {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        16 => __fpclassifyf(@floatCast(x)),
+        32 => __fpclassifyf(@floatCast(x)),
+        64 => __fpclassify(@floatCast(x)),
+        80 => blk: {
+            const bytes: [16]u8 = @bitCast(x);
+            // x87 80-bit: bytes 0..7 = significand (LE), bytes 8..9 = sign+exponent
+            const e: u32 = (@as(u32, bytes[9]) & 0x7f) << 8 | @as(u32, bytes[8]);
+            const msb: u1 = @truncate(bytes[7] >> 7);
+            if (e == 0) {
+                // Check if significand is non-zero (subnormal vs zero)
+                var has_bits = false;
+                for (bytes[0..8]) |b| {
+                    if (b != 0) {
+                        has_bits = true;
+                        break;
+                    }
+                }
+                break :blk if (has_bits) @as(c_int, 3) else @as(c_int, 2);
+            }
+            if (e == 0x7fff) {
+                if (msb == 0) break :blk @as(c_int, 0); // pseudo-NaN
+                // Check if significand bits (excluding integer bit) are non-zero
+                var has_frac = false;
+                for (bytes[0..7]) |b| {
+                    if (b != 0) {
+                        has_frac = true;
+                        break;
+                    }
+                }
+                if (!has_frac and (bytes[7] & 0x7f) == 0) break :blk @as(c_int, 1); // infinity
+                break :blk @as(c_int, 0); // NaN
+            }
+            break :blk if (msb != 0) @as(c_int, 4) else @as(c_int, 0);
+        },
+        128 => blk: {
+            const ux: u128 = @bitCast(x);
+            const e: u32 = @truncate((ux >> 112) & 0x7fff);
+            if (e == 0) break :blk if ((ux << 1) != 0) @as(c_int, 3) else @as(c_int, 2);
+            if (e == 0x7fff) break :blk if ((ux << 17) != 0) @as(c_int, 0) else @as(c_int, 1);
+            break :blk @as(c_int, 4);
+        },
+        else => unreachable,
+    };
+}
+
+fn __signbit(x: f64) callconv(.c) c_int {
+    const u: u64 = @bitCast(x);
+    return @intCast(u >> 63);
+}
+
+fn __signbitf(x: f32) callconv(.c) c_int {
+    const u: u32 = @bitCast(x);
+    return @intCast(u >> 31);
+}
+
+fn __signbitl(x: c_longdouble) callconv(.c) c_int {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        16, 32 => __signbitf(@floatCast(x)),
+        64 => __signbit(@floatCast(x)),
+        80 => blk: {
+            const bytes: [16]u8 = @bitCast(x);
+            break :blk @intCast(bytes[9] >> 7);
+        },
+        128 => blk: {
+            const ux: u128 = @bitCast(x);
+            break :blk @intCast(ux >> 127);
+        },
+        else => unreachable,
+    };
 }
 
 fn copysign(x: f64, y: f64) callconv(.c) f64 {

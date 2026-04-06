@@ -836,9 +836,7 @@ const src_files = [_][]const u8{
     "musl/src/math/fma.c",
     "musl/src/math/fmaf.c",
     "musl/src/math/fmal.c",
-    "musl/src/math/__fpclassify.c",
-    "musl/src/math/__fpclassifyf.c",
-    "musl/src/math/__fpclassifyl.c",
+
     "musl/src/math/frexp.c",
     "musl/src/math/frexpf.c",
     "musl/src/math/frexpl.c",
@@ -985,9 +983,7 @@ const src_files = [_][]const u8{
     "musl/src/math/scalbn.c",
     "musl/src/math/scalbnf.c",
     "musl/src/math/scalbnl.c",
-    "musl/src/math/__signbit.c",
-    "musl/src/math/__signbitf.c",
-    "musl/src/math/__signbitl.c",
+
     "musl/src/math/signgam.c",
     "musl/src/math/significand.c",
     "musl/src/math/significandf.c",
@@ -1029,7 +1025,7 @@ const src_files = [_][]const u8{
     "musl/src/math/x32/remainderl.s",
     "musl/src/math/x32/rintl.s",
     "musl/src/math/x86_64/acosl.s",
-    "musl/src/math/x86_64/asinl.s",
+
     "musl/src/math/x86_64/atan2l.s",
     "musl/src/math/x86_64/exp2l.s",
     "musl/src/math/x86_64/expl.s",
