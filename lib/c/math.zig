@@ -125,6 +125,7 @@ fn asinhf_(x: f32) callconv(.c) f32 {
 /// and the series atanh(s) = s + s³/3 + s⁵/5 + ...
 /// Uses only basic arithmetic (+, -, *, /) — no @log.
 fn log1p_wide(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
     if (x == 0) return x;
     const one: T = 1.0;
     const u = one + x;
@@ -153,6 +154,7 @@ fn log1p_wide(comptime T: type, x: T) T {
 /// Compute log(x) for x > 0 using frexp range reduction + log1p_wide.
 /// Uses only basic arithmetic — no @log.
 fn log_pure(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
     const fr = math.frexp(x);
     var sig = fr.significand;
     var exp_val = fr.exponent;
@@ -169,6 +171,7 @@ fn log_pure(comptime T: type, x: T) T {
 
 /// Taylor series for exp(x)-1: x + x²/2! + x³/3! + ...
 fn taylor_expm1(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
     var term: T = x;
     var sum: T = x;
     var n: u32 = 2;
@@ -184,6 +187,7 @@ fn taylor_expm1(comptime T: type, x: T) T {
 /// Compute exp(x)-1 using Taylor series with range reduction.
 /// Uses only basic arithmetic — no @exp.
 fn expm1_wide(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
     if (x == 0) return x;
     if (!math.isFinite(x)) {
         if (x > 0) return math.inf(T);
@@ -213,6 +217,7 @@ fn expm1_wide(comptime T: type, x: T) T {
 
 /// Compute exp(x) using expm1. Uses only basic arithmetic — no @exp.
 fn exp_pure(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
     return 1.0 + expm1_wide(T, x);
 }
 
