@@ -139,32 +139,33 @@ fn expm1_wide(comptime T: type, x: T) T {
     return t * x / @log(u);
 }
 
-/// Port of musl asinh.c using f80 intermediates for < 1.5 ULP accuracy.
-/// The 18 extra mantissa bits of f80 eliminate the log1p precision issue
-/// that causes 1.5+ ULP errors in the f64 [0.125,0.5] range.
+/// Port of musl asinh.c using f128 intermediates for < 1.5 ULP accuracy.
+/// The extra mantissa bits of f128 (112 vs 52 for f64) eliminate the log1p
+/// precision issue that causes 1.5+ ULP errors in the f64 [0.125,0.5] range.
+/// f128 is available on all targets via software emulation.
 fn asinh_(x_: f64) callconv(.c) f64 {
     @setFloatMode(.strict);
     const u: u64 = @bitCast(x_);
     const e = (u >> 52) & 0x7FF;
     const s = u >> 63;
-    const x: f80 = @floatCast(@as(f64, @bitCast(u & (std.math.maxInt(u64) >> 1))));
+    const x: f128 = @floatCast(@as(f64, @bitCast(u & (std.math.maxInt(u64) >> 1))));
 
     if (e >= 0x3FF + 26) {
         // |x| >= 0x1p26 or inf or nan
-        const r: f64 = @floatCast(@log(x) + @as(f80, 0.693147180559945309417232121458176568));
+        const r: f64 = @floatCast(@log(x) + @as(f128, 0.693147180559945309417232121458176568));
         return if (s != 0) -r else r;
     } else if (e >= 0x3FF + 1) {
         // |x| >= 2
         const r: f64 = @floatCast(@log(2 * x + 1 / (@sqrt(x * x + 1) + x)));
         return if (s != 0) -r else r;
     } else if (e >= 0x3FF - 26) {
-        // |x| >= 0x1p-26: compute in f80 to avoid log1p precision loss
+        // |x| >= 0x1p-26: compute in f128 to avoid log1p precision loss
         const y = x + x * x / (@sqrt(x * x + 1) + 1);
-        const r: f64 = @floatCast(log1p_wide(f80, y));
+        const r: f64 = @floatCast(log1p_wide(f128, y));
         return if (s != 0) -r else r;
     } else {
         // |x| < 0x1p-26, raise inexact if x != 0
-        std.mem.doNotOptimizeAway(x + @as(f80, 0x1p120));
+        std.mem.doNotOptimizeAway(x + @as(f128, 0x1p120));
         return x_;
     }
 }
@@ -267,22 +268,23 @@ fn coshl_(x: c_longdouble) callconv(.c) c_longdouble {
     };
 }
 
-/// Port of musl sinh.c using f80 intermediates.
-/// f80 exp handles values up to ~11356 without overflow, so the
+/// Port of musl sinh.c using f128 intermediates.
+/// f128 exp handles values up to ~11356 without overflow, so the
 /// overflow path (|x| > log(DBL_MAX) ≈ 710) works without the
 /// exp(x/2)² trick that causes directed rounding errors.
+/// f128 is available on all targets via software emulation.
 fn sinh_(x_: f64) callconv(.c) f64 {
     @setFloatMode(.strict);
     const u: u64 = @bitCast(x_);
     const absu = u & (std.math.maxInt(u64) >> 1);
     const w: u32 = @intCast(absu >> 32);
-    const absx: f80 = @abs(@as(f80, @floatCast(x_)));
-    var h: f80 = 0.5;
+    const absx: f128 = @abs(@as(f128, @floatCast(x_)));
+    var h: f128 = 0.5;
     if (u >> 63 != 0) h = -h;
 
     // |x| < log(DBL_MAX)
     if (w < 0x40862e42) {
-        const t: f80 = expm1_wide(f80, absx);
+        const t: f128 = expm1_wide(f128, absx);
         if (w < 0x3ff00000) {
             if (w < 0x3ff00000 - (26 << 20))
                 return x_;
@@ -291,8 +293,8 @@ fn sinh_(x_: f64) callconv(.c) f64 {
         return @floatCast(h * (t + t / (t + 1)));
     }
 
-    // |x| > log(DBL_MAX) or nan: f80 exp won't overflow here
-    const t: f80 = @exp(absx);
+    // |x| > log(DBL_MAX) or nan: f128 exp won't overflow here
+    const t: f128 = @exp(absx);
     return @floatCast(h * t);
 }
 
@@ -310,7 +312,7 @@ fn sinhl_impl(comptime T: type, x_: T) T {
     var h: T = 0.5;
     if (math.signbit(x_)) h = -h;
 
-    // |x| < log(FLT_MAX) for f80/f128 (≈ 11356.52)
+    // |x| < log(FLT_MAX) for extended/f128 (≈ 11356.52)
     if (absx < @as(T, 0x1.62e42fefa39efp+13)) {
         const t = expm1_wide(T, absx);
         if (absx < 1.0) {
