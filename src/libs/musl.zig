@@ -1323,7 +1323,6 @@ const src_files = [_][]const u8{
     "musl/src/signal/x32/sigsetjmp.s",
     "musl/src/signal/x86_64/restore.s",
     "musl/src/signal/x86_64/sigsetjmp.s",
-    "musl/src/stat/fstatat.c",
     "musl/src/stdio/asprintf.c",
     "musl/src/stdio/clearerr.c",
     "musl/src/stdio/dprintf.c",

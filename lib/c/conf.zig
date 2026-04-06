@@ -197,9 +197,6 @@ const sc_values = blk: {
     break :blk t;
 };
 
-extern "c" fn getrlimit(resource: c_int, rlim: *linux.rlimit) c_int;
-extern "c" fn getauxval(at_type: c_ulong) c_ulong;
-
 fn sysconf(name: c_int) callconv(.c) c_long {
     if (name < 0 or name >= sc_values.len or sc_values[@intCast(name)] == 0) {
         std.c._errno().* = @intFromEnum(linux.E.INVAL);
@@ -211,7 +208,7 @@ fn sysconf(name: c_int) callconv(.c) c_long {
     // RLIMIT case
     if (v < -256) {
         var rl: linux.rlimit = undefined;
-        _ = getrlimit(v & 16383, &rl);
+        _ = linux.getrlimit(@enumFromInt(v & 16383), &rl);
         if (rl.cur == std.math.maxInt(usize)) return -1;
         return if (rl.cur > std.math.maxInt(c_long)) std.math.maxInt(c_long) else @intCast(rl.cur);
     }
@@ -222,7 +219,7 @@ fn sysconf(name: c_int) callconv(.c) c_long {
         @as(u8, @truncate(@as(u16, @bitCast(VER)))) => POSIX_VERSION,
         @as(u8, @truncate(@as(u16, @bitCast(JT_ARG_MAX)))) => 131072,
         @as(u8, @truncate(@as(u16, @bitCast(JT_MQ_PRIO_MAX)))) => 32768,
-        @as(u8, @truncate(@as(u16, @bitCast(JT_PAGE_SIZE)))) => @intCast(getauxval(6)), // AT_PAGESZ=6
+        @as(u8, @truncate(@as(u16, @bitCast(JT_PAGE_SIZE)))) => @intCast(linux.getauxval(std.elf.AT_PAGESZ)),
         @as(u8, @truncate(@as(u16, @bitCast(JT_SEM_VALUE_MAX)))) => 0x7fffffff,
         @as(u8, @truncate(@as(u16, @bitCast(JT_DELAYTIMER_MAX)))) => 0x7fffffff,
         @as(u8, @truncate(@as(u16, @bitCast(JT_NPROCS_CONF)))),
@@ -242,13 +239,13 @@ fn sysconf(name: c_int) callconv(.c) c_long {
                 @as(u64, si.totalram) * unit
             else
                 (@as(u64, si.freeram) + @as(u64, si.bufferram)) * unit;
-            const page_size = getauxval(6);
+            const page_size = linux.getauxval(std.elf.AT_PAGESZ);
             const pages = mem / page_size;
             break :blk if (pages > std.math.maxInt(c_long)) std.math.maxInt(c_long) else @intCast(pages);
         },
         @as(u8, @truncate(@as(u16, @bitCast(JT_MINSIGSTKSZ)))),
         @as(u8, @truncate(@as(u16, @bitCast(JT_SIGSTKSZ)))) => blk: {
-            var val: c_long = @intCast(getauxval(51)); // AT_MINSIGSTKSZ=51
+            var val: c_long = @intCast(linux.getauxval(std.elf.AT_MINSIGSTKSZ));
             if (val < 2048) val = 2048; // MINSIGSTKSZ
             if (code == @as(u8, @truncate(@as(u16, @bitCast(JT_SIGSTKSZ)))))
                 val += 8192 - 2048; // SIGSTKSZ - MINSIGSTKSZ
@@ -260,8 +257,6 @@ fn sysconf(name: c_int) callconv(.c) c_long {
 }
 
 // --- conf/legacy.c ---
-
-extern "c" fn sysconf_c(name: c_int) c_long;
 
 fn get_nprocs_conf() callconv(.c) c_int { return @intCast(sysconf(83)); }
 fn get_nprocs() callconv(.c) c_int { return @intCast(sysconf(84)); }

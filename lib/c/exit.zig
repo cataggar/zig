@@ -174,10 +174,8 @@ fn exit_fn(code: c_int) callconv(.c) noreturn {
 
 // --- abort ---
 
-extern "c" fn raise(sig: linux.SIG) c_int;
-
 fn abort_fn() callconv(.c) noreturn {
-    _ = raise(.ABRT);
+    _ = linux.tkill(linux.gettid(), .ABRT);
 
     // If SIGABRT handler returned, block all signals and force-kill
     // Block all signals
@@ -185,8 +183,8 @@ fn abort_fn() callconv(.c) noreturn {
     for (&set) |*s| s.* = ~@as(@TypeOf(s.*), 0);
     _ = linux.sigprocmask(2, &set, null); // SIG_SETMASK=2 to block all
 
-    // Lock __abort_lock
-    __lock(&__abort_lock[0]);
+    // Lock __abort_lock (atomic CAS to avoid extern "c" dependency on __lock)
+    while (@cmpxchgWeak(c_int, &__abort_lock[0], 0, 1, .acquire, .monotonic) != null) {}
 
     // Reset SIGABRT to default
     const act = linux.Sigaction{
@@ -206,6 +204,6 @@ fn abort_fn() callconv(.c) noreturn {
 
     // Should be unreachable, but force crash
     @breakpoint();
-    _ = raise(.KILL);
+    _ = linux.tkill(linux.gettid(), .KILL);
     _Exit(127);
 }

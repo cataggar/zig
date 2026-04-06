@@ -24,6 +24,8 @@ comptime {
         symbol(&fstatvfsLinux, "fstatvfs");
         symbol(&fchmodLinux, "fchmod");
         if (builtin.link_libc) {
+            symbol(&fstatatImpl, "fstatat");
+            symbol(&fstatatImpl, "__fstatat");
             symbol(&statLinux, "stat");
             symbol(&lstatLinux, "lstat");
             symbol(&fstatLinux, "__fstat");
@@ -90,8 +92,183 @@ fn utimensatLinux(fd: c_int, path: ?[*:0]const u8, times: ?*const [2]linux.times
     return errno(linux.utimensat(fd, if (path) |p| @ptrCast(p) else null, if (times) |t| t else null, @bitCast(flags)));
 }
 
-// --- Extern libc functions (still compiled from C) ---
-extern "c" fn fstatat(fd: c_int, path: [*:0]const u8, buf: *anyopaque, flag: c_int) c_int;
+// --- fstatat implementation (replaces musl/src/stat/fstatat.c) ---
+
+fn makedev(major: u32, minor: u32) u64 {
+    const x: u64 = major;
+    const y: u64 = minor;
+    return ((x & 0xfffff000) << 32) | ((x & 0x00000fff) << 8) |
+        ((y & 0xffffff00) << 12) | (y & 0x000000ff);
+}
+
+/// Musl-ABI time64 timespec, matching the C struct layout for all arches.
+const Ts = if (@sizeOf(isize) >= 8)
+    extern struct { sec: i64, nsec: i64 }
+else if (builtin.cpu.arch.endian() == .little)
+    extern struct { sec: i64, nsec: i32, _p: u32 = 0 }
+else
+    extern struct { sec: i64, _p: u32 = 0, nsec: i32 };
+
+/// Time32 timespec for old 32-bit stat layouts.
+const Ts32 = extern struct { sec: i32, nsec: i32 };
+
+/// Returns true for arches where kernel kstat matches musl stat (direct fstatat64 works).
+fn kstatMatchesStat() bool {
+    const abi = builtin.target.abi;
+    if (abi == .muslx32) return true;
+    return switch (builtin.cpu.arch) {
+        .x86_64, .aarch64, .aarch64_be, .riscv64, .loongarch64,
+        .powerpc64, .powerpc64le, .s390x => true,
+        else => false,
+    };
+}
+
+/// Musl-ABI struct stat, architecture-specific layout.
+const MuStat = muStatType();
+
+fn muStatType() type {
+    // 64-bit arches where kstat matches stat use direct syscall, no struct needed.
+    // But mips64 (and n32 ABI) needs statx, so define structs for those.
+    const arch = builtin.cpu.arch;
+    const abi = builtin.target.abi;
+    if (abi == .muslabin32) return MuStatMipsN32; // mipsn32
+    return switch (arch) {
+        // Generic layout: aarch64, hexagon, loongarch64, riscv32, riscv64
+        .aarch64, .aarch64_be, .hexagon, .loongarch64, .riscv32, .riscv64 => extern struct {
+            dev: u64, ino: u64, mode: u32, nlink: u32, uid: u32, gid: u32,
+            rdev: u64, __pad: u64 = 0, size: i64, blksize: i32, __pad2: i32 = 0,
+            blocks: i64, atim: Ts, mtim: Ts, ctim: Ts, __unused: [2]u32 = .{ 0, 0 },
+        },
+        .x86_64 => extern struct {
+            dev: u64, ino: u64, nlink: u64, mode: u32, uid: u32, gid: u32,
+            __pad0: u32 = 0, rdev: u64, size: i64, blksize: i64, blocks: i64,
+            atim: Ts, mtim: Ts, ctim: Ts, __unused: [3]i64 = .{ 0, 0, 0 },
+        },
+        .powerpc64, .powerpc64le => extern struct {
+            dev: u64, ino: u64, nlink: u64, mode: u32, uid: u32, gid: u32,
+            __pad0: u32 = 0, rdev: u64, size: i64, blksize: i64, blocks: i64,
+            atim: Ts, mtim: Ts, ctim: Ts, __unused: [3]u64 = .{ 0, 0, 0 },
+        },
+        .s390x => extern struct {
+            dev: u64, ino: u64, nlink: u64, mode: u32, uid: u32, gid: u32,
+            __pad0: u32 = 0, rdev: u64, size: i64,
+            atim: Ts, mtim: Ts, ctim: Ts,
+            blksize: i64, blocks: i64, __unused: [3]u64 = .{ 0, 0, 0 },
+        },
+        .mips64, .mips64el => extern struct {
+            dev: u64, __pad1: [3]i32 = .{ 0, 0, 0 },
+            ino: u64, mode: u32, nlink: u32, uid: u32, gid: u32,
+            rdev: u64, __pad2: [2]u32 = .{ 0, 0 }, size: i64, __pad3: i32 = 0,
+            atim: Ts, mtim: Ts, ctim: Ts,
+            blksize: i64, __pad4: u32 = 0, blocks: i64, __pad5: [14]i32 = .{0} ** 14,
+        },
+        .arm, .armeb, .thumb, .thumbeb, .x86 => extern struct {
+            dev: u64, __dev_pad: i32 = 0, ino_truncated: i32 = 0,
+            mode: u32, nlink: u32, uid: u32, gid: u32,
+            rdev: u64, __rdev_pad: i32 = 0,
+            size: i64, blksize: i32, blocks: i64,
+            atim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+            mtim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+            ctim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+            ino: u64, atim: Ts, mtim: Ts, ctim: Ts,
+        },
+        .m68k => extern struct {
+            dev: u64, __dev_pad: i16 = 0, ino_truncated: i32 = 0,
+            mode: u32, nlink: u32, uid: u32, gid: u32,
+            rdev: u64, __rdev_pad: i16 = 0,
+            size: i64, blksize: i32, blocks: i64,
+            atim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+            mtim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+            ctim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+            ino: u64, atim: Ts, mtim: Ts, ctim: Ts,
+        },
+        .mips, .mipsel => extern struct {
+            dev: u64, __pad1: [2]i32 = .{ 0, 0 },
+            ino: u64, mode: u32, nlink: u32, uid: u32, gid: u32,
+            rdev: u64, __pad2: [2]i32 = .{ 0, 0 }, size: i64,
+            atim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+            mtim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+            ctim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+            blksize: i32, __pad3: i32 = 0, blocks: i64,
+            atim: Ts, mtim: Ts, ctim: Ts, __pad4: [2]i32 = .{ 0, 0 },
+        },
+        .powerpc, .powerpcle => extern struct {
+            dev: u64, ino: u64, mode: u32, nlink: u32, uid: u32, gid: u32,
+            rdev: u64, __rdev_pad: i16 = 0,
+            size: i64, blksize: i32, blocks: i64,
+            atim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+            mtim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+            ctim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+            __unused: [2]u32 = .{ 0, 0 },
+            atim: Ts, mtim: Ts, ctim: Ts,
+        },
+        else => @compileError("unsupported architecture for musl stat"),
+    };
+}
+
+/// mipsn32: mips64 arch with .muslabin32 ABI (32-bit address, 64-bit regs)
+const MuStatMipsN32 = extern struct {
+    dev: u64, __pad1: [2]i32 = .{ 0, 0 },
+    ino: u64, mode: u32, nlink: u32, uid: u32, gid: u32,
+    rdev: u64, __pad2: [2]i32 = .{ 0, 0 }, size: i64,
+    atim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+    mtim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+    ctim32: Ts32 = .{ .sec = 0, .nsec = 0 },
+    blksize: i32, __pad3: i32 = 0, blocks: i64,
+    atim: Ts, mtim: Ts, ctim: Ts, __pad4: [2]i32 = .{ 0, 0 },
+};
+
+fn fstatatImpl(fd: c_int, path: [*:0]const u8, buf: *anyopaque, flag: c_int) callconv(.c) c_int {
+    if (comptime kstatMatchesStat()) {
+        // Kernel stat struct matches musl stat — pass buffer directly.
+        return errno(linux.syscall4(
+            .fstatat64,
+            @as(usize, @bitCast(@as(isize, fd))),
+            @intFromPtr(path),
+            @intFromPtr(buf),
+            @as(usize, @bitCast(@as(isize, flag))),
+        ));
+    }
+    // Use statx and convert to the arch-specific musl stat struct.
+    var stx: linux.Statx = undefined;
+    const stx_rc: isize = @bitCast(linux.statx(
+        fd, path,
+        @as(u32, @bitCast(flag)) | linux.AT.NO_AUTOMOUNT,
+        linux.STATX.BASIC_STATS, &stx,
+    ));
+    if (stx_rc < 0) {
+        std.c._errno().* = @intCast(-stx_rc);
+        return -1;
+    }
+    const st: *MuStat = @ptrCast(@alignCast(buf));
+    st.* = std.mem.zeroes(MuStat);
+    st.dev = makedev(stx.dev_major, stx.dev_minor);
+    st.ino = stx.ino;
+    st.mode = @intCast(stx.mode);
+    st.nlink = @intCast(stx.nlink);
+    st.uid = stx.uid;
+    st.gid = stx.gid;
+    st.rdev = makedev(stx.rdev_major, stx.rdev_minor);
+    st.size = @intCast(stx.size);
+    st.blksize = @intCast(stx.blksize);
+    st.blocks = @intCast(stx.blocks);
+    st.atim = .{ .sec = stx.atime.sec, .nsec = @intCast(stx.atime.nsec) };
+    st.mtim = .{ .sec = stx.mtime.sec, .nsec = @intCast(stx.mtime.nsec) };
+    st.ctim = .{ .sec = stx.ctime.sec, .nsec = @intCast(stx.ctime.nsec) };
+    if (@hasField(MuStat, "atim32")) {
+        st.atim32 = .{ .sec = @truncate(stx.atime.sec), .nsec = @intCast(stx.atime.nsec) };
+        st.mtim32 = .{ .sec = @truncate(stx.mtime.sec), .nsec = @intCast(stx.mtime.nsec) };
+        st.ctim32 = .{ .sec = @truncate(stx.ctime.sec), .nsec = @intCast(stx.ctime.nsec) };
+    }
+    if (@hasField(MuStat, "ino_truncated")) {
+        st.ino_truncated = @truncate(stx.ino);
+    }
+    return 0;
+}
+
+fn fstatat(fd: c_int, path: [*:0]const u8, buf: *anyopaque, flag: c_int) c_int {
+    return fstatatImpl(fd, path, buf, flag);
+}
 
 fn statLinux(noalias path: [*:0]const u8, noalias buf: *anyopaque) callconv(.c) c_int {
     return fstatat(linux.AT.FDCWD, path, buf, 0);
