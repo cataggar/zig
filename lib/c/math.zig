@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 
 const std = @import("std");
 const math = std.math;
+const mem = std.mem;
 const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 const expectApproxEqAbs = std.testing.expectApproxEqAbs;
@@ -71,7 +72,10 @@ comptime {
     if (builtin.target.isMuslLibC()) {
         symbol(&copysign, "copysign");
         symbol(&copysignf, "copysignf");
+        symbol(&nextafter, "nextafter");
+        symbol(&nexttoward, "nexttoward");
         symbol(&rint, "rint");
+        symbol(&scalb, "scalb");
     }
 
     symbol(&copysignl, "copysignl");
@@ -360,4 +364,77 @@ fn tanh(x: f64) callconv(.c) f64 {
 
 fn tanhf(x: f32) callconv(.c) f32 {
     return math.tanh(x);
+}
+
+fn nextafter(x: f64, y: f64) callconv(.c) f64 {
+    var ux: u64 = @bitCast(x);
+    const uy: u64 = @bitCast(y);
+
+    if (math.isNan(x) or math.isNan(y)) return x + y;
+    if (ux == uy) return y;
+
+    const ax = ux & (math.maxInt(u64) >> 1);
+    const ay = uy & (math.maxInt(u64) >> 1);
+    if (ax == 0) {
+        if (ay == 0) return y;
+        ux = (uy & (@as(u64, 1) << 63)) | 1;
+    } else if (ax > ay or ((ux ^ uy) & (@as(u64, 1) << 63)) != 0) {
+        ux -= 1;
+    } else {
+        ux += 1;
+    }
+    const e: u32 = @truncate((ux >> 52) & 0x7ff);
+    // raise overflow if ux is infinite and x is finite
+    if (e == 0x7ff) {
+        mem.doNotOptimizeAway(x + x);
+    }
+    // raise underflow if ux is subnormal or zero
+    if (e == 0) {
+        const val: f64 = @bitCast(ux);
+        mem.doNotOptimizeAway(val * val);
+    }
+    return @bitCast(ux);
+}
+
+fn nexttoward(x: f64, y: c_longdouble) callconv(.c) f64 {
+    var ux: u64 = @bitCast(x);
+
+    if (math.isNan(x) or math.isNan(y)) return x + @as(f64, @floatCast(y));
+
+    const xld: c_longdouble = @floatCast(x);
+    if (xld == y) return @floatCast(y);
+
+    const ax = ux & (math.maxInt(u64) >> 1);
+    if (ax == 0) {
+        ux = 1;
+        if (math.copysign(@as(c_longdouble, 1.0), y) < 0) {
+            ux |= @as(u64, 1) << 63;
+        }
+    } else if ((xld < y) == (ux < (@as(u64, 1) << 63))) {
+        ux += 1;
+    } else {
+        ux -= 1;
+    }
+    const e: u32 = @truncate((ux >> 52) & 0x7ff);
+    if (e == 0x7ff) {
+        mem.doNotOptimizeAway(x + x);
+    }
+    if (e == 0) {
+        const val: f64 = @bitCast(ux);
+        mem.doNotOptimizeAway(val * val);
+    }
+    return @bitCast(ux);
+}
+
+fn scalb(x: f64, fn_: f64) callconv(.c) f64 {
+    if (math.isNan(x) or math.isNan(fn_)) return x * fn_;
+    if (!math.isFinite(fn_)) {
+        if (fn_ > 0.0) return x * fn_;
+        return x / (-fn_);
+    }
+    if (rint(fn_) != fn_) return (fn_ - fn_) / (fn_ - fn_);
+    if (fn_ > 65000.0) return math.scalbn(x, 65000);
+    if (-fn_ > 65000.0) return math.scalbn(x, -65000);
+    const n: i32 = @intFromFloat(fn_);
+    return math.scalbn(x, n);
 }
