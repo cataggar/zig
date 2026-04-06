@@ -145,7 +145,6 @@ fn quick_exit_fn(code: c_int) callconv(.c) noreturn {
 
 // Weak extern functions that may or may not be provided at link time
 extern "c" fn __stdio_exit() void;
-extern "c" fn _fini() void;
 
 fn __libc_exit_fini() callconv(.c) void {
     // Iterate __fini_array in reverse order (same as musl's libc_exit_fini)
@@ -161,7 +160,9 @@ fn __libc_exit_fini() callconv(.c) void {
             }
         }
     }
-    _fini();
+    // _fini is a weak symbol provided by CRT; call it if present.
+    const opt_fini = @extern(?*const fn () callconv(.c) void, .{ .name = "_fini", .linkage = .weak });
+    if (opt_fini) |f| f();
 }
 
 fn exit_fn(code: c_int) callconv(.c) noreturn {

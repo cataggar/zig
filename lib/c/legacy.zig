@@ -269,16 +269,16 @@ fn vwarnx(fmt: ?[*:0]const u8, ap: VaList) callconv(.c) void {
     _ = putc('\n', ctx.stderr_p);
 }
 
-extern "c" fn exit_libc(code: c_int) noreturn;
+extern "c" fn exit(code: c_int) noreturn;
 
 fn verr(status: c_int, fmt: ?[*:0]const u8, ap: VaList) callconv(.c) noreturn {
     vwarn(fmt, ap);
-    exit_libc(status);
+    exit(status);
 }
 
 fn verrx(status: c_int, fmt: ?[*:0]const u8, ap: VaList) callconv(.c) noreturn {
     vwarnx(fmt, ap);
-    exit_libc(status);
+    exit(status);
 }
 
 fn warn_fn(fmt: ?[*:0]const u8, ...) callconv(.c) void {
@@ -349,7 +349,7 @@ fn ftw_fn(
 extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
 extern "c" fn fmemopen(buf: ?*const anyopaque, size: usize, mode: [*:0]const u8) ?*anyopaque;
 extern "c" fn fclose(stream: *anyopaque) c_int;
-extern "c" fn getline_fn(lineptr: *?[*]u8, n: *usize, stream: *anyopaque) isize;
+extern "c" fn getline(lineptr: *?[*]u8, n: *usize, stream: *anyopaque) isize;
 
 const defshells = "/bin/sh\n/bin/csh\n";
 
@@ -369,7 +369,7 @@ fn setusershell() callconv(.c) void {
 fn getusershell() callconv(.c) ?[*:0]u8 {
     if (shell_f == null) setusershell();
     const f = shell_f orelse return null;
-    const l = getline_fn(&shell_line, &shell_linesize, f);
+    const l = getline(&shell_line, &shell_linesize, f);
     if (l <= 0) return null;
     const line = shell_line orelse return null;
     const ul: usize = @intCast(l);
