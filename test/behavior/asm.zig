@@ -162,6 +162,22 @@ test "rw constraint (x86_64)" {
     try expectEqual(@as(i32, 18), res);
 }
 
+test "memory constraint value input (x86_64)" {
+    // Regression test: "m" constraint on a value (not pointer) must emit "*m"
+    // in LLVM IR so the asm reads from the stack slot, not from a double-
+    // indirected pointer. See https://codeberg.org/ziglang/zig/issues/31022
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.target.cpu.arch != .x86_64) return error.SkipZigTest;
+
+    const val: u32 = 0xdeadbeef;
+    var result: u32 = undefined;
+    asm ("movl %[in], %[out]"
+        : [out] "=r" (result),
+        : [in] "m" (val),
+    );
+    try expectEqual(@as(u32, 0xdeadbeef), result);
+}
+
 test "asm modifiers (AArch64)" {
     if (!builtin.target.cpu.arch.isAARCH64()) return error.SkipZigTest;
 
