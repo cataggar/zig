@@ -7239,10 +7239,18 @@ pub const FuncGen = struct {
             const arg_llvm_value = try self.resolveInst(input.operand);
             const arg_ty = self.typeOf(input.operand);
             const is_by_ref = isByRef(arg_ty, zcu);
+            // When we synthesize a memory location for a value operand (via alloca
+            // or by_ref pointer), we must emit "*m" instead of "m" in the LLVM IR
+            // constraint string and set the elementtype attribute. Without "*",
+            // LLVM treats the pointer as a plain value and introduces an extra
+            // level of indirection, causing the asm to read pointer bytes instead
+            // of the actual data. This matches what Clang emits for "m" constraints.
+            var is_indirect = false;
             if (is_by_ref) {
                 if (constraintAllowsMemory(constraint)) {
                     llvm_param_values[llvm_param_i] = arg_llvm_value;
                     llvm_param_types[llvm_param_i] = arg_llvm_value.typeOfWip(&self.wip);
+                    is_indirect = constraint[0] != '*';
                 } else {
                     const alignment = arg_ty.abiAlignment(zcu).toLlvm();
                     const arg_llvm_ty = try o.lowerType(pt, arg_ty);
@@ -7261,12 +7269,16 @@ pub const FuncGen = struct {
                     _ = try self.wip.store(.normal, arg_llvm_value, arg_ptr, alignment);
                     llvm_param_values[llvm_param_i] = arg_ptr;
                     llvm_param_types[llvm_param_i] = arg_ptr.typeOfWip(&self.wip);
+                    is_indirect = constraint[0] != '*';
                 }
             }
 
-            try llvm_constraints.ensureUnusedCapacity(gpa, constraint.len + 1);
+            try llvm_constraints.ensureUnusedCapacity(gpa, constraint.len + 1 + @intFromBool(is_indirect));
             if (total_i != 0) {
                 llvm_constraints.appendAssumeCapacity(',');
+            }
+            if (is_indirect) {
+                llvm_constraints.appendAssumeCapacity('*');
             }
             for (constraint) |byte| {
                 llvm_constraints.appendAssumeCapacity(switch (byte) {
@@ -7287,6 +7299,8 @@ pub const FuncGen = struct {
                 if (!is_by_ref) self.maybeMarkAllowZeroAccess(arg_ty.ptrInfo(zcu));
 
                 break :blk try o.lowerType(pt, if (is_by_ref) arg_ty else arg_ty.childType(zcu));
+            } else if (is_indirect) blk: {
+                break :blk try o.lowerType(pt, arg_ty);
             } else .none;
 
             llvm_param_i += 1;
