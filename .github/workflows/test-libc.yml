@@ -1,0 +1,198 @@
+name: test-libc
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to test'
+        required: true
+        type: string
+      test-filter:
+        description: 'Test filter (e.g. powf, llround)'
+        required: true
+        type: string
+      targets:
+        description: 'Target groups to test (comma-separated, or "all")'
+        required: false
+        default: 'all'
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: "0.16.0-dev.3061+9b1eaad13"
+  LLVM_VERSION: "21.1.8"
+
+jobs:
+  build-stage4:
+    name: "build stage4"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Install Ninja
+        run: sudo apt-get install -y ninja-build
+
+      - name: Download Zig
+        run: |
+          curl -sSfL "https://github.com/ctaggart/zig/releases/download/v${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" \
+            | xz -d | tar x -C "$HOME"
+          echo "ZIG=$HOME/zig-x86_64-linux-${ZIG_VERSION}/zig" >> "$GITHUB_ENV"
+
+      - name: Download LLVM
+        run: |
+          curl -sSfL "https://github.com/ctaggart/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/llvm-zig-${LLVM_VERSION}-x86_64-linux.tar.xz" \
+            | xz -d | tar x -C "$HOME"
+          echo "LLVM_PREFIX=$HOME/llvm-zig-${LLVM_VERSION}-x86_64-linux" >> "$GITHUB_ENV"
+
+      - name: Build stage4
+        run: |
+          TARGET="x86_64-linux-musl"
+          MCPU="baseline"
+          export CC="$ZIG cc -target $TARGET -mcpu=$MCPU"
+          export CXX="$ZIG c++ -target $TARGET -mcpu=$MCPU"
+
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_INSTALL_PREFIX="stage4" \
+            -DCMAKE_PREFIX_PATH="$LLVM_PREFIX" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DZIG_TARGET_TRIPLE="$TARGET" \
+            -DZIG_TARGET_MCPU="$MCPU" \
+            -DZIG_STATIC=ON \
+            -DZIG_NO_LIB=ON \
+            -GNinja \
+            -DCMAKE_C_LINKER_DEPFILE_SUPPORTED=FALSE \
+            -DCMAKE_CXX_LINKER_DEPFILE_SUPPORTED=FALSE
+
+          unset CC CXX
+          ninja -C build install
+          stage4/bin/zig version
+
+      - name: Upload stage4
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage4
+          path: stage4/bin/zig
+          retention-days: 1
+
+  test:
+    name: "${{ matrix.name }}"
+    needs: build-stage4
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64
+            target-filter: x86_64-linux-musl
+            qemu: false
+          - name: x86
+            target-filter: x86-linux-musl
+            qemu: false
+          - name: aarch64
+            target-filter: aarch64
+            qemu: true
+          - name: arm
+            target-filter: arm
+            qemu: true
+          - name: thumb
+            target-filter: thumb
+            qemu: true
+          - name: riscv
+            target-filter: riscv
+            qemu: true
+          - name: powerpc
+            target-filter: powerpc
+            qemu: true
+          - name: s390x
+            target-filter: s390x
+            qemu: true
+          - name: loongarch64
+            target-filter: loongarch64
+            qemu: true
+          - name: wasm32
+            target-filter: wasm32-wasi
+            wasmtime: true
+
+    steps:
+      - name: Check target filter
+        id: filter
+        run: |
+          TARGETS="${{ inputs.targets }}"
+          if [ "$TARGETS" != "all" ]; then
+            if ! echo ",$TARGETS," | grep -qi ",${{ matrix.name }},"; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Skipping ${{ matrix.name }} (filter: $TARGETS)"
+            fi
+          fi
+
+      - name: Checkout
+        if: steps.filter.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+
+      - name: Download stage4
+        if: steps.filter.outputs.skip != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stage4
+          path: stage4/bin
+
+      - name: Setup stage4
+        if: steps.filter.outputs.skip != 'true'
+        run: chmod +x stage4/bin/zig && stage4/bin/zig version
+
+      - name: Install QEMU
+        if: steps.filter.outputs.skip != 'true' && matrix.qemu
+        run: sudo apt-get update && sudo apt-get install -y qemu-user qemu-user-static
+
+      - name: Install Wasmtime
+        if: steps.filter.outputs.skip != 'true' && matrix.wasmtime
+        run: |
+          curl -sSfL https://wasmtime.dev/install.sh | bash
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: Clone libc-test
+        if: steps.filter.outputs.skip != 'true'
+        run: git clone --depth 1 https://github.com/ctaggart/libc-test.git "$HOME/libc-test"
+
+      - name: Run libc-test (${{ matrix.name }})
+        if: steps.filter.outputs.skip != 'true'
+        run: |
+          # Use -j1 for pthread tests to avoid runner thread exhaustion
+          FILTER="${{ inputs.test-filter }}"
+          if echo "$FILTER" | grep -qi "pthread"; then
+            JOBS=1
+          else
+            JOBS=2
+          fi
+
+          ARGS=(
+            -Dlibc-test-path="$HOME/libc-test"
+            -Dtest-filter="$FILTER"
+            -j$JOBS
+            --summary all
+          )
+
+          # Apply target filter
+          TARGET_FILTER="${{ matrix.target-filter }}"
+          if [ -n "$TARGET_FILTER" ]; then
+            ARGS+=(-Dtest-target-filter="$TARGET_FILTER")
+          fi
+
+          # Enable QEMU for cross-arch targets
+          if [ "${{ matrix.qemu }}" = "true" ]; then
+            ARGS+=(-fqemu)
+          fi
+
+          # Enable Wasmtime for WASM targets
+          if [ "${{ matrix.wasmtime }}" = "true" ]; then
+            ARGS+=(-fwasmtime)
+          fi
+
+          stage4/bin/zig build test-libc "${ARGS[@]}"
