@@ -43,8 +43,8 @@ fn openpty(
     const m = open("/dev/ptmx", O_RDWR | O_NOCTTY);
     if (m < 0) return -1;
 
-    if (ioctl(m, @bitCast(linux.T.IOCSPTLCK), &n) != 0 or
-        ioctl(m, @bitCast(linux.T.IOCGPTN), &n) != 0)
+    if (ioctl(m, @as(c_int, @bitCast(@as(c_uint, linux.T.IOCSPTLCK))), &n) != 0 or
+        ioctl(m, @as(c_int, @bitCast(@as(c_uint, linux.T.IOCGPTN))), &n) != 0)
     {
         _ = close(m);
         return -1;
@@ -60,7 +60,7 @@ fn openpty(
     }
 
     if (tio) |t| _ = tcsetattr(s, TCSANOW, t);
-    if (ws) |w| _ = ioctl(s, @bitCast(linux.T.IOCSWINSZ), w);
+    if (ws) |w| _ = ioctl(s, @as(c_int, @bitCast(@as(c_uint, linux.T.IOCSWINSZ))), w);
 
     pm.* = m;
     ps.* = s;
