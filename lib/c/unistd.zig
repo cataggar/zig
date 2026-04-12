@@ -77,7 +77,6 @@ comptime {
         symbol(&swab, "swab");
     }
     if (builtin.target.isWasiLibC()) {
-        symbol(&closeWasi, "close");
     }
 }
 

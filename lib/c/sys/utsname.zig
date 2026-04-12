@@ -11,7 +11,6 @@ comptime {
     }
 
     if (builtin.target.isWasiLibC()) {
-        symbol(&unameWasi, "uname");
     }
 }
 

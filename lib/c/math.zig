@@ -932,9 +932,7 @@ comptime {
     if (builtin.target.isMuslLibC()) {
         symbol(&copysign, "copysign");
         symbol(&copysignf, "copysignf");
-        symbol(&finitef, "finitef");
         symbol(&rint, "rint");
-        symbol(&significandf, "significandf");
         symbol(&scalbf, "scalbf");
         symbol(&rintf, "rintf");
         symbol(&__fpclassify, "__fpclassify");
