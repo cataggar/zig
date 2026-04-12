@@ -13,15 +13,35 @@ extern "c" fn nftw(
     flags: c_int,
 ) c_int;
 const VaList = std.builtin.VaList;
+extern "c" var stderr: *anyopaque;
+extern "c" var __progname: [*:0]const u8;
+extern "c" fn fprintf(stream: *anyopaque, fmt: [*:0]const u8, ...) c_int;
+extern "c" fn vfprintf(stream: *anyopaque, fmt: [*:0]const u8, ap: VaList) c_int;
+extern "c" fn fputs(s: [*:0]const u8, stream: *anyopaque) c_int;
+extern "c" fn putc(c: c_int, stream: *anyopaque) c_int;
+extern "c" fn perror(s: ?[*:0]const u8) void;
+extern "c" fn exit(status: c_int) noreturn;
 const FILE = anyopaque;
+extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*FILE;
+extern "c" fn fclose(stream: *FILE) c_int;
+extern "c" fn fmemopen(buf: *const anyopaque, size: usize, mode: [*:0]const u8) ?*FILE;
+extern "c" fn getline(lineptr: *?[*:0]u8, n: *usize, stream: *FILE) isize;
 const defshells = "/bin/sh\n/bin/csh\n";
 var us_line: ?[*:0]u8 = null;
 var us_linesize: usize = 0;
 var us_f: ?*FILE = null;
+extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
+extern "c" fn close(fd: c_int) c_int;
+extern "c" fn read(fd: c_int, buf: [*]u8, count: usize) isize;
+extern "c" fn tcgetattr(fd: c_int, termios_p: *anyopaque) c_int;
+extern "c" fn tcsetattr(fd: c_int, action: c_int, termios_p: *const anyopaque) c_int;
+extern "c" fn tcdrain(fd: c_int) c_int;
+extern "c" fn dprintf(fd: c_int, fmt: [*:0]const u8, ...) c_int;
 const O_RDWR = 2;
 const O_NOCTTY = 0o400;
 const O_CLOEXEC = 0o2000000;
 const TCSAFLUSH = 2;
+// termios struct is large and arch-specific; use an opaque buffer
 const TERMIOS_SIZE = 60; // sizeof(struct termios) on Linux
 
 var password: [128]u8 = undefined;
@@ -35,6 +55,10 @@ const passwd = extern struct {
     pw_dir: ?[*:0]const u8,
     pw_shell: ?[*:0]const u8,
 };
+extern "c" fn getpwuid_r(uid: c_uint, pwd: *passwd, buf: [*]u8, buflen: usize, result: *?*passwd) c_int;
+extern "c" fn geteuid() c_uint;
+extern "c" fn strnlen(s: [*]const u8, maxlen: usize) usize;
+extern "c" fn memcpy(dst: *anyopaque, src: *const anyopaque, n: usize) *anyopaque;
 var usridbuf: [L_cuserid]u8 = undefined;
 
 comptime {

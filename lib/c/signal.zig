@@ -20,14 +20,18 @@ const app_mask = blk: {
     }
     break :blk mask;
 };
+// Musl's struct sigaction (different from kernel's k_sigaction)
 const c_sigaction = extern struct {
     handler: ?*const fn (c_int) callconv(.c) void,
     mask: [128 / @sizeOf(c_ulong)]c_ulong,
     flags: c_int,
     restorer: ?*const fn () callconv(.c) void,
 };
+// Functions provided by the C library (sigaction.c remains as C)
 extern "c" fn sigaction(sig: c_int, act: ?*const c_sigaction, oact: ?*c_sigaction) callconv(.c) c_int;
+extern "c" fn __sigaction(sig: c_int, act: ?*const c_sigaction, oact: ?*c_sigaction) callconv(.c) c_int;
 const SA_RESTART = 0x10000000;
+extern "c" fn psignal(sig: c_int, msg: ?[*:0]const u8) callconv(.c) void;
 const SIG_HOLD: ?*const fn (c_int) callconv(.c) void = @ptrFromInt(2);
 const SIG_ERR: ?*const fn (c_int) callconv(.c) void = @ptrFromInt(std.math.maxInt(usize));
 const SI_QUEUE = -1;

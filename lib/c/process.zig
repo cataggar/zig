@@ -7,6 +7,7 @@ const NSIG = linux.NSIG;
 const sigset_t = linux.sigset_t;
 const SigsetElement = @typeInfo(sigset_t).array.child;
 const bits_per_elem = @bitSizeOf(SigsetElement);
+// app_mask: all signals set except internal signals 32, 33, 34
 const app_mask = blk: {
     var mask: sigset_t = undefined;
     for (&mask) |*elem| elem.* = ~@as(SigsetElement, 0);
@@ -51,8 +52,13 @@ const fdop = extern struct {
     // flexible array member follows; for alloc sizing only
 };
 extern "c" fn malloc(size: usize) callconv(.c) ?[*]u8;
+extern "c" fn free(ptr: ?*anyopaque) callconv(.c) void;
+extern "c" fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) callconv(.c) c_int;
+extern "c" var __environ: [*:null]?[*:0]u8;
+extern "c" fn getenv(name: [*:0]const u8) callconv(.c) ?[*:0]const u8;
 const NAME_MAX = 255;
 const PATH_MAX = 4096;
+extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) callconv(.c) c_int;
 const MAX_ARGS = 256;
 const c_sigaction = extern struct {
     handler: ?*const fn (c_int) callconv(.c) void,
@@ -61,6 +67,18 @@ const c_sigaction = extern struct {
     restorer: ?*const fn () callconv(.c) void,
 };
 const SIG_IGN: ?*const fn (c_int) callconv(.c) void = @ptrFromInt(1);
+extern "c" fn sigaction(sig: c_int, act: ?*const c_sigaction, oact: ?*c_sigaction) callconv(.c) c_int;
+extern "c" fn sigprocmask(how: c_int, set: ?*const musl_sigset_t, oset: ?*musl_sigset_t) callconv(.c) c_int;
+extern "c" fn sigemptyset(set: *musl_sigset_t) callconv(.c) c_int;
+extern "c" fn sigaddset(set: *musl_sigset_t, sig: c_int) callconv(.c) c_int;
+extern "c" fn posix_spawnattr_init(attr: *posix_spawnattr_t) callconv(.c) c_int;
+extern "c" fn posix_spawnattr_setsigmask(attr: *posix_spawnattr_t, mask: *const musl_sigset_t) callconv(.c) c_int;
+extern "c" fn posix_spawnattr_setsigdefault(attr: *posix_spawnattr_t, def: *const musl_sigset_t) callconv(.c) c_int;
+extern "c" fn posix_spawnattr_setflags(attr: *posix_spawnattr_t, flags: c_short) callconv(.c) c_int;
+extern "c" fn posix_spawnattr_destroy(attr: *posix_spawnattr_t) callconv(.c) c_int;
+extern "c" fn posix_spawn(pid: *linux.pid_t, path: [*:0]const u8, fa: ?*anyopaque, attr: ?*const posix_spawnattr_t, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) callconv(.c) c_int;
+extern "c" fn waitpid(pid: linux.pid_t, status: ?*c_int, options: c_int) callconv(.c) linux.pid_t;
+extern "c" fn pthread_testcancel() callconv(.c) void;
 const POSIX_SPAWN_SETSIGDEF: c_short = 0x4;
 const POSIX_SPAWN_SETSIGMASK: c_short = 0x8;
 const SIGINT = 2;
@@ -152,6 +170,8 @@ fn waitidLinux(idtype: c_uint, id: c_uint, info: ?*linux.siginfo_t, options: c_i
     ));
 }
 
+// Fallback signal restorer stubs. Architecture-specific .s files provide
+// real implementations where the kernel sigaction struct uses sa_restorer.
 fn __restore() callconv(.c) void {}
 
 fn __restore_rt() callconv(.c) void {}

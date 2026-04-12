@@ -1,10 +1,15 @@
+/// WASI CloudLibc syscall wrappers migrated from C to Zig.
+///
+/// These functions were originally in lib/libc/wasi/libc-bottom-half/cloudlibc/src/libc/.
+/// They wrap WASI preview1 syscalls to provide POSIX-compatible C library functions.
 const builtin = @import("builtin");
 const std = @import("std");
 const wasi = std.os.wasi;
 const symbol = @import("../c.zig").symbol;
 const E = std.c.E;
+/// In WASI libc, clockid_t is `const struct __clockid *` (a pointer to a struct
+/// containing the raw WASI clock ID). This differs from Zig's std.c.clockid_t.
 const CClockId = extern struct { id: wasi.clockid_t };
-extern fn __wasilibc_rmdirat(fd: c_int, path: [*:0]const u8) c_int;
 const NSEC_PER_SEC: u64 = 1_000_000_000;
 const timeval = extern struct {
     sec: i64,
@@ -12,7 +17,18 @@ const timeval = extern struct {
 };
 const sym = @import("../c.zig").symbol;
 extern "c" fn c_close(fd: c_int) c_int;
+extern "c" fn c_malloc(size: usize) ?[*]align(@alignOf(usize)) u8;
+extern "c" fn c_free(ptr: ?*anyopaque) void;
+extern "c" fn c_realloc(ptr: ?*anyopaque, size: usize) ?[*]align(@alignOf(usize)) u8;
+extern "c" fn c_qsort(
+    base: ?*anyopaque,
+    nmemb: usize,
+    size: usize,
+    compar: *const fn (*const anyopaque, *const anyopaque) callconv(.c) c_int,
+) void;
+extern "c" fn c_openat_nomode(dir: c_int, path: [*:0]const u8, flags: c_int) c_int;
 const DIRENT_DEFAULT_BUFFER_SIZE: usize = 4096;
+/// Internal DIR structure matching cloudlibc dirent_impl.h
 const DIR = extern struct {
     fd: c_int,
     cookie: wasi.dircookie_t,
@@ -23,6 +39,7 @@ const DIR = extern struct {
     dirent_ptr: ?[*]u8,
     dirent_size: usize,
 };
+/// Layout helper to compute offsetof(struct dirent, d_name).
 const DirentLayout = extern struct {
     d_ino: u64,
     d_type: u8,
@@ -50,18 +67,22 @@ const Timeval = extern struct {
     tv_sec: c_longlong,
     tv_usec: c_longlong,
 };
+// Poll event flags (from __header_poll.h)
 const POLLRDNORM: c_short = 0x1;
 const POLLWRNORM: c_short = 0x2;
 const POLLERR: c_short = 0x1000;
 const POLLHUP: c_short = 0x2000;
 const POLLNVAL: c_short = 0x4000;
+// ioctl requests (from __header_sys_ioctl.h)
 const FIONREAD: c_int = 1;
 const FIONBIO: c_int = 2;
+// O_* flags for WASI (from __header_fcntl.h)
 const O_NONBLOCK: c_int = 4; // __WASI_FDFLAGS_NONBLOCK
 const O_DIRECTORY: c_int = 2 << 12; // __WASI_OFLAGS_DIRECTORY << 12
 const O_RDONLY: c_int = 0x04000000;
 const clock_monotonic = ClockId{ .id = .MONOTONIC };
 const clock_realtime = ClockId{ .id = .REALTIME };
+threadlocal var wasi_errno: c_int = 0;
 
 comptime {
     if (builtin.target.isWasiLibC()) {
@@ -825,6 +846,7 @@ fn clockGettimeWasi(clock_id_ptr: *const CClockId, tp: *std.c.timespec) callconv
     }
 }
 
+/// Internal implementation that takes a raw clock ID (not the C pointer type).
 fn clockNanosleepImpl(clock_id: wasi.clockid_t, flags_arg: c_int, rqtp: *const std.c.timespec) c_int {
     const TIMER_ABSTIME = 1;
     if ((flags_arg & ~@as(c_int, TIMER_ABSTIME)) != 0)
@@ -845,6 +867,7 @@ fn clockNanosleepImpl(clock_id: wasi.clockid_t, flags_arg: c_int, rqtp: *const s
     return @intFromEnum(E.NOTSUP);
 }
 
+/// C ABI wrapper that accepts the C clockid_t pointer.
 fn clockNanosleepWasi(clock_id_ptr: *const CClockId, flags_arg: c_int, rqtp: *const std.c.timespec, _: ?*std.c.timespec) callconv(.c) c_int {
     return clockNanosleepImpl(clock_id_ptr.id, flags_arg, rqtp);
 }
@@ -959,6 +982,8 @@ fn utimensGetTimestamps(
     return true;
 }
 
+/// Grow a buffer (via realloc) to at least `target_size`.
+/// Returns null on allocation failure.
 fn grow(buf: ?[*]u8, buf_size: *usize, target_size: usize) ?[*]u8 {
     if (buf_size.* >= target_size) return buf;
     var new_size = buf_size.*;

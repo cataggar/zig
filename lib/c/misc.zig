@@ -7,13 +7,17 @@ const digits = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 var l64a_buf: [7]u8 = undefined;
 const NGROUPS_MAX = 32;
 extern "c" fn getgrouplist(user: [*:0]const u8, group: linux.gid_t, groups: [*]linux.gid_t, ngroups: *c_int) c_int;
+extern "c" fn setgroups(size: usize, list: [*]const linux.gid_t) c_int;
+// lockf command constants
 const F_ULOCK = 0;
 const F_LOCK = 1;
 const F_TLOCK = 2;
 const F_TEST = 3;
+// fcntl commands
 const F_GETLK = 5;
 const F_SETLK = 6;
 const F_SETLKW = 7;
+// flock types
 const F_RDLCK: c_short = 0;
 const F_WRLCK: c_short = 1;
 const F_UNLCK: c_short = 2;
@@ -25,11 +29,29 @@ const flock = extern struct {
     l_len: i64,
     l_pid: c_int,
 };
+extern "c" fn fcntl(fd: c_int, cmd: c_int, ...) c_int;
+extern "c" fn getpid() c_int;
+extern "c" fn __ptsname_r(fd: c_int, buf: [*]u8, len: usize) c_int;
 var ptsname_buf: [9 + @sizeOf(c_int) * 3 + 1]u8 = undefined;
+extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
+extern "c" fn close(fd: c_int) c_int;
+extern "c" fn ioctl(fd: c_int, req: c_int, ...) c_int;
+extern "c" fn login_tty(fd: c_int) c_int;
+extern "c" fn fork() c_int;
+extern "c" fn write(fd: c_int, buf: *const anyopaque, count: usize) isize;
+extern "c" fn read(fd: c_int, buf: *anyopaque, count: usize) isize;
+extern "c" fn _exit(code: c_int) noreturn;
+extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
+extern "c" fn pipe2(fds: *[2]c_int, flags: c_int) c_int;
+extern "c" fn tcsetattr(fd: c_int, action: c_int, termios_p: *const anyopaque) c_int;
+extern "c" fn snprintf(buf: [*]u8, size: usize, fmt: [*:0]const u8, ...) c_int;
 const O_RDWR = 2;
 const O_NOCTTY = 0o400;
 const O_CLOEXEC = 0o2000000;
 const TCSANOW = 0;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
+extern "c" fn dprintf(fd: c_int, fmt: [*:0]const u8, ...) c_int;
+extern "c" fn strchr(s: [*:0]u8, c: c_int) ?[*:0]u8;
 const O_WRONLY = 1;
 const MM_CONSOLE: c_long = 512;
 const MM_PRINT: c_long = 256;
@@ -41,8 +63,24 @@ const MM_NOCON = 4;
 const MM_NOMSG = 1;
 const MM_NOTOK = -1;
 const empty: [*:0]const u8 = "";
+extern "c" fn strdup(s: [*:0]const u8) ?[*:0]u8;
+extern "c" fn getcwd(buf: ?[*]u8, size: usize) ?[*:0]u8;
+// Use opaque stat buffers and compare dev+ino fields.
 const STAT_BUF_SIZE = 256;
+extern "c" fn stat(path: [*:0]const u8, buf: *[STAT_BUF_SIZE]u8) c_int;
 const FILE = anyopaque;
+extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*FILE;
+extern "c" fn fclose(f: *FILE) c_int;
+extern "c" fn fgets(buf: [*]u8, size: c_int, f: *FILE) ?[*]u8;
+extern "c" fn feof(f: *FILE) c_int;
+extern "c" fn ferror(f: *FILE) c_int;
+extern "c" fn fscanf(f: *FILE, fmt: [*:0]const u8, ...) c_int;
+extern "c" fn sscanf(s: [*]const u8, fmt: [*:0]const u8, ...) c_int;
+extern "c" fn fprintf(f: *FILE, fmt: [*:0]const u8, ...) c_int;
+extern "c" fn fseek(f: *FILE, offset: c_long, whence: c_int) c_int;
+extern "c" fn strlen(s: [*:0]const u8) usize;
+extern "c" fn strstr(haystack: [*:0]const u8, needle: [*:0]const u8) ?[*:0]const u8;
+extern "c" fn getline(lineptr: *?[*:0]u8, n: *usize, f: *FILE) isize;
 const SEEK_END = 2;
 const mntent = extern struct {
     mnt_fsname: ?[*:0]u8,
@@ -56,8 +94,21 @@ var internal_buf: ?[*:0]u8 = null;
 var internal_bufsize: usize = 0;
 var static_mnt: mntent = undefined;
 const SENTINEL: [*]u8 = @ptrCast(&internal_buf);
+extern "c" fn readlink(path: [*:0]const u8, buf: [*]u8, bufsiz: usize) isize;
+extern "c" fn __strchrnul(s: [*:0]const u8, c: c_int) [*:0]const u8;
+extern "c" fn strnlen(s: [*]const u8, maxlen: usize) usize;
+extern "c" fn memcpy(dst: *anyopaque, src: *const anyopaque, n: usize) *anyopaque;
+extern "c" fn memmove(dst: *anyopaque, src: *const anyopaque, n: usize) *anyopaque;
 const PATH_MAX = 4096;
 const SYMLOOP_MAX = 40;
+// C library dependencies.
+extern "c" fn mbtowc(pwc: ?*c_uint, s: [*]const u8, n: usize) c_int;
+extern "c" fn fputs(s: [*:0]const u8, f: *anyopaque) c_int;
+extern "c" fn fwrite(ptr: *const anyopaque, size: usize, nmemb: usize, f: *anyopaque) usize;
+extern "c" fn putc(c: c_int, f: *anyopaque) c_int;
+extern "c" fn flockfile(f: *anyopaque) void;
+extern "c" fn funlockfile(f: *anyopaque) void;
+extern "c" var stderr: *anyopaque;
 const MB_LEN_MAX = 4;
 var optarg_val: ?[*:0]u8 = null;
 var optind_val: c_int = 1;
@@ -66,6 +117,15 @@ var optopt_val: c_int = 0;
 var optpos_val: c_int = 0;
 var optreset_val: c_int = 0;
 const VaList = std.builtin.VaList;
+extern "c" fn __lock(lock: *c_int) void;
+extern "c" fn __unlock(lock: *c_int) void;
+extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
+extern "c" fn connect(fd: c_int, addr: *const anyopaque, len: c_uint) c_int;
+extern "c" fn send(fd: c_int, buf: *const anyopaque, len: usize, flags: c_int) isize;
+extern "c" fn time(tloc: ?*i64) i64;
+extern "c" fn gmtime_r(timep: *const i64, result: *anyopaque) ?*anyopaque;
+extern "c" fn strftime(s: [*]u8, max: usize, fmt: [*:0]const u8, tm: *const anyopaque) usize;
+extern "c" fn vsnprintf(buf: [*]u8, size: usize, fmt: [*:0]const u8, ap: VaList) c_int;
 const AF_UNIX = 1;
 const SOCK_DGRAM = 2;
 const SOCK_CLOEXEC = 0o2000000;
@@ -97,6 +157,15 @@ const Option = extern struct {
     val: c_int,
 };
 const required_argument: c_int = 1;
+extern "c" var optarg: ?[*:0]u8;
+extern "c" var optind: c_int;
+extern "c" var opterr: c_int;
+extern "c" var optopt: c_int;
+extern "c" var __optpos: c_int;
+extern "c" var __optreset: c_int;
+extern "c" fn getopt(argc: c_int, argv: [*]const ?[*:0]u8, optstring: [*:0]const u8) c_int;
+extern "c" fn __getopt_msg(a: [*:0]const u8, b: [*:0]const u8, c_ptr: [*]const u8, l: usize) void;
+extern "c" fn mblen(s: [*]const u8, n: usize) c_int;
 const sigset_t = [128 / @sizeOf(c_ulong)]c_ulong;
 const wordexp_t = extern struct {
     we_wordc: usize,
@@ -114,6 +183,17 @@ const WRDE_CMDSUB: c_int = 4;
 const WRDE_SYNTAX: c_int = 5;
 const F_SETFD: c_int = 2;
 const SIGKILL: c_int = 9;
+extern "c" fn dup2(old: c_int, new: c_int) c_int;
+extern "c" fn execl(path: [*:0]const u8, arg0: [*:0]const u8, ...) c_int;
+extern "c" fn kill(pid: c_int, sig: c_int) c_int;
+extern "c" fn fdopen(fd: c_int, mode: [*:0]const u8) ?*FILE;
+extern "c" fn getdelim(lineptr: *?[*:0]u8, n: *usize, delim: c_int, f: *FILE) isize;
+extern "c" fn realloc(ptr: ?*anyopaque, size: usize) ?[*]u8;
+extern "c" fn calloc(nmemb: usize, size: usize) ?[*]u8;
+extern "c" fn free(ptr: ?*anyopaque) void;
+extern "c" fn __block_all_sigs(set: ?*sigset_t) void;
+extern "c" fn __restore_sigs(set: *const sigset_t) void;
+extern "c" fn pthread_setcancelstate(state: c_int, oldstate: ?*c_int) c_int;
 const PTHREAD_CANCEL_DISABLE: c_int = 1;
 const DIR = anyopaque;
 const stat_buf = [256]u8;
@@ -129,10 +209,16 @@ const FTW_MOUNT: c_int = 2;
 const FTW_DEPTH: c_int = 8;
 const FTW = extern struct { base: c_int, level: c_int };
 const nftw_fn_t = *const fn ([*:0]const u8, *const stat_buf, c_int, *FTW) callconv(.c) c_int;
+extern "c" fn lstat(path: [*:0]const u8, buf: *stat_buf) c_int;
+extern "c" fn fdopendir(fd: c_int) ?*DIR;
+extern "c" fn readdir(d: *DIR) ?*anyopaque; // returns struct dirent*
+extern "c" fn closedir(d: *DIR) c_int;
+extern "c" fn strcpy(dst: [*]u8, src: [*:0]const u8) [*]u8;
 const O_RDONLY = 0;
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFLNK: u32 = 0o120000;
+// Offsets for st_dev, st_ino, st_mode in struct stat (Linux 64-bit musl)
 const ST_DEV_OFF = 0;
 const ST_INO_OFF = 8;
 const ST_MODE_OFF = 24; // after dev(8) + ino(8) + nlink(8)

@@ -2,9 +2,13 @@ const builtin = @import("builtin");
 const std = @import("std");
 const symbol = @import("../c.zig").symbol;
 const E = std.os.linux.E;
+/// `typedef struct { unsigned __attr; } pthread_mutexattr_t;`
 const pthread_mutexattr_t = extern struct { __attr: c_uint = 0 };
+/// `typedef struct { unsigned __attr; } pthread_condattr_t;`
 const pthread_condattr_t = extern struct { __attr: c_uint = 0 };
+/// `typedef struct { unsigned __attr; } pthread_barrierattr_t;`
 const pthread_barrierattr_t = extern struct { __attr: c_uint = 0 };
+/// `typedef struct { unsigned __attr[2]; } pthread_rwlockattr_t;`
 const pthread_rwlockattr_t = extern struct { __attr: [2]c_uint = .{ 0, 0 } };
 const pthread_attr_t = extern struct {
     _a_stacksize: usize = 0,
@@ -19,6 +23,7 @@ const pthread_attr_t = extern struct {
     const attr_total = if (@sizeOf(c_ulong) == 8) @as(usize, 56) else 36;
     const attr_padding = attr_total - 3 * @sizeOf(usize) - 4 * @sizeOf(c_int);
 };
+/// Only the first field is accessed; remaining musl sched_param fields are padding.
 const sched_param = extern struct {
     sched_priority: c_int,
 };
@@ -48,6 +53,7 @@ const pthread_barrier_impl = extern struct {
     _b_limit: c_int = 0,
     _padding: [barrier_size - 3 * @sizeOf(c_int)]u8 = [_]u8{0} ** (barrier_size - 3 * @sizeOf(c_int)),
 };
+// Comptime errno constants for use in switch cases.
 const c_EBUSY: c_int = @intCast(@intFromEnum(E.BUSY));
 const c_ETIMEDOUT: c_int = @intCast(@intFromEnum(E.TIMEDOUT));
 const sem_val_len = 4 * @sizeOf(c_long) / @sizeOf(c_int);
@@ -62,6 +68,7 @@ const tls_above_tp = switch (arch) {
     .loongarch64, .m68k => true,
     else => false,
 };
+/// TP_OFFSET from musl per-arch pthread_arch.h (defaults to 0).
 const tp_offset: usize = switch (arch) {
     .mips, .mipsel, .mips64, .mips64el,
     .powerpc, .powerpcle, .powerpc64, .powerpc64le,
@@ -69,14 +76,21 @@ const tp_offset: usize = switch (arch) {
     else => 0,
 };
 const ptr_size = @sizeOf(usize);
+/// Part 1 of struct pthread: ABI fields whose presence depends on TLS model.
+/// Non-TLS_ABOVE_TP: self, dtv, prev, next, sysinfo, canary = 6 pointers.
+/// TLS_ABOVE_TP: self, prev, next, sysinfo = 4 pointers.
 const part1_size: usize = if (tls_above_tp) 4 * ptr_size else 6 * ptr_size;
+/// Total sizeof(struct pthread): 200 on 64-bit, 112 on 32-bit.
 const sizeof_pthread: usize = if (ptr_size == 8) 200 else 112;
+/// Padding from Part 2 byte 19 to next pointer-aligned boundary.
 const map_base_off: usize = if (ptr_size == 8) 24 else 20;
+// Field offsets from struct pthread base.
 const off_detach_state = part1_size + 8;
 const off_canceldisable = part1_size + 16;
 const off_cancelasync = part1_size + 17;
 const off_tsd_flags = part1_size + 18;
 const off_tsd = part1_size + map_base_off + 7 * ptr_size;
+/// Musl detach state enum values from pthread_impl.h.
 const DT_JOINABLE: c_int = 2;
 const DT_DETACHED: c_int = 3;
 const SEM_VALUE_MAX: c_int = 0x7fffffff;
@@ -84,6 +98,7 @@ const linux = std.os.linux;
 const off_tid = part1_size;
 const off_killlock = part1_size + map_base_off + 11 * ptr_size + 8 + ptr_size;
 const CLOCK_REALTIME: c_int = 0;
+/// Musl's struct __ptcb from pthread.h.
 const PtCb = extern struct {
     f: ?*const fn (?*anyopaque) callconv(.c) void,
     x: ?*anyopaque,
@@ -113,13 +128,14 @@ var __default_guardsize: c_uint = 8192; // DEFAULT_GUARD_SIZE
 // States: 0 = unlocked/empty, < 0 = locked, > 0 = unlocked with waiters.
 
 const INT_MIN = std.math.minInt(c_int);
+/// Partial layout of musl's internal `struct __libc` (from libc.h).
+/// Only the initial fields needed to access `need_locks` are declared.
 const MuslLibc = extern struct {
     can_do_threads: i8,
     threaded: i8,
     secure: i8,
     need_locks: i8, // volatile signed char
 };
-extern var __libc: MuslLibc;
 const rwlock_ints = if (@sizeOf(c_long) == 8) 14 else 8;
 var ptc_rwlock: [rwlock_ints]c_int = .{0} ** rwlock_ints;
 const PTHREAD_BARRIER_SERIAL_THREAD: c_int = -1;
@@ -133,12 +149,17 @@ const BarrierInstance = extern struct {
 const cond_int_count: usize = if (@sizeOf(usize) == 8) 12 else 8;
 const FUTEX_LOCK_PI: usize = 6;
 const FUTEX_UNLOCK_PI: usize = 7;
+// Pthread struct offsets for robust_list (relative to self pointer)
 const off_after_bitfields: usize = off_tid + 19; // tid(4)+errno_val(4)+detach_state(4)+cancel(4)+canceldisable(1)+cancelasync(1)+bitfield_byte(1)
 const off_map_base: usize = std.mem.alignForward(usize, off_after_bitfields, ptr_size);
 const off_robust_head: usize = off_map_base + 8 * ptr_size; // skip: map_base, map_size, stack, stack_size, guard_size, result, cancelbuf, tsd
 const off_robust_off: usize = off_robust_head + ptr_size;
 const off_robust_pending: usize = off_robust_head + 2 * ptr_size;
+// __SU = sizeof(size_t) / sizeof(int)
 const SU: usize = @sizeOf(usize) / @sizeOf(c_int);
+// pthread_attr_t field indices:
+//   __s[0..2]  = stacksize, guardsize, stackaddr (usize-indexed)
+//   __i[3*SU+0..3] = detach, sched, policy, prio (c_int-indexed)
 const attr_i_detach: usize = 3 * SU;
 const attr_i_sched: usize = 3 * SU + 1;
 const attr_i_policy: usize = 3 * SU + 2;
@@ -150,14 +171,19 @@ const DEFAULT_STACK_MAX: c_uint = 8 << 20;
 const DEFAULT_GUARD_MAX: c_uint = 1 << 20;
 const thrd_busy: c_int = 1;
 const thrd_timedout: c_int = 4;
+// C11 mutex type flags
 const mtx_recursive: c_int = 1;
+// POSIX mutex types
 const PTHREAD_MUTEX_NORMAL: c_int = 0;
 const PTHREAD_MUTEX_RECURSIVE: c_int = 1;
+// POSIX cancellation constants
 const PTHREAD_CANCEL_DISABLE: c_int = 1;
+// POSIX priority protocol
 const PTHREAD_PRIO_NONE: c_int = 0;
 const PTHREAD_PRIO_INHERIT: c_int = 1;
 const PTHREAD_PRIO_PROTECT: c_int = 2;
 const off_cancel: usize = off_tid + 12;
+// DT_* enum values
 const DT_EXITED: c_int = 0;
 var vmlock_storage: [2]c_int = .{ 0, 0 };
 const SIG_BLOCK: c_int = 0;
@@ -243,165 +269,167 @@ comptime {
         symbol(&__default_stacksize, "__default_stacksize");
         symbol(&__default_guardsize, "__default_guardsize");
     }
-    if (builtin.link_libc) {
-        symbol(&call_once, "call_once");
-        symbol(&tss_create, "tss_create");
-        symbol(&tss_delete, "tss_delete");
-        symbol(&cnd_signal, "cnd_signal");
-        symbol(&cnd_broadcast, "cnd_broadcast");
-        symbol(&cnd_timedwait, "cnd_timedwait");
-        symbol(&cnd_wait, "cnd_wait");
-        symbol(&mtx_lock, "mtx_lock");
-        symbol(&mtx_timedlock, "mtx_timedlock");
-        symbol(&mtx_trylock, "mtx_trylock");
-        symbol(&mtx_unlock, "mtx_unlock");
-        symbol(&pthread_detach_fn, "pthread_detach");
-        symbol(&pthread_detach_fn, "thrd_detach");
-        symbol(&sem_wait_fn, "sem_wait");
-        symbol(&sem_unlink_fn, "sem_unlink");
-        symbol(&do_cleanup_push_default, "__do_cleanup_push");
-        symbol(&do_cleanup_pop_default, "__do_cleanup_pop");
-        symbol(&_pthread_cleanup_push_fn, "_pthread_cleanup_push");
-        symbol(&_pthread_cleanup_pop_fn, "_pthread_cleanup_pop");
-        symbol(&pthread_getschedparam_fn, "pthread_getschedparam");
-        symbol(&pthread_setschedparam_fn, "pthread_setschedparam");
-        symbol(&pthread_getname_np_fn, "pthread_getname_np");
-        symbol(&pthread_setname_np_fn, "pthread_setname_np");
-        symbol(&sem_timedwait_fn, "sem_timedwait");
-        symbol(&thrd_create_fn, "thrd_create");
-        symbol(&thrd_exit_fn, "thrd_exit");
-        symbol(&thrd_join_fn, "thrd_join");
-        symbol(&thrd_sleep_fn, "thrd_sleep");
-        symbol(&pthread_getcpuclockid_fn, "pthread_getcpuclockid");
-        symbol(&pthread_kill_fn, "pthread_kill");
-        symbol(&pthread_setschedprio_fn, "pthread_setschedprio");
-        symbol(&pthread_sigmask_fn, "pthread_sigmask");
-        symbol(&pthread_mutexattr_setprotocol_fn, "pthread_mutexattr_setprotocol");
-        symbol(&pthread_mutexattr_setrobust_fn, "pthread_mutexattr_setrobust");
-        symbol(&pthread_mutex_destroy_fn, "pthread_mutex_destroy");
-        symbol(&inhibit_ptc_fn, "__inhibit_ptc");
-        symbol(&acquire_ptc_fn, "__acquire_ptc");
-        symbol(&release_ptc_fn, "__release_ptc");
-        symbol(&__pthread_once_fn, "__pthread_once");
-        symbol(&__pthread_once_fn, "pthread_once");
-        symbol(&__wait_fn, "__wait");
-        symbol(&vm_wait_fn, "__vm_wait");
-        symbol(&vm_lock_fn, "__vm_lock");
-        symbol(&vm_unlock_fn, "__vm_unlock");
-        symbol(&__lock_fn, "__lock");
-        symbol(&__unlock_fn, "__unlock");
-        symbol(&rwlock_init_fn, "pthread_rwlock_init");
-        symbol(&rwlock_destroy_fn, "pthread_rwlock_destroy");
-        symbol(&rwlock_tryrdlock_fn, "__pthread_rwlock_tryrdlock");
-        symbol(&rwlock_tryrdlock_fn, "pthread_rwlock_tryrdlock");
-        symbol(&rwlock_trywrlock_fn, "__pthread_rwlock_trywrlock");
-        symbol(&rwlock_trywrlock_fn, "pthread_rwlock_trywrlock");
-        symbol(&rwlock_unlock_fn, "__pthread_rwlock_unlock");
-        symbol(&rwlock_unlock_fn, "pthread_rwlock_unlock");
-        symbol(&rwlock_timedrdlock_fn, "__pthread_rwlock_timedrdlock");
-        symbol(&rwlock_timedrdlock_fn, "pthread_rwlock_timedrdlock");
-        symbol(&rwlock_timedwrlock_fn, "__pthread_rwlock_timedwrlock");
-        symbol(&rwlock_timedwrlock_fn, "pthread_rwlock_timedwrlock");
-        symbol(&rwlock_rdlock_fn, "__pthread_rwlock_rdlock");
-        symbol(&rwlock_rdlock_fn, "pthread_rwlock_rdlock");
-        symbol(&rwlock_wrlock_fn, "__pthread_rwlock_wrlock");
-        symbol(&rwlock_wrlock_fn, "pthread_rwlock_wrlock");
-        symbol(&barrier_init_fn, "pthread_barrier_init");
-        symbol(&barrier_destroy_fn, "pthread_barrier_destroy");
-        symbol(&barrier_wait_fn, "pthread_barrier_wait");
-        symbol(&cond_init_fn, "pthread_cond_init");
-        symbol(&cond_destroy_fn, "pthread_cond_destroy");
-        symbol(&cond_signal_fn, "pthread_cond_signal");
-        symbol(&cond_broadcast_fn, "pthread_cond_broadcast");
-        symbol(&cond_wait_fn, "pthread_cond_wait");
-        symbol(&mutex_lock_fn, "__pthread_mutex_lock");
-        symbol(&mutex_lock_fn, "pthread_mutex_lock");
-        symbol(&mutex_consistent_fn, "pthread_mutex_consistent");
-        symbol(&spin_init_fn, "pthread_spin_init");
-        symbol(&spin_destroy_fn, "pthread_spin_destroy");
-        symbol(&spin_lock_fn, "pthread_spin_lock");
-        symbol(&spin_trylock_fn, "pthread_spin_trylock");
-        symbol(&spin_unlock_fn, "pthread_spin_unlock");
-        symbol(&mutex_trylock_owner_fn, "__pthread_mutex_trylock_owner");
-        symbol(&mutex_trylock_fn, "__pthread_mutex_trylock");
-        symbol(&mutex_trylock_fn, "pthread_mutex_trylock");
-        symbol(&mutex_timedlock_fn, "__pthread_mutex_timedlock");
-        symbol(&mutex_timedlock_fn, "pthread_mutex_timedlock");
-        symbol(&mutex_unlock_fn, "__pthread_mutex_unlock");
-        symbol(&mutex_unlock_fn, "pthread_mutex_unlock");
-        symbol(&pthread_getconcurrency_fn, "pthread_getconcurrency");
-        symbol(&pthread_setconcurrency_fn, "pthread_setconcurrency");
-        symbol(&pthread_equal_fn, "pthread_equal");
-        symbol(&pthread_equal_fn, "thrd_equal");
-        symbol(&thrd_yield_fn, "thrd_yield");
-        symbol(&attr_destroy_fn, "pthread_attr_destroy");
-        symbol(&attr_init_fn, "pthread_attr_init");
-        symbol(&attr_setdetachstate_fn, "pthread_attr_setdetachstate");
-        symbol(&attr_setguardsize_fn, "pthread_attr_setguardsize");
-        symbol(&attr_setinheritsched_fn, "pthread_attr_setinheritsched");
-        symbol(&attr_setschedparam_fn, "pthread_attr_setschedparam");
-        symbol(&attr_setschedpolicy_fn, "pthread_attr_setschedpolicy");
-        symbol(&attr_setscope_fn, "pthread_attr_setscope");
-        symbol(&attr_setstack_fn, "pthread_attr_setstack");
-        symbol(&attr_setstacksize_fn, "pthread_attr_setstacksize");
-        symbol(&attr_getdetachstate_fn, "pthread_attr_getdetachstate");
-        symbol(&attr_getguardsize_fn, "pthread_attr_getguardsize");
-        symbol(&attr_getinheritsched_fn, "pthread_attr_getinheritsched");
-        symbol(&attr_getschedparam_fn, "pthread_attr_getschedparam");
-        symbol(&attr_getschedpolicy_fn, "pthread_attr_getschedpolicy");
-        symbol(&attr_getscope_fn, "pthread_attr_getscope");
-        symbol(&attr_getstack_fn, "pthread_attr_getstack");
-        symbol(&attr_getstacksize_fn, "pthread_attr_getstacksize");
-        symbol(&barrierattr_destroy_fn, "pthread_barrierattr_destroy");
-        symbol(&barrierattr_init_fn, "pthread_barrierattr_init");
-        symbol(&barrierattr_setpshared_fn, "pthread_barrierattr_setpshared");
-        symbol(&barrierattr_getpshared_fn, "pthread_barrierattr_getpshared");
-        symbol(&condattr_destroy_fn, "pthread_condattr_destroy");
-        symbol(&condattr_init_fn, "pthread_condattr_init");
-        symbol(&condattr_setclock_fn, "pthread_condattr_setclock");
-        symbol(&condattr_setpshared_fn, "pthread_condattr_setpshared");
-        symbol(&condattr_getclock_fn, "pthread_condattr_getclock");
-        symbol(&condattr_getpshared_fn, "pthread_condattr_getpshared");
-        symbol(&mutexattr_destroy_fn, "pthread_mutexattr_destroy");
-        symbol(&mutexattr_init_fn, "pthread_mutexattr_init");
-        symbol(&mutexattr_setpshared_fn, "pthread_mutexattr_setpshared");
-        symbol(&mutexattr_settype_fn, "pthread_mutexattr_settype");
-        symbol(&mutexattr_getprotocol_fn, "pthread_mutexattr_getprotocol");
-        symbol(&mutexattr_getpshared_fn, "pthread_mutexattr_getpshared");
-        symbol(&mutexattr_getrobust_fn, "pthread_mutexattr_getrobust");
-        symbol(&mutexattr_gettype_fn, "pthread_mutexattr_gettype");
-        symbol(&rwlockattr_destroy_fn, "pthread_rwlockattr_destroy");
-        symbol(&rwlockattr_init_fn, "pthread_rwlockattr_init");
-        symbol(&rwlockattr_setpshared_fn, "pthread_rwlockattr_setpshared");
-        symbol(&rwlockattr_getpshared_fn, "pthread_rwlockattr_getpshared");
-        symbol(&mutex_init_fn, "pthread_mutex_init");
-        symbol(&mutex_getprioceiling_fn, "pthread_mutex_getprioceiling");
-        symbol(&mutex_setprioceiling_fn, "pthread_mutex_setprioceiling");
-        symbol(&sem_destroy_fn, "sem_destroy");
-        symbol(&sem_getvalue_fn, "sem_getvalue");
-        symbol(&sem_init_fn, "sem_init");
-        symbol(&cnd_destroy_fn2, "cnd_destroy");
-        symbol(&cnd_init_fn2, "cnd_init");
-        symbol(&mtx_destroy_fn, "mtx_destroy");
-        symbol(&mtx_init_fn, "mtx_init");
-        symbol(&tss_set_fn, "tss_set");
-        symbol(&setattr_default_np_fn, "pthread_setattr_default_np");
-        symbol(&getattr_default_np_fn, "pthread_getattr_default_np");
-        symbol(&set_thread_area_fn, "__set_thread_area");
-        symbol(&syscall_cp_fn, "__syscall_cp");
-        symbol(&sem_post_fn, "sem_post");
-        symbol(&sem_trywait_fn, "sem_trywait");
-        symbol(&pthread_self_fn, "pthread_self");
-        symbol(&pthread_self_fn, "thrd_current");
-        symbol(&pthread_getspecific_fn, "pthread_getspecific");
-        symbol(&pthread_getspecific_fn, "tss_get");
-        symbol(&pthread_setspecific_fn, "pthread_setspecific");
-        symbol(&pthread_setcancelstate_fn, "__pthread_setcancelstate");
-        symbol(&pthread_setcancelstate_fn, "pthread_setcancelstate");
-        symbol(&pthread_setcanceltype_fn, "pthread_setcanceltype");
-        symbol(&pthread_testcancel_fn, "__pthread_testcancel");
-        symbol(&pthread_testcancel_fn, "pthread_testcancel");
-        symbol(&testcancel_fn, "__testcancel");
+    if (builtin.target.isMuslLibC()) {
+        if (builtin.link_libc) {
+            symbol(&call_once, "call_once");
+            symbol(&tss_create, "tss_create");
+            symbol(&tss_delete, "tss_delete");
+            symbol(&cnd_signal, "cnd_signal");
+            symbol(&cnd_broadcast, "cnd_broadcast");
+            symbol(&cnd_timedwait, "cnd_timedwait");
+            symbol(&cnd_wait, "cnd_wait");
+            symbol(&mtx_lock, "mtx_lock");
+            symbol(&mtx_timedlock, "mtx_timedlock");
+            symbol(&mtx_trylock, "mtx_trylock");
+            symbol(&mtx_unlock, "mtx_unlock");
+            symbol(&pthread_detach_fn, "pthread_detach");
+            symbol(&pthread_detach_fn, "thrd_detach");
+            symbol(&sem_wait_fn, "sem_wait");
+            symbol(&sem_unlink_fn, "sem_unlink");
+            symbol(&do_cleanup_push_default, "__do_cleanup_push");
+            symbol(&do_cleanup_pop_default, "__do_cleanup_pop");
+            symbol(&_pthread_cleanup_push_fn, "_pthread_cleanup_push");
+            symbol(&_pthread_cleanup_pop_fn, "_pthread_cleanup_pop");
+            symbol(&pthread_getschedparam_fn, "pthread_getschedparam");
+            symbol(&pthread_setschedparam_fn, "pthread_setschedparam");
+            symbol(&pthread_getname_np_fn, "pthread_getname_np");
+            symbol(&pthread_setname_np_fn, "pthread_setname_np");
+            symbol(&sem_timedwait_fn, "sem_timedwait");
+            symbol(&thrd_create_fn, "thrd_create");
+            symbol(&thrd_exit_fn, "thrd_exit");
+            symbol(&thrd_join_fn, "thrd_join");
+            symbol(&thrd_sleep_fn, "thrd_sleep");
+            symbol(&pthread_getcpuclockid_fn, "pthread_getcpuclockid");
+            symbol(&pthread_kill_fn, "pthread_kill");
+            symbol(&pthread_setschedprio_fn, "pthread_setschedprio");
+            symbol(&pthread_sigmask_fn, "pthread_sigmask");
+            symbol(&pthread_mutexattr_setprotocol_fn, "pthread_mutexattr_setprotocol");
+            symbol(&pthread_mutexattr_setrobust_fn, "pthread_mutexattr_setrobust");
+            symbol(&pthread_mutex_destroy_fn, "pthread_mutex_destroy");
+            symbol(&inhibit_ptc_fn, "__inhibit_ptc");
+            symbol(&acquire_ptc_fn, "__acquire_ptc");
+            symbol(&release_ptc_fn, "__release_ptc");
+            symbol(&__pthread_once_fn, "__pthread_once");
+            symbol(&__pthread_once_fn, "pthread_once");
+            symbol(&__wait_fn, "__wait");
+            symbol(&vm_wait_fn, "__vm_wait");
+            symbol(&vm_lock_fn, "__vm_lock");
+            symbol(&vm_unlock_fn, "__vm_unlock");
+            symbol(&__lock_fn, "__lock");
+            symbol(&__unlock_fn, "__unlock");
+            symbol(&rwlock_init_fn, "pthread_rwlock_init");
+            symbol(&rwlock_destroy_fn, "pthread_rwlock_destroy");
+            symbol(&rwlock_tryrdlock_fn, "__pthread_rwlock_tryrdlock");
+            symbol(&rwlock_tryrdlock_fn, "pthread_rwlock_tryrdlock");
+            symbol(&rwlock_trywrlock_fn, "__pthread_rwlock_trywrlock");
+            symbol(&rwlock_trywrlock_fn, "pthread_rwlock_trywrlock");
+            symbol(&rwlock_unlock_fn, "__pthread_rwlock_unlock");
+            symbol(&rwlock_unlock_fn, "pthread_rwlock_unlock");
+            symbol(&rwlock_timedrdlock_fn, "__pthread_rwlock_timedrdlock");
+            symbol(&rwlock_timedrdlock_fn, "pthread_rwlock_timedrdlock");
+            symbol(&rwlock_timedwrlock_fn, "__pthread_rwlock_timedwrlock");
+            symbol(&rwlock_timedwrlock_fn, "pthread_rwlock_timedwrlock");
+            symbol(&rwlock_rdlock_fn, "__pthread_rwlock_rdlock");
+            symbol(&rwlock_rdlock_fn, "pthread_rwlock_rdlock");
+            symbol(&rwlock_wrlock_fn, "__pthread_rwlock_wrlock");
+            symbol(&rwlock_wrlock_fn, "pthread_rwlock_wrlock");
+            symbol(&barrier_init_fn, "pthread_barrier_init");
+            symbol(&barrier_destroy_fn, "pthread_barrier_destroy");
+            symbol(&barrier_wait_fn, "pthread_barrier_wait");
+            symbol(&cond_init_fn, "pthread_cond_init");
+            symbol(&cond_destroy_fn, "pthread_cond_destroy");
+            symbol(&cond_signal_fn, "pthread_cond_signal");
+            symbol(&cond_broadcast_fn, "pthread_cond_broadcast");
+            symbol(&cond_wait_fn, "pthread_cond_wait");
+            symbol(&mutex_lock_fn, "__pthread_mutex_lock");
+            symbol(&mutex_lock_fn, "pthread_mutex_lock");
+            symbol(&mutex_consistent_fn, "pthread_mutex_consistent");
+            symbol(&spin_init_fn, "pthread_spin_init");
+            symbol(&spin_destroy_fn, "pthread_spin_destroy");
+            symbol(&spin_lock_fn, "pthread_spin_lock");
+            symbol(&spin_trylock_fn, "pthread_spin_trylock");
+            symbol(&spin_unlock_fn, "pthread_spin_unlock");
+            symbol(&mutex_trylock_owner_fn, "__pthread_mutex_trylock_owner");
+            symbol(&mutex_trylock_fn, "__pthread_mutex_trylock");
+            symbol(&mutex_trylock_fn, "pthread_mutex_trylock");
+            symbol(&mutex_timedlock_fn, "__pthread_mutex_timedlock");
+            symbol(&mutex_timedlock_fn, "pthread_mutex_timedlock");
+            symbol(&mutex_unlock_fn, "__pthread_mutex_unlock");
+            symbol(&mutex_unlock_fn, "pthread_mutex_unlock");
+            symbol(&pthread_getconcurrency_fn, "pthread_getconcurrency");
+            symbol(&pthread_setconcurrency_fn, "pthread_setconcurrency");
+            symbol(&pthread_equal_fn, "pthread_equal");
+            symbol(&pthread_equal_fn, "thrd_equal");
+            symbol(&thrd_yield_fn, "thrd_yield");
+            symbol(&attr_destroy_fn, "pthread_attr_destroy");
+            symbol(&attr_init_fn, "pthread_attr_init");
+            symbol(&attr_setdetachstate_fn, "pthread_attr_setdetachstate");
+            symbol(&attr_setguardsize_fn, "pthread_attr_setguardsize");
+            symbol(&attr_setinheritsched_fn, "pthread_attr_setinheritsched");
+            symbol(&attr_setschedparam_fn, "pthread_attr_setschedparam");
+            symbol(&attr_setschedpolicy_fn, "pthread_attr_setschedpolicy");
+            symbol(&attr_setscope_fn, "pthread_attr_setscope");
+            symbol(&attr_setstack_fn, "pthread_attr_setstack");
+            symbol(&attr_setstacksize_fn, "pthread_attr_setstacksize");
+            symbol(&attr_getdetachstate_fn, "pthread_attr_getdetachstate");
+            symbol(&attr_getguardsize_fn, "pthread_attr_getguardsize");
+            symbol(&attr_getinheritsched_fn, "pthread_attr_getinheritsched");
+            symbol(&attr_getschedparam_fn, "pthread_attr_getschedparam");
+            symbol(&attr_getschedpolicy_fn, "pthread_attr_getschedpolicy");
+            symbol(&attr_getscope_fn, "pthread_attr_getscope");
+            symbol(&attr_getstack_fn, "pthread_attr_getstack");
+            symbol(&attr_getstacksize_fn, "pthread_attr_getstacksize");
+            symbol(&barrierattr_destroy_fn, "pthread_barrierattr_destroy");
+            symbol(&barrierattr_init_fn, "pthread_barrierattr_init");
+            symbol(&barrierattr_setpshared_fn, "pthread_barrierattr_setpshared");
+            symbol(&barrierattr_getpshared_fn, "pthread_barrierattr_getpshared");
+            symbol(&condattr_destroy_fn, "pthread_condattr_destroy");
+            symbol(&condattr_init_fn, "pthread_condattr_init");
+            symbol(&condattr_setclock_fn, "pthread_condattr_setclock");
+            symbol(&condattr_setpshared_fn, "pthread_condattr_setpshared");
+            symbol(&condattr_getclock_fn, "pthread_condattr_getclock");
+            symbol(&condattr_getpshared_fn, "pthread_condattr_getpshared");
+            symbol(&mutexattr_destroy_fn, "pthread_mutexattr_destroy");
+            symbol(&mutexattr_init_fn, "pthread_mutexattr_init");
+            symbol(&mutexattr_setpshared_fn, "pthread_mutexattr_setpshared");
+            symbol(&mutexattr_settype_fn, "pthread_mutexattr_settype");
+            symbol(&mutexattr_getprotocol_fn, "pthread_mutexattr_getprotocol");
+            symbol(&mutexattr_getpshared_fn, "pthread_mutexattr_getpshared");
+            symbol(&mutexattr_getrobust_fn, "pthread_mutexattr_getrobust");
+            symbol(&mutexattr_gettype_fn, "pthread_mutexattr_gettype");
+            symbol(&rwlockattr_destroy_fn, "pthread_rwlockattr_destroy");
+            symbol(&rwlockattr_init_fn, "pthread_rwlockattr_init");
+            symbol(&rwlockattr_setpshared_fn, "pthread_rwlockattr_setpshared");
+            symbol(&rwlockattr_getpshared_fn, "pthread_rwlockattr_getpshared");
+            symbol(&mutex_init_fn, "pthread_mutex_init");
+            symbol(&mutex_getprioceiling_fn, "pthread_mutex_getprioceiling");
+            symbol(&mutex_setprioceiling_fn, "pthread_mutex_setprioceiling");
+            symbol(&sem_destroy_fn, "sem_destroy");
+            symbol(&sem_getvalue_fn, "sem_getvalue");
+            symbol(&sem_init_fn, "sem_init");
+            symbol(&cnd_destroy_fn2, "cnd_destroy");
+            symbol(&cnd_init_fn2, "cnd_init");
+            symbol(&mtx_destroy_fn, "mtx_destroy");
+            symbol(&mtx_init_fn, "mtx_init");
+            symbol(&tss_set_fn, "tss_set");
+            symbol(&setattr_default_np_fn, "pthread_setattr_default_np");
+            symbol(&getattr_default_np_fn, "pthread_getattr_default_np");
+            symbol(&set_thread_area_fn, "__set_thread_area");
+            symbol(&syscall_cp_fn, "__syscall_cp");
+            symbol(&sem_post_fn, "sem_post");
+            symbol(&sem_trywait_fn, "sem_trywait");
+            symbol(&pthread_self_fn, "pthread_self");
+            symbol(&pthread_self_fn, "thrd_current");
+            symbol(&pthread_getspecific_fn, "pthread_getspecific");
+            symbol(&pthread_getspecific_fn, "tss_get");
+            symbol(&pthread_setspecific_fn, "pthread_setspecific");
+            symbol(&pthread_setcancelstate_fn, "__pthread_setcancelstate");
+            symbol(&pthread_setcancelstate_fn, "pthread_setcancelstate");
+            symbol(&pthread_setcanceltype_fn, "pthread_setcanceltype");
+            symbol(&pthread_testcancel_fn, "__pthread_testcancel");
+            symbol(&pthread_testcancel_fn, "pthread_testcancel");
+            symbol(&testcancel_fn, "__testcancel");
+        }
     }
     @export(&vmlock, .{ .name = "__vmlock_lockptr" });
 }
@@ -474,6 +502,8 @@ fn pthread_equal(a: std.c.pthread_t, b: std.c.pthread_t) callconv(.c) c_int {
     return @intCast(@intFromBool(a == b));
 }
 
+/// Convert a Linux errno enum value to a positive c_int for direct return
+/// from POSIX thread functions (which return error numbers, not -1).
 fn eint(e: E) c_int {
     return @intCast(@intFromEnum(e));
 }
@@ -845,6 +875,7 @@ fn mtx_unlock(mtx: ?*anyopaque) callconv(.c) c_int {
     return __pthread_mutex_unlock(mtx);
 }
 
+/// Read the architecture-specific thread pointer register.
 fn get_tp() usize {
     return switch (arch) {
         .x86_64 => asm ("mov %%fs:0, %[ret]"
@@ -893,6 +924,7 @@ fn get_tp() usize {
     };
 }
 
+/// Equivalent to musl's __pthread_self() macro: returns the struct pthread address.
 fn pthread_self_ptr() usize {
     const tp = get_tp();
     return if (tls_above_tp) tp - sizeof_pthread - tp_offset else tp;
@@ -1240,6 +1272,7 @@ fn thrd_sleep_fn(req: ?*const anyopaque, rem: ?*anyopaque) callconv(.c) c_int {
     return -2;
 }
 
+// pthread_getcpuclockid.c
 fn pthread_getcpuclockid_fn(t: std.c.pthread_t, clockid: *c_int) callconv(.c) c_int {
     const tid: c_int = (@as(*const c_int, @ptrFromInt(@intFromPtr(t) + off_tid))).*;
     // (-t->tid - 1) * 8U + 6
@@ -1248,6 +1281,7 @@ fn pthread_getcpuclockid_fn(t: std.c.pthread_t, clockid: *c_int) callconv(.c) c_
     return 0;
 }
 
+// pthread_kill.c
 fn pthread_kill_fn(t: std.c.pthread_t, sig: c_int) callconv(.c) c_int {
     const __block_all_sigs = @extern(*const fn (*anyopaque) callconv(.c) void, .{ .name = "__block_all_sigs" });
     const __restore_sigs = @extern(*const fn (*anyopaque) callconv(.c) void, .{ .name = "__restore_sigs" });
@@ -1272,6 +1306,7 @@ fn pthread_kill_fn(t: std.c.pthread_t, sig: c_int) callconv(.c) c_int {
     return r;
 }
 
+// pthread_setschedprio.c
 fn pthread_setschedprio_fn(t: std.c.pthread_t, prio: c_int) callconv(.c) c_int {
     const __block_app_sigs = @extern(*const fn (*anyopaque) callconv(.c) void, .{ .name = "__block_app_sigs" });
     const __restore_sigs = @extern(*const fn (*anyopaque) callconv(.c) void, .{ .name = "__restore_sigs" });
@@ -1299,6 +1334,7 @@ fn pthread_setschedprio_fn(t: std.c.pthread_t, prio: c_int) callconv(.c) c_int {
     return r;
 }
 
+// pthread_sigmask.c
 fn pthread_sigmask_fn(how: c_int, set: ?*const anyopaque, old: ?*anyopaque) callconv(.c) c_int {
     if (set != null and @as(c_uint, @bitCast(how)) > 2) return eint(.INVAL);
     const sig_set_size: usize = 128 / 8;
@@ -1589,6 +1625,7 @@ fn __release_ptc_fn() callconv(.c) void {
     _ = rwlock_unlock_fn(@ptrCast(&ptc_rwlock));
 }
 
+// --- pthread_rwlock_init.c ---
 fn rwlock_init_fn(rw: *anyopaque, a: ?*const anyopaque) callconv(.c) c_int {
     const bytes: [*]u8 = @ptrCast(rw);
     @memset(bytes[0 .. rwlock_ints * @sizeOf(c_int)], 0);
@@ -1600,10 +1637,12 @@ fn rwlock_init_fn(rw: *anyopaque, a: ?*const anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_rwlock_destroy.c ---
 fn rwlock_destroy_fn(_: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_rwlock_tryrdlock.c ---
 fn rwlock_tryrdlock_fn(rw: *anyopaque) callconv(.c) c_int {
     const rw_i: [*]c_int = @ptrCast(@alignCast(rw));
     while (true) {
@@ -1616,6 +1655,7 @@ fn rwlock_tryrdlock_fn(rw: *anyopaque) callconv(.c) c_int {
     }
 }
 
+// --- pthread_rwlock_trywrlock.c ---
 fn rwlock_trywrlock_fn(rw: *anyopaque) callconv(.c) c_int {
     const rw_i: [*]c_int = @ptrCast(@alignCast(rw));
     if (@cmpxchgStrong(c_int, &rw_i[0], 0, 0x7fffffff, .seq_cst, .seq_cst) != null)
@@ -1623,6 +1663,7 @@ fn rwlock_trywrlock_fn(rw: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_rwlock_unlock.c ---
 fn rwlock_unlock_fn(rw: *anyopaque) callconv(.c) c_int {
     const rw_i: [*]c_int = @ptrCast(@alignCast(rw));
     const priv = rw_i[2] ^ 128; // _rw_shared^128
@@ -1640,6 +1681,7 @@ fn rwlock_unlock_fn(rw: *anyopaque) callconv(.c) c_int {
     }
 }
 
+// --- pthread_rwlock_timedrdlock.c ---
 fn rwlock_timedrdlock_fn(rw: *anyopaque, at: ?*const anyopaque) callconv(.c) c_int {
     const rw_i: [*]c_int = @ptrCast(@alignCast(rw));
     const __timedwait = @extern(*const fn (*anyopaque, c_int, c_int, ?*const anyopaque, c_int) callconv(.c) c_int, .{ .name = "__timedwait" });
@@ -1672,6 +1714,7 @@ fn rwlock_timedrdlock_fn(rw: *anyopaque, at: ?*const anyopaque) callconv(.c) c_i
     }
 }
 
+// --- pthread_rwlock_timedwrlock.c ---
 fn rwlock_timedwrlock_fn(rw: *anyopaque, at: ?*const anyopaque) callconv(.c) c_int {
     const rw_i: [*]c_int = @ptrCast(@alignCast(rw));
     const __timedwait = @extern(*const fn (*anyopaque, c_int, c_int, ?*const anyopaque, c_int) callconv(.c) c_int, .{ .name = "__timedwait" });
@@ -1702,14 +1745,17 @@ fn rwlock_timedwrlock_fn(rw: *anyopaque, at: ?*const anyopaque) callconv(.c) c_i
     }
 }
 
+// --- pthread_rwlock_rdlock.c ---
 fn rwlock_rdlock_fn(rw: *anyopaque) callconv(.c) c_int {
     return rwlock_timedrdlock_fn(rw, null);
 }
 
+// --- pthread_rwlock_wrlock.c ---
 fn rwlock_wrlock_fn(rw: *anyopaque) callconv(.c) c_int {
     return rwlock_timedwrlock_fn(rw, null);
 }
 
+// --- pthread_barrier_init.c ---
 fn barrier_init_fn(b: *anyopaque, a: ?*const anyopaque, count: c_uint) callconv(.c) c_int {
     if (count -% 1 > @as(c_uint, 0x7ffffffe)) return eint(.INVAL);
 
@@ -1725,6 +1771,7 @@ fn barrier_init_fn(b: *anyopaque, a: ?*const anyopaque, count: c_uint) callconv(
     return 0;
 }
 
+// --- pthread_barrier_destroy.c ---
 fn barrier_destroy_fn(b: *anyopaque) callconv(.c) c_int {
     const b_i: [*]c_int = @ptrCast(@alignCast(b));
     if (b_i[2] < 0) { // _b_limit < 0 → process-shared
@@ -1743,6 +1790,7 @@ fn barrier_destroy_fn(b: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_barrier_wait.c (process-shared path) ---
 fn pshared_barrier_wait(b: *anyopaque) c_int {
     const b_i: [*]c_int = @ptrCast(@alignCast(b));
     const __wait_ext = @extern(*const fn (*anyopaque, ?*anyopaque, c_int, c_int) callconv(.c) void, .{ .name = "__wait" });
@@ -1813,6 +1861,7 @@ fn pshared_barrier_wait(b: *anyopaque) c_int {
     return ret;
 }
 
+// --- pthread_barrier_wait.c (main, non-shared path) ---
 fn barrier_wait_fn(b: *anyopaque) callconv(.c) c_int {
     const b_i: [*]c_int = @ptrCast(@alignCast(b));
     const __wait_ext = @extern(*const fn (*anyopaque, ?*anyopaque, c_int, c_int) callconv(.c) void, .{ .name = "__wait" });
@@ -1903,6 +1952,7 @@ fn barrier_wait_fn(b: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_cond_init.c ---
 fn cond_init_fn(c: *anyopaque, a: ?*const anyopaque) callconv(.c) c_int {
     const bytes: [*]u8 = @ptrCast(c);
     @memset(bytes[0 .. cond_int_count * @sizeOf(c_int)], 0);
@@ -1919,6 +1969,7 @@ fn cond_init_fn(c: *anyopaque, a: ?*const anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_cond_destroy.c ---
 fn cond_destroy_fn(c: *anyopaque) callconv(.c) c_int {
     const c_ptrs: [*]usize = @ptrCast(@alignCast(c));
     const c_i: [*]c_int = @ptrCast(@alignCast(c));
@@ -1936,6 +1987,7 @@ fn cond_destroy_fn(c: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_cond_signal.c ---
 fn cond_signal_fn(c: *anyopaque) callconv(.c) c_int {
     const c_ptrs: [*]usize = @ptrCast(@alignCast(c));
     const c_i: [*]c_int = @ptrCast(@alignCast(c));
@@ -1949,6 +2001,7 @@ fn cond_signal_fn(c: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_cond_broadcast.c ---
 fn cond_broadcast_fn(c: *anyopaque) callconv(.c) c_int {
     const c_ptrs: [*]usize = @ptrCast(@alignCast(c));
     const c_i: [*]c_int = @ptrCast(@alignCast(c));
@@ -1962,11 +2015,13 @@ fn cond_broadcast_fn(c: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_cond_wait.c ---
 fn cond_wait_fn(c: *anyopaque, m: *anyopaque) callconv(.c) c_int {
     const __pthread_cond_timedwait_ext = @extern(*const fn (*anyopaque, *anyopaque, ?*const anyopaque) callconv(.c) c_int, .{ .name = "pthread_cond_timedwait" });
     return __pthread_cond_timedwait_ext(c, m, null);
 }
 
+// --- pthread_mutex_lock.c ---
 fn mutex_lock_fn(m: *anyopaque) callconv(.c) c_int {
     const m_i: [*]c_int = @ptrCast(@alignCast(m));
     // Fast path for PTHREAD_MUTEX_NORMAL (type == 0)
@@ -1978,6 +2033,7 @@ fn mutex_lock_fn(m: *anyopaque) callconv(.c) c_int {
     return __pthread_mutex_timedlock_ext(m, null);
 }
 
+// --- pthread_mutex_consistent.c ---
 fn mutex_consistent_fn(m: *anyopaque) callconv(.c) c_int {
     const m_i: [*]c_int = @ptrCast(@alignCast(m));
     const old = @atomicLoad(c_int, &m_i[1], .monotonic); // _m_lock
@@ -1993,15 +2049,18 @@ fn mutex_consistent_fn(m: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_spin_init.c ---
 fn spin_init_fn(s: *c_int, _: c_int) callconv(.c) c_int {
     s.* = 0;
     return 0;
 }
 
+// --- pthread_spin_destroy.c ---
 fn spin_destroy_fn(_: *c_int) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_spin_lock.c ---
 fn spin_lock_fn(s: *c_int) callconv(.c) c_int {
     while (@as(*volatile c_int, s).* != 0 or
         (@cmpxchgStrong(c_int, s, 0, eint(.BUSY), .seq_cst, .seq_cst) != null))
@@ -2011,10 +2070,12 @@ fn spin_lock_fn(s: *c_int) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_spin_trylock.c ---
 fn spin_trylock_fn(s: *c_int) callconv(.c) c_int {
     return @cmpxchgStrong(c_int, s, 0, eint(.BUSY), .seq_cst, .seq_cst) orelse 0;
 }
 
+// --- pthread_spin_unlock.c ---
 fn spin_unlock_fn(s: *c_int) callconv(.c) c_int {
     @atomicStore(c_int, s, 0, .seq_cst);
     return 0;
@@ -2047,6 +2108,7 @@ fn robustPending(self_addr: usize) *volatile usize {
     return @ptrFromInt(self_addr + off_robust_pending);
 }
 
+// --- pthread_mutex_trylock.c ---
 fn mutex_trylock_owner_fn(m: *anyopaque) callconv(.c) c_int {
     const m_i: [*]c_int = @ptrCast(@alignCast(m));
     const m_p = mutexPtrs(m);
@@ -2226,6 +2288,7 @@ fn mutex_timedlock_fn(m: *anyopaque, at: ?*const anyopaque) callconv(.c) c_int {
     return r;
 }
 
+// --- pthread_mutex_unlock.c ---
 fn mutex_unlock_fn(m: *anyopaque) callconv(.c) c_int {
     const m_i: [*]c_int = @ptrCast(@alignCast(m));
     const m_p = mutexPtrs(m);
@@ -2283,28 +2346,34 @@ fn mutex_unlock_fn(m: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_getconcurrency.c ---
 fn pthread_getconcurrency_fn() callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_setconcurrency.c ---
 fn pthread_setconcurrency_fn(val: c_int) callconv(.c) c_int {
     if (val < 0) return eint(.INVAL);
     if (val > 0) return eint(.AGAIN);
     return 0;
 }
 
+// --- pthread_equal.c ---
 fn pthread_equal_fn(a: usize, b: usize) callconv(.c) c_int {
     return @intFromBool(a == b);
 }
 
+// --- thrd_yield.c ---
 fn thrd_yield_fn() callconv(.c) void {
     _ = linux.syscall0(.sched_yield);
 }
 
+// --- pthread_attr_destroy.c ---
 fn attr_destroy_fn(_: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_attr_init.c ---
 fn attr_init_fn(a: *anyopaque) callconv(.c) c_int {
     const a_s: [*]usize = @ptrCast(@alignCast(a));
     const a_i: [*]c_int = @ptrCast(@alignCast(a));
@@ -2320,6 +2389,7 @@ fn attr_init_fn(a: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_attr_setdetachstate.c ---
 fn attr_setdetachstate_fn(a: *anyopaque, state: c_int) callconv(.c) c_int {
     if (@as(c_uint, @bitCast(state)) > 1) return eint(.INVAL);
     const a_i: [*]c_int = @ptrCast(@alignCast(a));
@@ -2327,6 +2397,7 @@ fn attr_setdetachstate_fn(a: *anyopaque, state: c_int) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_attr_setguardsize.c ---
 fn attr_setguardsize_fn(a: *anyopaque, size: usize) callconv(.c) c_int {
     if (size > SIZE_MAX / 8) return eint(.INVAL);
     const a_s: [*]usize = @ptrCast(@alignCast(a));
@@ -2334,6 +2405,7 @@ fn attr_setguardsize_fn(a: *anyopaque, size: usize) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_attr_setinheritsched.c ---
 fn attr_setinheritsched_fn(a: *anyopaque, inherit: c_int) callconv(.c) c_int {
     if (@as(c_uint, @bitCast(inherit)) > 1) return eint(.INVAL);
     const a_i: [*]c_int = @ptrCast(@alignCast(a));
@@ -2341,18 +2413,22 @@ fn attr_setinheritsched_fn(a: *anyopaque, inherit: c_int) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_attr_setschedparam.c ---
+// sched_param has sched_priority as first (and only) int field
 fn attr_setschedparam_fn(a: *anyopaque, param: *const c_int) callconv(.c) c_int {
     const a_i: [*]c_int = @ptrCast(@alignCast(a));
     a_i[attr_i_prio] = param.*;
     return 0;
 }
 
+// --- pthread_attr_setschedpolicy.c ---
 fn attr_setschedpolicy_fn(a: *anyopaque, policy: c_int) callconv(.c) c_int {
     const a_i: [*]c_int = @ptrCast(@alignCast(a));
     a_i[attr_i_policy] = policy;
     return 0;
 }
 
+// --- pthread_attr_setscope.c ---
 fn attr_setscope_fn(_: *anyopaque, scope: c_int) callconv(.c) c_int {
     return switch (scope) {
         PTHREAD_SCOPE_SYSTEM => 0,
@@ -2361,6 +2437,7 @@ fn attr_setscope_fn(_: *anyopaque, scope: c_int) callconv(.c) c_int {
     };
 }
 
+// --- pthread_attr_setstack.c ---
 fn attr_setstack_fn(a: *anyopaque, addr: usize, size: usize) callconv(.c) c_int {
     if (size -% PTHREAD_STACK_MIN > SIZE_MAX / 4) return eint(.INVAL);
     const a_s: [*]usize = @ptrCast(@alignCast(a));
@@ -2369,6 +2446,7 @@ fn attr_setstack_fn(a: *anyopaque, addr: usize, size: usize) callconv(.c) c_int 
     return 0;
 }
 
+// --- pthread_attr_setstacksize.c ---
 fn attr_setstacksize_fn(a: *anyopaque, size: usize) callconv(.c) c_int {
     if (size -% PTHREAD_STACK_MIN > SIZE_MAX / 4) return eint(.INVAL);
     const a_s: [*]usize = @ptrCast(@alignCast(a));
@@ -2426,35 +2504,42 @@ fn attr_getstacksize_fn(a: *const anyopaque, size: *usize) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_barrierattr_destroy.c ---
 fn barrierattr_destroy_fn(_: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_barrierattr_init.c ---
 fn barrierattr_init_fn(a: *c_uint) callconv(.c) c_int {
     a.* = 0;
     return 0;
 }
 
+// --- pthread_barrierattr_setpshared.c ---
 fn barrierattr_setpshared_fn(a: *c_int, pshared: c_int) callconv(.c) c_int {
     if (@as(c_uint, @bitCast(pshared)) > 1) return eint(.INVAL);
     a.* = if (pshared != 0) INT_MIN else 0;
     return 0;
 }
 
+// --- pthread_barrierattr_getpshared.c ---
 fn barrierattr_getpshared_fn(a: *const c_uint, pshared: *c_int) callconv(.c) c_int {
     pshared.* = @intFromBool(a.* != 0);
     return 0;
 }
 
+// --- pthread_condattr_destroy.c ---
 fn condattr_destroy_fn(_: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_condattr_init.c ---
 fn condattr_init_fn(a: *c_int) callconv(.c) c_int {
     a.* = 0;
     return 0;
 }
 
+// --- pthread_condattr_setclock.c ---
 fn condattr_setclock_fn(a: *c_int, clk: c_int) callconv(.c) c_int {
     if (clk < 0) return eint(.INVAL);
     // clk-2U < 2 catches clk==2 and clk==3 (CLOCK_MONOTONIC_RAW, etc.)
@@ -2463,26 +2548,31 @@ fn condattr_setclock_fn(a: *c_int, clk: c_int) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_condattr_setpshared.c ---
 fn condattr_setpshared_fn(a: *c_uint, pshared: c_int) callconv(.c) c_int {
     if (@as(c_uint, @bitCast(pshared)) > 1) return eint(.INVAL);
     a.* = (a.* & 0x7fffffff) | (@as(c_uint, @bitCast(pshared)) << 31);
     return 0;
 }
 
+// --- pthread_condattr_getclock.c ---
 fn condattr_getclock_fn(a: *const c_int, clk: *c_int) callconv(.c) c_int {
     clk.* = a.* & 0x7fffffff;
     return 0;
 }
 
+// --- pthread_condattr_getpshared.c ---
 fn condattr_getpshared_fn(a: *const c_uint, pshared: *c_int) callconv(.c) c_int {
     pshared.* = @intCast(a.* >> 31);
     return 0;
 }
 
+// --- pthread_mutexattr_destroy.c ---
 fn mutexattr_destroy_fn(_: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_mutexattr_init.c ---
 fn mutexattr_init_fn(a: *c_uint) callconv(.c) c_int {
     a.* = 0;
     return 0;
@@ -2511,6 +2601,7 @@ fn mutexattr_setprotocol_fn(a: *c_uint, protocol: c_int) callconv(.c) c_int {
     }
 }
 
+// --- pthread_mutexattr_setpshared.c ---
 fn mutexattr_setpshared_fn(a: *c_uint, pshared: c_int) callconv(.c) c_int {
     if (@as(c_uint, @bitCast(pshared)) > 1) return eint(.INVAL);
     a.* = (a.* & ~@as(c_uint, 128)) | (@as(c_uint, @bitCast(pshared)) << 7);
@@ -2536,36 +2627,43 @@ fn mutexattr_setrobust_fn(a: *c_uint, robust: c_int) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_mutexattr_settype.c ---
 fn mutexattr_settype_fn(a: *c_uint, t: c_int) callconv(.c) c_int {
     if (@as(c_uint, @bitCast(t)) > 2) return eint(.INVAL);
     a.* = (a.* & ~@as(c_uint, 3)) | @as(c_uint, @bitCast(t));
     return 0;
 }
 
+// --- pthread_mutexattr_getprotocol.c ---
 fn mutexattr_getprotocol_fn(a: *const c_uint, protocol: *c_int) callconv(.c) c_int {
     protocol.* = @intCast((a.* / 8) % 2);
     return 0;
 }
 
+// --- pthread_mutexattr_getpshared.c ---
 fn mutexattr_getpshared_fn(a: *const c_uint, pshared: *c_int) callconv(.c) c_int {
     pshared.* = @intCast((a.* / 128) % 2);
     return 0;
 }
 
+// --- pthread_mutexattr_getrobust.c ---
 fn mutexattr_getrobust_fn(a: *const c_uint, robust: *c_int) callconv(.c) c_int {
     robust.* = @intCast((a.* / 4) % 2);
     return 0;
 }
 
+// --- pthread_mutexattr_gettype.c ---
 fn mutexattr_gettype_fn(a: *const c_uint, t: *c_int) callconv(.c) c_int {
     t.* = @intCast(a.* & 3);
     return 0;
 }
 
+// --- pthread_rwlockattr_destroy.c ---
 fn rwlockattr_destroy_fn(_: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_rwlockattr_init.c ---
 fn rwlockattr_init_fn(a: *anyopaque) callconv(.c) c_int {
     const a_i: [*]c_int = @ptrCast(@alignCast(a));
     a_i[0] = 0;
@@ -2573,17 +2671,20 @@ fn rwlockattr_init_fn(a: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_rwlockattr_setpshared.c ---
 fn rwlockattr_setpshared_fn(a: *c_int, pshared: c_int) callconv(.c) c_int {
     if (@as(c_uint, @bitCast(pshared)) > 1) return eint(.INVAL);
     a.* = pshared;
     return 0;
 }
 
+// --- pthread_rwlockattr_getpshared.c ---
 fn rwlockattr_getpshared_fn(a: *const c_int, pshared: *c_int) callconv(.c) c_int {
     pshared.* = a.*;
     return 0;
 }
 
+// --- pthread_mutex_destroy.c ---
 fn mutex_destroy_fn(m: *anyopaque) callconv(.c) c_int {
     const m_i: [*]c_int = @ptrCast(@alignCast(m));
     if (m_i[0] > 128) { // _m_type > 128 → process-shared with nontrivial type
@@ -2593,6 +2694,7 @@ fn mutex_destroy_fn(m: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_mutex_init.c ---
 fn mutex_init_fn(m: *anyopaque, a: ?*const c_uint) callconv(.c) c_int {
     const size = if (@sizeOf(usize) == 8) 14 * @sizeOf(c_int) else 6 * @sizeOf(c_int);
     @memset(@as([*]u8, @ptrCast(m))[0..size], 0);
@@ -2603,24 +2705,29 @@ fn mutex_init_fn(m: *anyopaque, a: ?*const c_uint) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_mutex_getprioceiling.c ---
 fn mutex_getprioceiling_fn(_: *const anyopaque, _: *c_int) callconv(.c) c_int {
     return eint(.INVAL);
 }
 
+// --- pthread_mutex_setprioceiling.c ---
 fn mutex_setprioceiling_fn(_: *anyopaque, _: c_int, _: ?*c_int) callconv(.c) c_int {
     return eint(.INVAL);
 }
 
+// --- sem_destroy.c ---
 fn sem_destroy_fn(_: *anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- sem_getvalue.c ---
 fn sem_getvalue_fn(sem: *anyopaque, valp: *c_int) callconv(.c) c_int {
     const s: [*]volatile c_int = @ptrCast(@alignCast(sem));
     valp.* = s[0] & SEM_VALUE_MAX;
     return 0;
 }
 
+// --- sem_init.c ---
 fn sem_init_fn(sem: *anyopaque, pshared: c_int, value: c_uint) callconv(.c) c_int {
     if (@as(c_int, @bitCast(value)) < 0) { // value > SEM_VALUE_MAX
         // errno = EINVAL
@@ -2635,29 +2742,35 @@ fn sem_init_fn(sem: *anyopaque, pshared: c_int, value: c_uint) callconv(.c) c_in
     return 0;
 }
 
+// --- call_once.c ---
 fn call_once_fn(flag: *c_int, func: *const fn () callconv(.c) void) callconv(.c) void {
     const __pthread_once_ext = @extern(*const fn (*c_int, *const fn () callconv(.c) void) callconv(.c) c_int, .{ .name = "__pthread_once" });
     _ = __pthread_once_ext(flag, func);
 }
 
+// --- cnd_broadcast.c ---
 fn cnd_broadcast_fn2(c: *anyopaque) callconv(.c) c_int {
     const __priv_cond_sig = @extern(*const fn (*anyopaque, c_int) callconv(.c) c_int, .{ .name = "__private_cond_signal" });
     return __priv_cond_sig(c, -1);
 }
 
+// --- cnd_destroy.c ---
 fn cnd_destroy_fn2(_: *anyopaque) callconv(.c) void {}
 
+// --- cnd_init.c ---
 fn cnd_init_fn2(c: *anyopaque) callconv(.c) c_int {
     const bytes: [*]u8 = @ptrCast(c);
     @memset(bytes[0 .. cond_int_count * @sizeOf(c_int)], 0);
     return thrd_success;
 }
 
+// --- cnd_signal.c ---
 fn cnd_signal_fn2(c: *anyopaque) callconv(.c) c_int {
     const __priv_cond_sig = @extern(*const fn (*anyopaque, c_int) callconv(.c) c_int, .{ .name = "__private_cond_signal" });
     return __priv_cond_sig(c, 1);
 }
 
+// --- cnd_timedwait.c ---
 fn cnd_timedwait_fn(c: *anyopaque, m: *anyopaque, ts: ?*const anyopaque) callconv(.c) c_int {
     const __pthread_cond_timedwait_ext = @extern(*const fn (*anyopaque, *anyopaque, ?*const anyopaque) callconv(.c) c_int, .{ .name = "__pthread_cond_timedwait" });
     const ret = __pthread_cond_timedwait_ext(c, m, ts);
@@ -2668,12 +2781,15 @@ fn cnd_timedwait_fn(c: *anyopaque, m: *anyopaque, ts: ?*const anyopaque) callcon
     };
 }
 
+// --- cnd_wait.c ---
 fn cnd_wait_fn2(c: *anyopaque, m: *anyopaque) callconv(.c) c_int {
     return cnd_timedwait_fn(c, m, null);
 }
 
+// --- mtx_destroy.c ---
 fn mtx_destroy_fn(_: *anyopaque) callconv(.c) void {}
 
+// --- mtx_init.c ---
 fn mtx_init_fn(m: *anyopaque, t: c_int) callconv(.c) c_int {
     const m_i: [*]c_int = @ptrCast(@alignCast(m));
     const size = if (@sizeOf(usize) == 8) 14 * @sizeOf(c_int) else 6 * @sizeOf(c_int);
@@ -2682,6 +2798,7 @@ fn mtx_init_fn(m: *anyopaque, t: c_int) callconv(.c) c_int {
     return thrd_success;
 }
 
+// --- mtx_lock.c ---
 fn mtx_lock_fn(m: *anyopaque) callconv(.c) c_int {
     const m_i: [*]c_int = @ptrCast(@alignCast(m));
     if (m_i[0] == PTHREAD_MUTEX_NORMAL) {
@@ -2691,6 +2808,7 @@ fn mtx_lock_fn(m: *anyopaque) callconv(.c) c_int {
     return mtx_timedlock_fn(m, null);
 }
 
+// --- mtx_timedlock.c ---
 fn mtx_timedlock_fn(m: *anyopaque, ts: ?*const anyopaque) callconv(.c) c_int {
     const __pthread_mutex_timedlock_ext = @extern(*const fn (*anyopaque, ?*const anyopaque) callconv(.c) c_int, .{ .name = "__pthread_mutex_timedlock" });
     const ret = __pthread_mutex_timedlock_ext(m, ts);
@@ -2701,6 +2819,7 @@ fn mtx_timedlock_fn(m: *anyopaque, ts: ?*const anyopaque) callconv(.c) c_int {
     };
 }
 
+// --- mtx_trylock.c ---
 fn mtx_trylock_fn(m: *anyopaque) callconv(.c) c_int {
     const m_i: [*]c_int = @ptrCast(@alignCast(m));
     if (m_i[0] == PTHREAD_MUTEX_NORMAL) {
@@ -2718,21 +2837,26 @@ fn mtx_trylock_fn(m: *anyopaque) callconv(.c) c_int {
     };
 }
 
+// --- mtx_unlock.c ---
 fn mtx_unlock_fn(m: *anyopaque) callconv(.c) c_int {
     const __pthread_mutex_unlock_ext = @extern(*const fn (*anyopaque) callconv(.c) c_int, .{ .name = "__pthread_mutex_unlock" });
     return __pthread_mutex_unlock_ext(m);
 }
 
+// --- tss_create.c ---
 fn tss_create_fn(tss: *c_uint, dtor: ?*const anyopaque) callconv(.c) c_int {
     const __pthread_key_create_ext = @extern(*const fn (*c_uint, ?*const anyopaque) callconv(.c) c_int, .{ .name = "__pthread_key_create" });
     return if (__pthread_key_create_ext(tss, dtor) != 0) thrd_error else thrd_success;
 }
 
+// --- tss_delete.c ---
 fn tss_delete_fn(key: c_uint) callconv(.c) void {
     const __pthread_key_delete_ext = @extern(*const fn (c_uint) callconv(.c) c_int, .{ .name = "__pthread_key_delete" });
     _ = __pthread_key_delete_ext(key);
 }
 
+// --- tss_set.c ---
+// Accesses self->tsd[k] - use struct pthread layout
 fn tss_set_fn(k: c_uint, x: ?*anyopaque) callconv(.c) c_int {
     const self_addr = selfAddr();
     const off_tsd: usize = off_map_base + 7 * ptr_size;
@@ -2747,6 +2871,7 @@ fn tss_set_fn(k: c_uint, x: ?*anyopaque) callconv(.c) c_int {
     return thrd_success;
 }
 
+// --- pthread_setattr_default_np.c ---
 fn setattr_default_np_fn(attrp: *const anyopaque) callconv(.c) c_int {
     // Reject anything except stack/guard size.
     // C code: copy attr, zero stacksize+guardsize, check rest is all-zero.
@@ -2774,6 +2899,7 @@ fn setattr_default_np_fn(attrp: *const anyopaque) callconv(.c) c_int {
     return 0;
 }
 
+// --- pthread_getattr_default_np (in same file) ---
 fn getattr_default_np_fn(attrp: *anyopaque) callconv(.c) c_int {
     const a_s: [*]usize = @ptrCast(@alignCast(attrp));
     const n_ints: usize = if (@sizeOf(usize) == 8) 14 else 9;
@@ -2832,11 +2958,15 @@ fn set_thread_area_fn(p: usize) callconv(.c) c_int {
     }
 }
 
+// The real cancellation-point logic is in arch-specific .s files
+// (via __syscall_cp_asm). This is the C fallback: just a regular syscall.
 fn syscall_cp_fn(nr: usize, u: usize, v: usize, w: usize, x: usize, y: usize, z: usize) callconv(.c) isize {
     const __syscall_cp_c_ext = @extern(*const fn (usize, usize, usize, usize, usize, usize, usize) callconv(.c) isize, .{ .name = "__syscall_cp_c" });
     return __syscall_cp_c_ext(nr, u, v, w, x, y, z);
 }
 
+// __testcancel is a weak symbol: if cancellation is not linked, it's a no-op.
+// The real implementation is in pthread_cancel.c.
 fn testcancel_fn() callconv(.c) void {}
 
 fn do_cleanup_push_fn(_: *anyopaque) callconv(.c) void {}

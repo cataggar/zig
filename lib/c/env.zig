@@ -3,7 +3,16 @@ var environ_var: ?[*:null]?[*:0]u8 = null;
 const std = @import("std");
 const linux = std.os.linux;
 const symbol = @import("../c.zig").symbol;
+// C library dependencies.
 extern "c" fn strncmp(a: [*:0]const u8, b: [*:0]const u8, n: usize) c_int;
+extern "c" fn strlen(s: [*:0]const u8) usize;
+extern "c" fn malloc(size: usize) ?[*]u8;
+extern "c" fn realloc(ptr: ?*anyopaque, size: usize) ?[*]u8;
+extern "c" fn free(ptr: ?*anyopaque) void;
+extern "c" fn memcpy(dst: *anyopaque, src: *const anyopaque, n: usize) *anyopaque;
+extern "c" fn __strchrnul(s: [*:0]const u8, c: c_int) [*:0]const u8;
+extern "c" fn issetugid() c_int;
+extern "c" var __environ: ?[*:null]?[*:0]u8;
 var env_alloced: ?[*]?[*:0]u8 = null;
 var env_alloced_n: usize = 0;
 var oldenv: ?[*:null]?[*:0]u8 = null;
@@ -16,6 +25,8 @@ const tls_module = extern struct {
     @"align": usize,
     offset: usize,
 };
+// Partial __libc struct — only the fields we access.
+// After page_size, there's global_locale which we don't touch.
 const LibC = extern struct {
     can_do_threads: u8,
     threaded: u8,
@@ -29,7 +40,13 @@ const LibC = extern struct {
     tls_cnt: usize,
     page_size: usize,
 };
-extern var __libc: LibC;
+extern "c" fn __init_tls(aux: [*]usize) void;
+extern "c" fn __init_ssp(entropy: ?*const anyopaque) void;
+extern "c" fn __set_thread_area(tp: *anyopaque) c_int;
+extern "c" fn memset(dst: *anyopaque, c: c_int, n: usize) *anyopaque;
+extern "c" fn _init() void;
+extern "c" fn exit(code: c_int) noreturn;
+extern "c" fn __libc_start_init() void;
 const AT_PHDR = 3;
 const AT_PHENT = 4;
 const AT_PHNUM = 5;
@@ -56,12 +73,16 @@ const O_RDWR = 2;
 const O_LARGEFILE = if (@sizeOf(usize) == 4) 0o100000 else 0;
 const POLLNVAL: c_short = 0x020;
 const DEFAULT_STACK_MAX: c_uint = 8 << 20;
+// DTP_OFFSET is arch-specific.
 const DTP_OFFSET: usize = if (builtin.cpu.arch.isMIPS() or builtin.cpu.arch == .m68k or builtin.cpu.arch.isPowerPC())
     0x8000
 else if (builtin.cpu.arch.isRISCV())
     0x800
 else
     0;
+// Offsets into struct pthread for dtv field (arch-specific).
+// On x86_64 (TLS below TP): self(8), dtv(8) at offset 8.
+// On aarch64 (TLS_ABOVE_TP): dtv is at end of struct after canary.
 const DTV_OFFSET: usize = @sizeOf(usize); // offset of dtv in struct pthread (after self ptr)
 
 fn __reset_tls_fn() callconv(.c) void {
@@ -89,7 +110,6 @@ fn __reset_tls_fn() callconv(.c) void {
 fn dummy() callconv(.c) void {}
 
 extern const __init_array_start: *const fn () callconv(.c) void;
-extern const __init_array_end: *const fn () callconv(.c) void;
 
 comptime {
     if (builtin.target.isMuslLibC()) {
@@ -278,6 +298,7 @@ fn __stack_chk_fail() callconv(.c) noreturn {
     @trap();
 }
 
+// __pthread_self() for the current arch.
 inline fn get_tp() usize {
     return switch (builtin.cpu.arch) {
         .x86_64 => asm volatile ("mov %%fs:0, %[ret]"

@@ -3,6 +3,12 @@ const std = @import("std");
 const linux = std.os.linux;
 const symbol = @import("../c.zig").symbol;
 extern "c" fn __funcs_on_quick_exit() void;
+extern "c" fn _Exit(code: c_int) noreturn;
+// Internal musl lock functions (provided by the thread subsystem).
+extern "c" fn __lock(lock: *c_int) void;
+extern "c" fn __unlock(lock: *c_int) void;
+// C library functions used by atexit.
+extern "c" fn calloc(nmemb: usize, size: usize) ?*anyopaque;
 const COUNT = 32;
 var qe_funcs: [COUNT]?*const fn () callconv(.c) void = .{null} ** COUNT;
 var qe_count: c_int = 0;
@@ -16,7 +22,12 @@ var ae_builtin: FuncList = std.mem.zeroes(FuncList);
 var ae_head: ?*FuncList = null;
 var ae_slot: c_int = 0;
 var ae_lock: c_int = 0;
-extern const __fini_array_start: *const fn () callconv(.c) void;
+extern "c" fn raise(sig: c_int) c_int;
+extern "c" fn __block_all_sigs(set: ?*anyopaque) void;
+extern "c" var __abort_lock: c_int;
+extern "c" fn __funcs_on_exit() void;
+extern "c" fn __stdio_exit() void;
+extern "c" fn _fini() void;
 
 comptime {
     if (builtin.target.isMuslLibC()) {

@@ -5,11 +5,13 @@ const FILE = opaque {};
 const wchar_t = std.c.wchar_t;
 const wint_t = std.c.wint_t;
 const ssize_t = isize;
+/// C constants
 const _IOFBF = 0;
 const _IOLBF = 1;
 const _IONBF = 2;
 const BUFSIZ = 1024;
 const EOF = -1;
+// Extern references to musl C functions that are still compiled from C sources.
 const setvbuf_fn = @extern(*const fn (?*FILE, ?[*]u8, c_int, usize) callconv(.c) c_int, .{ .name = "setvbuf" });
 const getdelim_fn = @extern(*const fn (?*[*]u8, ?*usize, c_int, ?*FILE) callconv(.c) ssize_t, .{ .name = "getdelim" });
 const fgetwc_fn = @extern(*const fn (?*FILE) callconv(.c) wint_t, .{ .name = "fgetwc" });
@@ -22,6 +24,7 @@ const fgetc_fn = @extern(*const fn (?*FILE) callconv(.c) c_int, .{ .name = "fget
 const fputc_fn = @extern(*const fn (c_int, ?*FILE) callconv(.c) c_int, .{ .name = "fputc" });
 const getc_unlocked_fn = @extern(*const fn (?*FILE) callconv(.c) c_int, .{ .name = "getc_unlocked" });
 const putc_unlocked_fn = @extern(*const fn (c_int, ?*FILE) callconv(.c) c_int, .{ .name = "putc_unlocked" });
+/// Musl FILE flag constants (from stdio_impl.h)
 const F_EOF: c_uint = 16;
 const F_ERR: c_uint = 32;
 const lockfile_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__lockfile" });
@@ -29,8 +32,10 @@ const unlockfile_fn = @extern(*const fn (*FILE) callconv(.c) void, .{ .name = "_
 const fseeko_unlocked_fn = @extern(*const fn (*FILE, i64, c_int) callconv(.c) c_int, .{ .name = "__fseeko_unlocked" });
 const fseeko_fn = @extern(*const fn (*FILE, i64, c_int) callconv(.c) c_int, .{ .name = "__fseeko" });
 const ftello_fn = @extern(*const fn (*FILE) callconv(.c) i64, .{ .name = "__ftello" });
+/// Musl UNGET constant (from stdio_impl.h)
 const UNGET = 8;
 const toread_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__toread" });
+/// Musl FILE flag constant (from stdio_impl.h)
 const F_SVB: c_uint = 64;
 const F_APP: c_uint = 128;
 const F_NORD: c_uint = 4;
@@ -198,72 +203,89 @@ comptime {
     }
 }
 
+/// setbuf.c: void setbuf(FILE *restrict f, char *restrict buf)
 fn setbuf(f: ?*FILE, buf: ?[*]u8) callconv(.c) void {
     _ = setvbuf_fn(f, buf, if (buf != null) _IOFBF else _IONBF, BUFSIZ);
 }
 
+/// setbuffer.c: void setbuffer(FILE *f, char *buf, size_t size)
 fn setbuffer(f: ?*FILE, buf: ?[*]u8, size: usize) callconv(.c) void {
     _ = setvbuf_fn(f, buf, if (buf != null) _IOFBF else _IONBF, size);
 }
 
+/// setlinebuf.c: void setlinebuf(FILE *f)
 fn setlinebuf(f: ?*FILE) callconv(.c) void {
     _ = setvbuf_fn(f, null, _IOLBF, 0);
 }
 
+/// getline.c: ssize_t getline(char **s, size_t *n, FILE *f)
 fn getline(s: ?*[*]u8, n: ?*usize, f: ?*FILE) callconv(.c) ssize_t {
     return getdelim_fn(s, n, '\n', f);
 }
 
+/// getwchar.c: wint_t getwchar(void)
 fn getwchar() callconv(.c) wint_t {
     return fgetwc_fn(stdin_ext.*);
 }
 
+/// putwchar.c: wint_t putwchar(wchar_t c)
 fn putwchar(c: wchar_t) callconv(.c) wint_t {
     return fputwc_fn(c, stdout_ext.*);
 }
 
+/// getwc.c: wint_t getwc(FILE *f)
 fn getwc(f: ?*FILE) callconv(.c) wint_t {
     return fgetwc_fn(f);
 }
 
+/// putwc.c: wint_t putwc(wchar_t c, FILE *f)
 fn putwc(c: wchar_t, f: ?*FILE) callconv(.c) wint_t {
     return fputwc_fn(c, f);
 }
 
+/// getw.c: int getw(FILE *f)
 fn getw(f: ?*FILE) callconv(.c) c_int {
     var x: c_int = undefined;
     return if (fread_fn(&x, @sizeOf(c_int), 1, f) != 0) x else EOF;
 }
 
+/// putw.c: int putw(int x, FILE *f)
 fn putw(x: c_int, f: ?*FILE) callconv(.c) c_int {
     var val = x;
     return @as(c_int, @intCast(fwrite_fn(&val, @sizeOf(c_int), 1, f))) - 1;
 }
 
+/// getchar.c: int getchar(void)
 fn getchar() callconv(.c) c_int {
     return fgetc_fn(stdin_ext.*);
 }
 
+/// putchar.c: int putchar(int c)
 fn putchar(c: c_int) callconv(.c) c_int {
     return fputc_fn(c, stdout_ext.*);
 }
 
+/// getchar_unlocked.c: int getchar_unlocked(void)
 fn getchar_unlocked() callconv(.c) c_int {
     return getc_unlocked_fn(stdin_ext.*);
 }
 
+/// putchar_unlocked.c: int putchar_unlocked(int c)
 fn putchar_unlocked(c: c_int) callconv(.c) c_int {
     return putc_unlocked_fn(c, stdout_ext.*);
 }
 
+/// Implements musl FLOCK(f) macro: ((f)->lock>=0 ? __lockfile((f)) : 0)
 inline fn flock(f: *FILE) c_int {
     return if (f.lock >= 0) lockfile_fn(f) else 0;
 }
 
+/// Implements musl FUNLOCK(f) macro
 inline fn funlock(f: *FILE, need_unlock: c_int) void {
     if (need_unlock != 0) unlockfile_fn(f);
 }
 
+/// feof.c: int feof(FILE *f)
 fn feof_fn(f: *FILE) callconv(.c) c_int {
     const need_unlock = flock(f);
     const ret: c_int = @intFromBool(f.flags & F_EOF != 0);
@@ -271,6 +293,7 @@ fn feof_fn(f: *FILE) callconv(.c) c_int {
     return ret;
 }
 
+/// ferror.c: int ferror(FILE *f)
 fn ferror_fn(f: *FILE) callconv(.c) c_int {
     const need_unlock = flock(f);
     const ret: c_int = @intFromBool(f.flags & F_ERR != 0);
@@ -278,12 +301,14 @@ fn ferror_fn(f: *FILE) callconv(.c) c_int {
     return ret;
 }
 
+/// clearerr.c: void clearerr(FILE *f)
 fn clearerr(f: *FILE) callconv(.c) void {
     const need_unlock = flock(f);
     f.flags &= ~(F_EOF | F_ERR);
     funlock(f, need_unlock);
 }
 
+/// fileno.c: int fileno(FILE *f)
 fn fileno(f: *FILE) callconv(.c) c_int {
     const need_unlock = flock(f);
     const fd = f.fd;
@@ -295,6 +320,7 @@ fn fileno(f: *FILE) callconv(.c) c_int {
     return fd;
 }
 
+/// rewind.c: void rewind(FILE *f)
 fn rewind(f: *FILE) callconv(.c) void {
     const need_unlock = flock(f);
     _ = fseeko_unlocked_fn(f, 0, 0); // SEEK_SET = 0
@@ -302,6 +328,7 @@ fn rewind(f: *FILE) callconv(.c) void {
     funlock(f, need_unlock);
 }
 
+/// fgetpos.c: int fgetpos(FILE *f, fpos_t *pos)
 fn fgetpos(f: *FILE, pos: *i64) callconv(.c) c_int {
     const off = ftello_fn(f);
     if (off < 0) return -1;
@@ -309,15 +336,18 @@ fn fgetpos(f: *FILE, pos: *i64) callconv(.c) c_int {
     return 0;
 }
 
+/// fsetpos.c: int fsetpos(FILE *f, const fpos_t *pos)
 fn fsetpos(f: *FILE, pos: *const i64) callconv(.c) c_int {
     return fseeko_fn(f, pos.*, 0); // SEEK_SET = 0
 }
 
+/// fputs.c: int fputs(const char *restrict s, FILE *restrict f)
 fn fputs(s: [*:0]const u8, f: *FILE) callconv(.c) c_int {
     const l = std.mem.len(s);
     return @as(c_int, @intCast(@intFromBool(fwrite_fn(s, 1, l, f) == l))) - 1;
 }
 
+/// puts.c: int puts(const char *s)
 fn puts(s: [*:0]const u8) callconv(.c) c_int {
     const stdout_ptr: *FILE = @ptrCast(stdout_ext.*);
     const need_unlock = flock(stdout_ptr);
@@ -326,6 +356,7 @@ fn puts(s: [*:0]const u8) callconv(.c) c_int {
     return r;
 }
 
+/// gets.c: char *gets(char *s)
 fn gets(s: [*]u8) callconv(.c) ?[*]u8 {
     var i: usize = 0;
     const stdin_ptr: *FILE = @ptrCast(stdin_ext.*);
@@ -347,6 +378,7 @@ fn gets(s: [*]u8) callconv(.c) ?[*]u8 {
     return s;
 }
 
+/// ungetc.c: int ungetc(int c, FILE *f)
 fn ungetc(c: c_int, f: *FILE) callconv(.c) c_int {
     if (c == EOF) return c;
 
@@ -374,6 +406,7 @@ fn ungetc(c: c_int, f: *FILE) callconv(.c) c_int {
     return @as(c_int, @intCast(@as(c_uint, @bitCast(c)) & 0xff));
 }
 
+/// setvbuf.c
 fn setvbuf(f: *FILE, buf: ?[*]u8, @"type": c_int, size: usize) callconv(.c) c_int {
     f.lbf = EOF;
 
@@ -394,6 +427,7 @@ fn setvbuf(f: *FILE, buf: ?[*]u8, @"type": c_int, size: usize) callconv(.c) c_in
     return 0;
 }
 
+/// __fseeko_unlocked from fseek.c
 fn __fseeko_unlocked(f: *FILE, off_arg: i64, whence: c_int) callconv(.c) c_int {
     var off = off_arg;
 
@@ -430,6 +464,7 @@ fn __fseeko_unlocked(f: *FILE, off_arg: i64, whence: c_int) callconv(.c) c_int {
     return 0;
 }
 
+/// __fseeko from fseek.c
 fn __fseeko(f: *FILE, off: i64, whence: c_int) callconv(.c) c_int {
     const need_unlock = flock(f);
     const result = __fseeko_unlocked(f, off, whence);
@@ -437,10 +472,12 @@ fn __fseeko(f: *FILE, off: i64, whence: c_int) callconv(.c) c_int {
     return result;
 }
 
+/// fseek from fseek.c
 fn fseek(f: *FILE, off: c_long, whence: c_int) callconv(.c) c_int {
     return __fseeko(f, @intCast(off), whence);
 }
 
+/// __ftello_unlocked from ftell.c
 fn __ftello_unlocked(f: *FILE) callconv(.c) i64 {
     const pos = f.seek_fn.?(f, 0, if (f.flags & F_APP != 0 and f.wpos != f.wbase) SEEK_END else SEEK_CUR);
     if (pos < 0) return pos;
@@ -454,6 +491,7 @@ fn __ftello_unlocked(f: *FILE) callconv(.c) i64 {
     return pos;
 }
 
+/// __ftello from ftell.c
 fn __ftello(f: *FILE) callconv(.c) i64 {
     const need_unlock = flock(f);
     const pos = __ftello_unlocked(f);
@@ -461,6 +499,7 @@ fn __ftello(f: *FILE) callconv(.c) i64 {
     return pos;
 }
 
+/// ftell from ftell.c
 fn ftell(f: *FILE) callconv(.c) c_long {
     const pos = __ftello(f);
     if (pos > std.math.maxInt(c_long)) {
@@ -470,6 +509,7 @@ fn ftell(f: *FILE) callconv(.c) c_long {
     return @intCast(pos);
 }
 
+/// __fwritex from fwrite.c - internal write helper
 fn __fwritex(s: [*]const u8, l_arg: usize, f: *FILE) callconv(.c) usize {
     var l = l_arg;
 
@@ -497,6 +537,7 @@ fn __fwritex(s: [*]const u8, l_arg: usize, f: *FILE) callconv(.c) usize {
     return l + 0; // +0 because no i prefix in this path
 }
 
+/// fwrite from fwrite.c
 fn fwrite(src: [*]const u8, size: usize, nmemb: usize, f: *FILE) callconv(.c) usize {
     const l = size *% nmemb;
     if (size == 0) return 0;
@@ -506,6 +547,7 @@ fn fwrite(src: [*]const u8, size: usize, nmemb: usize, f: *FILE) callconv(.c) us
     return if (k == l) nmemb else k / size;
 }
 
+/// fread from fread.c
 fn fread(destv: [*]u8, size: usize, nmemb: usize, f: *FILE) callconv(.c) usize {
     const len = size *% nmemb;
     var l = len;
@@ -544,6 +586,7 @@ fn fread(destv: [*]u8, size: usize, nmemb: usize, f: *FILE) callconv(.c) usize {
     return nmemb;
 }
 
+/// fgets.c: char *fgets(char *restrict s, int n, FILE *restrict f)
 fn fgets(s: [*]u8, n_arg: c_int, f: *FILE) callconv(.c) ?[*]u8 {
     var p = s;
     var n = n_arg;
@@ -592,42 +635,52 @@ fn fgets(s: [*]u8, n_arg: c_int, f: *FILE) callconv(.c) ?[*]u8 {
     return s;
 }
 
+/// _flushlbf: flush all line-buffered streams
 fn _flushlbf() callconv(.c) void {
     _ = fflush_fn(null);
 }
 
+/// __fsetlocking: set locking type (no-op in musl)
 fn __fsetlocking(_: *FILE, _: c_int) callconv(.c) c_int {
     return 0;
 }
 
+/// __fwriting: check if stream is in write mode
 fn __fwriting(f: *FILE) callconv(.c) c_int {
     return @intFromBool(f.flags & F_NORD != 0 or f.wend != null);
 }
 
+/// __freading: check if stream is in read mode
 fn __freading(f: *FILE) callconv(.c) c_int {
     return @intFromBool(f.flags & F_NOWR != 0 or f.rend != null);
 }
 
+/// __freadable: check if stream is readable
 fn __freadable(f: *FILE) callconv(.c) c_int {
     return @intFromBool(f.flags & F_NORD == 0);
 }
 
+/// __fwritable: check if stream is writable
 fn __fwritable(f: *FILE) callconv(.c) c_int {
     return @intFromBool(f.flags & F_NOWR == 0);
 }
 
+/// __flbf: check if stream is line-buffered
 fn __flbf(f: *FILE) callconv(.c) c_int {
     return @intFromBool(f.lbf >= 0);
 }
 
+/// __fbufsize: get stream buffer size
 fn __fbufsize(f: *FILE) callconv(.c) usize {
     return f.buf_size;
 }
 
+/// __fpending: get pending write data size
 fn __fpending(f: *FILE) callconv(.c) usize {
     return if (f.wend != null) @intFromPtr(f.wpos.?) - @intFromPtr(f.wbase.?) else 0;
 }
 
+/// __fpurge: discard all pending data
 fn __fpurge(f: *FILE) callconv(.c) c_int {
     f.wpos = null;
     f.wbase = null;
@@ -637,24 +690,29 @@ fn __fpurge(f: *FILE) callconv(.c) c_int {
     return 0;
 }
 
+/// __freadahead: bytes available for reading
 fn __freadahead(f: *FILE) callconv(.c) usize {
     return if (f.rend != null) @intFromPtr(f.rend.?) - @intFromPtr(f.rpos.?) else 0;
 }
 
+/// __freadptr: get pointer to read buffer
 fn __freadptr(f: *FILE, sizep: *usize) callconv(.c) ?[*]const u8 {
     if (f.rpos == f.rend) return null;
     sizep.* = @intFromPtr(f.rend.?) - @intFromPtr(f.rpos.?);
     return f.rpos;
 }
 
+/// __freadptrinc: advance read pointer
 fn __freadptrinc(f: *FILE, inc: usize) callconv(.c) void {
     f.rpos = f.rpos.? + inc;
 }
 
+/// __fseterr: set error flag on stream
 fn __fseterr(f: *FILE) callconv(.c) void {
     f.flags |= F_ERR;
 }
 
+/// remove.c: int remove(const char *path)
 fn remove_fn(path: [*:0]const u8) callconv(.c) c_int {
     var r = linux.unlinkat(linux.AT.FDCWD, @ptrCast(path), 0);
     const signed: isize = @bitCast(r);
@@ -664,10 +722,14 @@ fn remove_fn(path: [*:0]const u8) callconv(.c) c_int {
     return c_errno(r);
 }
 
+/// rename.c: int rename(const char *old, const char *new)
 fn rename_fn(old: [*:0]const u8, new: [*:0]const u8) callconv(.c) c_int {
     return c_errno(linux.renameat2(linux.AT.FDCWD, @ptrCast(old), linux.AT.FDCWD, @ptrCast(new), .{}));
 }
 
+/// getc_unlocked.c: int getc_unlocked(FILE *f)
+/// Implements musl's getc_unlocked macro:
+///   ((f)->rpos != (f)->rend) ? *(f)->rpos++ : __uflow((f))
 fn getc_unlocked_impl(f: *FILE) callconv(.c) c_int {
     if (f.rpos != f.rend) {
         const c = f.rpos.?[0];
@@ -677,6 +739,10 @@ fn getc_unlocked_impl(f: *FILE) callconv(.c) c_int {
     return uflow_fn(f);
 }
 
+/// putc_unlocked.c: int putc_unlocked(int c, FILE *f)
+/// Implements musl's putc_unlocked macro:
+///   ((unsigned char)(c)!=(f)->lbf && (f)->wpos!=(f)->wend)
+///     ? *(f)->wpos++ = (unsigned char)(c) : __overflow((f),(unsigned char)(c))
 fn putc_unlocked_impl(c: c_int, f: *FILE) callconv(.c) c_int {
     const uc: u8 = @truncate(@as(c_uint, @bitCast(c)));
     if (uc != @as(u8, @truncate(@as(c_uint, @bitCast(f.lbf)))) and f.wpos != f.wend) {
@@ -687,6 +753,7 @@ fn putc_unlocked_impl(c: c_int, f: *FILE) callconv(.c) c_int {
     return overflow_fn(f, uc);
 }
 
+/// fgetc.c / getc.c: int fgetc(FILE *f)
 fn fgetc_impl(f: *FILE) callconv(.c) c_int {
     const need_unlock = flock(f);
     const c = getc_unlocked_impl(f);
@@ -694,6 +761,7 @@ fn fgetc_impl(f: *FILE) callconv(.c) c_int {
     return c;
 }
 
+/// fputc.c / putc.c: int fputc(int c, FILE *f)
 fn fputc_impl(c: c_int, f: *FILE) callconv(.c) c_int {
     const need_unlock = flock(f);
     const result = putc_unlocked_impl(c, f);
@@ -701,6 +769,8 @@ fn fputc_impl(c: c_int, f: *FILE) callconv(.c) c_int {
     return result;
 }
 
+/// __toread.c: int __toread(FILE *f)
+/// Transition FILE from write mode to read mode.
 fn toread_impl(f: *FILE) callconv(.c) c_int {
     f.mode |= @bitCast(@as(c_uint, @bitCast(f.mode)) -% 1);
     if (f.wpos != f.wbase) {
@@ -719,6 +789,8 @@ fn toread_impl(f: *FILE) callconv(.c) c_int {
     return if (f.flags & F_EOF != 0) EOF else 0;
 }
 
+/// __towrite.c: int __towrite(FILE *f)
+/// Transition FILE from read mode to write mode.
 fn towrite_impl(f: *FILE) callconv(.c) c_int {
     f.mode |= @bitCast(@as(c_uint, @bitCast(f.mode)) -% 1);
     if (f.flags & F_NOWR != 0) {
@@ -733,12 +805,16 @@ fn towrite_impl(f: *FILE) callconv(.c) c_int {
     return 0;
 }
 
+/// __uflow.c: int __uflow(FILE *f)
+/// Refill read buffer and return one byte, or EOF.
 fn uflow_impl(f: *FILE) callconv(.c) c_int {
     var c: u8 = undefined;
     if (toread_impl(f) == 0 and f.read_fn.?(f, @as([*]u8, @ptrCast(&c)), 1) == 1) return c;
     return EOF;
 }
 
+/// __overflow.c: int __overflow(FILE *f, int _c)
+/// Write one byte through the buffer, flushing if needed.
 fn overflow_impl(f: *FILE, _c: c_int) callconv(.c) c_int {
     var c: u8 = @truncate(@as(c_uint, @bitCast(_c)));
     if (f.wend == null and towrite_impl(f) != 0) return EOF;
@@ -751,60 +827,70 @@ fn overflow_impl(f: *FILE, _c: c_int) callconv(.c) c_int {
     return c;
 }
 
+/// fprintf.c: int fprintf(FILE *restrict f, const char *restrict fmt, ...)
 fn fprintf_impl(f: ?*FILE, fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vfprintf_fn(f, fmt, ap);
 }
 
+/// printf.c: int printf(const char *restrict fmt, ...)
 fn printf_impl(fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vfprintf_fn(stdout_ext.*, fmt, ap);
 }
 
+/// snprintf.c: int snprintf(char *restrict s, size_t n, const char *restrict fmt, ...)
 fn snprintf_impl(s: [*]u8, n: usize, fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vsnprintf_impl(s, n, fmt, ap);
 }
 
+/// sprintf.c: int sprintf(char *restrict s, const char *restrict fmt, ...)
 fn sprintf_impl(s: [*]u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vsprintf_impl(s, fmt, ap);
 }
 
+/// asprintf.c: int asprintf(char **s, const char *fmt, ...)
 fn asprintf_impl(s: *?[*]u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vasprintf_impl(s, fmt, ap);
 }
 
+/// dprintf.c: int dprintf(int fd, const char *restrict fmt, ...)
 fn dprintf_impl(fd: c_int, fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vdprintf_impl(fd, fmt, ap);
 }
 
+/// scanf.c: int scanf(const char *restrict fmt, ...)
 fn scanf_impl(fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vscanf_impl(fmt, ap);
 }
 
+/// fscanf.c: int fscanf(FILE *restrict f, const char *restrict fmt, ...)
 fn fscanf_impl(f: ?*FILE, fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vfscanf_fn(f, fmt, ap);
 }
 
+/// sscanf.c: int sscanf(const char *restrict s, const char *restrict fmt, ...)
 fn sscanf_impl(s: [*:0]const u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vsscanf_impl(s, fmt, ap);
 }
 
+/// perror.c: void perror(const char *msg)
 fn perror_impl(msg: ?[*:0]const u8) callconv(.c) void {
     const f: *FILE = @ptrCast(stderr_ext.*);
     const errstr = strerror_fn(std.c._errno().*);
@@ -827,6 +913,8 @@ fn perror_impl(msg: ?[*:0]const u8) callconv(.c) void {
     funlock(f, need_unlock);
 }
 
+/// __fmodeflags.c: int __fmodeflags(const char *mode)
+/// Parse fopen-style mode string to O_* flags.
 fn fmodeflags_impl(mode: [*:0]const u8) callconv(.c) c_int {
     const O = std.os.linux.O;
     var o = O{};
@@ -859,10 +947,12 @@ fn fmodeflags_impl(mode: [*:0]const u8) callconv(.c) c_int {
     return @bitCast(@as(u32, @bitCast(o)));
 }
 
+/// __fclose_ca.c: int __fclose_ca(FILE *f)
 fn fclose_ca_impl(f: *FILE) callconv(.c) c_int {
     return f.close_fn.?(f);
 }
 
+/// fgetln.c: char *fgetln(FILE *f, size_t *plen)
 fn fgetln_impl(f_opaque: ?*FILE, plen: *usize) callconv(.c) ?[*]u8 {
     const f: *FILE = @ptrCast(f_opaque orelse return null);
     var ret: ?[*]u8 = null;
@@ -891,10 +981,12 @@ fn fgetln_impl(f_opaque: ?*FILE, plen: *usize) callconv(.c) ?[*]u8 {
     return ret;
 }
 
+/// __stdio_seek.c: off_t __stdio_seek(FILE *f, off_t off, int whence)
 fn stdio_seek_impl(f: *FILE, off: i64, whence: c_int) callconv(.c) i64 {
     return lseek_fn(f.fd, off, whence);
 }
 
+/// vasprintf.c: int vasprintf(char **s, const char *fmt, va_list ap)
 fn vasprintf_impl(s: *?[*]u8, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
     var ap_src = ap;
     var ap_copy = @cVaCopy(&ap_src);
@@ -908,6 +1000,7 @@ fn vasprintf_impl(s: *?[*]u8, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int
     return vsnprintf_impl(s.*.?, size + 1, fmt, ap_src);
 }
 
+/// vdprintf.c: int vdprintf(int fd, const char *restrict fmt, va_list ap)
 fn vdprintf_impl(fd: c_int, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
     var f = std.mem.zeroes(FILE);
     f.fd = fd;
@@ -919,6 +1012,7 @@ fn vdprintf_impl(fd: c_int, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
     return vfprintf_fn(@ptrCast(&f), fmt, ap);
 }
 
+/// getdelim.c: ssize_t getdelim(char **restrict s, size_t *restrict n, int delim, FILE *restrict f)
 fn getdelim_impl(s_raw: ?*[*]u8, n_raw: ?*usize, delim: c_int, f_opaque: ?*FILE) callconv(.c) ssize_t {
     const f: *FILE = @ptrCast(f_opaque orelse return -1);
     const need_unlock = flock(f);
@@ -1048,6 +1142,7 @@ fn sn_write(f: *FILE, s: [*]const u8, l: usize) callconv(.c) usize {
     return l;
 }
 
+/// vsnprintf.c: int vsnprintf(char *restrict s, size_t n, const char *restrict fmt, va_list ap)
 fn vsnprintf_impl(s: [*]u8, n: usize, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
     var buf: [1]u8 = undefined;
     var dummy: [1]u8 = undefined;
@@ -1065,6 +1160,7 @@ fn vsnprintf_impl(s: [*]u8, n: usize, fmt: [*:0]const u8, ap: VaList) callconv(.
     return vfprintf_fn(@ptrCast(&f), fmt, ap);
 }
 
+/// vsprintf.c: int vsprintf(char *restrict s, const char *restrict fmt, va_list ap)
 fn vsprintf_impl(s: [*]u8, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
     return vsnprintf_impl(s, std.math.maxInt(c_int), fmt, ap);
 }
@@ -1084,6 +1180,7 @@ fn string_read(f: *FILE, buf: [*]u8, len: usize) callconv(.c) usize {
     return actual;
 }
 
+/// vsscanf.c: int vsscanf(const char *restrict s, const char *restrict fmt, va_list ap)
 fn vsscanf_impl(s: [*:0]const u8, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
     var f = std.mem.zeroes(FILE);
     f.buf = @ptrCast(@constCast(s));
@@ -1132,6 +1229,7 @@ fn sw_write(f: *FILE, s: [*]const u8, l: usize) callconv(.c) usize {
     return l0;
 }
 
+/// vswprintf.c: int vswprintf(wchar_t *restrict s, size_t n, const wchar_t *restrict fmt, va_list ap)
 fn vswprintf_impl(s: [*]wchar_t, n: usize, fmt: [*:0]const wchar_t, ap: VaList) callconv(.c) c_int {
     var buf: [256]u8 = undefined;
     var c = SwCookie{ .ws = s, .l = n -| 1 };
@@ -1165,6 +1263,7 @@ fn wstring_read(f: *FILE, buf: [*]u8, len: usize) callconv(.c) usize {
     return 1;
 }
 
+/// vswscanf.c: int vswscanf(const wchar_t *restrict s, const wchar_t *restrict fmt, va_list ap)
 fn vswscanf_impl(s: [*:0]const wchar_t, fmt: [*:0]const wchar_t, ap: VaList) callconv(.c) c_int {
     var buf: [256]u8 = undefined;
     var f = std.mem.zeroes(FILE);
@@ -1176,54 +1275,64 @@ fn vswscanf_impl(s: [*:0]const wchar_t, fmt: [*:0]const wchar_t, ap: VaList) cal
     return vfwscanf_fn(@ptrCast(&f), fmt, ap);
 }
 
+/// wprintf.c: int wprintf(const wchar_t *restrict fmt, ...)
 fn wprintf_impl(fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vfwprintf_fn(stdout_ext.*, fmt, ap);
 }
 
+/// fwprintf.c: int fwprintf(FILE *restrict f, const wchar_t *restrict fmt, ...)
 fn fwprintf_impl(f: ?*FILE, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vfwprintf_fn(f, fmt, ap);
 }
 
+/// swprintf.c: int swprintf(wchar_t *restrict s, size_t n, const wchar_t *restrict fmt, ...)
 fn swprintf_impl(s: [*]wchar_t, n: usize, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vswprintf_impl(s, n, fmt, ap);
 }
 
+/// wscanf.c: int wscanf(const wchar_t *restrict fmt, ...)
 fn wscanf_impl(fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vfwscanf_fn(stdin_ext.*, fmt, ap);
 }
 
+/// fwscanf.c: int fwscanf(FILE *restrict f, const wchar_t *restrict fmt, ...)
 fn fwscanf_impl(f: ?*FILE, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vfwscanf_fn(f, fmt, ap);
 }
 
+/// swscanf.c: int swscanf(const wchar_t *restrict s, const wchar_t *restrict fmt, ...)
 fn swscanf_impl(s: [*:0]const wchar_t, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
     return vswscanf_impl(s, fmt, ap);
 }
 
+/// vwprintf.c: int vwprintf(const wchar_t *restrict fmt, va_list ap)
 fn vwprintf_impl(fmt: [*:0]const wchar_t, ap: VaList) callconv(.c) c_int {
     return vfwprintf_fn(stdout_ext.*, fmt, ap);
 }
 
+/// vwscanf.c: int vwscanf(const wchar_t *restrict fmt, va_list ap)
 fn vwscanf_impl(fmt: [*:0]const wchar_t, ap: VaList) callconv(.c) c_int {
     return vfwscanf_fn(stdin_ext.*, fmt, ap);
 }
 
+/// vprintf.c: int vprintf(const char *restrict fmt, va_list ap)
 fn vprintf_impl(fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
     return vfprintf_fn(stdout_ext.*, fmt, ap);
 }
 
+/// vscanf.c: int vscanf(const char *restrict fmt, va_list ap)
 fn vscanf_impl(fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
     return vfscanf_fn(stdin_ext.*, fmt, ap);
 }

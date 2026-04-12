@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const linux = std.os.linux;
 const symbol = @import("../c.zig").symbol;
+// POSIX limit values
 const _POSIX_LINK_MAX = 8;
 const _POSIX_MAX_CANON = 255;
 const _POSIX_MAX_INPUT = 255;
@@ -9,6 +10,7 @@ const NAME_MAX = 255;
 const PATH_MAX = 4096;
 const PIPE_BUF = 4096;
 const FILESIZEBITS = 64;
+// _PC_ index values (from POSIX / musl unistd.h)
 const values = [21]c_short{
     _POSIX_LINK_MAX, // _PC_LINK_MAX = 0
     _POSIX_MAX_CANON, // _PC_MAX_CANON = 1
@@ -40,6 +42,7 @@ const _SC_AVPHYS_PAGES = 86;
 const _CS_POSIX_V6_ILP32_OFF32_CFLAGS = 1116;
 const _POSIX_VERSION: c_long = 200809;
 const LONG_MAX = std.math.maxInt(c_long);
+// Encoded table values
 const VER: c_int = -256 | 1;
 const JT_ARG_MAX: c_int = -256 | 2;
 const JT_MQ_PRIO_MAX: c_int = -256 | 3;
@@ -55,6 +58,7 @@ const JT_SIGSTKSZ: c_int = -256 | 13;
 const RLIM_NPROC: c_int = @bitCast(@as(c_uint, 0x80000000 | 6)); // RLIMIT_NPROC
 const RLIM_NOFILE: c_int = @bitCast(@as(c_uint, 0x80000000 | 7)); // RLIMIT_NOFILE
 const sz_long: c_int = @sizeOf(c_long);
+// Table size: _SC values go up to ~199 on Linux
 const TABLE_SIZE = 200;
 
 comptime {

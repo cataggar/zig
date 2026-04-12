@@ -6,6 +6,14 @@ const expectEqual = std.testing.expectEqual;
 const expectApproxEqAbs = std.testing.expectApproxEqAbs;
 const expectApproxEqRel = std.testing.expectApproxEqRel;
 const symbol = @import("../c.zig").symbol;
+    // Very large numbers return unchanged
+    const large: f64 = 9007199254740992.0; // 2^53
+    try expectEqual(large, rint(large));
+    // Small positive numbers round to zero
+    const pos_result = rint(0.3);
+    // Small negative numbers round to negative zero
+    const neg_result = rint(-0.3);
+    const bits: u64 = @bitCast(neg_result);
 const powf_impl = struct {
     const POWF_LOG2_TABLE_BITS = 4;
     const POWF_LOG2_POLY_ORDER = 5;
@@ -249,6 +257,9 @@ const powf_impl = struct {
 };
 const maxInt = std.math.maxInt;
 const minInt = std.math.minInt;
+    var e: c_int = undefined;
+    var q: c_int = undefined;
+// Constants for f64 erf/erfc implementation
 const erf_erx: f64 = 8.45062911510467529297e-01; // 0x3FEB0AC1, 0x60000000
 const erf_efx8: f64 = 1.02703333676410069053e+00; // 0x3FF06EBA, 0x8214DB69
 const erf_pp0: f64 = 1.28379167095512558561e-01; // 0x3FC06EBA, 0x8214DB68
@@ -276,6 +287,7 @@ const erf_qa3: f64 = 7.18286544141962662868e-02;
 const erf_qa4: f64 = 1.26171219808761642112e-01;
 const erf_qa5: f64 = 1.36370839120290507362e-02;
 const erf_qa6: f64 = 1.19844998467991074170e-02;
+// Coefficients for approximation to erfc in [1.25,1/0.35]
 const erf_ra0: f64 = -9.86494403484714822705e-03;
 const erf_ra1: f64 = -6.93858572707181764372e-01;
 const erf_ra2: f64 = -1.05586262253232909814e+01;
@@ -292,6 +304,7 @@ const erf_sa5: f64 = 4.29008140027567833386e+02;
 const erf_sa6: f64 = 1.08635005541779435134e+02;
 const erf_sa7: f64 = 6.57024977031928170135e+00;
 const erf_sa8: f64 = -6.04244152148580987438e-02;
+// Coefficients for approximation to erfc in [1/.35,28]
 const erf_rb0: f64 = -9.86494292470009928597e-03;
 const erf_rb1: f64 = -7.99283237680523006574e-01;
 const erf_rb2: f64 = -1.77579549177547519889e+01;
@@ -306,6 +319,7 @@ const erf_sb4: f64 = 3.19985821950859553908e+03;
 const erf_sb5: f64 = 2.55305040643316442583e+03;
 const erf_sb6: f64 = 4.74528541206955367215e+02;
 const erf_sb7: f64 = -2.24409524465858183362e+01;
+// f32 erf/erfc constants and implementation
 const erff_erx: f32 = 8.4506291151e-01;
 const erff_efx8: f32 = 1.0270333290e+00;
 const erff_pp0: f32 = 1.2837916613e-01;
@@ -318,6 +332,7 @@ const erff_qq2: f32 = 6.5022252500e-02;
 const erff_qq3: f32 = 5.0813062117e-03;
 const erff_qq4: f32 = 1.3249473704e-04;
 const erff_qq5: f32 = -3.9602282413e-06;
+// Coefficients for approximation to erf in [0.84375,1.25]
 const erff_pa0: f32 = -2.3621185683e-03;
 const erff_pa1: f32 = 4.1485610604e-01;
 const erff_pa2: f32 = -3.7220788002e-01;
@@ -331,6 +346,7 @@ const erff_qa3: f32 = 7.1828655899e-02;
 const erff_qa4: f32 = 1.2617121637e-01;
 const erff_qa5: f32 = 1.3637083583e-02;
 const erff_qa6: f32 = 1.1984500103e-02;
+// Coefficients for approximation to erfc in [1.25,1/0.35]
 const erff_ra0: f32 = -9.8649440333e-03;
 const erff_ra1: f32 = -6.9385856390e-01;
 const erff_ra2: f32 = -1.0558626175e+01;
@@ -347,6 +363,7 @@ const erff_sa5: f32 = 4.2900814819e+02;
 const erff_sa6: f32 = 1.0863500214e+02;
 const erff_sa7: f32 = 6.5702495575e+00;
 const erff_sa8: f32 = -6.0424413532e-02;
+// Coefficients for approximation to erfc in [1/.35,28]
 const erff_rb0: f32 = -9.8649431020e-03;
 const erff_rb1: f32 = -7.9928326607e-01;
 const erff_rb2: f32 = -1.7757955551e+01;
@@ -362,6 +379,7 @@ const erff_sb5: f32 = 2.5530502930e+03;
 const erff_sb6: f32 = 4.7452853394e+02;
 const erff_sb7: f32 = -2.2440952301e+01;
 const mem = std.mem;
+// lgamma_r f64 polynomial coefficients
 const lg_pi: f64 = 3.14159265358979311600e+00; // 0x400921FB, 0x54442D18
 const lg_a0: f64 = 7.72156649015328655494e-02; // 0x3FB3C467, 0xE37DB0C8
 const lg_a1: f64 = 3.22467033424113591611e-01; // 0x3FD4A34C, 0xC4A60FAD
@@ -778,6 +796,7 @@ fn tanh(x: f64) callconv(.c) f64 {
 fn tanhf(x: f32) callconv(.c) f32 {
     return math.tanh(x);
 }
+
 
 comptime {
     if (builtin.target.isMinGW()) {
@@ -1339,6 +1358,7 @@ fn nexttowardl(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
     return math.nextAfter(c_longdouble, x, y);
 }
 
+/// Generic rint for any IEEE 754 float type.
 fn rintGeneric(comptime T: type, x: T) T {
     const toint: T = 1.0 / math.floatEps(T);
     const FloatBits = std.meta.Int(.unsigned, @typeInfo(T).float.bits);
@@ -1467,6 +1487,9 @@ fn fdim(x: f64, y: f64) callconv(.c) f64 {
     return 0;
 }
 
+/// Port of musl powf — IEEE 754 conformant single-precision power function.
+/// Uses double-precision log2+exp2 internally for 0.82 ULP accuracy.
+/// Copyright (c) 2017-2018, Arm Limited. SPDX-License-Identifier: MIT
 fn powf(x: f32, y: f32) callconv(.c) f32 {
     return powf_impl.call(x, y);
 }
@@ -1636,6 +1659,9 @@ fn asinhf_(x: f32) callconv(.c) f32 {
     return math.asinh(x);
 }
 
+/// Compute log(1+x) using the identity log(1+x) = 2*atanh(x/(x+2))
+/// and the series atanh(s) = s + s³/3 + s⁵/5 + ...
+/// Uses only basic arithmetic (+, -, *, /) — no @log.
 fn log1p_wide(comptime T: type, x: T) T {
     if (x == 0) return x;
     const one: T = 1.0;
@@ -1662,6 +1688,8 @@ fn log1p_wide(comptime T: type, x: T) T {
     return 2 * s * w;
 }
 
+/// Compute log(x) for x > 0 using frexp range reduction + log1p_wide.
+/// Uses only basic arithmetic — no @log.
 fn log_pure(comptime T: type, x: T) T {
     const fr = math.frexp(x);
     var sig = fr.significand;
@@ -1677,6 +1705,7 @@ fn log_pure(comptime T: type, x: T) T {
     return k * ln2 + log1p_wide(T, sig - 1.0);
 }
 
+/// Taylor series for exp(x)-1: x + x²/2! + x³/3! + ...
 fn taylor_expm1(comptime T: type, x: T) T {
     var term: T = x;
     var sum: T = x;
@@ -1690,6 +1719,8 @@ fn taylor_expm1(comptime T: type, x: T) T {
     return sum;
 }
 
+/// Compute exp(x)-1 using Taylor series with range reduction.
+/// Uses only basic arithmetic — no @exp.
 fn expm1_wide(comptime T: type, x: T) T {
     if (x == 0) return x;
     if (math.isNan(x)) return x;
@@ -1719,10 +1750,15 @@ fn expm1_wide(comptime T: type, x: T) T {
     return two_k * sum + (two_k - 1);
 }
 
+/// Compute exp(x) using expm1. Uses only basic arithmetic — no @exp.
 fn exp_pure(comptime T: type, x: T) T {
     return 1.0 + expm1_wide(T, x);
 }
 
+/// Port of musl asinh.c using f128 intermediates for < 1.5 ULP accuracy.
+/// The extra mantissa bits of f128 (112 vs 52 for f64) eliminate the log1p
+/// precision issue that causes 1.5+ ULP errors in the f64 [0.125,0.5] range.
+/// f128 is available on all targets via software emulation.
 fn asinh_(x_: f64) callconv(.c) f64 {
     @setFloatMode(.strict);
     const u: u64 = @bitCast(x_);
@@ -1757,6 +1793,7 @@ fn asinhl_(x: c_longdouble) callconv(.c) c_longdouble {
     };
 }
 
+/// Native long double asinh (port of musl asinhl.c).
 fn asinhl_impl(comptime T: type, x_: T) T {
     @setFloatMode(.strict);
     const ax = @abs(x_);
@@ -1800,6 +1837,11 @@ fn coshl_(x: c_longdouble) callconv(.c) c_longdouble {
     };
 }
 
+/// Port of musl sinh.c using f128 intermediates.
+/// f128 exp handles values up to ~11356 without overflow, so the
+/// overflow path (|x| > log(DBL_MAX) ≈ 710) works without the
+/// exp(x/2)² trick that causes directed rounding errors.
+/// f128 is available on all targets via software emulation.
 fn sinh_(x_: f64) callconv(.c) f64 {
     @setFloatMode(.strict);
     const u: u64 = @bitCast(x_);
@@ -1832,6 +1874,7 @@ fn sinhl_(x: c_longdouble) callconv(.c) c_longdouble {
     };
 }
 
+/// Native long double sinh (port of musl sinhl.c).
 fn sinhl_impl(comptime T: type, x_: T) T {
     @setFloatMode(.strict);
     const absx = @abs(x_);
@@ -1876,6 +1919,7 @@ fn remainderl_(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
     return remquol_(x, y, &q);
 }
 
+/// Translated from musl/src/math/remquof.c
 fn remquof_(x_: f32, y_: f32, quo: *c_int) callconv(.c) f32 {
     var x: f32 = x_;
     var y: f32 = y_;
@@ -1965,6 +2009,7 @@ fn remquof_(x_: f32, y_: f32, quo: *c_int) callconv(.c) f32 {
     return if (sx != 0) -x else x;
 }
 
+/// Translated from musl/src/math/remquo.c
 fn remquo_(x_: f64, y_: f64, quo: *c_int) callconv(.c) f64 {
     var x: f64 = x_;
     var y: f64 = y_;
@@ -2054,6 +2099,7 @@ fn remquo_(x_: f64, y_: f64, quo: *c_int) callconv(.c) f64 {
     return if (sx != 0) -x else x;
 }
 
+/// Translated from musl/src/math/remquol.c
 fn remquol_(x_: c_longdouble, y_: c_longdouble, quo: *c_int) callconv(.c) c_longdouble {
     const ld = @typeInfo(c_longdouble).float;
     if (ld.bits == 64) {

@@ -3,6 +3,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const symbol = @import("../c.zig").symbol;
 const errno = @import("../c.zig").errno;
+    const set = [_]u8{ 0b10101010, 0b11001100, 0b11110000 };
 const c = @import("../c.zig");
 
 comptime {
@@ -32,6 +33,7 @@ fn sched_get_priority_minLinux(policy: c_int) callconv(.c) c_int {
     return errno(linux.sched_get_priority_min(@bitCast(policy)));
 }
 
+/// musl deliberately returns -ENOSYS for these scheduling functions.
 fn sched_getparamStub(pid: linux.pid_t, param: *linux.sched_param) callconv(.c) c_int {
     _ = pid;
     _ = param;
@@ -72,6 +74,8 @@ fn __sched_cpucount(size: usize, set: [*]const u8) callconv(.c) c_int {
     return cnt;
 }
 
+/// sched_getcpu — returns the CPU the calling thread is running on.
+/// Drops musl's vdso optimization; uses raw getcpu syscall.
 fn sched_getcpuLinux() callconv(.c) c_int {
     var cpu: usize = 0;
     const rc: isize = @bitCast(linux.getcpu(&cpu, null));

@@ -1,9 +1,12 @@
 const builtin = @import("builtin");
 const symbol = @import("../c.zig").symbol;
 const RTLD_DI_LINKMAP = 2;
-extern fn __dl_seterr([*:0]const u8, ...) callconv(.c) void;
 const std = @import("std");
 const elf = std.elf;
+threadlocal var tl_errbuf: [256]u8 = .{0} ** 256;
+threadlocal var tl_errflag: bool = false;
+/// Extended dl_phdr_info matching musl's struct layout including
+/// the TLS fields beyond the minimal POSIX definition.
 const DlPhdrInfo = extern struct {
     addr: usize,
     name: ?[*:0]const u8,
@@ -102,6 +105,7 @@ fn dlerror_impl() callconv(.c) ?[*:0]const u8 {
     return @ptrCast(ptr);
 }
 
+/// Set the dlerror message using Zig formatting.
 fn setDlError(comptime fmt: []const u8, args: anytype) void {
     const result = std.fmt.bufPrint(tl_errbuf[0 .. tl_errbuf.len - 1], fmt, args) catch {
         tl_errbuf[tl_errbuf.len - 1] = 0;
@@ -112,6 +116,10 @@ fn setDlError(comptime fmt: []const u8, args: anytype) void {
     tl_errflag = true;
 }
 
+/// Exported __dl_seterr for C ABI compatibility.
+/// Copies the format string as the error message. Our Zig stubs use
+/// setDlError directly for proper formatting; this export exists for
+/// any external C code that references the symbol.
 fn dl_seterr_impl(fmt: [*:0]const u8, ...) callconv(.c) void {
     const s = std.mem.span(fmt);
     const len = @min(s.len, tl_errbuf.len - 1);

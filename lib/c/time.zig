@@ -38,8 +38,21 @@ var gmtime_buf: tm = undefined;
 const day_abbr = [7]*const [3]u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
 const mon_abbr = [12]*const [3]u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 var asctime_buf: [26]u8 = undefined;
+// ctime/ctime_r depend on localtime which is provided by the C library
 extern "c" fn localtime(t: *const time_t) callconv(.c) ?*tm;
+extern "c" fn localtime_r(t: *const time_t, result: *tm) callconv(.c) ?*tm;
+// Internal helpers (remain as C or from other Zig PRs)
+extern "c" fn __secs_to_zone(t: c_longlong, local: c_int, isdst: *c_int, offset: *c_long, oppoff: ?*c_long, zonename: *?[*:0]const u8) callconv(.c) void;
+extern "c" fn __secs_to_tm(t: c_longlong, r: *tm) callconv(.c) c_int;
+extern "c" fn __tm_to_secs(t: *const tm) callconv(.c) c_longlong;
 var localtime_buf: tm = undefined;
+extern "c" fn getenv(name: [*:0]const u8) callconv(.c) ?[*:0]const u8;
+extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) callconv(.c) ?*anyopaque;
+extern "c" fn fgets(buf: [*]u8, size: c_int, stream: *anyopaque) callconv(.c) ?[*]u8;
+extern "c" fn fclose(stream: *anyopaque) callconv(.c) c_int;
+extern "c" fn ferror(stream: *anyopaque) callconv(.c) c_int;
+extern "c" fn strptime(s: [*:0]const u8, fmt: [*:0]const u8, t: *tm) callconv(.c) ?[*:0]const u8;
+extern "c" fn pthread_setcancelstate(state: c_int, oldstate: ?*c_int) callconv(.c) c_int;
 const PTHREAD_CANCEL_DEFERRED = 0;
 var getdate_err: c_int = 0;
 var tmbuf: tm = undefined;
