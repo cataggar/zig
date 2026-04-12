@@ -557,8 +557,6 @@ const src_files = [_][]const u8{
     "musl/src/exit/abort.c",
     "musl/src/exit/arm/__aeabi_atexit.c",
     "musl/src/exit/assert.c",
-    "musl/src/exit/atexit.c",
-    "musl/src/exit/at_quick_exit.c",
     "musl/src/exit/exit.c",
     "musl/src/fenv/aarch64/fenv.s",
     "musl/src/fenv/arm/fenv.c",
