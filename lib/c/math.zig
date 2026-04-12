@@ -105,6 +105,7 @@ comptime {
         symbol(&fdiml_, "fdiml");
         symbol(&finite_, "finite");
         symbol(&finitef_, "finitef");
+        symbol(&fma, "fma");
         symbol(&hypot, "hypot");
         symbol(&lrint, "lrint");
         symbol(&lrintf, "lrintf");
@@ -759,6 +760,8 @@ test "logb" {
     try expect(math.isNan(logb_(math.nan(f64))));
     try expectEqual(@as(f32, 0.0), logbf_(1.0));
     try expectEqual(@as(f32, 3.0), logbf_(10.0));
+fn fma(x: f64, y: f64, z: f64) callconv(.c) f64 {
+    return @mulAdd(f64, x, y, z);
 }
 
 fn hypot(x: f64, y: f64) callconv(.c) f64 {
