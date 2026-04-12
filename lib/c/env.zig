@@ -93,8 +93,29 @@ inline fn get_tp() usize {
         .x86_64 => asm volatile ("mov %%fs:0, %[ret]"
             : [ret] "=r" (-> usize),
         ),
+        .x86 => asm volatile ("movl %%gs:0, %[ret]"
+            : [ret] "=r" (-> usize),
+        ),
         .aarch64, .aarch64_be => asm volatile ("mrs %[ret], tpidr_el0"
             : [ret] "=r" (-> usize),
+        ),
+        .arm, .armeb, .thumb, .thumbeb => asm volatile ("mrc p15,0,%[ret],c13,c0,3"
+            : [ret] "=r" (-> usize),
+        ),
+        .riscv32, .riscv64 => asm volatile ("mv %[ret], tp"
+            : [ret] "=r" (-> usize),
+        ),
+        .powerpc, .powerpc64, .powerpc64le => asm volatile (""
+            : [ret] "={r13}" (-> usize),
+        ),
+        .s390x => asm volatile (
+            \\ear  %[ret], %%a0
+            \\sllg %[ret], %[ret], 32
+            \\ear  %[ret], %%a1
+            : [ret] "=r" (-> usize),
+        ),
+        .loongarch64 => asm volatile (""
+            : [ret] "={$r2}" (-> usize),
         ),
         else => @compileError("unsupported arch for get_tp"),
     };
@@ -221,7 +242,7 @@ fn __libc_start_main_fn(
 }
 
 comptime {
-    if (builtin.link_libc) {
+    if (builtin.target.isMuslLibC()) {
         symbol(&__reset_tls_fn, "__reset_tls");
         symbol(&dummy, "_init");
         symbol(&dummy, "__funcs_on_exit");
