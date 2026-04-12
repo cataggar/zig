@@ -1163,7 +1163,6 @@ const src_files = [_][]const u8{
     "musl/src/passwd/putgrent.c",
     "musl/src/passwd/putpwent.c",
     "musl/src/passwd/putspent.c",
-    "musl/src/prng/random.c",
     "musl/src/process/aarch64/vfork.s",
     "musl/src/process/arm/vfork.s",
     "musl/src/process/execl.c",
