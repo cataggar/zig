@@ -250,8 +250,7 @@ const powf_impl = struct {
 };
 const maxInt = std.math.maxInt;
 const minInt = std.math.minInt;
-    var e: c_int = undefined;
-    var q: c_int = undefined;
+export var __signgam: c_int = 0;
 // Constants for f64 erf/erfc implementation
 const erf_erx: f64 = 8.45062911510467529297e-01; // 0x3FEB0AC1, 0x60000000
 const erf_efx8: f64 = 1.02703333676410069053e+00; // 0x3FF06EBA, 0x8214DB69
