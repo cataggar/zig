@@ -285,7 +285,7 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/pow10.c", true, .{});
     cases.addLibcTestCase("math/pow10f.c", true, .{});
     cases.addLibcTestCase("math/pow10l.c", true, .{});
-    // cases.addLibcTestCase("math/powf.c", true, .{});
+    cases.addLibcTestCase("math/powf.c", true, .{});
     // cases.addLibcTestCase("math/powl.c", true, .{});
     cases.addLibcTestCase("math/remainder.c", true, .{});
     cases.addLibcTestCase("math/remainderf.c", true, .{});
