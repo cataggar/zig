@@ -1433,10 +1433,6 @@ const src_files = [_][]const u8{
     "musl/src/thread/pthread_atfork.c",
     //"musl/src/thread/pthread_attr_destroy.c", // migrated to lib/c/thread.zig
     //"musl/src/thread/pthread_attr_get.c", // migrated to lib/c/thread.zig
-    "musl/src/thread/pthread_attr_init.c",
-    "musl/src/thread/pthread_cond_timedwait.c",
-    //"musl/src/thread/pthread_cond_wait.c", // migrated to lib/c/thread.zig
-    "musl/src/thread/pthread_create.c",
     "musl/src/thread/riscv32/clone.s",
     "musl/src/thread/riscv32/__set_thread_area.s",
     "musl/src/thread/riscv32/syscall_cp.s",
@@ -1454,15 +1450,11 @@ const src_files = [_][]const u8{
     //"musl/src/thread/sem_getvalue.c", // migrated to lib/c/thread.zig
     //"musl/src/thread/sem_init.c", // migrated to lib/c/thread.zig
     "musl/src/thread/sem_open.c",
-    "musl/src/thread/__set_thread_area.c",
-    "musl/src/thread/synccall.c",
-    "musl/src/thread/__syscall_cp.c",
     "musl/src/thread/__timedwait.c",
     //"musl/src/thread/tls.c", // empty file
     "musl/src/thread/__tls_get_addr.c",
     //"musl/src/thread/tss_create.c", // migrated to lib/c/thread.zig
     //"musl/src/thread/tss_delete.c", // migrated to lib/c/thread.zig
-    "musl/src/thread/tss_set.c",
     "musl/src/thread/__unmapself.c",
     //"musl/src/thread/vmlock.c", // migrated to lib/c/thread.zig
     //"musl/src/thread/__wait.c", // migrated to lib/c/thread.zig
