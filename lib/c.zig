@@ -106,5 +106,6 @@ comptime {
     _ = @import("c/time.zig");
     _ = @import("c/process.zig");
     _ = @import("c/unistd.zig");
+    _ = @import("c/spawn.zig");
     _ = @import("c/wchar.zig");
 }
