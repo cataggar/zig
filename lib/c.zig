@@ -138,6 +138,7 @@ comptime {
     _ = @import("c/linux.zig");
     _ = @import("c/unistd.zig");
     _ = @import("c/spawn.zig");
+    _ = @import("c/wasi_cloudlibc.zig");
     _ = @import("c/wchar.zig");
 
     _ = @import("c/misc.zig");
