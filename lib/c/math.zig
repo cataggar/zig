@@ -235,6 +235,13 @@ comptime {
         symbol(&rintf, "rintf");
         symbol(&scalbf, "scalbf");
         symbol(&significandf, "significandf");
+        symbol(&__fpclassify, "__fpclassify");
+        symbol(&__fpclassifyf, "__fpclassifyf");
+        symbol(&__fpclassifyl, "__fpclassifyl");
+        symbol(&rint, "rint");
+        symbol(&__signbit, "__signbit");
+        symbol(&__signbitf, "__signbitf");
+        symbol(&__signbitl, "__signbitl");
     }
 }
 
@@ -473,6 +480,78 @@ fn cbrt(x: f64) callconv(.c) f64 {
 
 fn cbrtf(x: f32) callconv(.c) f32 {
     return math.cbrt(x);
+}
+
+/// musl FP classification constants (from math.h):
+/// FP_NAN=0, FP_INFINITE=1, FP_ZERO=2, FP_SUBNORMAL=3, FP_NORMAL=4
+
+fn __fpclassify(x: f64) callconv(.c) c_int {
+    const u: u64 = @bitCast(x);
+    const e: u32 = @truncate((u >> 52) & 0x7ff);
+    if (e == 0) return if ((u << 1) != 0) 3 else 2;
+    if (e == 0x7ff) return if ((u << 12) != 0) 0 else 1;
+    return 4;
+}
+
+fn __fpclassifyf(x: f32) callconv(.c) c_int {
+    const u: u32 = @bitCast(x);
+    const e: u32 = (u >> 23) & 0xff;
+    if (e == 0) return if ((u << 1) != 0) 3 else 2;
+    if (e == 0xff) return if ((u << 9) != 0) 0 else 1;
+    return 4;
+}
+
+fn __fpclassifyl(x: c_longdouble) callconv(.c) c_int {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        16 => __fpclassifyf(@floatCast(x)),
+        32 => __fpclassifyf(@floatCast(x)),
+        64 => __fpclassify(@floatCast(x)),
+        80 => blk: {
+            const ux: u80 = @bitCast(x);
+            const e: u32 = @truncate((ux >> 64) & 0x7fff);
+            if (e == 0) break :blk if ((ux << 1) != 0) @as(c_int, 3) else @as(c_int, 2);
+            const msb: u1 = @truncate(ux >> 63);
+            if (e == 0x7fff) {
+                if (msb == 0) break :blk @as(c_int, 0);
+                break :blk if ((ux & ((@as(u80, 1) << 63) - 1)) != 0) @as(c_int, 0) else @as(c_int, 1);
+            }
+            break :blk if (msb != 0) @as(c_int, 4) else @as(c_int, 0);
+        },
+        128 => blk: {
+            const ux: u128 = @bitCast(x);
+            const e: u32 = @truncate((ux >> 112) & 0x7fff);
+            if (e == 0) break :blk if ((ux << 1) != 0) @as(c_int, 3) else @as(c_int, 2);
+            if (e == 0x7fff) break :blk if ((ux << 17) != 0) @as(c_int, 0) else @as(c_int, 1);
+            break :blk @as(c_int, 4);
+        },
+        else => unreachable,
+    };
+}
+
+fn __signbit(x: f64) callconv(.c) c_int {
+    const u: u64 = @bitCast(x);
+    return @intCast(u >> 63);
+}
+
+fn __signbitf(x: f32) callconv(.c) c_int {
+    const u: u32 = @bitCast(x);
+    return @intCast(u >> 31);
+}
+
+fn __signbitl(x: c_longdouble) callconv(.c) c_int {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        16, 32 => __signbitf(@floatCast(x)),
+        64 => __signbit(@floatCast(x)),
+        80 => blk: {
+            const ux: u80 = @bitCast(x);
+            break :blk @intCast(ux >> 79);
+        },
+        128 => blk: {
+            const ux: u128 = @bitCast(x);
+            break :blk @intCast(ux >> 127);
+        },
+        else => unreachable,
+    };
 }
 
 fn copysign(x: f64, y: f64) callconv(.c) f64 {
