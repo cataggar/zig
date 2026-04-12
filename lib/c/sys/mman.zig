@@ -61,12 +61,20 @@ fn mprotectLinux(addr: *anyopaque, len: usize, prot: c_int) callconv(.c) c_int {
     return errno(std.os.linux.mprotect(@ptrFromInt(start), aligned_len, @bitCast(prot)));
 }
 
+fn msyncLinux(addr: *anyopaque, len: usize, flags: c_int) callconv(.c) c_int {
+    return errno(std.os.linux.msync(@ptrCast(addr), len, flags));
+}
+
 fn munlockLinux(addr: *const anyopaque, len: usize) callconv(.c) c_int {
     return errno(std.os.linux.munlock(@ptrCast(addr), len));
 }
 
 fn munlockallLinux() callconv(.c) c_int {
     return errno(std.os.linux.munlockall());
+}
+
+fn munmapLinux(addr: *anyopaque, len: usize) callconv(.c) c_int {
+    return errno(std.os.linux.munmap(@ptrCast(addr), len));
 }
 
 fn posix_madviseLinux(addr: *anyopaque, len: usize, advice: c_int) callconv(.c) c_int {

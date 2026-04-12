@@ -73,6 +73,9 @@ comptime {
         symbol(&renameatLinux, "renameat");
         symbol(&symlinkLinux, "symlink");
         symbol(&symlinkatLinux, "symlinkat");
+        symbol(&fdatasyncLinux, "fdatasync");
+        symbol(&fsyncLinux, "fsync");
+        symbol(&ftruncateLinux, "ftruncate");
         symbol(&syncLinux, "sync");
         symbol(&unlinkLinux, "unlink");
         symbol(&unlinkatLinux, "unlinkat");
@@ -208,6 +211,18 @@ fn symlinkLinux(existing: [*:0]const c_char, new: [*:0]const c_char) callconv(.c
 
 fn symlinkatLinux(existing: [*:0]const c_char, fd: c_int, new: [*:0]const c_char) callconv(.c) c_int {
     return errno(linux.symlinkat(@ptrCast(existing), fd, @ptrCast(new)));
+}
+
+fn fdatasyncLinux(fd: c_int) callconv(.c) c_int {
+    return errno(linux.fdatasync(fd));
+}
+
+fn fsyncLinux(fd: c_int) callconv(.c) c_int {
+    return errno(linux.fsync(fd));
+}
+
+fn ftruncateLinux(fd: c_int, length: linux.off_t) callconv(.c) c_int {
+    return errno(linux.ftruncate(fd, length));
 }
 
 fn syncLinux() callconv(.c) void {
