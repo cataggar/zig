@@ -73,6 +73,17 @@ comptime {
         symbol(&pthread_attr_setschedpolicy, "pthread_attr_setschedpolicy");
         symbol(&pthread_attr_setstack, "pthread_attr_setstack");
         symbol(&pthread_attr_setstacksize, "pthread_attr_setstacksize");
+
+        // Spin lock operations (atomics)
+        symbol(&pthread_spin_lock, "pthread_spin_lock");
+        symbol(&pthread_spin_trylock, "pthread_spin_trylock");
+        symbol(&pthread_spin_unlock, "pthread_spin_unlock");
+
+        // Mutex, rwlock, cond, barrier init
+        symbol(&pthread_mutex_init, "pthread_mutex_init");
+        symbol(&pthread_rwlock_init, "pthread_rwlock_init");
+        symbol(&pthread_cond_init, "pthread_cond_init");
+        symbol(&pthread_barrier_init, "pthread_barrier_init");
     }
 }
 
@@ -414,6 +425,85 @@ fn pthread_attr_setstacksize(a: *pthread_attr_t, size: usize) callconv(.c) c_int
     if (size -% PTHREAD_STACK_MIN > std.math.maxInt(usize) / 4) return eint(.INVAL);
     a._a_stackaddr = 0;
     a._a_stacksize = size;
+    return 0;
+}
+
+// --- Spin lock operations ---
+
+fn pthread_spin_lock(s: *c_int) callconv(.c) c_int {
+    while (@atomicLoad(c_int, s, .monotonic) != 0 or
+        @cmpxchgWeak(c_int, s, 0, eint(.BUSY), .seq_cst, .seq_cst) != null)
+    {
+        std.atomic.spinLoopHint();
+    }
+    return 0;
+}
+
+fn pthread_spin_trylock(s: *c_int) callconv(.c) c_int {
+    return @cmpxchgStrong(c_int, s, 0, eint(.BUSY), .seq_cst, .seq_cst) orelse 0;
+}
+
+fn pthread_spin_unlock(s: *c_int) callconv(.c) c_int {
+    @atomicStore(c_int, s, 0, .seq_cst);
+    return 0;
+}
+
+// --- Synchronization object init ---
+
+const mutex_size = if (@sizeOf(c_ulong) == 8) @as(usize, 40) else 24;
+const pthread_mutex_impl = extern struct {
+    _m_type: c_int = 0,
+    _padding: [mutex_size - @sizeOf(c_int)]u8 = [_]u8{0} ** (mutex_size - @sizeOf(c_int)),
+};
+
+fn pthread_mutex_init(m: *pthread_mutex_impl, a: ?*const pthread_mutexattr_t) callconv(.c) c_int {
+    m.* = .{};
+    if (a) |attr| m._m_type = @bitCast(attr.__attr);
+    return 0;
+}
+
+const rwlock_size = if (@sizeOf(c_ulong) == 8) @as(usize, 56) else 32;
+const pthread_rwlock_impl = extern struct {
+    _rw_lock: c_int = 0,
+    _rw_waiters: c_int = 0,
+    _rw_shared: c_int = 0,
+    _padding: [rwlock_size - 3 * @sizeOf(c_int)]u8 = [_]u8{0} ** (rwlock_size - 3 * @sizeOf(c_int)),
+};
+
+fn pthread_rwlock_init(rw: *pthread_rwlock_impl, a: ?*const pthread_rwlockattr_t) callconv(.c) c_int {
+    rw.* = .{};
+    if (a) |attr| rw._rw_shared = @bitCast(attr.__attr[0] * @as(c_uint, 128));
+    return 0;
+}
+
+const pthread_cond_impl = extern struct {
+    _c_shared: usize = 0,
+    _pad1: [16 - @sizeOf(usize)]u8 = [_]u8{0} ** (16 - @sizeOf(usize)),
+    _c_clock: c_int = 0,
+    _pad2: [48 - 16 - @sizeOf(c_int)]u8 = [_]u8{0} ** (48 - 16 - @sizeOf(c_int)),
+};
+
+fn pthread_cond_init(c: *pthread_cond_impl, a: ?*const pthread_condattr_t) callconv(.c) c_int {
+    c.* = .{};
+    if (a) |attr| {
+        c._c_clock = @bitCast(attr.__attr & 0x7fffffff);
+        if (attr.__attr >> 31 != 0) c._c_shared = std.math.maxInt(usize);
+    }
+    return 0;
+}
+
+const barrier_size = if (@sizeOf(c_ulong) == 8) @as(usize, 32) else 20;
+const pthread_barrier_impl = extern struct {
+    _b_lock: c_int = 0,
+    _b_waiters: c_int = 0,
+    _b_limit: c_int = 0,
+    _padding: [barrier_size - 3 * @sizeOf(c_int)]u8 = [_]u8{0} ** (barrier_size - 3 * @sizeOf(c_int)),
+};
+
+fn pthread_barrier_init(b: *pthread_barrier_impl, a: ?*const pthread_barrierattr_t, count: c_uint) callconv(.c) c_int {
+    if (count -% 1 > 0x7FFFFFFE) return eint(.INVAL);
+    b.* = .{};
+    b._b_limit = @bitCast((count -% 1) | if (a) |attr| attr.__attr else 0);
     return 0;
 }
 
