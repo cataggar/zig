@@ -1,112 +1,75 @@
 const builtin = @import("builtin");
-
 const std = @import("std");
 const linux = std.os.linux;
-
 const symbol = @import("../c.zig").symbol;
-
-comptime {
-    if (builtin.target.isMuslLibC()) {
-        symbol(&timesLinux, "times");
-    }
-}
-
-fn timesLinux(tms_ptr: ?*anyopaque) callconv(.c) c_long {
-    return @bitCast(linux.syscall1(.times, @intFromPtr(tms_ptr)));
 const errno = @import("../c.zig").errno;
-
-const NSIG = linux.NSIG;
-
-comptime {
-    if (builtin.target.isMuslLibC()) {
-        symbol(&sigtimedwaitLinux, "sigtimedwait");
-        symbol(&sigwaitLinux, "sigwait");
-        symbol(&sigwaitinfoLinux, "sigwaitinfo");
-        symbol(&nanosleepLinux, "nanosleep");
-        symbol(&clock_nanosleepLinux, "clock_nanosleep");
-        symbol(&clock_nanosleepLinux, "__clock_nanosleep");
-        symbol(&utimeLinux, "utime");
-    }
-}
-
-fn sigtimedwaitLinux(
-    mask: *const linux.sigset_t,
-    si: ?*linux.siginfo_t,
-    timeout: ?*const linux.timespec,
-) callconv(.c) c_int {
-    while (true) {
-        const r: isize = @bitCast(linux.syscall4(
-            if (@hasField(linux.SYS, "rt_sigtimedwait_time64")) .rt_sigtimedwait_time64 else .rt_sigtimedwait,
-            @intFromPtr(mask),
-            @intFromPtr(si),
-            @intFromPtr(timeout),
-            NSIG / 8,
-        ));
-        if (r != -@as(isize, @intFromEnum(linux.E.INTR))) {
-            if (r < 0) {
-                std.c._errno().* = @intCast(-r);
-                return -1;
-            }
-            return @intCast(r);
-        }
-    }
-}
-
-fn sigwaitLinux(mask: *const linux.sigset_t, sig: *c_int) callconv(.c) c_int {
-    var si: linux.siginfo_t = undefined;
-    if (sigtimedwaitLinux(mask, &si, null) < 0) return -1;
-    sig.* = @intCast(@intFromEnum(si.signo));
-    return 0;
-}
-
-fn sigwaitinfoLinux(mask: *const linux.sigset_t, si: ?*linux.siginfo_t) callconv(.c) c_int {
-    return sigtimedwaitLinux(mask, si, null);
-}
-
-fn clock_nanosleepLinux(clk: c_int, flags: c_int, req: *const linux.timespec, rem: ?*linux.timespec) callconv(.c) c_int {
-    const clk_id: linux.clockid_t = @enumFromInt(@as(u32, @bitCast(clk)));
-    if (clk_id == .THREAD_CPUTIME_ID) return @intFromEnum(linux.E.INVAL);
-    const r: isize = @bitCast(linux.clock_nanosleep(clk_id, @bitCast(@as(u32, @bitCast(flags))), req, rem));
-    if (r < 0) return @intCast(-r);
-    return 0;
-}
-
-fn nanosleepLinux(req: *const linux.timespec, rem: ?*linux.timespec) callconv(.c) c_int {
-    const r: isize = @bitCast(linux.clock_nanosleep(.REALTIME, @bitCast(@as(u32, 0)), req, rem));
-    if (r < 0) {
-        std.c._errno().* = @intCast(-r);
-        return -1;
-    }
-    return 0;
-}
-
-const utimbuf = extern struct {
-    actime: linux.time_t,
-    modtime: linux.time_t,
-};
-
-fn utimeLinux(path: [*:0]const u8, times_ptr: ?*const utimbuf) callconv(.c) c_int {
-    if (times_ptr) |t| {
-        const ts = [2]linux.timespec{
-            .{ .sec = @intCast(t.actime), .nsec = 0 },
-            .{ .sec = @intCast(t.modtime), .nsec = 0 },
-        };
-        return errno(linux.utimensat(linux.AT.FDCWD, path, &ts, 0));
-    }
-    return errno(linux.utimensat(linux.AT.FDCWD, path, null, 0));
-const errno = @import("../c.zig").errno;
-
 const timeb = extern struct {
     time: linux.time_t,
     millitm: c_ushort,
     timezone: c_short,
     dstflag: c_short,
 };
+const time_t = linux.time_t;
+const tm = extern struct {
+    tm_sec: c_int,
+    tm_min: c_int,
+    tm_hour: c_int,
+    tm_mday: c_int,
+    tm_mon: c_int,
+    tm_year: c_int,
+    tm_wday: c_int,
+    tm_yday: c_int,
+    tm_isdst: c_int,
+    __tm_gmtoff: c_long,
+    __tm_zone: ?[*:0]const u8,
+};
+const __utc: [3:0]u8 = "UTC".*;
+const secs_through_month = [12]c_int{
+    0,          31 * 86400,  59 * 86400,  90 * 86400,
+    120 * 86400, 151 * 86400, 181 * 86400, 212 * 86400,
+    243 * 86400, 273 * 86400, 304 * 86400, 334 * 86400,
+};
+const LEAPOCH = 946684800 + 86400 * (31 + 29);
+const DAYS_PER_400Y = 365 * 400 + 97;
+const DAYS_PER_100Y = 365 * 100 + 24;
+const DAYS_PER_4Y = 365 * 4 + 1;
+const days_in_month = [12]u8{ 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 31, 29 };
+var gmtime_buf: tm = undefined;
+const day_abbr = [7]*const [3]u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+const mon_abbr = [12]*const [3]u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+var asctime_buf: [26]u8 = undefined;
+extern "c" fn localtime(t: *const time_t) callconv(.c) ?*tm;
+var localtime_buf: tm = undefined;
+const PTHREAD_CANCEL_DEFERRED = 0;
+var getdate_err: c_int = 0;
+var tmbuf: tm = undefined;
 
 comptime {
     if (builtin.target.isMuslLibC()) {
         symbol(&ftimeLinux, "ftime");
         symbol(&timespec_getLinux, "timespec_get");
+        symbol(&__month_to_secs, "__month_to_secs");
+        symbol(&__year_to_secs, "__year_to_secs");
+        symbol(&__secs_to_tm, "__secs_to_tm");
+        symbol(&__tm_to_secs, "__tm_to_secs");
+        symbol(&timegmImpl, "timegm");
+        symbol(&__gmtime_r, "__gmtime_r");
+        symbol(&__gmtime_r, "gmtime_r");
+        symbol(&gmtimeImpl, "gmtime");
+        symbol(&__utc, "__utc");
+        symbol(&__asctime_r, "__asctime_r");
+        symbol(&__asctime_r, "asctime_r");
+        symbol(&asctimeImpl, "asctime");
+    }
+    if (builtin.link_libc) {
+        symbol(&ctimeImpl, "ctime");
+        symbol(&ctime_rImpl, "ctime_r");
+        symbol(&__localtime_r, "__localtime_r");
+        symbol(&__localtime_r, "localtime_r");
+        symbol(&localtimeImpl, "localtime");
+        symbol(&mktimeImpl, "mktime");
+        symbol(&getdate_err, "getdate_err");
+        symbol(&getdateImpl, "getdate");
     }
 }
 
@@ -124,43 +87,7 @@ fn timespec_getLinux(ts: *linux.timespec, base: c_int) callconv(.c) c_int {
     if (base != 1) return 0; // TIME_UTC = 1
     if (errno(linux.clock_gettime(.REALTIME, ts)) < 0) return 0;
     return base;
-const time_t = linux.time_t;
-
-const tm = extern struct {
-    tm_sec: c_int,
-    tm_min: c_int,
-    tm_hour: c_int,
-    tm_mday: c_int,
-    tm_mon: c_int,
-    tm_year: c_int,
-    tm_wday: c_int,
-    tm_yday: c_int,
-    tm_isdst: c_int,
-    __tm_gmtoff: c_long,
-    __tm_zone: ?[*:0]const u8,
-};
-
-comptime {
-    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
-        symbol(&__month_to_secs, "__month_to_secs");
-        symbol(&__year_to_secs, "__year_to_secs");
-        symbol(&__secs_to_tm, "__secs_to_tm");
-        symbol(&__tm_to_secs, "__tm_to_secs");
-        symbol(&timegmImpl, "timegm");
-        symbol(&__gmtime_r, "__gmtime_r");
-        symbol(&__gmtime_r, "gmtime_r");
-        symbol(&gmtimeImpl, "gmtime");
-        symbol(&__utc, "__utc");
-    }
 }
-
-const __utc: [3:0]u8 = "UTC".*;
-
-const secs_through_month = [12]c_int{
-    0,          31 * 86400,  59 * 86400,  90 * 86400,
-    120 * 86400, 151 * 86400, 181 * 86400, 212 * 86400,
-    243 * 86400, 273 * 86400, 304 * 86400, 334 * 86400,
-};
 
 fn __month_to_secs(month: c_int, is_leap: c_int) callconv(.c) c_int {
     var t = secs_through_month[@intCast(@as(c_uint, @bitCast(month)))];
@@ -228,12 +155,6 @@ fn __year_to_secs(year: c_longlong, is_leap: ?*c_int) callconv(.c) c_longlong {
     leaps += 97 * cycles + 24 * centuries - leap_ptr.*;
     return (year - 100) * 31536000 + @as(c_longlong, leaps) * 86400 + 946684800 + 86400;
 }
-
-const LEAPOCH = 946684800 + 86400 * (31 + 29);
-const DAYS_PER_400Y = 365 * 400 + 97;
-const DAYS_PER_100Y = 365 * 100 + 24;
-const DAYS_PER_4Y = 365 * 4 + 1;
-const days_in_month = [12]u8{ 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, 31, 29 };
 
 fn __secs_to_tm(t: c_longlong, r: *tm) callconv(.c) c_int {
     if (t < @as(c_longlong, std.math.minInt(c_int)) * 31622400 or
@@ -335,8 +256,6 @@ fn timegmImpl(t: *tm) callconv(.c) time_t {
     return @intCast(secs);
 }
 
-var gmtime_buf: tm = undefined;
-
 fn __gmtime_r(t: *const time_t, r: *tm) callconv(.c) ?*tm {
     if (__secs_to_tm(t.*, r) < 0) {
         std.c._errno().* = @intFromEnum(linux.E.OVERFLOW);
@@ -350,18 +269,7 @@ fn __gmtime_r(t: *const time_t, r: *tm) callconv(.c) ?*tm {
 
 fn gmtimeImpl(t: *const time_t) callconv(.c) ?*tm {
     return __gmtime_r(t, &gmtime_buf);
-        symbol(&__asctime_r, "__asctime_r");
-        symbol(&__asctime_r, "asctime_r");
-        symbol(&asctimeImpl, "asctime");
-    }
-    if (builtin.link_libc) {
-        symbol(&ctimeImpl, "ctime");
-        symbol(&ctime_rImpl, "ctime_r");
-    }
 }
-
-const day_abbr = [7]*const [3]u8{ "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
-const mon_abbr = [12]*const [3]u8{ "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
 fn writeDecimal(buf: [*]u8, value: c_int, width: u8) void {
     var v: u32 = if (value < 0) @intCast(-value) else @intCast(value);
@@ -417,15 +325,9 @@ fn __asctime_r(t: *const tm, buf: [*]u8) callconv(.c) [*]u8 {
     return buf;
 }
 
-var asctime_buf: [26]u8 = undefined;
-
 fn asctimeImpl(t: *const tm) callconv(.c) [*]u8 {
     return __asctime_r(t, &asctime_buf);
 }
-
-// ctime/ctime_r depend on localtime which is provided by the C library
-extern "c" fn localtime(t: *const time_t) callconv(.c) ?*tm;
-extern "c" fn localtime_r(t: *const time_t, result: *tm) callconv(.c) ?*tm;
 
 fn ctimeImpl(t: *const time_t) callconv(.c) ?[*]u8 {
     const r = localtime(t) orelse return null;
@@ -436,18 +338,6 @@ fn ctime_rImpl(t: *const time_t, buf: [*]u8) callconv(.c) ?[*]u8 {
     var result: tm = undefined;
     const r = localtime_r(t, &result) orelse return null;
     return __asctime_r(r, buf);
-// Internal helpers (remain as C or from other Zig PRs)
-extern "c" fn __secs_to_zone(t: c_longlong, local: c_int, isdst: *c_int, offset: *c_long, oppoff: ?*c_long, zonename: *?[*:0]const u8) callconv(.c) void;
-extern "c" fn __secs_to_tm(t: c_longlong, r: *tm) callconv(.c) c_int;
-extern "c" fn __tm_to_secs(t: *const tm) callconv(.c) c_longlong;
-
-comptime {
-    if (builtin.link_libc) {
-        symbol(&__localtime_r, "__localtime_r");
-        symbol(&__localtime_r, "localtime_r");
-        symbol(&localtimeImpl, "localtime");
-        symbol(&mktimeImpl, "mktime");
-    }
 }
 
 fn __localtime_r(t: *const time_t, r: *tm) callconv(.c) ?*tm {
@@ -465,8 +355,6 @@ fn __localtime_r(t: *const time_t, r: *tm) callconv(.c) ?*tm {
     }
     return r;
 }
-
-var localtime_buf: tm = undefined;
 
 fn localtimeImpl(t: *const time_t) callconv(.c) ?*tm {
     return __localtime_r(t, &localtime_buf);
@@ -493,26 +381,7 @@ fn mktimeImpl(t: *tm) callconv(.c) time_t {
 
     t.* = new;
     return @intCast(secs);
-extern "c" fn getenv(name: [*:0]const u8) callconv(.c) ?[*:0]const u8;
-extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) callconv(.c) ?*anyopaque;
-extern "c" fn fgets(buf: [*]u8, size: c_int, stream: *anyopaque) callconv(.c) ?[*]u8;
-extern "c" fn fclose(stream: *anyopaque) callconv(.c) c_int;
-extern "c" fn ferror(stream: *anyopaque) callconv(.c) c_int;
-extern "c" fn strptime(s: [*:0]const u8, fmt: [*:0]const u8, t: *tm) callconv(.c) ?[*:0]const u8;
-extern "c" fn pthread_setcancelstate(state: c_int, oldstate: ?*c_int) callconv(.c) c_int;
-
-const PTHREAD_CANCEL_DEFERRED = 0;
-
-comptime {
-    if (builtin.link_libc) {
-        symbol(&getdate_err, "getdate_err");
-        symbol(&getdateImpl, "getdate");
-    }
 }
-
-var getdate_err: c_int = 0;
-
-var tmbuf: tm = undefined;
 
 fn getdateImpl(s: [*:0]const u8) callconv(.c) ?*tm {
     var ret: ?*tm = null;

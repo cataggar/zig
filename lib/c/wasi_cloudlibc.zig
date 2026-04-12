@@ -1,26 +1,75 @@
-/// WASI CloudLibc syscall wrappers migrated from C to Zig.
-///
-/// These functions were originally in lib/libc/wasi/libc-bottom-half/cloudlibc/src/libc/.
-/// They wrap WASI preview1 syscalls to provide POSIX-compatible C library functions.
 const builtin = @import("builtin");
 const std = @import("std");
 const wasi = std.os.wasi;
-
 const symbol = @import("../c.zig").symbol;
-
 const E = std.c.E;
+const CClockId = extern struct { id: wasi.clockid_t };
+extern fn __wasilibc_rmdirat(fd: c_int, path: [*:0]const u8) c_int;
+const NSEC_PER_SEC: u64 = 1_000_000_000;
+const timeval = extern struct {
+    sec: i64,
+    usec: i64,
+};
+const sym = @import("../c.zig").symbol;
+extern "c" fn c_close(fd: c_int) c_int;
+const DIRENT_DEFAULT_BUFFER_SIZE: usize = 4096;
+const DIR = extern struct {
+    fd: c_int,
+    cookie: wasi.dircookie_t,
+    buffer: ?[*]u8,
+    buffer_processed: usize,
+    buffer_size: usize,
+    buffer_used: usize,
+    dirent_ptr: ?[*]u8,
+    dirent_size: usize,
+};
+const DirentLayout = extern struct {
+    d_ino: u64,
+    d_type: u8,
+    d_name: [1]u8,
+};
+const DIRENT_D_NAME_OFFSET = @offsetOf(DirentLayout, "d_name");
+const PollFd = extern struct {
+    fd: c_int,
+    events: c_short,
+    revents: c_short,
+};
+const FD_SETSIZE = 1024;
+const FdSet = extern struct {
+    __nfds: usize,
+    __fds: [FD_SETSIZE]c_int,
+};
+const ClockId = extern struct {
+    id: wasi.clockid_t,
+};
+const Timespec = extern struct {
+    tv_sec: c_longlong,
+    tv_nsec: c_long,
+};
+const Timeval = extern struct {
+    tv_sec: c_longlong,
+    tv_usec: c_longlong,
+};
+const POLLRDNORM: c_short = 0x1;
+const POLLWRNORM: c_short = 0x2;
+const POLLERR: c_short = 0x1000;
+const POLLHUP: c_short = 0x2000;
+const POLLNVAL: c_short = 0x4000;
+const FIONREAD: c_int = 1;
+const FIONBIO: c_int = 2;
+const O_NONBLOCK: c_int = 4; // __WASI_FDFLAGS_NONBLOCK
+const O_DIRECTORY: c_int = 2 << 12; // __WASI_OFLAGS_DIRECTORY << 12
+const O_RDONLY: c_int = 0x04000000;
+const clock_monotonic = ClockId{ .id = .MONOTONIC };
+const clock_realtime = ClockId{ .id = .REALTIME };
+
+comptime {
+    // WASI exports handled in wasi_sources.zig
+}
 
 fn setErrno(e: E) void {
     std.c._errno().* = @intFromEnum(e);
 }
-
-/// In WASI libc, clockid_t is `const struct __clockid *` (a pointer to a struct
-/// containing the raw WASI clock ID). This differs from Zig's std.c.clockid_t.
-const CClockId = extern struct { id: wasi.clockid_t };
-
-// ═══════════════════════════════════════════════════════════════════════
-// unistd
-// ═══════════════════════════════════════════════════════════════════════
 
 fn readWasi(fd: c_int, buf: [*]u8, nbyte: usize) callconv(.c) isize {
     var nread: usize = 0;
@@ -262,9 +311,6 @@ fn faccessatWasi(fd: c_int, path: [*]const u8, amode: c_int, flag: c_int) callco
     return 0;
 }
 
-extern fn __wasilibc_rmdirat(fd: c_int, path: [*:0]const u8) c_int;
-extern fn __wasilibc_unlinkat(fd: c_int, path: [*:0]const u8) c_int;
-
 fn unlinkatWasi(fd: c_int, path: [*:0]const u8, flag: c_int) callconv(.c) c_int {
     const AT_REMOVEDIR = 0x200;
     if ((flag & AT_REMOVEDIR) != 0)
@@ -291,10 +337,6 @@ fn usleepWasi(useconds: c_uint) callconv(.c) c_int {
     }
     return 0;
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// fcntl
-// ═══════════════════════════════════════════════════════════════════════
 
 fn fcntlWasi(fd: c_int, cmd: c_int, ...) callconv(.c) c_int {
     const F_GETFD = 1;
@@ -450,10 +492,6 @@ fn posixFallocateWasi(fd: c_int, offset: i64, len: i64) callconv(.c) c_int {
     return @intFromEnum(wasi.fd_allocate(@intCast(fd), @intCast(offset), @intCast(len)));
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// sys/uio
-// ═══════════════════════════════════════════════════════════════════════
-
 fn readvWasi(fd: c_int, iov: [*]const wasi.iovec_t, iovcnt: c_int) callconv(.c) isize {
     if (iovcnt < 0) {
         setErrno(.INVAL);
@@ -513,10 +551,6 @@ fn pwritevWasi(fd: c_int, iov: [*]const wasi.ciovec_t, iovcnt: c_int, offset: i6
         },
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// sys/stat
-// ═══════════════════════════════════════════════════════════════════════
 
 fn fstatWasi(fd: c_int, buf: *std.c.Stat) callconv(.c) c_int {
     var internal_stat: wasi.filestat_t = undefined;
@@ -615,10 +649,6 @@ fn utimensatWasi(fd: c_int, path: [*]const u8, times: ?[*]const std.c.timespec, 
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// sys/socket
-// ═══════════════════════════════════════════════════════════════════════
-
 fn recvWasi(socket: c_int, buffer: [*]u8, length: usize, flags_arg: c_int) callconv(.c) isize {
     const MSG_PEEK = 0x2;
     const MSG_WAITALL = 0x100;
@@ -714,12 +744,6 @@ fn getsockoptWasi(socket: c_int, level: c_int, option_name: c_int, option_value:
     return 0;
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// time
-// ═══════════════════════════════════════════════════════════════════════
-
-const NSEC_PER_SEC: u64 = 1_000_000_000;
-
 fn clockGetresWasi(clock_id_ptr: *const CClockId, res: *std.c.timespec) callconv(.c) c_int {
     var ts: wasi.timestamp_t = 0;
     switch (wasi.clock_res_get(clock_id_ptr.id, &ts)) {
@@ -748,7 +772,6 @@ fn clockGettimeWasi(clock_id_ptr: *const CClockId, tp: *std.c.timespec) callconv
     }
 }
 
-/// Internal implementation that takes a raw clock ID (not the C pointer type).
 fn clockNanosleepImpl(clock_id: wasi.clockid_t, flags_arg: c_int, rqtp: *const std.c.timespec) c_int {
     const TIMER_ABSTIME = 1;
     if ((flags_arg & ~@as(c_int, TIMER_ABSTIME)) != 0)
@@ -769,7 +792,6 @@ fn clockNanosleepImpl(clock_id: wasi.clockid_t, flags_arg: c_int, rqtp: *const s
     return @intFromEnum(E.NOTSUP);
 }
 
-/// C ABI wrapper that accepts the C clockid_t pointer.
 fn clockNanosleepWasi(clock_id_ptr: *const CClockId, flags_arg: c_int, rqtp: *const std.c.timespec, _: ?*std.c.timespec) callconv(.c) c_int {
     return clockNanosleepImpl(clock_id_ptr.id, flags_arg, rqtp);
 }
@@ -792,15 +814,6 @@ fn timeWasi(tloc: ?*i64) callconv(.c) i64 {
     return result;
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// sys/time
-// ═══════════════════════════════════════════════════════════════════════
-
-const timeval = extern struct {
-    sec: i64,
-    usec: i64,
-};
-
 fn gettimeofdayWasi(tp: ?*timeval, _: ?*anyopaque) callconv(.c) c_int {
     if (tp) |p| {
         var ts: wasi.timestamp_t = 0;
@@ -811,10 +824,6 @@ fn gettimeofdayWasi(tp: ?*timeval, _: ?*anyopaque) callconv(.c) c_int {
     return 0;
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// sched
-// ═══════════════════════════════════════════════════════════════════════
-
 fn schedYieldWasi() callconv(.c) c_int {
     switch (wasi.sched_yield()) {
         .SUCCESS => return 0,
@@ -824,10 +833,6 @@ fn schedYieldWasi() callconv(.c) c_int {
         },
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// stdio
-// ═══════════════════════════════════════════════════════════════════════
 
 fn renameatWasi(oldfd: c_int, old: [*]const u8, newfd: c_int, new: [*]const u8) callconv(.c) c_int {
     const old_len = std.mem.len(old);
@@ -840,10 +845,6 @@ fn renameatWasi(oldfd: c_int, old: [*]const u8, newfd: c_int, new: [*]const u8) 
         },
     }
 }
-
-// ═══════════════════════════════════════════════════════════════════════
-// Helpers
-// ═══════════════════════════════════════════════════════════════════════
 
 fn timespecToTimestampClamp(ts: *const std.c.timespec) ?wasi.timestamp_t {
     if (ts.nsec < 0 or ts.nsec >= @as(isize, @intCast(NSEC_PER_SEC)))
@@ -864,242 +865,7 @@ fn timespecToTimestampExact(ts: *const std.c.timespec) ?wasi.timestamp_t {
 }
 
 fn utimensGetTimestamps(
-    times: [*]const std.c.timespec,
-    st_atim: *wasi.timestamp_t,
-    st_mtim: *wasi.timestamp_t,
-    flags: *wasi.fstflags_t,
-) bool {
-    const UTIME_NOW: isize = -1;
-    const UTIME_OMIT: isize = -2;
 
-    flags.* = .{};
-
-    switch (times[0].nsec) {
-        UTIME_NOW => {
-            flags.ATIM_NOW = true;
-            st_atim.* = 0;
-        },
-        UTIME_OMIT => {
-            st_atim.* = 0;
-        },
-        else => {
-            flags.ATIM = true;
-            st_atim.* = timespecToTimestampExact(&times[0]) orelse return false;
-        },
-    }
-
-    switch (times[1].nsec) {
-        UTIME_NOW => {
-            flags.MTIM_NOW = true;
-            st_mtim.* = 0;
-        },
-        UTIME_OMIT => {
-            st_mtim.* = 0;
-        },
-        else => {
-            flags.MTIM = true;
-            st_mtim.* = timespecToTimestampExact(&times[1]) orelse return false;
-        },
-    }
-
-    return true;
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-// Symbol exports
-// ═══════════════════════════════════════════════════════════════════════
-
-comptime {
-    if (builtin.target.isWasiLibC()) {
-        // unistd
-        symbol(&readWasi, "read");
-        symbol(&writeWasi, "write");
-        symbol(&lseekWasi, "__lseek");
-        symbol(&lseekWasi, "lseek");
-        symbol(&fdatasyncWasi, "fdatasync");
-        symbol(&fsyncWasi, "fsync");
-        symbol(&ftruncateWasi, "ftruncate");
-        symbol(&preadWasi, "pread");
-        symbol(&pwriteWasi, "pwrite");
-        symbol(&readlinkatWasi, "__wasilibc_nocwd_readlinkat");
-        symbol(&linkatWasi, "__wasilibc_nocwd_linkat");
-        symbol(&symlinkatWasi, "__wasilibc_nocwd_symlinkat");
-        symbol(&faccessatWasi, "__wasilibc_nocwd_faccessat");
-        symbol(&unlinkatWasi, "unlinkat");
-        symbol(&sleepWasi, "sleep");
-        symbol(&usleepWasi, "usleep");
-
-        // fcntl
-        symbol(&fcntlWasi, "fcntl");
-        symbol(&openatWasi, "__wasilibc_nocwd_openat_nomode");
-        symbol(&posixFadviseWasi, "posix_fadvise");
-        symbol(&posixFallocateWasi, "posix_fallocate");
-
-        // sys/uio
-        symbol(&readvWasi, "readv");
-        symbol(&writevWasi, "writev");
-        symbol(&preadvWasi, "preadv");
-        symbol(&pwritevWasi, "pwritev");
-
-        // sys/stat
-        symbol(&fstatWasi, "fstat");
-        symbol(&fstatatWasi, "__wasilibc_nocwd_fstatat");
-        symbol(&futimensWasi, "futimens");
-        symbol(&mkdiratWasi, "__wasilibc_nocwd_mkdirat_nomode");
-        symbol(&utimensatWasi, "__wasilibc_nocwd_utimensat");
-
-        // sys/socket
-        symbol(&recvWasi, "recv");
-        symbol(&sendWasi, "send");
-        symbol(&shutdownWasi, "shutdown");
-        symbol(&getsockoptWasi, "getsockopt");
-
-        // time
-        symbol(&clockGetresWasi, "clock_getres");
-        symbol(&clockGettimeWasi, "__clock_gettime");
-        symbol(&clockGettimeWasi, "clock_gettime");
-        symbol(&clockNanosleepWasi, "clock_nanosleep");
-        symbol(&clockNanosleepWasi, "__clock_nanosleep");
-        symbol(&nanosleepWasi, "nanosleep");
-        symbol(&timeWasi, "time");
-
-        // sys/time
-        symbol(&gettimeofdayWasi, "gettimeofday");
-
-        // sched
-        symbol(&schedYieldWasi, "sched_yield");
-
-        // stdio
-        symbol(&renameatWasi, "__wasilibc_nocwd_renameat");
-// SPDX-License-Identifier: BSD-2-Clause
-//
-// Zig implementations of CloudLibc WASI libc functions.
-// Migrated from lib/libc/wasi/libc-bottom-half/cloudlibc/src/libc/
-
-const builtin = @import("builtin");
-const std = @import("std");
-const wasi = std.os.wasi;
-const sym = @import("../c.zig").symbol;
-
-// =================================================// Extern C library functions used by implementations below
-// =================================================
-extern "c" fn c_close(fd: c_int) c_int;
-comptime {
-    if (builtin.target.isWasiLibC())
-        @export(&c_close, .{ .name = "close" });
-}
-
-extern "c" fn c_malloc(size: usize) ?[*]align(@alignOf(usize)) u8;
-comptime {
-    if (builtin.target.isWasiLibC())
-        @export(&c_malloc, .{ .name = "malloc" });
-}
-
-extern "c" fn c_free(ptr: ?*anyopaque) void;
-comptime {
-    if (builtin.target.isWasiLibC())
-        @export(&c_free, .{ .name = "free" });
-}
-
-extern "c" fn c_realloc(ptr: ?*anyopaque, size: usize) ?[*]align(@alignOf(usize)) u8;
-comptime {
-    if (builtin.target.isWasiLibC())
-        @export(&c_realloc, .{ .name = "realloc" });
-}
-
-extern "c" fn c_qsort(
-    base: ?*anyopaque,
-    nmemb: usize,
-    size: usize,
-    compar: *const fn (*const anyopaque, *const anyopaque) callconv(.c) c_int,
-) void;
-comptime {
-    if (builtin.target.isWasiLibC())
-        @export(&c_qsort, .{ .name = "qsort" });
-}
-
-extern "c" fn c_openat_nomode(dir: c_int, path: [*:0]const u8, flags: c_int) c_int;
-comptime {
-    if (builtin.target.isWasiLibC())
-        @export(&c_openat_nomode, .{ .name = "__wasilibc_nocwd_openat_nomode" });
-}
-
-// =================================================// Type definitions matching C ABI
-// =================================================
-const DIRENT_DEFAULT_BUFFER_SIZE: usize = 4096;
-
-/// Internal DIR structure matching cloudlibc dirent_impl.h
-const DIR = extern struct {
-    fd: c_int,
-    cookie: wasi.dircookie_t,
-    buffer: ?[*]u8,
-    buffer_processed: usize,
-    buffer_size: usize,
-    buffer_used: usize,
-    dirent_ptr: ?[*]u8,
-    dirent_size: usize,
-};
-
-/// Layout helper to compute offsetof(struct dirent, d_name).
-const DirentLayout = extern struct {
-    d_ino: u64,
-    d_type: u8,
-    d_name: [1]u8,
-};
-const DIRENT_D_NAME_OFFSET = @offsetOf(DirentLayout, "d_name");
-
-const PollFd = extern struct {
-    fd: c_int,
-    events: c_short,
-    revents: c_short,
-};
-
-const FD_SETSIZE = 1024;
-const FdSet = extern struct {
-    __nfds: usize,
-    __fds: [FD_SETSIZE]c_int,
-};
-
-const ClockId = extern struct {
-    id: wasi.clockid_t,
-};
-
-const Timespec = extern struct {
-    tv_sec: c_longlong,
-    tv_nsec: c_long,
-};
-
-const Timeval = extern struct {
-    tv_sec: c_longlong,
-    tv_usec: c_longlong,
-};
-
-// Poll event flags (from __header_poll.h)
-const POLLRDNORM: c_short = 0x1;
-const POLLWRNORM: c_short = 0x2;
-const POLLERR: c_short = 0x1000;
-const POLLHUP: c_short = 0x2000;
-const POLLNVAL: c_short = 0x4000;
-
-// ioctl requests (from __header_sys_ioctl.h)
-const FIONREAD: c_int = 1;
-const FIONBIO: c_int = 2;
-
-// O_* flags for WASI (from __header_fcntl.h)
-const O_NONBLOCK: c_int = 4; // __WASI_FDFLAGS_NONBLOCK
-const O_DIRECTORY: c_int = 2 << 12; // __WASI_OFLAGS_DIRECTORY << 12
-const O_RDONLY: c_int = 0x04000000;
-
-const NSEC_PER_SEC: u64 = 1_000_000_000;
-
-// =================================================// Helpers
-// =================================================
-fn setErrno(err: wasi.errno_t) void {
-    std.c._errno().* = @intFromEnum(err);
-}
-
-/// Grow a buffer (via realloc) to at least `target_size`.
-/// Returns null on allocation failure.
 fn grow(buf: ?[*]u8, buf_size: *usize, target_size: usize) ?[*]u8 {
     if (buf_size.* >= target_size) return buf;
     var new_size = buf_size.*;
@@ -1109,60 +875,10 @@ fn grow(buf: ?[*]u8, buf_size: *usize, target_size: usize) ?[*]u8 {
     return new_buf;
 }
 
-// =================================================// Symbol exports
-// =================================================
-comptime {
-    if (builtin.target.isWasiLibC()) {
-        // stdlib
-        sym(&exitWasi, "_Exit");
-        sym(&exitWasi, "_exit");
-
-        // time constants (data symbols)
-        @export(&clock_monotonic, .{ .name = "_CLOCK_MONOTONIC", .linkage = .weak, .visibility = .hidden });
-        @export(&clock_realtime, .{ .name = "_CLOCK_REALTIME", .linkage = .weak, .visibility = .hidden });
-
-        // errno
-        @export(&wasi_errno, .{ .name = "errno", .linkage = .weak, .visibility = .hidden });
-
-        // dirent
-        sym(&closedirWasi, "closedir");
-        sym(&dirfdWasi, "dirfd");
-        sym(&fdclosedirWasi, "fdclosedir");
-        sym(&fdopendirWasi, "fdopendir");
-        sym(&opendiratWasi, "__wasilibc_nocwd_opendirat");
-        sym(&readdirWasi, "readdir");
-        sym(&rewinddirWasi, "rewinddir");
-        sym(&scandiratWasi, "__wasilibc_nocwd_scandirat");
-        sym(&seekdirWasi, "seekdir");
-        sym(&telldirWasi, "telldir");
-
-        // poll/select
-        sym(&pollWasi, "poll");
-        sym(&pselectWasi, "pselect");
-        sym(&selectWasi, "select");
-
-        // ioctl
-        sym(&ioctlWasi, "ioctl");
-    }
-}
-
-// =================================================// _Exit / _exit
-// =================================================
 fn exitWasi(status: c_int) callconv(.c) noreturn {
     wasi.proc_exit(@bitCast(status));
 }
 
-// =================================================// CLOCK_MONOTONIC / CLOCK_REALTIME
-// =================================================
-const clock_monotonic = ClockId{ .id = .MONOTONIC };
-const clock_realtime = ClockId{ .id = .REALTIME };
-
-// =================================================// errno
-// =================================================
-threadlocal var wasi_errno: c_int = 0;
-
-// =================================================// dirent functions
-// =================================================
 fn dirfdWasi(dirp: *DIR) callconv(.c) c_int {
     return dirp.fd;
 }
@@ -1326,159 +1042,6 @@ fn readEntries(dirp: *DIR) ?void {
 }
 
 fn scandiratWasi(
-    dirfd: c_int,
-    dir: [*:0]const u8,
-    namelist: *?[*]*anyopaque,
-    sel: ?*const fn (*const anyopaque) callconv(.c) c_int,
-    compar: *const fn (*const anyopaque, *const anyopaque) callconv(.c) c_int,
-) callconv(.c) c_int {
-    const fd = c_openat_nomode(dirfd, dir, O_RDONLY | O_NONBLOCK | O_DIRECTORY);
-    if (fd == -1) return -1;
-
-    var buffer_size: usize = DIRENT_DEFAULT_BUFFER_SIZE;
-    var buffer: ?[*]u8 = @ptrCast(c_malloc(buffer_size));
-    if (buffer == null) {
-        _ = c_close(fd);
-        return -1;
-    }
-    var buffer_processed: usize = buffer_size;
-    var buffer_used: usize = buffer_size;
-
-    var dirents: ?[*]*anyopaque = null;
-    var dirents_size: usize = 0;
-    var dirents_used: usize = 0;
-
-    var cookie: wasi.dircookie_t = wasi.DIRCOOKIE_START;
-    var done = false;
-    while (!done) {
-        const buffer_left = buffer_used - buffer_processed;
-        if (buffer_left < @sizeOf(wasi.dirent_t)) {
-            if (buffer_used < buffer_size) {
-                done = true;
-                continue;
-            }
-            // Read more entries.
-            switch (wasi.fd_readdir(fd, buffer.?, buffer_size, cookie, &buffer_used)) {
-                .SUCCESS => buffer_processed = 0,
-                else => |err| {
-                    setErrno(err);
-                    scandiratFree(dirents, dirents_used);
-                    c_free(@ptrCast(buffer));
-                    _ = c_close(fd);
-                    return -1;
-                },
-            }
-            continue;
-        }
-
-        var entry: wasi.dirent_t = undefined;
-        const entry_ptr: [*]u8 = @ptrCast(&entry);
-        @memcpy(entry_ptr[0..@sizeOf(wasi.dirent_t)], buffer.?[buffer_processed..][0..@sizeOf(wasi.dirent_t)]);
-
-        const entry_size = @sizeOf(wasi.dirent_t) + entry.namlen;
-        if (entry.namlen == 0) {
-            buffer_processed += entry_size;
-            continue;
-        }
-
-        if (buffer_left < entry_size) {
-            while (buffer_size < entry_size) buffer_size *= 2;
-            buffer = @ptrCast(c_realloc(@ptrCast(buffer), buffer_size) orelse {
-                scandiratFree(dirents, dirents_used);
-                c_free(@ptrCast(buffer));
-                _ = c_close(fd);
-                return -1;
-            });
-            // Read entries again with larger buffer.
-            switch (wasi.fd_readdir(fd, buffer.?, buffer_size, cookie, &buffer_used)) {
-                .SUCCESS => buffer_processed = 0,
-                else => |err| {
-                    setErrno(err);
-                    scandiratFree(dirents, dirents_used);
-                    c_free(@ptrCast(buffer));
-                    _ = c_close(fd);
-                    return -1;
-                },
-            }
-            continue;
-        }
-
-        const name = buffer.?[buffer_processed + @sizeOf(wasi.dirent_t) ..][0..entry.namlen];
-        buffer_processed += entry_size;
-
-        // Skip entries with null bytes in the filename.
-        if (std.mem.indexOfScalar(u8, name, 0) != null) continue;
-
-        // Allocate a new dirent.
-        const alloc_size = DIRENT_D_NAME_OFFSET + entry.namlen + 1;
-        const dirent_bytes: [*]u8 = @ptrCast(c_malloc(alloc_size) orelse {
-            scandiratFree(dirents, dirents_used);
-            c_free(@ptrCast(buffer));
-            _ = c_close(fd);
-            return -1;
-        });
-
-        dirent_bytes[8] = @intFromEnum(entry.type);
-        @memcpy(dirent_bytes[DIRENT_D_NAME_OFFSET..][0..entry.namlen], name);
-        dirent_bytes[DIRENT_D_NAME_OFFSET + entry.namlen] = 0;
-
-        // Resolve inode if unknown.
-        var d_ino: u64 = entry.ino;
-        var d_type: u8 = @intFromEnum(entry.type);
-        if (d_ino == 0) {
-            var filestat: wasi.filestat_t = undefined;
-            switch (wasi.path_filestat_get(fd, .{}, name.ptr, name.len, &filestat)) {
-                .SUCCESS => {
-                    d_ino = filestat.ino;
-                    d_type = @intFromEnum(filestat.filetype);
-                },
-                else => {
-                    c_free(@ptrCast(dirent_bytes));
-                    scandiratFree(dirents, dirents_used);
-                    c_free(@ptrCast(buffer));
-                    _ = c_close(fd);
-                    return -1;
-                },
-            }
-        }
-        @as(*align(1) u64, @ptrCast(dirent_bytes)).* = d_ino;
-        dirent_bytes[8] = d_type;
-
-        cookie = entry.next;
-
-        // Apply selection filter.
-        const selected = if (sel) |sel_fn| sel_fn(@ptrCast(dirent_bytes)) != 0 else true;
-        if (selected) {
-            // Grow dirents array if needed.
-            if (dirents_used == dirents_size) {
-                dirents_size = if (dirents_size < 8) 8 else dirents_size * 2;
-                const new_dirents: ?[*]*anyopaque = @ptrCast(@alignCast(c_realloc(
-                    @ptrCast(dirents),
-                    dirents_size * @sizeOf(*anyopaque),
-                )));
-                if (new_dirents == null) {
-                    c_free(@ptrCast(dirent_bytes));
-                    scandiratFree(dirents, dirents_used);
-                    c_free(@ptrCast(buffer));
-                    _ = c_close(fd);
-                    return -1;
-                }
-                dirents = new_dirents;
-            }
-            dirents.?[dirents_used] = @ptrCast(dirent_bytes);
-            dirents_used += 1;
-        } else {
-            c_free(@ptrCast(dirent_bytes));
-        }
-    }
-
-    // Sort and return results.
-    c_free(@ptrCast(buffer));
-    _ = c_close(fd);
-    c_qsort(@ptrCast(dirents), dirents_used, @sizeOf(*anyopaque), compar);
-    namelist.* = dirents;
-    return @intCast(dirents_used);
-}
 
 fn scandiratFree(dirents: ?[*]*anyopaque, count: usize) void {
     if (dirents) |d| {
@@ -1487,8 +1050,6 @@ fn scandiratFree(dirents: ?[*]*anyopaque, count: usize) void {
     }
 }
 
-// =================================================// poll
-// =================================================
 fn pollWasi(fds: ?[*]PollFd, nfds: usize, timeout: c_int) callconv(.c) c_int {
     return pollWasiP1(fds, nfds, timeout);
 }
@@ -1614,135 +1175,10 @@ fn pollWasiP1(fds: ?[*]PollFd, nfds: usize, timeout: c_int) c_int {
     return retval;
 }
 
-// =================================================// pselect / select
-// =================================================
 fn pselectWasi(
-    nfds: c_int,
-    readfds: ?*FdSet,
-    writefds: ?*FdSet,
-    errorfds: ?*const FdSet,
-    timeout: ?*const Timespec,
-    _: ?*const u8, // sigset_t, unused on WASI
-) callconv(.c) c_int {
-    if (nfds < 0) {
-        setErrno(.INVAL);
-        return -1;
-    }
-
-    if (errorfds) |ef| {
-        if (ef.__nfds > 0) {
-            setErrno(.NOSYS);
-            return -1;
-        }
-    }
-
-    // Use empty sets for null pointers.
-    var empty1 = std.mem.zeroes(FdSet);
-    var empty2 = std.mem.zeroes(FdSet);
-    const rds = readfds orelse &empty1;
-    const wrs = writefds orelse &empty2;
-
-    const poll_nfds_max = rds.__nfds + wrs.__nfds;
-    const poll_fds_mem: ?[*]align(@alignOf(PollFd)) u8 = if (poll_nfds_max > 0)
-        @alignCast(c_malloc(poll_nfds_max * @sizeOf(PollFd)) orelse {
-            setErrno(.NOMEM);
-            return -1;
-        })
-    else
-        null;
-    defer if (poll_fds_mem) |m| c_free(@ptrCast(m));
-
-    const poll_fds: [*]PollFd = if (poll_fds_mem) |m| @ptrCast(m) else @as([*]PollFd, undefined);
-    var poll_nfds: usize = 0;
-
-    for (rds.__fds[0..rds.__nfds]) |fd| {
-        if (fd < nfds) {
-            poll_fds[poll_nfds] = PollFd{ .fd = fd, .events = POLLRDNORM, .revents = 0 };
-            poll_nfds += 1;
-        }
-    }
-    for (wrs.__fds[0..wrs.__nfds]) |fd| {
-        if (fd < nfds) {
-            poll_fds[poll_nfds] = PollFd{ .fd = fd, .events = POLLWRNORM, .revents = 0 };
-            poll_nfds += 1;
-        }
-    }
-
-    var poll_timeout: c_int = undefined;
-    if (timeout) |ts| {
-        if (ts.tv_nsec < 0 or ts.tv_nsec >= @as(c_long, @intCast(NSEC_PER_SEC))) {
-            setErrno(.INVAL);
-            return -1;
-        }
-        if (ts.tv_sec < 0) {
-            poll_timeout = 0;
-        } else {
-            // Convert to milliseconds with clamping.
-            const sec: u64 = @intCast(ts.tv_sec);
-            const mul_result = @mulWithOverflow(sec, NSEC_PER_SEC);
-            if (mul_result[1] != 0) {
-                poll_timeout = std.math.maxInt(c_int);
-            } else {
-                const add_result = @addWithOverflow(mul_result[0], @as(u64, @intCast(ts.tv_nsec)));
-                if (add_result[1] != 0) {
-                    poll_timeout = std.math.maxInt(c_int);
-                } else {
-                    const ms = add_result[0] / 1_000_000;
-                    poll_timeout = if (ms > @as(u64, @intCast(std.math.maxInt(c_int))))
-                        std.math.maxInt(c_int)
-                    else
-                        @intCast(ms);
-                }
-            }
-        }
-    } else {
-        poll_timeout = -1;
-    }
-
-    if (pollWasi(if (poll_nfds > 0) poll_fds else null, poll_nfds, poll_timeout) < 0)
-        return -1;
-
-    // Clear and rebuild fd sets.
-    rds.__nfds = 0;
-    wrs.__nfds = 0;
-    for (0..poll_nfds) |i| {
-        if (poll_fds[i].revents & POLLRDNORM != 0) {
-            rds.__fds[rds.__nfds] = poll_fds[i].fd;
-            rds.__nfds += 1;
-        }
-        if (poll_fds[i].revents & POLLWRNORM != 0) {
-            wrs.__fds[wrs.__nfds] = poll_fds[i].fd;
-            wrs.__nfds += 1;
-        }
-    }
-
-    return @intCast(rds.__nfds + wrs.__nfds);
-}
 
 fn selectWasi(
-    nfds: c_int,
-    readfds: ?*FdSet,
-    writefds: ?*FdSet,
-    errorfds: ?*const FdSet,
-    timeout: ?*Timeval,
-) callconv(.c) c_int {
-    if (timeout) |tv| {
-        if (tv.tv_usec < 0 or tv.tv_usec >= 1_000_000) {
-            setErrno(.INVAL);
-            return -1;
-        }
-        const ts = Timespec{
-            .tv_sec = tv.tv_sec,
-            .tv_nsec = @intCast(tv.tv_usec * 1000),
-        };
-        return pselectWasi(nfds, readfds, writefds, errorfds, &ts, null);
-    } else {
-        return pselectWasi(nfds, readfds, writefds, errorfds, null, null);
-    }
-}
 
-// =================================================// ioctl
-// =================================================
 fn ioctlWasi(fildes: c_int, request: c_int, ...) callconv(.c) c_int {
     switch (request) {
         FIONREAD => {

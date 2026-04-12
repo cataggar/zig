@@ -1,15 +1,36 @@
 const builtin = @import("builtin");
-
 const std = @import("std");
 const linux = std.os.linux;
-
 const symbol = @import("../c.zig").symbol;
-const errno = @import("../c.zig").errno;
-
 const NSIG = linux.NSIG;
 const sigset_t = linux.sigset_t;
 const SigsetElement = @typeInfo(sigset_t).array.child;
 const bits_per_elem = @bitSizeOf(SigsetElement);
+const errno = @import("../c.zig").errno;
+const all_mask = blk: {
+    var mask: sigset_t = undefined;
+    for (&mask) |*elem| elem.* = ~@as(SigsetElement, 0);
+    break :blk mask;
+};
+const app_mask = blk: {
+    var mask = all_mask;
+    // Clear bits for internal signals 32, 33, 34 (bits 31, 32, 33)
+    for (.{ 31, 32, 33 }) |s| {
+        mask[s / bits_per_elem] &= ~(@as(SigsetElement, 1) << @intCast(s % bits_per_elem));
+    }
+    break :blk mask;
+};
+const c_sigaction = extern struct {
+    handler: ?*const fn (c_int) callconv(.c) void,
+    mask: [128 / @sizeOf(c_ulong)]c_ulong,
+    flags: c_int,
+    restorer: ?*const fn () callconv(.c) void,
+};
+extern "c" fn sigaction(sig: c_int, act: ?*const c_sigaction, oact: ?*c_sigaction) callconv(.c) c_int;
+const SA_RESTART = 0x10000000;
+const SIG_HOLD: ?*const fn (c_int) callconv(.c) void = @ptrFromInt(2);
+const SIG_ERR: ?*const fn (c_int) callconv(.c) void = @ptrFromInt(std.math.maxInt(usize));
+const SI_QUEUE = -1;
 
 comptime {
     if (builtin.target.isMuslLibC()) {
@@ -23,6 +44,28 @@ comptime {
         symbol(&sigorsetLinux, "sigorset");
         symbol(&__libc_current_sigrtmin, "__libc_current_sigrtmin");
         symbol(&__libc_current_sigrtmax, "__libc_current_sigrtmax");
+        symbol(&killLinux, "kill");
+        symbol(&killpgLinux, "killpg");
+        symbol(&sigpendingLinux, "sigpending");
+        symbol(&sigaltstackLinux, "sigaltstack");
+        symbol(&sigprocmaskLinux, "sigprocmask");
+        symbol(&sigsuspendLinux, "sigsuspend");
+        symbol(&__block_all_sigs, "__block_all_sigs");
+        symbol(&__block_app_sigs, "__block_app_sigs");
+        symbol(&__restore_sigs, "__restore_sigs");
+        symbol(&sigholdLinux, "sighold");
+        symbol(&sigrelseLinux, "sigrelse");
+        symbol(&sigpauseLinux, "sigpause");
+    }
+    if (builtin.link_libc) {
+        symbol(&signalImpl, "signal");
+        symbol(&signalImpl, "bsd_signal");
+        symbol(&signalImpl, "__sysv_signal");
+        symbol(&siginterruptImpl, "siginterrupt");
+        symbol(&sigignoreImpl, "sigignore");
+        symbol(&psiginfo, "psiginfo");
+        symbol(&sigsetImpl, "sigset");
+        symbol(&sigqueueImpl, "sigqueue");
     }
 }
 
@@ -89,16 +132,6 @@ fn __libc_current_sigrtmin() callconv(.c) c_int {
 
 fn __libc_current_sigrtmax() callconv(.c) c_int {
     return NSIG - 1;
-const errno = @import("../c.zig").errno;
-
-const NSIG = linux.NSIG;
-
-comptime {
-    if (builtin.target.isMuslLibC()) {
-        symbol(&killLinux, "kill");
-        symbol(&killpgLinux, "killpg");
-        symbol(&sigpendingLinux, "sigpending");
-    }
 }
 
 fn killLinux(pid: linux.pid_t, sig: c_int) callconv(.c) c_int {
@@ -115,12 +148,6 @@ fn killpgLinux(pgid: linux.pid_t, sig: c_int) callconv(.c) c_int {
 
 fn sigpendingLinux(set: *linux.sigset_t) callconv(.c) c_int {
     return errno(linux.syscall2(.rt_sigpending, @intFromPtr(set), NSIG / 8));
-const errno = @import("../c.zig").errno;
-
-comptime {
-    if (builtin.target.isMuslLibC()) {
-        symbol(&sigaltstackLinux, "sigaltstack");
-    }
 }
 
 fn sigaltstackLinux(ss: ?*const linux.stack_t, old: ?*linux.stack_t) callconv(.c) c_int {
@@ -135,9 +162,6 @@ fn sigaltstackLinux(ss: ?*const linux.stack_t, old: ?*linux.stack_t) callconv(.c
         }
     }
     return errno(linux.sigaltstack(ss, old));
-        symbol(&sigprocmaskLinux, "sigprocmask");
-        symbol(&sigsuspendLinux, "sigsuspend");
-    }
 }
 
 fn sigprocmaskLinux(how: c_int, noalias set: ?*const linux.sigset_t, noalias old: ?*linux.sigset_t) callconv(.c) c_int {
@@ -152,31 +176,7 @@ fn sigprocmaskLinux(how: c_int, noalias set: ?*const linux.sigset_t, noalias old
 
 fn sigsuspendLinux(mask: *const linux.sigset_t) callconv(.c) c_int {
     return errno(linux.syscall2(.rt_sigsuspend, @intFromPtr(mask), linux.NSIG / 8));
-        // block.c helpers
-        symbol(&__block_all_sigs, "__block_all_sigs");
-        symbol(&__block_app_sigs, "__block_app_sigs");
-        symbol(&__restore_sigs, "__restore_sigs");
-        // sighold/sigrelse/sigpause
-        symbol(&sigholdLinux, "sighold");
-        symbol(&sigrelseLinux, "sigrelse");
-        symbol(&sigpauseLinux, "sigpause");
-    }
 }
-
-const all_mask = blk: {
-    var mask: sigset_t = undefined;
-    for (&mask) |*elem| elem.* = ~@as(SigsetElement, 0);
-    break :blk mask;
-};
-
-const app_mask = blk: {
-    var mask = all_mask;
-    // Clear bits for internal signals 32, 33, 34 (bits 31, 32, 33)
-    for (.{ 31, 32, 33 }) |s| {
-        mask[s / bits_per_elem] &= ~(@as(SigsetElement, 1) << @intCast(s % bits_per_elem));
-    }
-    break :blk mask;
-};
 
 fn __block_all_sigs(set: ?*sigset_t) callconv(.c) void {
     _ = linux.sigprocmask(linux.SIG.BLOCK, &all_mask, set);
@@ -220,30 +220,7 @@ fn sigpauseLinux(sig: c_int) callconv(.c) c_int {
         mask[s / bits_per_elem] &= ~(@as(SigsetElement, 1) << @intCast(s % bits_per_elem));
     }
     return errno(linux.syscall2(.rt_sigsuspend, @intFromPtr(&mask), NSIG / 8));
-// Musl's struct sigaction (different from kernel's k_sigaction)
-const c_sigaction = extern struct {
-    handler: ?*const fn (c_int) callconv(.c) void,
-    mask: [128 / @sizeOf(c_ulong)]c_ulong,
-    flags: c_int,
-    restorer: ?*const fn () callconv(.c) void,
-};
-
-// Functions provided by the C library (sigaction.c remains as C)
-extern "c" fn sigaction(sig: c_int, act: ?*const c_sigaction, oact: ?*c_sigaction) callconv(.c) c_int;
-extern "c" fn __sigaction(sig: c_int, act: ?*const c_sigaction, oact: ?*c_sigaction) callconv(.c) c_int;
-
-comptime {
-    if (builtin.link_libc) {
-        symbol(&signalImpl, "signal");
-        symbol(&signalImpl, "bsd_signal");
-        symbol(&signalImpl, "__sysv_signal");
-        symbol(&siginterruptImpl, "siginterrupt");
-        symbol(&sigignoreImpl, "sigignore");
-        symbol(&psiginfo, "psiginfo");
-    }
 }
-
-const SA_RESTART = 0x10000000;
 
 fn signalImpl(sig: c_int, func: ?*const fn (c_int) callconv(.c) void) callconv(.c) ?*const fn (c_int) callconv(.c) void {
     const SIG_ERR: ?*const fn (c_int) callconv(.c) void = @ptrFromInt(std.math.maxInt(usize));
@@ -280,30 +257,9 @@ fn sigignoreImpl(sig: c_int) callconv(.c) c_int {
     return sigaction(sig, &sa, null);
 }
 
-extern "c" fn psignal(sig: c_int, msg: ?[*:0]const u8) callconv(.c) void;
-
 fn psiginfo(si: *const linux.siginfo_t, msg: ?[*:0]const u8) callconv(.c) void {
     psignal(@intCast(@intFromEnum(si.signo)), msg);
-extern "c" fn sigaction(sig: c_int, act: ?*const c_sigaction, oact: ?*c_sigaction) callconv(.c) c_int;
-
-const app_mask = blk: {
-    var mask: sigset_t = undefined;
-    for (&mask) |*elem| elem.* = ~@as(SigsetElement, 0);
-    for (.{ 31, 32, 33 }) |s| {
-        mask[s / bits_per_elem] &= ~(@as(SigsetElement, 1) << @intCast(s % bits_per_elem));
-    }
-    break :blk mask;
-};
-
-comptime {
-    if (builtin.link_libc) {
-        symbol(&sigsetImpl, "sigset");
-        symbol(&sigqueueImpl, "sigqueue");
-    }
 }
-
-const SIG_HOLD: ?*const fn (c_int) callconv(.c) void = @ptrFromInt(2);
-const SIG_ERR: ?*const fn (c_int) callconv(.c) void = @ptrFromInt(std.math.maxInt(usize));
 
 fn sigsetImpl(sig: c_int, handler: ?*const fn (c_int) callconv(.c) void) callconv(.c) ?*const fn (c_int) callconv(.c) void {
     var sa: c_sigaction = undefined;
@@ -328,8 +284,6 @@ fn sigsetImpl(sig: c_int, handler: ?*const fn (c_int) callconv(.c) void) callcon
     }
     return if (mask_old[s / bits_per_elem] & (@as(SigsetElement, 1) << @intCast(s % bits_per_elem)) != 0) SIG_HOLD else sa_old.handler;
 }
-
-const SI_QUEUE = -1;
 
 fn sigqueueImpl(pid: linux.pid_t, sig: c_int, value: usize) callconv(.c) c_int {
     // siginfo_t needs to be zeroed and then filled in

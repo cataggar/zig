@@ -1,27 +1,25 @@
 const builtin = @import("builtin");
-
 const std = @import("std");
 const linux = std.os.linux;
-
 const symbol = @import("../c.zig").symbol;
 const errno = @import("../c.zig").errno;
-
+const NSIG = linux.NSIG;
+const sigset_t = linux.sigset_t;
+const SigsetElement = @typeInfo(sigset_t).array.child;
+const bits_per_elem = @bitSizeOf(SigsetElement);
+const app_mask = blk: {
+    var mask: sigset_t = undefined;
+    for (&mask) |*elem| elem.* = ~@as(SigsetElement, 0);
+    for (.{ 31, 32, 33 }) |s| {
+        mask[s / bits_per_elem] &= ~(@as(SigsetElement, 1) << @intCast(s % bits_per_elem));
+    }
+    break :blk mask;
+};
 const itimerval = extern struct {
     it_interval: linux.timeval,
     it_value: linux.timeval,
-
-const musl_sigset_t = [128 / @sizeOf(c_ulong)]c_ulong;
-
-
-const musl_sigset_t = [128 / @sizeOf(c_ulong)]c_ulong;
-
-const c_sigaction = extern struct {
-    handler: ?*const fn (c_int) callconv(.c) void,
-    mask: musl_sigset_t,
-    flags: c_int,
-    restorer: ?*const fn () callconv(.c) void,
 };
-
+const musl_sigset_t = [128 / @sizeOf(c_ulong)]c_ulong;
 const posix_spawnattr_t = extern struct {
     __flags: c_int,
     __pgrp: linux.pid_t,
@@ -31,13 +29,17 @@ const posix_spawnattr_t = extern struct {
     __pol: c_int,
     __fn: ?*anyopaque,
     __pad: [64 - @sizeOf(?*anyopaque)]u8,
-
+};
+const posix_spawn_file_actions_t = extern struct {
+    __pad0: [2]c_int,
+    __actions: ?*anyopaque,
+    __pad: [16]c_int,
+};
 const FDOP_CLOSE = 1;
 const FDOP_DUP2 = 2;
 const FDOP_OPEN = 3;
 const FDOP_CHDIR = 4;
 const FDOP_FCHDIR = 5;
-
 const fdop = extern struct {
     next: ?*fdop,
     prev: ?*fdop,
@@ -48,21 +50,111 @@ const fdop = extern struct {
     mode: linux.mode_t,
     // flexible array member follows; for alloc sizing only
 };
-
-const posix_spawn_file_actions_t = extern struct {
-    __pad0: [2]c_int,
-    __actions: ?*anyopaque,
-    __pad: [16]c_int,
+extern "c" fn malloc(size: usize) callconv(.c) ?[*]u8;
+const NAME_MAX = 255;
+const PATH_MAX = 4096;
+const MAX_ARGS = 256;
+const c_sigaction = extern struct {
+    handler: ?*const fn (c_int) callconv(.c) void,
+    mask: musl_sigset_t,
+    flags: c_int,
+    restorer: ?*const fn () callconv(.c) void,
 };
+const SIG_IGN: ?*const fn (c_int) callconv(.c) void = @ptrFromInt(1);
+const POSIX_SPAWN_SETSIGDEF: c_short = 0x4;
+const POSIX_SPAWN_SETSIGMASK: c_short = 0x8;
+const SIGINT = 2;
+const SIGQUIT = 3;
+const SIGCHLD = 17;
+const SIG_BLOCK = 0;
+const SIG_SETMASK = 2;
 
 comptime {
     if (builtin.target.isMuslLibC()) {
+        symbol(&raiseLinux, "raise");
+        symbol(&waitLinux, "wait");
+        symbol(&waitpidLinux, "waitpid");
+        symbol(&waitidLinux, "waitid");
+        symbol(&__restore, "__restore");
+        symbol(&__restore_rt, "__restore_rt");
         symbol(&getitimerLinux, "getitimer");
         symbol(&setitimerLinux, "setitimer");
-        // vfork fallback (weak: arch-specific .s files take priority)
         symbol(&vforkLinux, "vfork");
+        symbol(&posix_spawnattr_init, "posix_spawnattr_init");
+        symbol(&posix_spawnattr_getflags, "posix_spawnattr_getflags");
+        symbol(&posix_spawnattr_setflags, "posix_spawnattr_setflags");
+        symbol(&posix_spawnattr_getpgroup, "posix_spawnattr_getpgroup");
+        symbol(&posix_spawnattr_setpgroup, "posix_spawnattr_setpgroup");
+        symbol(&posix_spawnattr_getsigdefault, "posix_spawnattr_getsigdefault");
+        symbol(&posix_spawnattr_setsigdefault, "posix_spawnattr_setsigdefault");
+        symbol(&posix_spawnattr_getsigmask, "posix_spawnattr_getsigmask");
+        symbol(&posix_spawnattr_setsigmask, "posix_spawnattr_setsigmask");
+        symbol(&posix_spawn_file_actions_init, "posix_spawn_file_actions_init");
+    }
+    if (builtin.link_libc) {
+        symbol(&execvImpl, "execv");
+        symbol(&posix_spawn_file_actions_addclose_impl, "posix_spawn_file_actions_addclose");
+        symbol(&posix_spawn_file_actions_adddup2_impl, "posix_spawn_file_actions_adddup2");
+        symbol(&posix_spawn_file_actions_addopen_impl, "posix_spawn_file_actions_addopen");
+        symbol(&posix_spawn_file_actions_addchdir_impl, "posix_spawn_file_actions_addchdir_np");
+        symbol(&posix_spawn_file_actions_addfchdir_impl, "posix_spawn_file_actions_addfchdir_np");
+        symbol(&posix_spawn_file_actions_destroy_impl, "posix_spawn_file_actions_destroy");
+        symbol(&__execvpe, "__execvpe");
+        symbol(&__execvpe, "execvpe");
+        symbol(&execvpImpl, "execvp");
+        symbol(&execlImpl, "execl");
+        symbol(&execleImpl, "execle");
+        symbol(&execlpImpl, "execlp");
+        symbol(&systemImpl, "system");
     }
 }
+
+fn raiseLinux(sig: c_int) callconv(.c) c_int {
+    var set: sigset_t = undefined;
+    _ = linux.sigprocmask(linux.SIG.BLOCK, &app_mask, &set);
+    const ret = errno(linux.tkill(linux.gettid(), @enumFromInt(@as(u32, @bitCast(sig)))));
+    _ = linux.sigprocmask(linux.SIG.SETMASK, &set, null);
+    return ret;
+}
+
+fn errnoP(r: usize) linux.pid_t {
+    const signed: isize = @bitCast(r);
+    if (signed < 0) {
+        @branchHint(.unlikely);
+        std.c._errno().* = @intCast(-signed);
+        return -1;
+    }
+    return @intCast(signed);
+}
+
+fn waitLinux(status: ?*c_int) callconv(.c) linux.pid_t {
+    return waitpidLinux(-1, status, 0);
+}
+
+fn waitpidLinux(pid: linux.pid_t, status: ?*c_int, options: c_int) callconv(.c) linux.pid_t {
+    return errnoP(linux.syscall4(
+        .wait4,
+        @as(usize, @bitCast(@as(isize, pid))),
+        @intFromPtr(status),
+        @as(usize, @bitCast(@as(isize, options))),
+        0,
+    ));
+}
+
+fn waitidLinux(idtype: c_uint, id: c_uint, info: ?*linux.siginfo_t, options: c_int) callconv(.c) c_int {
+    return errno(linux.syscall5(
+        .waitid,
+        @as(usize, idtype),
+        @as(usize, id),
+        @intFromPtr(info),
+        @as(usize, @bitCast(@as(isize, options))),
+        0,
+    ));
+}
+
+fn __restore() callconv(.c) void {}
+
+fn __restore_rt() callconv(.c) void {}
 
 fn getitimerLinux(which: c_int, old: *itimerval) callconv(.c) c_int {
     return errno(linux.syscall2(.getitimer, @as(usize, @bitCast(@as(isize, which))), @intFromPtr(old)));
@@ -82,17 +174,6 @@ fn vforkLinux() callconv(.c) linux.pid_t {
         return -1;
     }
     return @intCast(r);
-        symbol(&posix_spawnattr_init, "posix_spawnattr_init");
-        symbol(&posix_spawnattr_getflags, "posix_spawnattr_getflags");
-        symbol(&posix_spawnattr_setflags, "posix_spawnattr_setflags");
-        symbol(&posix_spawnattr_getpgroup, "posix_spawnattr_getpgroup");
-        symbol(&posix_spawnattr_setpgroup, "posix_spawnattr_setpgroup");
-        symbol(&posix_spawnattr_getsigdefault, "posix_spawnattr_getsigdefault");
-        symbol(&posix_spawnattr_setsigdefault, "posix_spawnattr_setsigdefault");
-        symbol(&posix_spawnattr_getsigmask, "posix_spawnattr_getsigmask");
-        symbol(&posix_spawnattr_setsigmask, "posix_spawnattr_setsigmask");
-        symbol(&posix_spawn_file_actions_init, "posix_spawn_file_actions_init");
-    }
 }
 
 fn posix_spawnattr_init(attr: *posix_spawnattr_t) callconv(.c) c_int {
@@ -146,102 +227,6 @@ fn posix_spawnattr_setsigmask(attr: *posix_spawnattr_t, mask: *const musl_sigset
 fn posix_spawn_file_actions_init(fa: *posix_spawn_file_actions_t) callconv(.c) c_int {
     fa.__actions = null;
     return 0;
-}
-const NSIG = linux.NSIG;
-const sigset_t = linux.sigset_t;
-const SigsetElement = @typeInfo(sigset_t).array.child;
-const bits_per_elem = @bitSizeOf(SigsetElement);
-
-comptime {
-    if (builtin.target.isMuslLibC()) {
-        symbol(&raiseLinux, "raise");
-        symbol(&waitLinux, "wait");
-        symbol(&waitpidLinux, "waitpid");
-        symbol(&waitidLinux, "waitid");
-        symbol(&__restore, "__restore");
-        symbol(&__restore_rt, "__restore_rt");
-    }
-}
-
-// app_mask: all signals set except internal signals 32, 33, 34
-const app_mask = blk: {
-    var mask: sigset_t = undefined;
-    for (&mask) |*elem| elem.* = ~@as(SigsetElement, 0);
-    for (.{ 31, 32, 33 }) |s| {
-        mask[s / bits_per_elem] &= ~(@as(SigsetElement, 1) << @intCast(s % bits_per_elem));
-    }
-    break :blk mask;
-};
-
-fn raiseLinux(sig: c_int) callconv(.c) c_int {
-    var set: sigset_t = undefined;
-    _ = linux.sigprocmask(linux.SIG.BLOCK, &app_mask, &set);
-    const ret = errno(linux.tkill(linux.gettid(), @enumFromInt(@as(u32, @bitCast(sig)))));
-    _ = linux.sigprocmask(linux.SIG.SETMASK, &set, null);
-    return ret;
-}
-
-fn errnoP(r: usize) linux.pid_t {
-    const signed: isize = @bitCast(r);
-    if (signed < 0) {
-        @branchHint(.unlikely);
-        std.c._errno().* = @intCast(-signed);
-        return -1;
-    }
-    return @intCast(signed);
-}
-
-fn waitLinux(status: ?*c_int) callconv(.c) linux.pid_t {
-    return waitpidLinux(-1, status, 0);
-}
-
-fn waitpidLinux(pid: linux.pid_t, status: ?*c_int, options: c_int) callconv(.c) linux.pid_t {
-    return errnoP(linux.syscall4(
-        .wait4,
-        @as(usize, @bitCast(@as(isize, pid))),
-        @intFromPtr(status),
-        @as(usize, @bitCast(@as(isize, options))),
-        0,
-    ));
-}
-
-fn waitidLinux(idtype: c_uint, id: c_uint, info: ?*linux.siginfo_t, options: c_int) callconv(.c) c_int {
-    return errno(linux.syscall5(
-        .waitid,
-        @as(usize, idtype),
-        @as(usize, id),
-        @intFromPtr(info),
-        @as(usize, @bitCast(@as(isize, options))),
-        0,
-    ));
-}
-
-// Fallback signal restorer stubs. Architecture-specific .s files provide
-// real implementations where the kernel sigaction struct uses sa_restorer.
-fn __restore() callconv(.c) void {}
-fn __restore_rt() callconv(.c) void {}
-    __actions: ?*fdop,
-    __pad: [16]c_int,
-};
-
-extern "c" fn malloc(size: usize) callconv(.c) ?[*]u8;
-extern "c" fn free(ptr: ?*anyopaque) callconv(.c) void;
-extern "c" fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) callconv(.c) c_int;
-
-extern "c" fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) callconv(.c) c_int;
-extern "c" fn getenv(name: [*:0]const u8) callconv(.c) ?[*:0]const u8;
-extern "c" var __environ: [*:null]?[*:0]u8;
-
-comptime {
-    if (builtin.link_libc) {
-        symbol(&execvImpl, "execv");
-        symbol(&posix_spawn_file_actions_addclose_impl, "posix_spawn_file_actions_addclose");
-        symbol(&posix_spawn_file_actions_adddup2_impl, "posix_spawn_file_actions_adddup2");
-        symbol(&posix_spawn_file_actions_addopen_impl, "posix_spawn_file_actions_addopen");
-        symbol(&posix_spawn_file_actions_addchdir_impl, "posix_spawn_file_actions_addchdir_np");
-        symbol(&posix_spawn_file_actions_addfchdir_impl, "posix_spawn_file_actions_addfchdir_np");
-        symbol(&posix_spawn_file_actions_destroy_impl, "posix_spawn_file_actions_destroy");
-    }
 }
 
 fn execvImpl(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) callconv(.c) c_int {
@@ -321,14 +306,7 @@ fn posix_spawn_file_actions_destroy_impl(fa: *posix_spawn_file_actions_t) callco
         op = next;
     }
     return 0;
-        symbol(&__execvpe, "__execvpe");
-        symbol(&__execvpe, "execvpe");
-        symbol(&execvpImpl, "execvp");
-    }
 }
-
-const NAME_MAX = 255;
-const PATH_MAX = 4096;
 
 fn strchrnul(s: [*]const u8, c: u8) [*]const u8 {
     var p = s;
@@ -390,19 +368,6 @@ fn __execvpe(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:n
 
 fn execvpImpl(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) callconv(.c) c_int {
     return __execvpe(file, argv, @ptrCast(&__environ));
-
-extern "c" fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) callconv(.c) c_int;
-extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) callconv(.c) c_int;
-extern "c" var __environ: [*:null]?[*:0]u8;
-
-const MAX_ARGS = 256;
-
-comptime {
-    if (builtin.link_libc) {
-        symbol(&execlImpl, "execl");
-        symbol(&execleImpl, "execle");
-        symbol(&execlpImpl, "execlp");
-    }
 }
 
 fn execlImpl(path: [*:0]const u8, argv0: ?[*:0]const u8, ...) callconv(.c) c_int {
@@ -453,36 +418,6 @@ fn execlpImpl(file: [*:0]const u8, argv0: ?[*:0]const u8, ...) callconv(.c) c_in
     argv_buf[argc] = null;
 
     return execvp(file, @ptrCast(&argv_buf));
-};
-
-const SIG_IGN: ?*const fn (c_int) callconv(.c) void = @ptrFromInt(1);
-
-extern "c" fn sigaction(sig: c_int, act: ?*const c_sigaction, oact: ?*c_sigaction) callconv(.c) c_int;
-extern "c" fn sigprocmask(how: c_int, set: ?*const musl_sigset_t, oset: ?*musl_sigset_t) callconv(.c) c_int;
-extern "c" fn sigemptyset(set: *musl_sigset_t) callconv(.c) c_int;
-extern "c" fn sigaddset(set: *musl_sigset_t, sig: c_int) callconv(.c) c_int;
-extern "c" fn posix_spawnattr_init(attr: *posix_spawnattr_t) callconv(.c) c_int;
-extern "c" fn posix_spawnattr_setsigmask(attr: *posix_spawnattr_t, mask: *const musl_sigset_t) callconv(.c) c_int;
-extern "c" fn posix_spawnattr_setsigdefault(attr: *posix_spawnattr_t, def: *const musl_sigset_t) callconv(.c) c_int;
-extern "c" fn posix_spawnattr_setflags(attr: *posix_spawnattr_t, flags: c_short) callconv(.c) c_int;
-extern "c" fn posix_spawnattr_destroy(attr: *posix_spawnattr_t) callconv(.c) c_int;
-extern "c" fn posix_spawn(pid: *linux.pid_t, path: [*:0]const u8, fa: ?*anyopaque, attr: ?*const posix_spawnattr_t, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) callconv(.c) c_int;
-extern "c" fn waitpid(pid: linux.pid_t, status: ?*c_int, options: c_int) callconv(.c) linux.pid_t;
-extern "c" fn pthread_testcancel() callconv(.c) void;
-extern "c" var __environ: [*:null]?[*:0]u8;
-
-const POSIX_SPAWN_SETSIGDEF: c_short = 0x4;
-const POSIX_SPAWN_SETSIGMASK: c_short = 0x8;
-const SIGINT = 2;
-const SIGQUIT = 3;
-const SIGCHLD = 17;
-const SIG_BLOCK = 0;
-const SIG_SETMASK = 2;
-
-comptime {
-    if (builtin.link_libc) {
-        symbol(&systemImpl, "system");
-    }
 }
 
 fn systemImpl(cmd: ?[*:0]const u8) callconv(.c) c_int {
@@ -529,77 +464,4 @@ fn systemImpl(cmd: ?[*:0]const u8) callconv(.c) c_int {
 
     if (ret != 0) std.c._errno().* = ret;
     return status;
-
-comptime {
-    if (builtin.target.isMuslLibC()) {
-        symbol(&posix_spawnattr_destroy, "posix_spawnattr_destroy");
-        symbol(&posix_spawnattr_getschedparam, "posix_spawnattr_getschedparam");
-        symbol(&posix_spawnattr_setschedparam, "posix_spawnattr_setschedparam");
-        symbol(&posix_spawnattr_getschedpolicy, "posix_spawnattr_getschedpolicy");
-        symbol(&posix_spawnattr_setschedpolicy, "posix_spawnattr_setschedpolicy");
-    }
-}
-
-fn posix_spawnattr_destroy(_: *anyopaque) callconv(.c) c_int {
-    return 0;
-}
-
-fn posix_spawnattr_getschedparam(_: *const anyopaque, _: *anyopaque) callconv(.c) c_int {
-    return @intFromEnum(linux.E.NOSYS);
-}
-
-fn posix_spawnattr_setschedparam(_: *anyopaque, _: *const anyopaque) callconv(.c) c_int {
-    return @intFromEnum(linux.E.NOSYS);
-}
-
-fn posix_spawnattr_getschedpolicy(_: *const anyopaque, _: *c_int) callconv(.c) c_int {
-    return @intFromEnum(linux.E.NOSYS);
-}
-
-fn posix_spawnattr_setschedpolicy(_: *anyopaque, _: c_int) callconv(.c) c_int {
-    return @intFromEnum(linux.E.NOSYS);
-}
-extern "c" fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) callconv(.c) c_int;
-
-comptime {
-    if (builtin.link_libc) {
-        symbol(&fexecveImpl, "fexecve");
-    }
-}
-
-fn fexecveImpl(fd: c_int, argv: [*:null]const ?[*:0]const u8, envp: [*:null]const ?[*:0]const u8) callconv(.c) c_int {
-    // Try execveat first
-    const r: isize = @bitCast(linux.execveat(fd, "", argv, envp, .{ .SYMLINK_NOFOLLOW = false, .EMPTY_PATH = true }));
-    if (r != -@as(isize, @intFromEnum(linux.E.NOSYS))) {
-        // execveat succeeded (doesn't return) or failed with non-ENOSYS
-        std.c._errno().* = @intCast(-r);
-        return -1;
-    }
-    // Fallback: /proc/self/fd/N
-    var buf: ["/proc/self/fd/".len + 11]u8 = undefined;
-    const prefix = "/proc/self/fd/";
-    @memcpy(buf[0..prefix.len], prefix);
-    var pos: usize = prefix.len;
-    var v: u32 = @intCast(@as(c_uint, @bitCast(fd)));
-    if (v == 0) {
-        buf[pos] = '0';
-        pos += 1;
-    } else {
-        var tmp: [10]u8 = undefined;
-        var i: usize = 0;
-        while (v > 0) : (i += 1) {
-            tmp[i] = '0' + @as(u8, @intCast(v % 10));
-            v /= 10;
-        }
-        while (i > 0) {
-            i -= 1;
-            buf[pos] = tmp[i];
-            pos += 1;
-        }
-    }
-    buf[pos] = 0;
-    _ = execve(@ptrCast(buf[0..pos :0]), argv, envp);
-    if (std.c._errno().* == @intFromEnum(linux.E.NOENT))
-        std.c._errno().* = @intFromEnum(linux.E.BADF);
-    return -1;
 }
