@@ -71,7 +71,6 @@ comptime {
 
         symbol(&execveLinux, "execve");
         symbol(&fexecveLinux, "fexecve");
-        symbol(&vforkLinux, "vfork");
     }
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&swab, "swab");

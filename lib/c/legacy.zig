@@ -65,7 +65,6 @@ comptime {
     if (builtin.target.isMuslLibC()) {
         symbol(&getpagesize, "getpagesize");
         symbol(&getdtablesizeLinux, "getdtablesize");
-        symbol(&isastreamLinux, "isastream");
         symbol(&euidaccessLinux, "euidaccess");
         symbol(&endutxent, "endutxent");
         symbol(&setutxent, "setutxent");

@@ -31,7 +31,6 @@ extern "c" var __abort_lock: c_int;
 
 comptime {
     if (builtin.target.isMuslLibC()) {
-        symbol(&_ExitLinux, "_Exit");
     }
     if (builtin.link_libc) {
         symbol(&quick_exit, "quick_exit");

@@ -21,16 +21,7 @@ const posix_spawnattr_t = extern struct {
 
 comptime {
     if (builtin.target.isMuslLibC()) {
-        c.symbol(&posix_spawnattr_init, "posix_spawnattr_init");
         c.symbol(&posix_spawnattr_destroy, "posix_spawnattr_destroy");
-        c.symbol(&posix_spawnattr_getflags, "posix_spawnattr_getflags");
-        c.symbol(&posix_spawnattr_setflags, "posix_spawnattr_setflags");
-        c.symbol(&posix_spawnattr_getpgroup, "posix_spawnattr_getpgroup");
-        c.symbol(&posix_spawnattr_setpgroup, "posix_spawnattr_setpgroup");
-        c.symbol(&posix_spawnattr_getsigdefault, "posix_spawnattr_getsigdefault");
-        c.symbol(&posix_spawnattr_setsigdefault, "posix_spawnattr_setsigdefault");
-        c.symbol(&posix_spawnattr_getsigmask, "posix_spawnattr_getsigmask");
-        c.symbol(&posix_spawnattr_setsigmask, "posix_spawnattr_setsigmask");
         c.symbol(&posix_spawnattr_getschedparam, "posix_spawnattr_getschedparam");
         c.symbol(&posix_spawnattr_setschedparam, "posix_spawnattr_setschedparam");
         c.symbol(&posix_spawnattr_getschedpolicy, "posix_spawnattr_getschedpolicy");
