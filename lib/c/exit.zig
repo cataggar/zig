@@ -3,7 +3,6 @@ const std = @import("std");
 const linux = std.os.linux;
 const symbol = @import("../c.zig").symbol;
 extern "c" fn _Exit(code: c_int) noreturn;
-extern "c" fn __funcs_on_exit() void;
 extern "c" fn __stdio_exit() void;
 extern "c" fn _fini() void;
 extern const __fini_array_start: *const fn () callconv(.c) void;
@@ -29,8 +28,6 @@ var ae_lock: c_int = 0;
 extern "c" fn raise(sig: c_int) c_int;
 extern "c" fn __block_all_sigs(set: ?*anyopaque) void;
 extern "c" var __abort_lock: c_int;
-extern "c" fn __stdio_exit() void;
-extern "c" fn _fini() void;
 
 comptime {
     if (builtin.target.isMuslLibC()) {

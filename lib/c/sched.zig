@@ -3,7 +3,6 @@ const std = @import("std");
 const linux = std.os.linux;
 const symbol = @import("../c.zig").symbol;
 const errno = @import("../c.zig").errno;
-    const set = [_]u8{ 0b10101010, 0b11001100, 0b11110000 };
 const c = @import("../c.zig");
 
 comptime {

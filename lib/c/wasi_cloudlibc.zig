@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const wasi = std.os.wasi;
 const symbol = @import("../c.zig").symbol;
+extern "c" fn __wasilibc_unlinkat(fd: c_int, path: [*:0]const u8) c_int;
 extern "c" fn __wasilibc_rmdirat(fd: c_int, path: [*:0]const u8) c_int;
 const E = std.c.E;
 /// In WASI libc, clockid_t is `const struct __clockid *` (a pointer to a struct

@@ -133,10 +133,10 @@ const errmsg = blk: {
     break :blk table;
 };
 
-fn strerror(e: c_int, ...) callconv(.c) [*:0]const u8 {
-    // strerror_l takes locale as second arg — we ignore it (no locale support)
+fn strerror(e: c_int) callconv(.c) [*:0]const u8 {
     const idx: usize = if (e >= 0 and e < error_messages.len) @intCast(e) else 0;
     return error_messages[idx];
+}
 
 fn __strerror_l(e: c_int, _: ?*anyopaque) callconv(.c) [*:0]const u8 {
     return strerror(e);
