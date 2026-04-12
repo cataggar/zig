@@ -64,6 +64,9 @@ comptime {
         symbol(&daemonLinux, "daemon");
         symbol(&ulimitLinux, "ulimit");
     }
+    if (builtin.target.isWasiLibC()) {
+        symbol(&getpagesize, "getpagesize");
+    }
     if (builtin.link_libc) {
         symbol(&ftw, "ftw");
         symbol(&vwarn, "vwarn");
@@ -80,7 +83,6 @@ comptime {
         symbol(&getpass, "getpass");
         symbol(&cuserid, "cuserid");
     }
-    // WASI exports handled in wasi_sources.zig
 }
 
 fn getpagesize() callconv(.c) c_int {
@@ -192,6 +194,12 @@ fn ulimitLinux(cmd: c_int, ...) callconv(.c) c_long {
 }
 
 fn ftw(
+    path: [*:0]const u8,
+    func: *const anyopaque,
+    fd_limit: c_int,
+) callconv(.c) c_int {
+    return nftw(path, func, fd_limit, FTW_PHYS);
+}
 
 fn vwarn(fmt: ?[*:0]const u8, ap: VaList) callconv(.c) void {
     _ = fprintf(stderr, "%s: ", __progname);

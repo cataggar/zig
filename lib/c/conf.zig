@@ -61,7 +61,10 @@ comptime {
     if (builtin.target.isMuslLibC()) {
         symbol(&fpathconf, "fpathconf");
         symbol(&pathconf, "pathconf");
-        symbol(&confstr, "confstr");
+    }
+    if (builtin.target.isWasiLibC()) {
+        symbol(&fpathconf, "fpathconf");
+        symbol(&pathconf, "pathconf");
     }
     if (builtin.link_libc) {
         symbol(&get_nprocs_conf, "get_nprocs_conf");
@@ -70,7 +73,9 @@ comptime {
         symbol(&get_avphys_pages, "get_avphys_pages");
         symbol(&sysconf, "sysconf");
     }
-    // WASI exports handled in wasi_sources.zig
+    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
+        symbol(&confstr, "confstr");
+    }
 }
 
 fn fpathconf(_: c_int, name: c_int) callconv(.c) c_long {

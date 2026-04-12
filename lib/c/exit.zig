@@ -92,6 +92,30 @@ fn __funcs_on_exit() callconv(.c) void {
 fn __cxa_finalize(_: ?*anyopaque) callconv(.c) void {}
 
 fn __cxa_atexit(
+    func: ?*const fn (?*anyopaque) callconv(.c) void,
+    arg: ?*anyopaque,
+    _: ?*anyopaque,
+) callconv(.c) c_int {
+    __lock(&ae_lock);
+    defer __unlock(&ae_lock);
+
+    // Defer initialization of head so it can be in BSS.
+    if (ae_head == null) ae_head = &ae_builtin;
+
+    // If the current function list is full, add a new one.
+    if (ae_slot == COUNT) {
+        const new_fl: ?*FuncList = @ptrCast(@alignCast(calloc(@sizeOf(FuncList), 1)));
+        if (new_fl == null) return -1;
+        new_fl.?.next = ae_head;
+        ae_head = new_fl;
+        ae_slot = 0;
+    }
+
+    ae_head.?.f[@intCast(ae_slot)] = func;
+    ae_head.?.a[@intCast(ae_slot)] = arg;
+    ae_slot += 1;
+    return 0;
+}
 
 fn call(p: ?*anyopaque) callconv(.c) void {
     const func: *const fn () callconv(.c) void = @ptrCast(@alignCast(p));

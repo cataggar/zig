@@ -384,3 +384,17 @@ fn __init_libc_fn(envp: [*:null]?[*:0]u8, pn: ?[*:0]u8) callconv(.c) void {
 }
 
 fn __libc_start_main_fn(
+    main_fn: *const fn (c_int, [*]?[*:0]u8, [*:null]?[*:0]u8) callconv(.c) c_int,
+    argc: c_int,
+    argv: [*]?[*:0]u8,
+    _: ?*anyopaque, // init_dummy
+    _: ?*anyopaque, // fini_dummy
+    _: ?*anyopaque, // ldso_dummy
+) callconv(.c) c_int {
+    const envp: [*:null]?[*:0]u8 = @ptrCast(argv + @as(usize, @intCast(argc)) + 1);
+    __init_libc_fn(envp, argv[0]);
+
+    __libc_start_init();
+    const envp2: [*:null]?[*:0]u8 = @ptrCast(argv + @as(usize, @intCast(argc)) + 1);
+    exit(main_fn(argc, argv, envp2));
+}

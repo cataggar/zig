@@ -168,14 +168,8 @@ comptime {
         symbol(&getdomainnameLinux, "getdomainname");
         symbol(&getrlimitLinux, "getrlimit");
         symbol(&setrlimitLinux, "setrlimit");
-        symbol(&basename, "basename");
-        symbol(&basename, "__xpg_basename");
-        symbol(&dirname, "dirname");
-        symbol(&a64l, "a64l");
-        symbol(&l64a, "l64a");
         symbol(&getrusageLinux, "getrusage");
         symbol(&getentropyLinux, "getentropy");
-        symbol(&getsubopt, "getsubopt");
         symbol(&login_ttyLinux, "login_tty");
         symbol(&posix_openptLinux, "posix_openpt");
         symbol(&grantpt, "grantpt");
@@ -184,6 +178,17 @@ comptime {
         symbol(&__ptsname_rLinux, "ptsname_r");
         symbol(&ioctlImpl, "ioctl");
         symbol(&syscall_fn, "syscall");
+    }
+    if (builtin.target.isWasiLibC()) {
+        symbol(&gethostid, "gethostid");
+    }
+    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
+        symbol(&basename, "basename");
+        symbol(&basename, "__xpg_basename");
+        symbol(&dirname, "dirname");
+        symbol(&a64l, "a64l");
+        symbol(&l64a, "l64a");
+        symbol(&getsubopt, "getsubopt");
     }
     if (builtin.link_libc) {
         symbol(&initgroups, "initgroups");
@@ -223,7 +228,6 @@ comptime {
         symbol(&wordfree_fn, "wordfree");
         symbol(&nftw_fn, "nftw");
     }
-    // WASI exports handled in wasi_sources.zig
 }
 
 fn getpriorityLinux(which: c_int, who: c_uint) callconv(.c) c_int {
@@ -552,8 +556,98 @@ fn __ptsname_rLinux(fd: c_int, buf: ?[*]u8, len: usize) callconv(.c) c_int {
 }
 
 fn openpty(
+    pm: *c_int,
+    ps: *c_int,
+    name: ?[*]u8,
+    tio: ?*const anyopaque,
+    ws: ?*const anyopaque,
+) callconv(.c) c_int {
+    var n: c_int = 0;
+    var buf: [20]u8 = undefined;
+
+    const m = open("/dev/ptmx", O_RDWR | O_NOCTTY);
+    if (m < 0) return -1;
+
+    if (ioctl(m, @as(c_int, @bitCast(@as(c_uint, linux.T.IOCSPTLCK))), &n) != 0 or
+        ioctl(m, @as(c_int, @bitCast(@as(c_uint, linux.T.IOCGPTN))), &n) != 0)
+    {
+        _ = close(m);
+        return -1;
+    }
+
+    const namebuf: [*]u8 = name orelse &buf;
+    _ = snprintf(namebuf, 20, "/dev/pts/%d", n);
+
+    const s = open(@ptrCast(namebuf), O_RDWR | O_NOCTTY);
+    if (s < 0) {
+        _ = close(m);
+        return -1;
+    }
+
+    if (tio) |t| _ = tcsetattr(s, TCSANOW, t);
+    if (ws) |w| _ = ioctl(s, @as(c_int, @bitCast(@as(c_uint, linux.T.IOCSWINSZ))), w);
+
+    pm.* = m;
+    ps.* = s;
+    return 0;
+}
 
 fn forkpty(
+    pm: *c_int,
+    name: ?[*]u8,
+    tio: ?*const anyopaque,
+    ws: ?*const anyopaque,
+) callconv(.c) c_int {
+    var m: c_int = undefined;
+    var s: c_int = undefined;
+    var p: [2]c_int = undefined;
+
+    if (openpty(&m, &s, name, tio, ws) < 0) return -1;
+
+    if (pipe2(&p, O_CLOEXEC) != 0) {
+        _ = close(s);
+        _ = close(m);
+        return -1;
+    }
+
+    const pid = fork();
+    if (pid == 0) {
+        // Child.
+        _ = close(m);
+        _ = close(p[0]);
+        if (login_tty(s) != 0) {
+            const e = std.c._errno().*;
+            _ = write(p[1], &e, @sizeOf(c_int));
+            _exit(127);
+        }
+        _ = close(p[1]);
+        return 0;
+    }
+
+    // Parent.
+    _ = close(s);
+    _ = close(p[1]);
+
+    if (pid < 0) {
+        _ = close(p[0]);
+        _ = close(m);
+        return -1;
+    }
+
+    var ec: c_int = undefined;
+    if (read(p[0], &ec, @sizeOf(c_int)) > 0) {
+        var status: c_int = undefined;
+        _ = waitpid(pid, &status, 0);
+        _ = close(p[0]);
+        _ = close(m);
+        std.c._errno().* = ec;
+        return -1;
+    }
+    _ = close(p[0]);
+
+    pm.* = m;
+    return pid;
+}
 
 fn strcolcmp(lstr: [*:0]const u8, bstr: [*:0]const u8) bool {
     var i: usize = 0;
@@ -562,6 +656,76 @@ fn strcolcmp(lstr: [*:0]const u8, bstr: [*:0]const u8) bool {
 }
 
 fn fmtmsg(
+    classification: c_long,
+    label: ?[*:0]const u8,
+    severity: c_int,
+    text: ?[*:0]const u8,
+    action: ?[*:0]const u8,
+    tag: ?[*:0]const u8,
+) callconv(.c) c_int {
+    var ret: c_int = 0;
+
+    const errstring: [*:0]const u8 = switch (severity) {
+        MM_HALT => "HALT: ",
+        MM_ERROR => "ERROR: ",
+        MM_WARNING => "WARNING: ",
+        MM_INFO => "INFO: ",
+        else => empty,
+    };
+
+    if (classification & MM_CONSOLE != 0) {
+        const consolefd = open("/dev/console", O_WRONLY);
+        if (consolefd < 0) {
+            ret = MM_NOCON;
+        } else {
+            if (dprintf(consolefd, "%s%s%s%s%s%s%s%s\n",
+                if (label) |l| l else empty, if (label != null) @as([*:0]const u8, ": ") else empty,
+                if (severity != 0) errstring else empty, if (text) |t| t else empty,
+                if (action != null) @as([*:0]const u8, "\nTO FIX: ") else empty,
+                if (action) |a| a else empty, if (action != null) @as([*:0]const u8, " ") else empty,
+                if (tag) |t| t else empty) < 1)
+                ret = MM_NOCON;
+            _ = close(consolefd);
+        }
+    }
+
+    if (classification & MM_PRINT != 0) {
+        var verb: c_int = 0;
+        var cmsg: ?[*:0]u8 = getenv("MSGVERB");
+        const msgs = [_][*:0]const u8{ "label", "severity", "text", "action", "tag" };
+
+        while (cmsg) |cm| {
+            if (cm[0] == 0) break;
+            var found = false;
+            for (msgs, 0..) |m, i| {
+                if (strcolcmp(m, cm)) {
+                    verb |= @as(c_int, 1) << @intCast(i);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) { verb = 0xFF; break; }
+            cmsg = if (strchr(cm, ':')) |p| @ptrCast(@as([*]u8, @ptrCast(p)) + 1) else null;
+        }
+        if (verb == 0) verb = 0xFF;
+
+        if (dprintf(2, "%s%s%s%s%s%s%s%s\n",
+            if (verb & 1 != 0 and label != null) label.? else empty,
+            if (verb & 1 != 0 and label != null) @as([*:0]const u8, ": ") else empty,
+            if (verb & 2 != 0 and severity != 0) errstring else empty,
+            if (verb & 4 != 0 and text != null) text.? else empty,
+            if (verb & 8 != 0 and action != null) @as([*:0]const u8, "\nTO FIX: ") else empty,
+            if (verb & 8 != 0 and action != null) action.? else empty,
+            if (verb & 8 != 0 and action != null) @as([*:0]const u8, " ") else empty,
+            if (verb & 16 != 0 and tag != null) tag.? else empty) < 1)
+            ret |= MM_NOMSG;
+    }
+
+    if (ret & (MM_NOCON | MM_NOMSG) == (MM_NOCON | MM_NOMSG))
+        ret = MM_NOTOK;
+
+    return ret;
+}
 
 fn get_current_dir_name() callconv(.c) ?[*:0]u8 {
     const res = getenv("PWD") orelse return getcwd(null, 0);
@@ -856,6 +1020,97 @@ fn __getopt_msg(a: [*:0]const u8, b: [*:0]const u8, c_ptr: [*]const u8, l: usize
 }
 
 fn getopt_fn(
+    argc: c_int,
+    argv: [*]const ?[*:0]u8,
+    optstring_arg: [*:0]const u8,
+) callconv(.c) c_int {
+    if (optind_val == 0 or optreset_val != 0) {
+        optreset_val = 0;
+        optpos_val = 0;
+        optind_val = 1;
+    }
+
+    if (optind_val >= argc) return -1;
+    const cur = argv[@intCast(optind_val)] orelse return -1;
+    if (cur[0] != '-') {
+        if (optstring_arg[0] == '-') {
+            optarg_val = @constCast(cur);
+            optind_val += 1;
+            return 1;
+        }
+        return -1;
+    }
+    if (cur[1] == 0) return -1;
+    if (cur[1] == '-' and cur[2] == 0) {
+        optind_val += 1;
+        return -1;
+    }
+
+    if (optpos_val == 0) optpos_val = 1;
+
+    var c: c_uint = undefined;
+    const cur_bytes: [*]const u8 = @ptrCast(cur);
+    var k = mbtowc(&c, cur_bytes + @as(usize, @intCast(optpos_val)), MB_LEN_MAX);
+    if (k < 0) {
+        k = 1;
+        c = 0xfffd;
+    }
+    const optchar: [*]const u8 = cur_bytes + @as(usize, @intCast(optpos_val));
+    optpos_val += k;
+
+    if (cur[@intCast(optpos_val)] == 0) {
+        optind_val += 1;
+        optpos_val = 0;
+    }
+
+    var optstring = optstring_arg;
+    if (optstring[0] == '-' or optstring[0] == '+') optstring = @ptrCast(@as([*]const u8, @ptrCast(optstring)) + 1);
+
+    var i: usize = 0;
+    var d: c_uint = 0;
+    while (true) {
+        const os_bytes: [*]const u8 = @ptrCast(optstring);
+        const l = mbtowc(&d, os_bytes + i, MB_LEN_MAX);
+        if (l > 0) {
+            i += @intCast(l);
+        } else {
+            i += 1;
+        }
+        if (l == 0 or d == c) break;
+    }
+
+    if (d != c or c == ':') {
+        optopt_val = @intCast(c);
+        if (optstring_arg[0] != ':' and opterr_val != 0)
+            __getopt_msg(@ptrCast(argv[0].?), ": unrecognized option: ", optchar, @intCast(k));
+        return '?';
+    }
+
+    const os_bytes: [*]const u8 = @ptrCast(optstring);
+    if (os_bytes[i] == ':') {
+        optarg_val = null;
+        if (os_bytes[i + 1] != ':' or optpos_val != 0) {
+            if (optind_val >= argc) {
+                optopt_val = @intCast(c);
+                if (optstring_arg[0] == ':') return ':';
+                if (opterr_val != 0)
+                    __getopt_msg(@ptrCast(argv[0].?), ": option requires an argument: ", optchar, @intCast(k));
+                return '?';
+            }
+            const next = argv[@intCast(optind_val)] orelse null;
+            optind_val += 1;
+            if (optpos_val != 0) {
+                if (next) |n| {
+                    optarg_val = @ptrCast(@constCast(@as([*]const u8, @ptrCast(n)) + @as(usize, @intCast(optpos_val))));
+                }
+            } else {
+                optarg_val = @constCast(next);
+            }
+            optpos_val = 0;
+        }
+    }
+    return @intCast(c);
+}
 
 fn openlog_internal() void {
     log_fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0);
@@ -972,8 +1227,145 @@ fn permute(argv: [*]const ?[*:0]u8, dest: c_int, src: c_int) void {
 }
 
 fn getopt_long_core(
+    argc: c_int,
+    argv: [*]const ?[*:0]u8,
+    optstring: [*:0]const u8,
+    longopts: ?[*]const Option,
+    idx: ?*c_int,
+    longonly: c_int,
+) c_int {
+    optarg = null;
+    const cur = argv[@intCast(optind)] orelse return getopt(argc, argv, optstring);
+    const cur_b: [*]const u8 = @ptrCast(cur);
+
+    if (longopts != null and cur[0] == '-' and
+        ((longonly != 0 and cur[1] != 0 and cur[1] != '-') or
+        (cur[1] == '-' and cur[2] != 0)))
+    {
+        const opts = longopts.?;
+        const os_b: [*]const u8 = @ptrCast(optstring);
+        const colon: bool = os_b[if (os_b[0] == '+' or os_b[0] == '-') @as(usize, 1) else 0] == ':';
+
+        const start: [*]const u8 = cur_b + 1;
+        var cnt: c_int = 0;
+        var match: usize = 0;
+        var match_arg: [*]const u8 = start;
+        var i: usize = 0;
+        while (opts[i].name) |name_ptr| : (i += 1) {
+            const name_b: [*]const u8 = @ptrCast(name_ptr);
+            var opt: [*]const u8 = start;
+            if (opt[0] == '-') opt += 1;
+            var n: [*]const u8 = name_b;
+            while (opt[0] != 0 and opt[0] != '=' and opt[0] == n[0]) {
+                n += 1;
+                opt += 1;
+            }
+            if (opt[0] != 0 and opt[0] != '=') continue;
+            match_arg = opt;
+            match = i;
+            if (n[0] == 0) {
+                cnt = 1;
+                break;
+            }
+            cnt += 1;
+        }
+
+        if (cnt == 1 and longonly != 0) {
+            const arg_len = @intFromPtr(match_arg) - @intFromPtr(start);
+            if (arg_len == @as(usize, @intCast(mblen(start, MB_LEN_MAX)))) {
+                const l: usize = arg_len;
+                var j_outer: usize = 0;
+                while (os_b[j_outer] != 0) : (j_outer += 1) {
+                    var k: usize = 0;
+                    while (k < l and start[k] == os_b[j_outer + k]) : (k += 1) {}
+                    if (k == l) {
+                        cnt += 1;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (cnt == 1) {
+            i = match;
+            const opt = match_arg;
+            optind += 1;
+            if (opt[0] == '=') {
+                if (opts[i].has_arg == 0) {
+                    optopt = opts[i].val;
+                    if (colon or opterr == 0) return '?';
+                    __getopt_msg(@ptrCast(argv[0].?), ": option does not take an argument: ", @ptrCast(opts[i].name.?), strlen(opts[i].name.?));
+                    return '?';
+                }
+                optarg = @ptrCast(@constCast(opt + 1));
+            } else if (opts[i].has_arg == required_argument) {
+                optarg = @constCast(argv[@intCast(optind)]);
+                if (optarg == null) {
+                    optopt = opts[i].val;
+                    if (colon) return ':';
+                    if (opterr == 0) return '?';
+                    __getopt_msg(@ptrCast(argv[0].?), ": option requires an argument: ", @ptrCast(opts[i].name.?), strlen(opts[i].name.?));
+                    return '?';
+                }
+                optind += 1;
+            }
+            if (idx) |p| p.* = @intCast(i);
+            if (opts[i].flag) |flag| {
+                flag.* = opts[i].val;
+                return 0;
+            }
+            return opts[i].val;
+        }
+
+        if (cur[1] == '-') {
+            optopt = 0;
+            if (!colon and opterr != 0) {
+                __getopt_msg(@ptrCast(argv[0].?), if (cnt != 0) ": option is ambiguous: " else ": unrecognized option: ", cur_b + 2, strlen(@ptrCast(cur_b + 2)));
+            }
+            optind += 1;
+            return '?';
+        }
+    }
+    return getopt(argc, argv, optstring);
+}
 
 fn getopt_long_impl(
+    argc: c_int,
+    argv: [*]const ?[*:0]u8,
+    optstring: [*:0]const u8,
+    longopts: ?[*]const Option,
+    idx: ?*c_int,
+    longonly: c_int,
+) c_int {
+    if (optind == 0 or __optreset != 0) {
+        __optreset = 0;
+        __optpos = 0;
+        optind = 1;
+    }
+    if (optind >= argc or argv[@intCast(optind)] == null) return -1;
+    const skipped = optind;
+    const os_b: [*]const u8 = @ptrCast(optstring);
+    if (os_b[0] != '+' and os_b[0] != '-') {
+        var ii = optind;
+        while (true) : (ii += 1) {
+            if (ii >= argc or argv[@intCast(ii)] == null) return -1;
+            const a = argv[@intCast(ii)].?;
+            if (a[0] == '-' and a[1] != 0) break;
+        }
+        optind = ii;
+    }
+    const resumed = optind;
+    const ret = getopt_long_core(argc, argv, optstring, longopts, idx, longonly);
+    if (resumed > skipped) {
+        const cnt = optind - resumed;
+        var j: c_int = 0;
+        while (j < cnt) : (j += 1) {
+            permute(argv, skipped, optind - 1);
+        }
+        optind = skipped + cnt;
+    }
+    return ret;
+}
 
 fn getopt_long_fn(argc: c_int, argv: [*]const ?[*:0]u8, optstring: [*:0]const u8, longopts: ?[*]const Option, idx: ?*c_int) callconv(.c) c_int {
     return getopt_long_impl(argc, argv, optstring, longopts, idx, 0);

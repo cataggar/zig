@@ -48,6 +48,8 @@ comptime {
     if (builtin.target.isMuslLibC()) {
         symbol(&ftimeLinux, "ftime");
         symbol(&timespec_getLinux, "timespec_get");
+    }
+    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&__month_to_secs, "__month_to_secs");
         symbol(&__year_to_secs, "__year_to_secs");
         symbol(&__secs_to_tm, "__secs_to_tm");
