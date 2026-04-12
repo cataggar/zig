@@ -106,6 +106,7 @@ comptime {
     _ = @import("c/string.zig");
     _ = @import("c/strings.zig");
     _ = @import("c/stropts.zig");
+    _ = @import("c/temp.zig");
 
     _ = @import("c/sys/capability.zig");
     _ = @import("c/sys/file.zig");
