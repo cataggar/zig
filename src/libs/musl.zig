@@ -639,8 +639,6 @@ const src_files = [_][]const u8{
     "musl/src/legacy/getdtablesize.c",
     "musl/src/legacy/getloadavg.c",
     "musl/src/legacy/getpagesize.c",
-    "musl/src/legacy/getpass.c",
-    "musl/src/legacy/getusershell.c",
     "musl/src/linux/adjtime.c",
     "musl/src/linux/adjtimex.c",
     "musl/src/linux/arch_prctl.c",
