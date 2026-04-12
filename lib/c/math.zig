@@ -202,6 +202,14 @@ comptime {
         symbol(&significand_, "significand");
         symbol(&significandf_, "significandf");
         symbol(&rintl, "rintl");
+        symbol(&remainder_, "remainder");
+        symbol(&remainder_, "drem");
+        symbol(&remainderf_, "remainderf");
+        symbol(&remainderf_, "dremf");
+        symbol(&remainderl_, "remainderl");
+        symbol(&remquo_, "remquo");
+        symbol(&remquof_, "remquof");
+        symbol(&remquol_, "remquol");
         symbol(&tanh, "tanh");
         symbol(&tanl, "tanl");
         symbol(&rintl, "rintl");
@@ -1132,6 +1140,421 @@ fn pow10(x: f64) callconv(.c) f64 {
 
 fn pow10f(x: f32) callconv(.c) f32 {
     return exp10f(x);
+}
+
+fn remainder_(x: f64, y: f64) callconv(.c) f64 {
+    var q: c_int = undefined;
+    return remquo_(x, y, &q);
+}
+
+fn remainderf_(x: f32, y: f32) callconv(.c) f32 {
+    var q: c_int = undefined;
+    return remquof_(x, y, &q);
+}
+
+fn remainderl_(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
+    var q: c_int = undefined;
+    return remquol_(x, y, &q);
+}
+
+/// Translated from musl/src/math/remquof.c
+fn remquof_(x_: f32, y_: f32, quo: *c_int) callconv(.c) f32 {
+    var x: f32 = x_;
+    var y: f32 = y_;
+    var uxi: u32 = @bitCast(x);
+    var uyi: u32 = @bitCast(y);
+    var ex: i32 = @intCast(uxi >> 23 & 0xff);
+    var ey: i32 = @intCast(uyi >> 23 & 0xff);
+    const sx: u32 = uxi >> 31;
+    const sy: u32 = uyi >> 31;
+    var q: u32 = undefined;
+
+    quo.* = 0;
+    if (uyi << 1 == 0 or math.isNan(y) or ex == 0xff)
+        return (x * y) / (x * y);
+    if (uxi << 1 == 0)
+        return x;
+
+    // normalize x and y
+    if (ex == 0) {
+        var i = uxi << 9;
+        while (i >> 31 == 0) : (i <<= 1) {
+            ex -= 1;
+        }
+        uxi <<= @intCast(@as(u32, @bitCast(-ex + 1)));
+    } else {
+        uxi &= 0x007fffff;
+        uxi |= 0x00800000;
+    }
+    if (ey == 0) {
+        var i = uyi << 9;
+        while (i >> 31 == 0) : (i <<= 1) {
+            ey -= 1;
+        }
+        uyi <<= @intCast(@as(u32, @bitCast(-ey + 1)));
+    } else {
+        uyi &= 0x007fffff;
+        uyi |= 0x00800000;
+    }
+
+    q = 0;
+    if (ex >= ey) {
+        // x mod y
+        while (ex > ey) : (ex -= 1) {
+            const i = uxi -% uyi;
+            if (i >> 31 == 0) {
+                uxi = i;
+                q +%= 1;
+            }
+            uxi <<= 1;
+            q = q *% 2;
+        }
+        {
+            const i = uxi -% uyi;
+            if (i >> 31 == 0) {
+                uxi = i;
+                q +%= 1;
+            }
+        }
+        if (uxi == 0) {
+            ex = -30;
+        } else {
+            while (uxi >> 23 == 0) {
+                uxi <<= 1;
+                ex -= 1;
+            }
+        }
+    } else if (ex + 1 != ey) {
+        return x;
+    }
+
+    // scale result and decide between |x| and |x|-|y|
+    if (ex > 0) {
+        uxi -= 1 << 23;
+        uxi |= @as(u32, @intCast(ex)) << 23;
+    } else {
+        uxi >>= @intCast(@as(u32, @bitCast(-ex + 1)));
+    }
+    x = @bitCast(uxi);
+    if (sy != 0) y = -y;
+    if (ex == ey or (ex + 1 == ey and (2.0 * x > y or (2.0 * x == y and q % 2 != 0)))) {
+        x -= y;
+        q +%= 1;
+    }
+    q &= 0x7fffffff;
+    const qi: c_int = @intCast(q);
+    quo.* = if (sx ^ sy != 0) -qi else qi;
+    return if (sx != 0) -x else x;
+}
+
+/// Translated from musl/src/math/remquo.c
+fn remquo_(x_: f64, y_: f64, quo: *c_int) callconv(.c) f64 {
+    var x: f64 = x_;
+    var y: f64 = y_;
+    var uxi: u64 = @bitCast(x);
+    var uyi: u64 = @bitCast(y);
+    var ex: i32 = @intCast(uxi >> 52 & 0x7ff);
+    var ey: i32 = @intCast(uyi >> 52 & 0x7ff);
+    const sx: u64 = uxi >> 63;
+    const sy: u64 = uyi >> 63;
+    var q: u32 = undefined;
+
+    quo.* = 0;
+    if (uyi << 1 == 0 or math.isNan(y) or ex == 0x7ff)
+        return (x * y) / (x * y);
+    if (uxi << 1 == 0)
+        return x;
+
+    // normalize x and y
+    if (ex == 0) {
+        var i = uxi << 12;
+        while (i >> 63 == 0) : (i <<= 1) {
+            ex -= 1;
+        }
+        uxi <<= @intCast(@as(u32, @bitCast(-ex + 1)));
+    } else {
+        uxi &= 0x000fffffffffffff;
+        uxi |= 0x0010000000000000;
+    }
+    if (ey == 0) {
+        var i = uyi << 12;
+        while (i >> 63 == 0) : (i <<= 1) {
+            ey -= 1;
+        }
+        uyi <<= @intCast(@as(u32, @bitCast(-ey + 1)));
+    } else {
+        uyi &= 0x000fffffffffffff;
+        uyi |= 0x0010000000000000;
+    }
+
+    q = 0;
+    if (ex >= ey) {
+        // x mod y
+        while (ex > ey) : (ex -= 1) {
+            const i = uxi -% uyi;
+            if (i >> 63 == 0) {
+                uxi = i;
+                q +%= 1;
+            }
+            uxi <<= 1;
+            q = q *% 2;
+        }
+        {
+            const i = uxi -% uyi;
+            if (i >> 63 == 0) {
+                uxi = i;
+                q +%= 1;
+            }
+        }
+        if (uxi == 0) {
+            ex = -60;
+        } else {
+            while (uxi >> 52 == 0) {
+                uxi <<= 1;
+                ex -= 1;
+            }
+        }
+    } else if (ex + 1 != ey) {
+        return x;
+    }
+
+    // scale result and decide between |x| and |x|-|y|
+    if (ex > 0) {
+        uxi -= @as(u64, 1) << 52;
+        uxi |= @as(u64, @intCast(ex)) << 52;
+    } else {
+        uxi >>= @intCast(@as(u32, @bitCast(-ex + 1)));
+    }
+    x = @bitCast(uxi);
+    if (sy != 0) y = -y;
+    if (ex == ey or (ex + 1 == ey and (2.0 * x > y or (2.0 * x == y and q % 2 != 0)))) {
+        x -= y;
+        q +%= 1;
+    }
+    q &= 0x7fffffff;
+    const qi: c_int = @intCast(q);
+    quo.* = if (sx ^ sy != 0) -qi else qi;
+    return if (sx != 0) -x else x;
+}
+
+/// Translated from musl/src/math/remquol.c
+fn remquol_(x_: c_longdouble, y_: c_longdouble, quo: *c_int) callconv(.c) c_longdouble {
+    const ld = @typeInfo(c_longdouble).float;
+    if (ld.bits == 64) {
+        return @floatCast(remquo_(@as(f64, @floatCast(x_)), @as(f64, @floatCast(y_)), quo));
+    }
+    if (ld.bits == 80) {
+        return remquox(f80, x_, y_, quo);
+    }
+    if (ld.bits == 128) {
+        return remquox(f128, x_, y_, quo);
+    }
+    unreachable;
+}
+
+fn remquox(comptime F: type, x_: c_longdouble, y_: c_longdouble, quo: *c_int) c_longdouble {
+    const bits = @typeInfo(F).float.bits;
+    const Bits = std.meta.Int(.unsigned, bits);
+    const se_shift: comptime_int = bits - 16;
+    const se_mask: Bits = @as(Bits, 0xFFFF) << se_shift;
+
+    var x: F = @floatCast(x_);
+    var y: F = @floatCast(y_);
+    var ux: Bits = @bitCast(x);
+    var uy: Bits = @bitCast(y);
+    var ux_se: u16 = @truncate(ux >> se_shift);
+    const uy_se: u16 = @truncate(uy >> se_shift);
+    var ex: i32 = @intCast(ux_se & 0x7fff);
+    var ey: i32 = @intCast(uy_se & 0x7fff);
+    const sx: u16 = ux_se >> 15;
+    const sy: u16 = uy_se >> 15;
+    var q: u32 = 0;
+
+    quo.* = 0;
+    if (y == 0 or math.isNan(y) or ex == 0x7fff)
+        return @floatCast((x * y) / (x * y));
+    if (x == 0)
+        return @floatCast(x);
+
+    // normalize x
+    if (ex == 0) {
+        ux = ux & ~se_mask;
+        x = @bitCast(ux);
+        x *= 0x1p120;
+        ux = @bitCast(x);
+        ux_se = @truncate(ux >> se_shift);
+        ex = @as(i32, @intCast(ux_se & 0x7fff)) - 120;
+    }
+    // normalize y
+    if (ey == 0) {
+        uy = uy & ~se_mask;
+        y = @bitCast(uy);
+        y *= 0x1p120;
+        uy = @bitCast(y);
+        ey = @as(i32, @intCast(@as(u16, @truncate(uy >> se_shift)) & 0x7fff)) - 120;
+    }
+
+    q = 0;
+    if (ex >= ey) {
+        if (bits == 80) {
+            // f80: 64-bit mantissa in bits[63:0]
+            var mx: u64 = @truncate(ux);
+            const my: u64 = @truncate(uy);
+            while (ex > ey) : (ex -= 1) {
+                if (mx >= my) {
+                    mx = (mx - my) *% 2;
+                    q +%= 1;
+                    q = q *% 2;
+                } else if (mx *% 2 < mx) {
+                    mx = mx *% 2 -% my;
+                    q = q *% 2;
+                    q +%= 1;
+                } else {
+                    mx = mx * 2;
+                    q = q *% 2;
+                }
+            }
+            if (mx >= my) {
+                mx = mx - my;
+                q +%= 1;
+            }
+            if (mx == 0) {
+                ex = -120;
+            } else {
+                while (mx >> 63 == 0) {
+                    mx *%= 2;
+                    ex -= 1;
+                }
+            }
+            ux = (ux & se_mask) | @as(Bits, mx);
+        } else {
+            // f128: mantissa split into hi (48 bits) and lo (64 bits)
+            var xhi: u64 = (@as(u64, @truncate(ux >> 64)) & (std.math.maxInt(u64) >> 16)) | (@as(u64, 1) << 48);
+            const yhi: u64 = (@as(u64, @truncate(uy >> 64)) & (std.math.maxInt(u64) >> 16)) | (@as(u64, 1) << 48);
+            var xlo: u64 = @truncate(ux);
+            const ylo: u64 = @truncate(uy);
+            while (ex > ey) : (ex -= 1) {
+                var hi = xhi -% yhi;
+                const lo = xlo -% ylo;
+                if (xlo < ylo)
+                    hi -%= 1;
+                if (hi >> 63 == 0) {
+                    xhi = hi *% 2 +% (lo >> 63);
+                    xlo = lo *% 2;
+                    q +%= 1;
+                } else {
+                    xhi = xhi *% 2 +% (xlo >> 63);
+                    xlo = xlo *% 2;
+                }
+                q = q *% 2;
+            }
+            {
+                var hi = xhi -% yhi;
+                const lo = xlo -% ylo;
+                if (xlo < ylo)
+                    hi -%= 1;
+                if (hi >> 63 == 0) {
+                    xhi = hi;
+                    xlo = lo;
+                    q +%= 1;
+                }
+            }
+            if ((xhi | xlo) == 0) {
+                ex = -120;
+            } else {
+                while (xhi >> 48 == 0) {
+                    xhi = xhi *% 2 +% (xlo >> 63);
+                    xlo = xlo *% 2;
+                    ex -= 1;
+                }
+            }
+            ux = (@as(Bits, xhi) << 64) | @as(Bits, xlo);
+        }
+    }
+
+    // scale result and decide between |x| and |x|-|y|
+    if (ex <= 0) {
+        ux_se = @intCast(@as(u32, @bitCast(ex + 120)));
+        ux = (ux & ~se_mask) | (@as(Bits, ux_se) << se_shift);
+        x = @bitCast(ux);
+        x *= 0x1p-120;
+    } else {
+        ux_se = @intCast(@as(u32, @bitCast(ex)));
+        ux = (ux & ~se_mask) | (@as(Bits, ux_se) << se_shift);
+        x = @bitCast(ux);
+    }
+    if (sy != 0) y = -y;
+    if (ex == ey or (ex + 1 == ey and (2.0 * x > y or (2.0 * x == y and q % 2 != 0)))) {
+        x -= y;
+        q +%= 1;
+    }
+    q &= 0x7fffffff;
+    const qi: c_int = @intCast(q);
+    quo.* = if (sx ^ sy != 0) -qi else qi;
+    return @floatCast(if (sx != 0) -x else x);
+}
+
+test "remquof" {
+    var q: c_int = undefined;
+
+    // basic: 10 mod 3 = 1, quotient 3
+    try expectEqual(@as(f32, 1.0), remquof_(10.0, 3.0, &q));
+    try expectEqual(@as(c_int, 3), q & 0x7);
+
+    // negative x: -10 mod 3 = -1, quotient -3
+    try expectEqual(@as(f32, -1.0), remquof_(-10.0, 3.0, &q));
+    try expectEqual(@as(c_int, -3), q);
+
+    // remainder rounds to nearest: remquo(5.5, 2) -> -0.5 quotient 3
+    try expectEqual(@as(f32, -0.5), remquof_(5.5, 2.0, &q));
+    try expectEqual(@as(c_int, 3), q);
+
+    // y == 0 -> NaN
+    try expect(math.isNan(remquof_(1.0, 0.0, &q)));
+
+    // x == NaN -> NaN
+    try expect(math.isNan(remquof_(math.nan(f32), 1.0, &q)));
+
+    // x == inf -> NaN
+    try expect(math.isNan(remquof_(math.inf(f32), 1.0, &q)));
+
+    // x == 0 -> 0
+    try expectEqual(@as(f32, 0.0), remquof_(0.0, 1.0, &q));
+    try expectEqual(@as(c_int, 0), q);
+}
+
+test "remquo" {
+    var q: c_int = undefined;
+
+    try expectEqual(@as(f64, 1.0), remquo_(10.0, 3.0, &q));
+    try expectEqual(@as(c_int, 3), q & 0x7);
+
+    try expectEqual(@as(f64, -1.0), remquo_(-10.0, 3.0, &q));
+    try expectEqual(@as(c_int, -3), q);
+
+    try expectEqual(@as(f64, -0.5), remquo_(5.5, 2.0, &q));
+    try expectEqual(@as(c_int, 3), q);
+
+    try expect(math.isNan(remquo_(1.0, 0.0, &q)));
+    try expect(math.isNan(remquo_(math.nan(f64), 1.0, &q)));
+    try expect(math.isNan(remquo_(math.inf(f64), 1.0, &q)));
+
+    try expectEqual(@as(f64, 0.0), remquo_(0.0, 1.0, &q));
+    try expectEqual(@as(c_int, 0), q);
+}
+
+test "remainderf" {
+    try expectEqual(@as(f32, 1.0), remainderf_(10.0, 3.0));
+    try expectEqual(@as(f32, -1.0), remainderf_(-10.0, 3.0));
+    try expectEqual(@as(f32, -0.5), remainderf_(5.5, 2.0));
+    try expect(math.isNan(remainderf_(1.0, 0.0)));
+}
+
+test "remainder" {
+    try expectEqual(@as(f64, 1.0), remainder_(10.0, 3.0));
+    try expectEqual(@as(f64, -1.0), remainder_(-10.0, 3.0));
+    try expectEqual(@as(f64, -0.5), remainder_(5.5, 2.0));
+    try expect(math.isNan(remainder_(1.0, 0.0)));
 }
 
 fn rint(x: f64) callconv(.c) f64 {
