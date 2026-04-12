@@ -693,19 +693,19 @@ fn adjtimexLinux(tx: *anyopaque) callconv(.c) c_int {
 
 fn settimeofdayLinux(tv: ?*const linux.timeval, _: ?*const anyopaque) callconv(.c) c_int {
     const t = tv orelse return 0;
-    if (@as(u64, @bitCast(t.tv_usec)) >= 1000000) {
+    if (@as(u64, @bitCast(t.usec)) >= 1000000) {
         std.c._errno().* = @intFromEnum(linux.E.INVAL);
         return -1;
     }
     const ts = linux.timespec{
-        .tv_sec = t.tv_sec,
-        .tv_nsec = t.tv_usec * 1000,
+        .sec = t.sec,
+        .nsec = t.usec * 1000,
     };
     return errno(linux.clock_settime(.REALTIME, &ts));
 }
 
 fn stimeLinux(t: *const linux.time_t) callconv(.c) c_int {
-    const tv = linux.timeval{ .tv_sec = t.*, .tv_usec = 0 };
+    const tv = linux.timeval{ .sec = t.*, .usec = 0 };
     return settimeofdayLinux(&tv, null);
 }
 
@@ -714,8 +714,8 @@ fn stimeLinux(t: *const linux.time_t) callconv(.c) c_int {
 fn utimesLinux(path: [*:0]const u8, times: ?*const [2]linux.timeval) callconv(.c) c_int {
     if (times) |tv| {
         const ts = [2]linux.timespec{
-            .{ .tv_sec = tv[0].tv_sec, .tv_nsec = tv[0].tv_usec * 1000 },
-            .{ .tv_sec = tv[1].tv_sec, .tv_nsec = tv[1].tv_usec * 1000 },
+            .{ .sec = tv[0].sec, .nsec = tv[0].usec * 1000 },
+            .{ .sec = tv[1].sec, .nsec = tv[1].usec * 1000 },
         };
         return errno(linux.utimensat(linux.AT.FDCWD, path, &ts, 0));
     }
