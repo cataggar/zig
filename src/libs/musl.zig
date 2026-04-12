@@ -1508,8 +1508,8 @@ const src_files = [_][]const u8{
     //"musl/src/thread/tss_delete.c", // migrated to lib/c/thread.zig
     "musl/src/thread/tss_set.c",
     "musl/src/thread/__unmapself.c",
-    "musl/src/thread/vmlock.c",
-    "musl/src/thread/__wait.c",
+    //"musl/src/thread/vmlock.c", // migrated to lib/c/thread.zig
+    //"musl/src/thread/__wait.c", // migrated to lib/c/thread.zig
     "musl/src/thread/x32/clone.s",
     "musl/src/thread/x32/__set_thread_area.s",
     "musl/src/thread/x32/syscall_cp.s",
