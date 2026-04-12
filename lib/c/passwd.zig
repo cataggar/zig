@@ -289,7 +289,7 @@ fn bswap_32(x: uint32_t) uint32_t {
 
 const nscd_addr = extern struct {
     sun_family: u16,
-    sun_path: [21]u8,
+    sun_path: [20:0]u8,
 };
 
 const nscd_addr_val = nscd_addr{
@@ -453,20 +453,19 @@ fn __parsespent(s: [*:0]u8, sp: *spwd) callconv(.c) c_int {
 // __getpwent_a - parse a line from /etc/passwd
 // ====================================================================
 
-fn __getpwent_a(f: *FILE, pw: *passwd, line: *?[*:0]u8, size: *usize, res: **passwd) callconv(.c) c_int {
+fn __getpwent_a(f: *FILE, pw: *passwd, line: *?[*:0]u8, size: *usize, res: *?*passwd) callconv(.c) c_int {
     var rv: c_int = 0;
     var cs: c_int = 0;
     _ = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
 
-    var pw_local: *passwd = pw;
+    const pw_local: *passwd = pw;
     while (true) {
         const l = getline(line, size, f);
         if (l < 0) {
             rv = if (ferror(f) != 0) errno_val().* else 0;
             free(@ptrCast(line.*));
             line.* = null;
-            pw_local = @ptrFromInt(0);
-            break;
+            res.* = null; break;
         }
         var s: [*:0]u8 = line.*.?;
         s[@intCast(l - 1)] = 0;
@@ -514,12 +513,12 @@ fn __getpwent_a(f: *FILE, pw: *passwd, line: *?[*:0]u8, size: *usize, res: **pas
 // __getgrent_a - parse a line from /etc/group
 // ====================================================================
 
-fn __getgrent_a(f: *FILE, gr: *group, line: *?[*:0]u8, size: *usize, mem: *?[*]?[*:0]u8, nmem: *usize, res: **group) callconv(.c) c_int {
+fn __getgrent_a(f: *FILE, gr: *group, line: *?[*:0]u8, size: *usize, mem: *?[*]?[*:0]u8, nmem: *usize, res: *?*group) callconv(.c) c_int {
     var rv: c_int = 0;
     var cs: c_int = 0;
     _ = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
     var mems: [*:0]u8 = undefined;
-    var gr_local: *group = gr;
+    const gr_local: *group = gr;
 
     while (true) {
         const l = getline(line, size, f);
@@ -527,8 +526,7 @@ fn __getgrent_a(f: *FILE, gr: *group, line: *?[*:0]u8, size: *usize, mem: *?[*]?
             rv = if (ferror(f) != 0) errno_val().* else 0;
             free(@ptrCast(line.*));
             line.* = null;
-            gr_local = @ptrFromInt(0);
-            break;
+            res.* = null; break;
         }
         var s: [*:0]u8 = line.*.?;
         s[@intCast(l - 1)] = 0;
@@ -553,7 +551,7 @@ fn __getgrent_a(f: *FILE, gr: *group, line: *?[*:0]u8, size: *usize, mem: *?[*]?
         break;
     }
 
-    if (@intFromPtr(gr_local) == 0) {
+    if (@intFromPtr(res.*) == 0) {
         _ = pthread_setcancelstate(cs, null);
         res.* = gr_local;
         if (rv != 0) errno_val().* = rv;
@@ -576,9 +574,8 @@ fn __getgrent_a(f: *FILE, gr: *group, line: *?[*:0]u8, size: *usize, mem: *?[*]?
         rv = errno_val().*;
         free(@ptrCast(line.*));
         line.* = null;
-        gr_local = @ptrFromInt(0);
         _ = pthread_setcancelstate(cs, null);
-        res.* = gr_local;
+        res.* = null;
         if (rv != 0) errno_val().* = rv;
         return rv;
     }
@@ -630,19 +627,19 @@ fn __getpw_a(name: ?[*:0]const u8, uid: uid_t, pw: *passwd, buf: *?[*:0]u8, size
     }
 
     // Use a temporary non-null res for __getpwent_a
-    var res_inner: *passwd = undefined;
+    var res_inner: ?*passwd = null;
     while (true) {
         rv = __getpwent_a(f.?, pw, buf, size, &res_inner);
-        if (rv != 0 or @intFromPtr(res_inner) == 0) break;
+        if (rv != 0 or res_inner == null) break;
         if (name) |n| {
-            if (strcmp(n, res_inner.pw_name) == 0) break;
+            if (strcmp(n, res_inner.?.pw_name) == 0) break;
         } else {
-            if (res_inner.pw_uid == uid) break;
+            if (res_inner.?.pw_uid == uid) break;
         }
     }
     _ = fclose(f.?);
 
-    if (@intFromPtr(res_inner) != 0) {
+    if (res_inner != null) {
         res.* = res_inner;
     }
 
@@ -733,7 +730,7 @@ fn __getpw_a(name: ?[*:0]const u8, uid: uid_t, pw: *passwd, buf: *?[*:0]u8, size
         }
         const passwd_end = data + pw_name_len + pw_passwd_len;
         if (data[pw_name_len - 1] != 0 or
-            passwd_end[0 -% 1] != 0 or
+            (passwd_end - 1)[0] != 0 or
             data[pw_name_len + pw_passwd_len + pw_gecos_len - 1] != 0 or
             data[pw_name_len + pw_passwd_len + pw_gecos_len + pw_dir_len - 1] != 0 or
             data[len - 1] != 0)
@@ -792,19 +789,19 @@ fn __getgr_a(name: ?[*:0]const u8, gid: gid_t, gr: *group, buf: *?[*:0]u8, size:
         return rv;
     }
 
-    var res_inner: *group = undefined;
+    var res_inner: ?*group = null;
     while (true) {
         rv = __getgrent_a(f.?, gr, buf, size, mem, nmem, &res_inner);
-        if (rv != 0 or @intFromPtr(res_inner) == 0) break;
+        if (rv != 0 or res_inner == null) break;
         if (name) |n| {
-            if (strcmp(n, res_inner.gr_name) == 0) break;
+            if (strcmp(n, res_inner.?.gr_name) == 0) break;
         } else {
-            if (res_inner.gr_gid == gid) break;
+            if (res_inner.?.gr_gid == gid) break;
         }
     }
     _ = fclose(f.?);
 
-    if (@intFromPtr(res_inner) != 0) {
+    if (res_inner != null) {
         res.* = res_inner;
     }
 
@@ -972,7 +969,7 @@ var fgetgrent_mem: ?[*]?[*:0]u8 = null;
 var fgetgrent_gr: group = undefined;
 
 fn fgetgrent(f: *FILE) callconv(.c) ?*group {
-    var res: *group = undefined;
+    var res: ?*group = null;
     var size: usize = 0;
     var nmem: usize = 0;
     _ = __getgrent_a(f, &fgetgrent_gr, &fgetgrent_line, &size, &fgetgrent_mem, &nmem, &res);
@@ -985,7 +982,7 @@ var fgetpwent_pw: passwd = undefined;
 
 fn fgetpwent(f: *FILE) callconv(.c) ?*passwd {
     var size: usize = 0;
-    var res: *passwd = undefined;
+    var res: ?*passwd = null;
     _ = __getpwent_a(f, &fgetpwent_pw, &fgetpwent_line, &size, &res);
     if (@intFromPtr(res) == 0) return null;
     return res;
@@ -1027,7 +1024,7 @@ fn endgrent() callconv(.c) void {
 }
 
 fn getgrent() callconv(.c) ?*group {
-    var res: *group = undefined;
+    var res: ?*group = null;
     var size: usize = 0;
     var nmem: usize = 0;
     if (getgrent_f == null) {
@@ -1076,7 +1073,7 @@ fn endpwent() callconv(.c) void {
 }
 
 fn getpwent() callconv(.c) ?*passwd {
-    var res: *passwd = undefined;
+    var res: ?*passwd = null;
     if (getpwent_f == null) {
         getpwent_f = fopen("/etc/passwd", "rbe");
     }
@@ -1201,7 +1198,7 @@ fn getgrouplist(user: [*:0]const u8, gid: gid_t, groups: [*]gid_t, ngroups: *c_i
     var n: ssize_t = 1;
     var ret: c_int = -1;
     var gr_s: group = undefined;
-    var res: *group = undefined;
+    var res: ?*group = null;
     var f: ?*FILE = undefined;
     var swap_val: c_int = 0;
     var resp = [_]int32_t{0} ** INITGR_LEN;
