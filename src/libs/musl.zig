@@ -512,14 +512,14 @@ const src_files = [_][]const u8{
     "musl/src/ldso/arm/dlsym_time64.S",
     "musl/src/ldso/arm/find_exidx.c",
     "musl/src/ldso/arm/tlsdesc.S",
-    "musl/src/ldso/dladdr.c",
-    "musl/src/ldso/dlclose.c",
+    //"musl/src/ldso/dladdr.c", // migrated to lib/c/ldso.zig
+    //"musl/src/ldso/dlclose.c", // migrated to lib/c/ldso.zig
     "musl/src/ldso/dlerror.c",
-    "musl/src/ldso/dlinfo.c",
+    //"musl/src/ldso/dlinfo.c", // migrated to lib/c/ldso.zig
     "musl/src/ldso/dl_iterate_phdr.c",
-    "musl/src/ldso/dlopen.c",
-    "musl/src/ldso/__dlsym.c",
-    "musl/src/ldso/dlsym.c",
+    //"musl/src/ldso/dlopen.c", // migrated to lib/c/ldso.zig
+    //"musl/src/ldso/__dlsym.c", // migrated to lib/c/ldso.zig
+    //"musl/src/ldso/dlsym.c", // migrated to lib/c/ldso.zig
     "musl/src/ldso/i386/dlsym.s",
     "musl/src/ldso/i386/dlsym_time64.S",
     "musl/src/ldso/i386/tlsdesc.s",
@@ -538,7 +538,7 @@ const src_files = [_][]const u8{
     "musl/src/ldso/riscv64/dlsym.s",
     "musl/src/ldso/riscv64/tlsdesc.s",
     "musl/src/ldso/s390x/dlsym.s",
-    "musl/src/ldso/tlsdesc.c",
+    //"musl/src/ldso/tlsdesc.c", // migrated to lib/c/ldso.zig
     "musl/src/ldso/x32/dlsym.s",
     "musl/src/ldso/x86_64/dlsym.s",
     "musl/src/ldso/x86_64/tlsdesc.s",
