@@ -79,6 +79,7 @@ pub fn errnoSize(syscall_return_value: usize) isize {
 
 comptime {
     _ = @import("c/conf.zig");
+    _ = @import("c/crypt.zig");
     _ = @import("c/ctype.zig");
     _ = @import("c/errno.zig");
     _ = @import("c/exit.zig");
