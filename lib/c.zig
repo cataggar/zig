@@ -135,6 +135,7 @@ comptime {
     _ = @import("c/complex.zig");
     _ = @import("c/termios.zig");
     _ = @import("c/ldso.zig");
+    _ = @import("c/linux.zig");
     _ = @import("c/unistd.zig");
     _ = @import("c/spawn.zig");
     _ = @import("c/wchar.zig");
