@@ -607,7 +607,6 @@ const libc_top_half_src_files = [_][]const u8{
     "musl/src/complex/ctanhl.c",
     "musl/src/complex/ctanl.c",
     "musl/src/conf/confstr.c",
-    "musl/src/conf/legacy.c",
     "musl/src/crypt/crypt_blowfish.c",
     "musl/src/crypt/crypt.c",
     "musl/src/crypt/crypt_des.c",
