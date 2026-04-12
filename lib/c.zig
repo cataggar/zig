@@ -62,6 +62,8 @@ pub fn errno(syscall_return_value: usize) c_int {
 }
 
 /// Like `errno`, but for syscalls that return `ssize_t` (e.g. read, write).
+/// Like `errno`, but for syscalls that return `isize` (ssize_t) values such as
+/// read, write, pread, pwrite, readlink, etc.
 pub fn errnoSize(syscall_return_value: usize) isize {
     return switch (builtin.os.tag) {
         .linux => {
