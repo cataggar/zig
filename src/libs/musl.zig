@@ -1459,11 +1459,6 @@ const src_files = [_][]const u8{
     //"musl/src/thread/pthread_barrier_init.c", // migrated to lib/c/thread.zig
     "musl/src/thread/pthread_barrier_wait.c",
     "musl/src/thread/pthread_cancel.c",
-    "musl/src/thread/pthread_cleanup_push.c",
-    //"musl/src/thread/pthread_condattr_destroy.c", // migrated to lib/c/thread.zig
-    //"musl/src/thread/pthread_condattr_init.c", // migrated to lib/c/thread.zig
-    //"musl/src/thread/pthread_condattr_setclock.c", // migrated to lib/c/thread.zig
-    //"musl/src/thread/pthread_condattr_setpshared.c", // migrated to lib/c/thread.zig
     "musl/src/thread/pthread_cond_broadcast.c",
     "musl/src/thread/pthread_cond_destroy.c",
     //"musl/src/thread/pthread_cond_init.c", // migrated to lib/c/thread.zig
@@ -1474,8 +1469,6 @@ const src_files = [_][]const u8{
     "musl/src/thread/pthread_getattr_np.c",
     //"musl/src/thread/pthread_getconcurrency.c", // migrated to lib/c/thread.zig
     "musl/src/thread/pthread_getcpuclockid.c",
-    "musl/src/thread/pthread_getname_np.c",
-    "musl/src/thread/pthread_getschedparam.c",
     "musl/src/thread/pthread_join.c",
     "musl/src/thread/pthread_key_create.c",
     "musl/src/thread/pthread_kill.c",
@@ -1508,8 +1501,6 @@ const src_files = [_][]const u8{
     "musl/src/thread/pthread_rwlock_unlock.c",
     "musl/src/thread/pthread_rwlock_wrlock.c",
     "musl/src/thread/pthread_setattr_default_np.c",
-    "musl/src/thread/pthread_setname_np.c",
-    "musl/src/thread/pthread_setschedparam.c",
     "musl/src/thread/pthread_setschedprio.c",
     "musl/src/thread/pthread_sigmask.c",
     "musl/src/thread/riscv32/clone.s",
@@ -1529,7 +1520,6 @@ const src_files = [_][]const u8{
     //"musl/src/thread/sem_getvalue.c", // migrated to lib/c/thread.zig
     //"musl/src/thread/sem_init.c", // migrated to lib/c/thread.zig
     "musl/src/thread/sem_open.c",
-    "musl/src/thread/sem_timedwait.c",
     "musl/src/thread/__set_thread_area.c",
     "musl/src/thread/synccall.c",
     "musl/src/thread/__syscall_cp.c",
