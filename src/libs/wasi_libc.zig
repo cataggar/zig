@@ -457,24 +457,6 @@ fn addLibcTopHalfIncludes(
 }
 
 const libc_bottom_half_src_files = [_][]const u8{
-    "wasi/libc-bottom-half/cloudlibc/src/libc/dirent/closedir.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/dirent/dirfd.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/dirent/fdclosedir.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/dirent/fdopendir.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/dirent/opendirat.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/dirent/readdir.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/dirent/rewinddir.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/dirent/scandirat.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/dirent/seekdir.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/dirent/telldir.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/errno/errno.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/poll/poll.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/stdlib/_Exit.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/sys/ioctl/ioctl.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/sys/select/pselect.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/sys/select/select.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/time/CLOCK_MONOTONIC.c",
-    "wasi/libc-bottom-half/cloudlibc/src/libc/time/CLOCK_REALTIME.c",
 };
 
 const libc_top_half_src_files = [_][]const u8{

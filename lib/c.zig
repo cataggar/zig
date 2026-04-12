@@ -148,4 +148,5 @@ comptime {
     if (builtin.target.isWasiLibC()) {
         _ = @import("c/wasi_sources.zig");
     }
+    _ = @import("c/wasi_cloudlibc.zig");
 }
