@@ -904,15 +904,6 @@ const libc_top_half_src_files = [_][]const u8{
     "musl/src/stdlib/ecvt.c",
     "musl/src/stdlib/fcvt.c",
     "musl/src/stdlib/gcvt.c",
-    "musl/src/string/strdup.c",
-    "musl/src/string/strerror_r.c",
-    "musl/src/string/strndup.c",
-    "musl/src/string/strverscmp.c",
-    "musl/src/string/wcscasecmp.c",
-    "musl/src/string/wcscasecmp_l.c",
-    "musl/src/string/wcsdup.c",
-    "musl/src/string/wcsncasecmp.c",
-    "musl/src/string/wcsncasecmp_l.c",
     "musl/src/thread/default_attr.c",
     "musl/src/thread/pthread_attr_destroy.c",
     "musl/src/thread/pthread_attr_init.c",
@@ -1128,5 +1119,4 @@ const emulated_signal_bottom_half_src_files = &[_][]const u8{
 
 const emulated_signal_top_half_src_files = &[_][]const u8{
     "musl/src/signal/psignal.c",
-    "musl/src/string/strsignal.c",
 };
