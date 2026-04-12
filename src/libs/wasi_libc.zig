@@ -619,7 +619,6 @@ const libc_top_half_src_files = [_][]const u8{
     "musl/src/crypt/encrypt.c",
     "musl/src/env/setenv.c",
     "musl/src/exit/assert.c",
-    "musl/src/exit/quick_exit.c",
     "musl/src/fenv/fegetexceptflag.c",
     "musl/src/fenv/feholdexcept.c",
     "musl/src/fenv/fenv.c",
