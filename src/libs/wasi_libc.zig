@@ -554,8 +554,6 @@ const libc_top_half_src_files = [_][]const u8{
     "musl/src/crypt/encrypt.c",
     "musl/src/math/acosh.c",
     "musl/src/math/acoshl.c",
-    "musl/src/math/atan2.c",
-    "musl/src/math/atan2f.c",
     "musl/src/math/atan2l.c",
     "musl/src/math/atanh.c",
     "musl/src/math/atanhl.c",

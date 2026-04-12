@@ -67,6 +67,8 @@ comptime {
         symbol(&asinl, "asinl");
         symbol(&asinf, "asinf");
         symbol(&atan, "atan");
+        symbol(&atan2, "atan2");
+        symbol(&atan2f, "atan2f");
         symbol(&atanf, "atanf");
         symbol(&atanhf, "atanhf");
         symbol(&acosf, "acosf");
@@ -445,6 +447,12 @@ fn atanhl_(x: c_longdouble) callconv(.c) c_longdouble {
         64 => math.atanh(@as(f64, @bitCast(x))),
         else => @floatCast(math.atanh(@as(f64, @floatCast(x)))),
     };
+fn atan2(y: f64, x: f64) callconv(.c) f64 {
+    return math.atan2(y, x);
+}
+
+fn atan2f(y: f32, x: f32) callconv(.c) f32 {
+    return math.atan2(y, x);
 }
 
 fn atanl(x: c_longdouble) callconv(.c) c_longdouble {
