@@ -610,7 +610,6 @@ const src_files = [_][]const u8{
     "musl/src/process/posix_spawn.c",
     "musl/src/process/posix_spawnp.c",
     "musl/src/sched/affinity.c",
-    "musl/src/sched/sched_getcpu.c",
     "musl/src/setjmp/aarch64/longjmp.s",
     "musl/src/setjmp/aarch64/setjmp.s",
     "musl/src/setjmp/arm/longjmp.S",
