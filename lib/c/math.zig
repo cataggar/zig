@@ -115,6 +115,45 @@ comptime {
         symbol(&pow10, "pow10");
         symbol(&pow10f, "pow10f");
 
+        symbol(&exp2l, "exp2l");
+        symbol(&expl, "expl");
+        symbol(&expm1f, "expm1f");
+        symbol(&fdimf, "fdimf");
+        symbol(&fdiml, "fdiml");
+        symbol(&fmaf, "fmaf");
+        symbol(&fmal, "fmal");
+        symbol(&frexpf, "frexpf");
+        symbol(&frexpl, "frexpl");
+        symbol(&hypot, "hypot");
+        symbol(&ilogbf, "ilogbf");
+        symbol(&ilogbl, "ilogbl");
+        symbol(&ldexpf, "ldexpf");
+        symbol(&ldexpl, "ldexpl");
+        symbol(&llrintf, "llrintf");
+        symbol(&llrintl, "llrintl");
+        symbol(&llroundf, "llroundf");
+        symbol(&llroundl, "llroundl");
+        symbol(&log10l, "log10l");
+        symbol(&log1pf, "log1pf");
+        symbol(&log2l, "log2l");
+        symbol(&logbf, "logbf");
+        symbol(&logbl, "logbl");
+        symbol(&logl, "logl");
+        symbol(&lrintf, "lrintf");
+        symbol(&lrintl, "lrintl");
+        symbol(&lroundf, "lroundf");
+        symbol(&lroundl, "lroundl");
+        symbol(&modf, "modf");
+        symbol(&nearbyintf, "nearbyintf");
+        symbol(&nearbyintl, "nearbyintl");
+
+        symbol(&pow, "pow");
+        symbol(&pow10, "pow10");
+        symbol(&pow10f, "pow10f");
+        symbol(&scalblnf, "scalblnf");
+        symbol(&scalblnl, "scalblnl");
+        symbol(&scalbnf, "scalbnf");
+        symbol(&scalbnl, "scalbnl");
         symbol(&sincosl, "sincosl");
         symbol(&sinhf, "sinhf");
         symbol(&sinl, "sinl");
@@ -128,6 +167,7 @@ comptime {
         symbol(&finitef, "finitef");
         symbol(&rint, "rint");
         symbol(&rintf, "rintf");
+        symbol(&scalbf, "scalbf");
         symbol(&significandf, "significandf");
     }
 }
@@ -511,6 +551,14 @@ fn cosl(x: c_longdouble) callconv(.c) c_longdouble {
     return math.cos(x);
 }
 
+fn exp2l(x: c_longdouble) callconv(.c) c_longdouble {
+    return math.exp2(x);
+}
+
+fn expl(x: c_longdouble) callconv(.c) c_longdouble {
+    return math.exp(x);
+}
+
 fn expm1f(x: f32) callconv(.c) f32 {
     return math.expm1(x);
 }
@@ -587,8 +635,34 @@ fn llroundl(x: c_longdouble) callconv(.c) c_longlong {
     return @intFromFloat(math.round(x));
 }
 
+fn log10l(x: c_longdouble) callconv(.c) c_longdouble {
+    return math.log10(x);
+}
+
 fn log1pf(x: f32) callconv(.c) f32 {
     return math.log1p(x);
+}
+
+fn log2l(x: c_longdouble) callconv(.c) c_longdouble {
+    return math.log2(x);
+}
+
+fn logbGeneric(comptime T: type, x: T) T {
+    if (!math.isFinite(x)) return x * x;
+    if (x == 0) return -math.inf(T);
+    return @floatFromInt(math.ilogb(x));
+}
+
+fn logbf(x: f32) callconv(.c) f32 {
+    return logbGeneric(f32, x);
+}
+
+fn logbl(x: c_longdouble) callconv(.c) c_longdouble {
+    return logbGeneric(c_longdouble, x);
+}
+
+fn logl(x: c_longdouble) callconv(.c) c_longdouble {
+    return @log(x);
 }
 
 fn lrintf(x: f32) callconv(.c) c_long {
@@ -651,6 +725,7 @@ fn nexttowardl(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
     return math.nextAfter(c_longdouble, x, y);
 }
 
+
 /// Generic rint for any IEEE 754 float type.
 fn rintGeneric(comptime T: type, x: T) T {
     const toint: T = 1.0 / math.floatEps(T);
@@ -674,6 +749,43 @@ fn rintGeneric(comptime T: type, x: T) T {
 }
 
 
+fn scalbf(x: f32, fn_arg: f32) callconv(.c) f32 {
+    if (math.isNan(x) or math.isNan(fn_arg)) return x * fn_arg;
+    if (!math.isFinite(fn_arg)) {
+        if (fn_arg > 0.0) return x * fn_arg;
+        return x / (-fn_arg);
+    }
+    if (rintGeneric(f32, fn_arg) != fn_arg) return (fn_arg - fn_arg) / (fn_arg - fn_arg);
+    if (fn_arg > 65000.0) return math.scalbn(x, 65000);
+    if (-fn_arg > 65000.0) return math.scalbn(x, -65000);
+    return math.scalbn(x, @intFromFloat(fn_arg));
+}
+
+fn scalblnGeneric(comptime T: type, x: T, n: c_long) T {
+    const clamped: i32 = if (n > std.math.maxInt(i32))
+        std.math.maxInt(i32)
+    else if (n < std.math.minInt(i32))
+        std.math.minInt(i32)
+    else
+        @intCast(n);
+    return math.scalbn(x, clamped);
+}
+
+fn scalblnf(x: f32, n: c_long) callconv(.c) f32 {
+    return scalblnGeneric(f32, x, n);
+}
+
+fn scalblnl(x: c_longdouble, n: c_long) callconv(.c) c_longdouble {
+    return scalblnGeneric(c_longdouble, x, n);
+}
+
+fn scalbnf(x: f32, n: c_int) callconv(.c) f32 {
+    return math.scalbn(x, n);
+}
+
+fn scalbnl(x: c_longdouble, n: c_int) callconv(.c) c_longdouble {
+    return math.scalbn(x, n);
+}
 
 fn significandf(x: f32) callconv(.c) f32 {
     const e = math.ilogb(x);
