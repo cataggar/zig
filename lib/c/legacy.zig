@@ -663,4 +663,34 @@ fn getusershell() callconv(.c) ?[*:0]u8 {
     const ul: usize = @intCast(l);
     if (line[ul - 1] == '\n') line[ul - 1] = 0;
     return @ptrCast(line);
+        symbol(&getpagesize, "getpagesize");
+        symbol(&getdtablesizeLinux, "getdtablesize");
+        symbol(&isastreamLinux, "isastream");
+        symbol(&euidaccessLinux, "euidaccess");
+        symbol(&euidaccessLinux, "eaccess");
+    }
+    if (builtin.target.isWasiLibC()) {
+        symbol(&getpagesize, "getpagesize");
+    }
+}
+
+fn getpagesize() callconv(.c) c_int {
+    return std.heap.page_size_min;
+}
+
+fn getdtablesizeLinux() callconv(.c) c_int {
+    var rl: linux.rlimit = undefined;
+    _ = linux.getrlimit(.NOFILE, &rl);
+    return if (rl.cur < std.math.maxInt(c_int)) @intCast(rl.cur) else std.math.maxInt(c_int);
+}
+
+fn isastreamLinux(fd: c_int) callconv(.c) c_int {
+    const F_GETFD = 1;
+    const rc: isize = @bitCast(linux.fcntl(fd, F_GETFD, 0));
+    return if (rc < 0) -1 else 0;
+}
+
+fn euidaccessLinux(path: [*:0]const u8, amode: c_uint) callconv(.c) c_int {
+    const AT_EACCESS = 0x200;
+    return errno(linux.faccessat(linux.AT.FDCWD, path, amode, AT_EACCESS));
 }

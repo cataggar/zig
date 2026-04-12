@@ -621,7 +621,6 @@ const libc_top_half_src_files = [_][]const u8{
     "musl/src/fenv/fesetexceptflag.c",
     "musl/src/fenv/fesetround.c",
     "musl/src/fenv/feupdateenv.c",
-    "musl/src/legacy/getpagesize.c",
     "musl/src/locale/c_locale.c",
     "musl/src/locale/duplocale.c",
     "musl/src/locale/freelocale.c",
