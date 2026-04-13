@@ -117,6 +117,8 @@ extern var __sysinfo: usize;
 extern var __progname: ?[*:0]u8;
 extern var __progname_full: ?[*:0]u8;
 extern "c" fn __libc_start_init() void;
+extern var __default_stacksize: c_uint;
+extern var __thread_list_lock: c_int;
 extern "c" fn __init_tls(aux: [*]usize) void;
 
 comptime {
@@ -131,6 +133,9 @@ comptime {
         symbol(&issetugidImpl, "issetugid");
         symbol(&__reset_tls_fn, "__reset_tls");
         symbol(&dummy, "_init");
+        symbol(&dummy, "__funcs_on_exit");
+        symbol(&dummy, "__stdio_exit");
+        symbol(&dummy, "_fini");
         symbol(&libc_start_init_fn, "__libc_start_init");
         symbol(&__init_libc_fn, "__init_libc");
         symbol(&__libc_start_main_fn, "__libc_start_main");
