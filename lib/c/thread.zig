@@ -352,7 +352,6 @@ comptime {
             symbol(&tss_set_fn, "tss_set");
             symbol(&setattr_default_np_fn, "pthread_setattr_default_np");
             symbol(&getattr_default_np_fn, "pthread_getattr_default_np");
-            symbol(&set_thread_area_fn, "__set_thread_area");
             symbol(&syscall_cp_fn, "__syscall_cp");
             symbol(&testcancel_fn, "__testcancel");
         }
