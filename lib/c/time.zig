@@ -59,6 +59,9 @@ comptime {
     if (builtin.target.isMuslLibC()) {
         symbol(&ftimeLinux, "ftime");
         symbol(&__localtime_r, "localtime_r");
+        symbol(&nanosleepLinux, "nanosleep");
+        symbol(&clock_nanosleepLinux, "clock_nanosleep");
+        symbol(&clock_nanosleepLinux, "__clock_nanosleep");
         symbol(&__gmtime_r, "gmtime_r");
         symbol(&timespec_getLinux, "timespec_get");
     }
@@ -434,4 +437,17 @@ fn getdateImpl(s: [*:0]const u8) callconv(.c) ?*tm {
     _ = fclose(f);
     _ = pthread_setcancelstate(cs, null);
     return ret;
+}
+
+fn nanosleepLinux(req: *const linux.timespec, rem: ?*linux.timespec) callconv(.c) c_int {
+    return errno(linux.nanosleep(req, rem));
+}
+
+fn clock_nanosleepLinux(clk: c_int, flags: c_int, req: *const linux.timespec, rem: ?*linux.timespec) callconv(.c) c_int {
+    const r = linux.clock_nanosleep(@enumFromInt(@as(u32, @bitCast(clk))), @bitCast(@as(u32, @bitCast(flags))), req, rem);
+    if (r != 0) {
+        std.c._errno().* = @intCast(r);
+        return -1;
+    }
+    return 0;
 }

@@ -2,9 +2,11 @@ const builtin = @import("builtin");
 const std = @import("std");
 const linux = std.os.linux;
 const symbol = @import("../c.zig").symbol;
-extern "c" fn _Exit(code: c_int) noreturn;
+fn _ExitImpl(code: c_int) callconv(.c) noreturn {
+    std.os.linux.exit_group(@intCast(code));
+}
 extern "c" fn __stdio_exit() void;
-extern "c" fn _fini() void;
+fn _finiStub() callconv(.c) void {}
 extern const __fini_array_start: *const fn () callconv(.c) void;
 extern const __fini_array_end: *const fn () callconv(.c) void;
 // Internal musl lock functions (provided by the thread subsystem).
@@ -186,7 +188,7 @@ fn libc_exit_fini() callconv(.c) void {
         const func: *const *const fn () callconv(.c) void = @ptrFromInt(a);
         func.*();
     }
-    _fini();
+    _finiStub();
 }
 
 fn exitImpl(code: c_int) callconv(.c) noreturn {
@@ -195,3 +197,5 @@ fn exitImpl(code: c_int) callconv(.c) noreturn {
     __stdio_exit();
     _Exit(code);
 }
+
+comptime { if (builtin.target.isMuslLibC()) symbol(&_finiStub, "_fini"); }

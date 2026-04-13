@@ -304,3 +304,14 @@ fn __wcsxfrm_l(dest: [*]u32, src: [*]const u32, n: usize, _: ?*anyopaque) callco
     }
     return len;
 }
+
+// Internal musl locale objects (stubs for C locale only)
+export var __c_locale_obj: c_int = 0;
+export var __c_dot_utf8_locale_obj: c_int = 0;
+
+comptime {
+    if (builtin.target.isMuslLibC()) {
+        @export(&__c_locale_obj, .{ .name = "__c_locale" });
+        @export(&__c_dot_utf8_locale_obj, .{ .name = "__c_dot_utf8_locale" });
+    }
+}
