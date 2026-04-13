@@ -26,6 +26,7 @@ comptime {
             symbol(&statLinux, "stat");
             symbol(&lstatLinux, "lstat");
             symbol(&fstatLinux, "__fstat");
+        symbol(&fstatLinux, "fstat");
             symbol(&futimensLinux, "futimens");
             symbol(&lchmodLinux, "lchmod");
             symbol(&__futimesat, "__futimesat");

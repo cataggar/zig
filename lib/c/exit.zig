@@ -29,7 +29,7 @@ var ae_slot: c_int = 0;
 var ae_lock: c_int = 0;
 extern "c" fn raise(sig: c_int) c_int;
 extern "c" fn __block_all_sigs(set: ?*anyopaque) void;
-extern "c" var __abort_lock: c_int;
+var __abort_lock: c_int = 0;
 
 comptime {
     if (builtin.target.isMuslLibC()) {
@@ -47,6 +47,8 @@ comptime {
         symbol(&abortImpl, "abort");
         symbol(&dummy, "__stdio_exit");
         symbol(&libc_exit_fini, "__libc_exit_fini");
+        symbol(&_ExitImpl, "_Exit");
+        @export(&__abort_lock, .{ .name = "__abort_lock" });
         symbol(&exitImpl, "exit");
     }
 }
