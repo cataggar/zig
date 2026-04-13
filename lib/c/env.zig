@@ -282,7 +282,7 @@ fn clearenv() callconv(.c) c_int {
 }
 
 fn secure_getenv(name: [*:0]const u8) callconv(.c) ?[*:0]u8 {
-    if (issetugid() != 0) return null;
+    if (issetugidImpl() != 0) return null;
     return getenv(name);
 }
 
