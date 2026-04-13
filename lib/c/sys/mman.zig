@@ -109,8 +109,9 @@ fn shm_openLinux(name: [*:0]const u8, flag: c_int, mode: linux.mode_t) callconv(
     const path: [*:0]const u8 = buf[0 .. 9 + len :0];
 
     // Open with O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK
-    const extra_flags: u32 = @bitCast(std.c.O{ .NOFOLLOW = true, .CLOEXEC = true, .NONBLOCK = true });
-    return errno(linux.openat(linux.AT.FDCWD, path, @as(u32, @bitCast(flag)) | extra_flags, mode));
+    const extra_flags: linux.O = .{ .NOFOLLOW = true, .CLOEXEC = true, .NONBLOCK = true };
+    const combined: linux.O = @bitCast(@as(u32, @bitCast(extra_flags)) | @as(u32, @bitCast(flag)));
+    return errno(linux.openat(linux.AT.FDCWD, path, combined, mode));
 }
 
 fn shm_unlinkLinux(name: [*:0]const u8) callconv(.c) c_int {

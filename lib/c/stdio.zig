@@ -1,7 +1,41 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const symbol = @import("../c.zig").symbol;
-const FILE = opaque {};
+
+/// Musl internal FILE struct layout (struct _IO_FILE from stdio_impl.h).
+const FILE = extern struct {
+    flags: c_uint,
+    rpos: ?[*]u8,
+    rend: ?[*]u8,
+    close_fn: ?*const fn (*FILE) callconv(.c) c_int,
+    read_fn: ?*const fn (*FILE, [*]u8, usize) callconv(.c) usize,
+    write_fn: ?*const fn (*FILE, [*]const u8, usize) callconv(.c) usize,
+    seek_fn: ?*const fn (*FILE, i64, c_int) callconv(.c) i64,
+    buf: ?[*]u8,
+    buf_size: usize,
+    prev: ?*FILE,
+    next: ?*FILE,
+    fd: c_int,
+    pipe_pid: c_int,
+    lockcount: c_long,
+    mode: c_int,
+    lock: c_int,
+    lbf: c_int,
+    cookie: ?*anyopaque,
+    off: i64,
+    getln_buf: ?[*]u8,
+    getln_buf_size: usize,
+    mustbezero_1: ?*anyopaque,
+    shend: ?[*]u8,
+    shlim: i64,
+    shcnt: i64,
+    prev_locked: ?*FILE,
+    next_locked: ?*FILE,
+    locale: ?*anyopaque,
+    wpos: ?[*]u8,
+    wbase: ?[*]u8,
+    wend: ?[*]u8,
+};
 const wchar_t = std.c.wchar_t;
 const wint_t = std.c.wint_t;
 const ssize_t = isize;

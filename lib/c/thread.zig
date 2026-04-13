@@ -47,7 +47,8 @@ const PTHREAD_STACK_MIN: usize = 2048;
 const mutex_size = if (@sizeOf(c_ulong) == 8) @as(usize, 40) else 24;
 const pthread_mutex_impl = extern struct {
     _m_type: c_int = 0,
-    _padding: [mutex_size - @sizeOf(c_int)]u8 = [_]u8{0} ** (mutex_size - @sizeOf(c_int)),
+    _m_lock: c_int = 0,
+    _padding: [mutex_size - 2 * @sizeOf(c_int)]u8 = [_]u8{0} ** (mutex_size - 2 * @sizeOf(c_int)),
 };
 const rwlock_size = if (@sizeOf(c_ulong) == 8) @as(usize, 56) else 32;
 const pthread_rwlock_impl = extern struct {

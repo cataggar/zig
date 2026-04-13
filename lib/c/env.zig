@@ -112,6 +112,8 @@ extern const __init_array_end: *const fn () callconv(.c) void;
 extern var __libc: LibC;
 extern var __hwcap: usize;
 extern var __sysinfo: usize;
+extern var __progname: ?[*:0]u8;
+extern var __progname_full: ?[*:0]u8;
 extern "c" fn __libc_start_init() void;
 
 comptime {

@@ -157,7 +157,7 @@ fn sysconf(name: c_int) callconv(.c) c_long {
     }
 
     // Jump table entries
-    const code: u8 = @truncate(@as(c_uint, @bitCast(v)));
+    const code: u8 = @truncate(@as(c_uint, @intCast(v)));
     return switch (code) {
         1 => _POSIX_VERSION, // VER
         2 => 2097152, // ARG_MAX

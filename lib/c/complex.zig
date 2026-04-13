@@ -6,6 +6,7 @@ const symbol = @import("../c.zig").symbol;
 const CF64 = extern struct { re: f64, im: f64 };
 const CF32 = extern struct { re: f32, im: f32 };
 const long_double = c_longdouble;
+const math_ld = f128; // Complex math uses f128 since std.math.complex does not support c_longdouble
 const CFLD = extern struct { re: long_double, im: long_double };
 
 fn toZ64(c: CF64) mc.Complex(f64) {
@@ -20,10 +21,10 @@ fn toZ32(c: CF32) mc.Complex(f32) {
 fn fromZ32(c: mc.Complex(f32)) CF32 {
     return .{ .re = c.re, .im = c.im };
 }
-fn toZLD(c: CFLD) mc.Complex(long_double) {
+fn toZLD(c: CFLD) mc.Complex(math_ld) {
     return .{ .re = c.re, .im = c.im };
 }
-fn fromZLD(c: mc.Complex(long_double)) CFLD {
+fn fromZLD(c: mc.Complex(math_ld)) CFLD {
     return .{ .re = c.re, .im = c.im };
 }
 

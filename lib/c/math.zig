@@ -2605,7 +2605,7 @@ fn nearbyint(x: f64) callconv(.c) f64 {
 }
 
 fn powl(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
-    return math.pow(c_longdouble, x, y);
+    return @floatCast(math.pow(f128, @floatCast(x), @floatCast(y)));
 }
 
 fn sinh(x: f64) callconv(.c) f64 {

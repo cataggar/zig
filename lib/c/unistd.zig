@@ -248,7 +248,7 @@ fn fchownLinux(fd: c_int, owner: linux.uid_t, group: linux.gid_t) callconv(.c) c
 
 
 fn isattyLinux(fd: c_int) callconv(.c) c_int {
-    var wsz: linux.winsize = undefined;
+    var wsz: std.posix.winsize = undefined;
     if (errno(linux.ioctl(fd, linux.T.IOCGWINSZ, @intFromPtr(&wsz))) == 0) return 1;
     if (std.c._errno().* != @intFromEnum(linux.E.BADF))
         std.c._errno().* = @intFromEnum(linux.E.NOTTY);
@@ -273,7 +273,7 @@ fn readLinux(fd: c_int, buf: [*]u8, count: usize) callconv(.c) isize {
     return errnoSize(linux.read(fd, buf, count));
 }
 
-fn readvLinux(fd: c_int, iov: [*]const linux.iovec, count: c_int) callconv(.c) isize {
+fn readvLinux(fd: c_int, iov: [*]const std.posix.iovec, count: c_int) callconv(.c) isize {
     return errnoSize(linux.readv(fd, iov, @intCast(@as(c_uint, @bitCast(count)))));
 }
 
@@ -281,7 +281,7 @@ fn preadLinux(fd: c_int, buf: [*]u8, count: usize, offset: linux.off_t) callconv
     return errnoSize(linux.pread(fd, buf, count, offset));
 }
 
-fn preadvLinux(fd: c_int, iov: [*]const linux.iovec, count: c_int, offset: linux.off_t) callconv(.c) isize {
+fn preadvLinux(fd: c_int, iov: [*]const std.posix.iovec, count: c_int, offset: linux.off_t) callconv(.c) isize {
     return errnoSize(linux.preadv(fd, iov, @intCast(@as(c_uint, @bitCast(count))), offset));
 }
 
@@ -289,7 +289,7 @@ fn writeLinux(fd: c_int, buf: [*]const u8, count: usize) callconv(.c) isize {
     return errnoSize(linux.write(fd, buf, count));
 }
 
-fn writevLinux(fd: c_int, iov: [*]const linux.iovec_const, count: c_int) callconv(.c) isize {
+fn writevLinux(fd: c_int, iov: [*]const std.posix.iovec_const, count: c_int) callconv(.c) isize {
     return errnoSize(linux.writev(fd, iov, @intCast(@as(c_uint, @bitCast(count)))));
 }
 
@@ -297,7 +297,7 @@ fn pwriteLinux(fd: c_int, buf: [*]const u8, count: usize, offset: linux.off_t) c
     return errnoSize(linux.pwrite(fd, buf, count, offset));
 }
 
-fn pwritevLinux(fd: c_int, iov: [*]const linux.iovec_const, count: c_int, offset: linux.off_t) callconv(.c) isize {
+fn pwritevLinux(fd: c_int, iov: [*]const std.posix.iovec_const, count: c_int, offset: linux.off_t) callconv(.c) isize {
     return errnoSize(linux.pwritev(fd, iov, @intCast(@as(c_uint, @bitCast(count))), offset));
 }
 

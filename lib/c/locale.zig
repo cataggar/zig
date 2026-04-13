@@ -165,11 +165,11 @@ fn iconv_close(_: ?*anyopaque) callconv(.c) c_int {
 const c_locale_str: [:0]const u8 = "C";
 
 fn nl_langinfo(_: c_int) callconv(.c) [*:0]const c_char {
-    return c_locale_str.ptr;
+    return @ptrCast(c_locale_str.ptr);
 }
 
 fn nl_langinfo_l(_: c_int, _: ?*anyopaque) callconv(.c) [*:0]const c_char {
-    return c_locale_str.ptr;
+    return @ptrCast(c_locale_str.ptr);
 }
 
 fn __nl_langinfo_l(item: c_int, loc: ?*anyopaque) callconv(.c) [*:0]const c_char {
@@ -228,7 +228,7 @@ fn __pleval(_: [*:0]const c_char, _: c_ulong) callconv(.c) c_ulong {
 
 fn setlocale(_: c_int, locale: ?[*:0]const c_char) callconv(.c) ?[*:0]const c_char {
     if (locale) |loc| {
-        const l = std.mem.span(@as([*:0]const u8, loc));
+        const l = std.mem.span(@as([*:0]const u8, @ptrCast(loc)));
         if (l.len == 0 or std.mem.eql(u8, l, "C") or std.mem.eql(u8, l, "POSIX")) {
             return @ptrCast(c_locale_str.ptr);
         }
@@ -254,7 +254,7 @@ fn strtof_l(s: [*:0]const c_char, endp: ?*[*:0]const c_char, _: ?*anyopaque) cal
     return 0;
 }
 
-fn strtold_l(s: [*:0]const c_char, endp: ?*[*:0]const c_char, _: ?*anyopaque) callconv(.c) std.c.longdouble {
+fn strtold_l(s: [*:0]const c_char, endp: ?*[*:0]const c_char, _: ?*anyopaque) callconv(.c) c_longdouble {
     _ = endp;
     _ = s;
     return 0;

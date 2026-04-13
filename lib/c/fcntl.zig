@@ -27,7 +27,7 @@ fn creatLinux(path: [*:0]const c_char, mode: linux.mode_t) callconv(.c) c_int {
 fn fcntlLinux(fd: c_int, cmd: c_int, arg: c_ulong) callconv(.c) c_int {
     var a = arg;
     // F_SETFL must include O_LARGEFILE (musl always uses 64-bit offsets)
-    if (cmd == std.c.F.SETFL) a |= @as(c_ulong, @bitCast(@as(c_long, @bitCast(std.c.O{ .LARGEFILE = true }))));
+    if (cmd == std.c.F.SETFL) a |= 0o100000; // O_LARGEFILE
     return errno(linux.fcntl(fd, cmd, a));
 }
 
