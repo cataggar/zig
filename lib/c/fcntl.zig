@@ -47,5 +47,9 @@ fn posix_fadviseLinux(fd: c_int, offset: off_t, len: off_t, advice: c_int) callc
 }
 
 fn posix_fallocateLinux(fd: c_int, offset: off_t, len: off_t) callconv(.c) c_int {
-    return errno(linux.fallocate(fd, 0, offset, len));
+    // posix_fallocate returns error code directly (NOT -1 with errno)
+    const r = linux.fallocate(fd, 0, offset, len);
+    const signed: isize = @bitCast(r);
+    if (signed < 0) return @intCast(-signed);
+    return 0;
 }
