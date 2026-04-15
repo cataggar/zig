@@ -62,8 +62,6 @@ const putc_unlocked_fn = @extern(*const fn (c_int, ?*FILE) callconv(.c) c_int, .
 /// Musl FILE flag constants (from stdio_impl.h)
 const F_EOF: c_uint = 16;
 const F_ERR: c_uint = 32;
-const lockfile_fn = @extern(*const fn (*FILE) callconv(.c) c_int, .{ .name = "__lockfile" });
-const unlockfile_fn = @extern(*const fn (*FILE) callconv(.c) void, .{ .name = "__unlockfile" });
 const fseeko_unlocked_fn = @extern(*const fn (*FILE, i64, c_int) callconv(.c) c_int, .{ .name = "__fseeko_unlocked" });
 const fseeko_fn = @extern(*const fn (*FILE, i64, c_int) callconv(.c) c_int, .{ .name = "__fseeko" });
 const ftello_fn = @extern(*const fn (*FILE) callconv(.c) i64, .{ .name = "__ftello" });
@@ -124,9 +122,9 @@ comptime {
         symbol(&getchar_unlocked, "getchar_unlocked");
         symbol(&putchar_unlocked, "putchar_unlocked");
         symbol(&feof_fn, "feof");
-        symbol(&flockfileImpl, "flockfile");
-        symbol(&ftrylockfileImpl, "ftrylockfile");
-        symbol(&funlockfileImpl, "funlockfile");
+        symbol(&flockfile_impl, "flockfile");
+        symbol(&ftrylockfile_impl, "ftrylockfile");
+        symbol(&funlockfile_impl, "funlockfile");
         symbol(&__fseeko, "fseeko");
         symbol(&__ftello, "ftello");
         symbol(&ferror_fn, "ferror");
@@ -191,6 +189,19 @@ comptime {
 
         // vasprintf, vdprintf kept as C (see #243)
         symbol(&getdelim_impl, "getdelim");
+
+        // Locking (__lockfile.c, flockfile.c, funlockfile.c, ftrylockfile.c)
+        symbol(&lockfile_impl, "__lockfile");
+        symbol(&unlockfile_impl, "__unlockfile");
+        symbol(&do_orphaned_stdio_locks_impl, "__do_orphaned_stdio_locks");
+        symbol(&unlist_locked_file_impl, "__unlist_locked_file");
+        symbol(&register_locked_file_impl, "__register_locked_file");
+
+        // Memory stream functions (fmemopen.c, open_memstream.c, open_wmemstream.c, fopencookie.c)
+        symbol(&fmemopen_impl, "fmemopen");
+        symbol(&open_memstream_impl, "open_memstream");
+        symbol(&open_wmemstream_impl, "open_wmemstream");
+        symbol(&fopencookie_impl, "fopencookie");
     }
 }
 
@@ -268,12 +279,12 @@ fn putchar_unlocked(c: c_int) callconv(.c) c_int {
 
 /// Implements musl FLOCK(f) macro: ((f)->lock>=0 ? __lockfile((f)) : 0)
 inline fn flock(f: *FILE) c_int {
-    return if (f.lock >= 0) lockfile_fn(f) else 0;
+    return if (f.lock >= 0) lockfile_impl(f) else 0;
 }
 
 /// Implements musl FUNLOCK(f) macro
 inline fn funlock(f: *FILE, need_unlock: c_int) void {
-    if (need_unlock != 0) unlockfile_fn(f);
+    if (need_unlock != 0) unlockfile_impl(f);
 }
 
 /// feof.c: int feof(FILE *f)
@@ -1376,14 +1387,685 @@ fn vscanf_impl(fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
     return vfscanf_fn(stdin_ext.*, fmt, ap);
 }
 
-fn flockfileImpl(f: *FILE) callconv(.c) void {
-    _ = lockfile_fn(f);
+// --- Locking (__lockfile.c, flockfile.c, funlockfile.c, ftrylockfile.c) ---
+
+const MAYBE_WAITERS: c_int = 0x40000000;
+
+/// Minimal model of musl's `struct __pthread` so that the `tid` and
+/// `stdio_locks` fields land at their correct ABI offsets. Part 1
+/// (architecture-dependent TLS header) is opaque padding; Part 2
+/// (uniform across all targets) is represented by `tid`, a gap, then
+/// `stdio_locks`.
+const PThread = extern struct {
+    _header: [header_size]u8,
+    tid: c_int,
+    _p2: [p2_size]u8,
+    stdio_locks: ?*FILE,
+
+    /// Architectures where musl defines TLS_ABOVE_TP.
+    const tls_above_tp: bool = switch (builtin.cpu.arch) {
+        .aarch64, .aarch64_be,
+        .arm, .armeb, .thumb, .thumbeb,
+        .loongarch64,
+        .m68k,
+        .mips, .mipsel, .mips64, .mips64el,
+        .powerpc, .powerpcle, .powerpc64, .powerpc64le,
+        .riscv32, .riscv64,
+        => true,
+        else => false,
+    };
+
+    /// musl/arch/x32 is the only architecture that defines CANARY_PAD.
+    const has_canary_pad: bool = !tls_above_tp and builtin.cpu.arch == .x86_64 and @sizeOf(usize) == 4;
+
+    /// Part 1 field count: self[, dtv], prev, next, sysinfo[, canary_pad][, canary].
+    const part1_fields: usize = if (tls_above_tp) 4 else if (has_canary_pad) 7 else 6;
+    const header_size: usize = part1_fields * @sizeOf(usize);
+
+    /// Byte gap between end-of-tid and start-of-stdio_locks inside Part 2.
+    /// Covers errno_val through dlerror_buf (see pthread_impl.h lines 36-59).
+    const p2_size: usize = if (@sizeOf(usize) == 8) 140 else 80;
+};
+
+const pthread_self_fn = @extern(*const fn () callconv(.c) *PThread, .{ .name = "pthread_self" });
+
+/// __lockfile.c: int __lockfile(FILE *f)
+fn lockfile_impl(f: *FILE) callconv(.c) c_int {
+    const tid = pthread_self_fn().tid;
+    if ((f.lock & ~MAYBE_WAITERS) == tid)
+        return 0;
+    if (@cmpxchgStrong(c_int, &f.lock, 0, tid, .seq_cst, .seq_cst) == null)
+        return 1;
+    while (@cmpxchgStrong(c_int, &f.lock, 0, tid | MAYBE_WAITERS, .seq_cst, .seq_cst)) |owner| {
+        if ((owner & MAYBE_WAITERS) != 0 or
+            @cmpxchgStrong(c_int, &f.lock, owner, owner | MAYBE_WAITERS, .seq_cst, .seq_cst) == null)
+        {
+            futex_wait(&f.lock, owner | MAYBE_WAITERS);
+        }
+    }
+    return 1;
 }
 
-fn ftrylockfileImpl(f: *FILE) callconv(.c) c_int {
-    return lockfile_fn(f);
+/// __lockfile.c: void __unlockfile(FILE *f)
+fn unlockfile_impl(f: *FILE) callconv(.c) void {
+    if ((@atomicRmw(c_int, &f.lock, .Xchg, 0, .seq_cst) & MAYBE_WAITERS) != 0) {
+        futex_wake(&f.lock, 1);
+    }
 }
 
-fn funlockfileImpl(f: *FILE) callconv(.c) void {
-    funlock(f, 1);
+/// flockfile.c: void flockfile(FILE *f)
+fn flockfile_impl(f: *FILE) callconv(.c) void {
+    if (ftrylockfile_impl(f) == 0) return;
+    _ = lockfile_impl(f);
+    register_locked_file_impl(f, pthread_self_fn());
 }
+
+/// funlockfile.c: void funlockfile(FILE *f)
+fn funlockfile_impl(f: *FILE) callconv(.c) void {
+    if (f.lockcount == 1) {
+        unlist_locked_file_impl(f);
+        f.lockcount = 0;
+        unlockfile_impl(f);
+    } else {
+        f.lockcount -= 1;
+    }
+}
+
+/// ftrylockfile.c: void __do_orphaned_stdio_locks(void)
+fn do_orphaned_stdio_locks_impl() callconv(.c) void {
+    var f = pthread_self_fn().stdio_locks;
+    while (f) |file| : (f = file.next_locked) {
+        @atomicStore(c_int, &file.lock, MAYBE_WAITERS, .seq_cst);
+    }
+}
+
+/// ftrylockfile.c: void __unlist_locked_file(FILE *f)
+fn unlist_locked_file_impl(f: *FILE) callconv(.c) void {
+    if (f.lockcount != 0) {
+        if (f.next_locked) |next| {
+            next.prev_locked = f.prev_locked;
+        }
+        if (f.prev_locked) |prev| {
+            prev.next_locked = f.next_locked;
+        } else {
+            pthread_self_fn().stdio_locks = f.next_locked;
+        }
+    }
+}
+
+/// ftrylockfile.c: void __register_locked_file(FILE *f, pthread_t self)
+fn register_locked_file_impl(f: *FILE, self: *PThread) callconv(.c) void {
+    f.lockcount = 1;
+    f.prev_locked = null;
+    f.next_locked = self.stdio_locks;
+    if (f.next_locked) |next| {
+        next.prev_locked = f;
+    }
+    self.stdio_locks = f;
+}
+
+/// ftrylockfile.c: int ftrylockfile(FILE *f)
+fn ftrylockfile_impl(f: *FILE) callconv(.c) c_int {
+    const self = pthread_self_fn();
+    const tid = self.tid;
+    var owner = f.lock;
+    if ((owner & ~MAYBE_WAITERS) == tid) {
+        if (f.lockcount == std.math.maxInt(c_long))
+            return -1;
+        f.lockcount += 1;
+        return 0;
+    }
+    if (owner < 0) {
+        f.lock = 0;
+        owner = 0;
+    }
+    if (owner != 0 or @cmpxchgStrong(c_int, &f.lock, 0, tid, .seq_cst, .seq_cst) != null)
+        return -1;
+    register_locked_file_impl(f, self);
+    return 0;
+}
+
+fn futex_wait(ptr: *const c_int, expected: c_int) void {
+    _ = linux.futex_4arg(@ptrCast(ptr), .{ .cmd = .WAIT, .private = true }, @bitCast(expected), null);
+}
+
+fn futex_wake(ptr: *const c_int, count: u32) void {
+    _ = linux.futex_3arg(@ptrCast(ptr), .{ .cmd = .WAKE, .private = true }, count);
+}
+
+// --- Memory stream functions (fmemopen.c, open_memstream.c, open_wmemstream.c, fopencookie.c) ---
+
+// Minimal view of musl's struct __libc, enough to read the `threaded` field.
+const Libc = extern struct {
+    can_do_threads: u8,
+    threaded: u8,
+};
+
+// musl mbstate_t: struct { unsigned __opaque1, __opaque2; }
+const mbstate_t = extern struct {
+    __opaque1: c_uint = 0,
+    __opaque2: c_uint = 0,
+};
+
+// --- fmemopen.c ---
+
+const FmemCookie = extern struct {
+    pos: usize,
+    len: usize,
+    size: usize,
+    buf: ?[*]u8,
+    mode: c_int,
+};
+
+const MemFILE = extern struct {
+    f: FILE,
+    c: FmemCookie,
+    buf: [UNGET + BUFSIZ]u8,
+    // Flexible array member buf2[] is allocated past this struct.
+};
+
+fn mseek_impl(f: *FILE, off: i64, whence: c_int) callconv(.c) i64 {
+    const c: *FmemCookie = @ptrCast(@alignCast(f.cookie.?));
+    const w: usize = @intCast(@as(c_uint, @bitCast(whence)));
+    if (w > 2) {
+        setErrno(.INVAL);
+        return -1;
+    }
+    const base: isize = @intCast(([3]usize{ 0, c.pos, c.len })[w]);
+    if (off < -@as(i64, base) or off > @as(i64, @as(isize, @intCast(c.size))) - @as(i64, base)) {
+        setErrno(.INVAL);
+        return -1;
+    }
+    const new_pos: usize = @intCast(@as(i64, base) + off);
+    c.pos = new_pos;
+    return @intCast(new_pos);
+}
+
+fn mread_impl(f: *FILE, buf: [*]u8, len_arg: usize) callconv(.c) usize {
+    const c: *FmemCookie = @ptrCast(@alignCast(f.cookie.?));
+    var rem: usize = if (c.pos > c.len) 0 else c.len - c.pos;
+    var len = len_arg;
+    if (len > rem) {
+        len = rem;
+        f.flags |= F_EOF;
+    }
+    if (len > 0) @memcpy(buf[0..len], c.buf.?[c.pos..][0..len]);
+    c.pos += len;
+    rem -= len;
+    if (rem > f.buf_size) rem = f.buf_size;
+    f.rpos = f.buf;
+    if (f.buf) |b| {
+        f.rend = b + rem;
+        if (rem > 0) @memcpy(b[0..rem], c.buf.?[c.pos..][0..rem]);
+    }
+    c.pos += rem;
+    return len;
+}
+
+fn mwrite_impl(f: *FILE, buf: [*]const u8, len_arg: usize) callconv(.c) usize {
+    const c: *FmemCookie = @ptrCast(@alignCast(f.cookie.?));
+    const len2: usize = if (f.wpos != null and f.wbase != null)
+        @intFromPtr(f.wpos.?) - @intFromPtr(f.wbase.?)
+    else
+        0;
+    if (len2 != 0) {
+        f.wpos = f.wbase;
+        if (mwrite_impl(f, @ptrCast(f.wpos.?), len2) < len2) return 0;
+    }
+    if (c.mode == 'a') c.pos = c.len;
+    const rem = c.size - c.pos;
+    var len = len_arg;
+    if (len > rem) len = rem;
+    if (len > 0) @memcpy(c.buf.?[c.pos..][0..len], buf[0..len]);
+    c.pos += len;
+    if (c.pos > c.len) {
+        c.len = c.pos;
+        if (c.len < c.size)
+            c.buf.?[c.len] = 0
+        else if (f.flags & F_NORD != 0 and c.size != 0)
+            c.buf.?[c.size - 1] = 0;
+    }
+    return len;
+}
+
+fn mclose_impl(_: *FILE) callconv(.c) c_int {
+    return 0;
+}
+
+/// fmemopen.c: FILE *fmemopen(void *restrict buf, size_t size, const char *restrict mode)
+fn fmemopen_impl(user_buf: ?[*]u8, size: usize, mode: [*:0]const u8) callconv(.c) ?*FILE {
+    const mode_char = mode[0];
+    if (mode_char != 'r' and mode_char != 'w' and mode_char != 'a') {
+        setErrno(.INVAL);
+        return null;
+    }
+    if (user_buf == null and size > @as(usize, @intCast(std.math.maxInt(isize)))) {
+        setErrno(.NOMEM);
+        return null;
+    }
+    const has_plus = std.mem.indexOfScalar(u8, std.mem.span(mode), '+') != null;
+    const extra: usize = if (user_buf != null) 0 else size;
+    const alloc_size = @sizeOf(MemFILE) + extra;
+    const raw_ptr: *anyopaque = malloc_fn(alloc_size) orelse return null;
+    const mf: *MemFILE = @ptrCast(@alignCast(raw_ptr));
+
+    // Zero FILE and cookie (but not the I/O buffer), matching C offsetof(struct mem_FILE, buf).
+    @memset(@as([*]u8, @ptrCast(mf))[0..@offsetOf(MemFILE, "buf")], 0);
+
+    mf.f.cookie = @ptrCast(&mf.c);
+    mf.f.fd = -1;
+    mf.f.lbf = EOF;
+    const buf_start: [*]u8 = @ptrCast(&mf.buf);
+    mf.f.buf = buf_start + UNGET;
+    mf.f.buf_size = (UNGET + BUFSIZ) - UNGET;
+
+    var buf_ptr: [*]u8 = undefined;
+    if (user_buf) |ub| {
+        buf_ptr = ub;
+    } else {
+        buf_ptr = @as([*]u8, @ptrCast(mf)) + @sizeOf(MemFILE);
+        @memset(buf_ptr[0..size], 0);
+    }
+
+    mf.c.buf = buf_ptr;
+    mf.c.size = size;
+    mf.c.mode = @intCast(mode_char);
+
+    if (!has_plus) mf.f.flags = if (mode_char == 'r') F_NOWR else F_NORD;
+    if (mode_char == 'r') {
+        mf.c.len = size;
+    } else if (mode_char == 'a') {
+        const slen = std.mem.indexOfScalar(u8, buf_ptr[0..size], 0) orelse size;
+        mf.c.len = slen;
+        mf.c.pos = slen;
+    } else if (has_plus) {
+        buf_ptr[0] = 0;
+    }
+
+    mf.f.read_fn = &mread_impl;
+    mf.f.write_fn = &mwrite_impl;
+    mf.f.seek_fn = &mseek_impl;
+    mf.f.close_fn = &mclose_impl;
+
+    if (libc_ptr.threaded == 0) mf.f.lock = -1;
+
+    return ofl_add_fn(&mf.f);
+}
+
+// --- open_memstream.c ---
+
+const MsCookie = extern struct {
+    bufp: *?[*]u8,
+    sizep: *usize,
+    pos: usize,
+    buf: ?[*]u8,
+    len: usize,
+    space: usize,
+};
+
+const MsFILE = extern struct {
+    f: FILE,
+    c: MsCookie,
+    buf: [BUFSIZ]u8,
+};
+
+fn ms_seek_impl(f: *FILE, off: i64, whence: c_int) callconv(.c) i64 {
+    const c: *MsCookie = @ptrCast(@alignCast(f.cookie.?));
+    const w: usize = @intCast(@as(c_uint, @bitCast(whence)));
+    if (w > 2) {
+        setErrno(.INVAL);
+        return -1;
+    }
+    const base: isize = @intCast(([3]usize{ 0, c.pos, c.len })[w]);
+    const ssize_max: i64 = std.math.maxInt(isize);
+    if (off < -@as(i64, base) or off > ssize_max - @as(i64, base)) {
+        setErrno(.INVAL);
+        return -1;
+    }
+    const new_pos: usize = @intCast(@as(i64, base) + off);
+    c.pos = new_pos;
+    return @intCast(new_pos);
+}
+
+fn ms_write_impl(f: *FILE, buf: [*]const u8, len: usize) callconv(.c) usize {
+    const c: *MsCookie = @ptrCast(@alignCast(f.cookie.?));
+    const len2: usize = if (f.wpos != null and f.wbase != null)
+        @intFromPtr(f.wpos.?) - @intFromPtr(f.wbase.?)
+    else
+        0;
+    if (len2 != 0) {
+        f.wpos = f.wbase;
+        if (ms_write_impl(f, @ptrCast(f.wbase.?), len2) < len2) return 0;
+    }
+    if (len + c.pos >= c.space) {
+        const new_space = (2 * c.space + 1) | (c.pos + len + 1);
+        const newbuf = realloc_fn(@ptrCast(c.buf), new_space) orelse return 0;
+        const new_ptr: [*]u8 = @ptrCast(newbuf);
+        c.bufp.* = new_ptr;
+        c.buf = new_ptr;
+        @memset(new_ptr[c.space..new_space], 0);
+        c.space = new_space;
+    }
+    if (len > 0) @memcpy(c.buf.?[c.pos..][0..len], buf[0..len]);
+    c.pos += len;
+    if (c.pos >= c.len) c.len = c.pos;
+    c.sizep.* = c.pos;
+    return len;
+}
+
+fn ms_close_impl(_: *FILE) callconv(.c) c_int {
+    return 0;
+}
+
+/// open_memstream.c: FILE *open_memstream(char **bufp, size_t *sizep)
+fn open_memstream_impl(bufp: *?[*]u8, sizep: *usize) callconv(.c) ?*FILE {
+    const raw: *anyopaque = malloc_fn(@sizeOf(MsFILE)) orelse return null;
+    const ms: *MsFILE = @ptrCast(@alignCast(raw));
+    const buf_raw: *anyopaque = malloc_fn(1) orelse {
+        free_fn(raw);
+        return null;
+    };
+    const initial_buf: [*]u8 = @ptrCast(buf_raw);
+
+    ms.f = std.mem.zeroes(FILE);
+    ms.c = MsCookie{
+        .bufp = bufp,
+        .sizep = sizep,
+        .pos = 0,
+        .buf = initial_buf,
+        .len = 0,
+        .space = 0,
+    };
+    sizep.* = 0;
+    bufp.* = initial_buf;
+    initial_buf[0] = 0;
+
+    ms.f.cookie = @ptrCast(&ms.c);
+    ms.f.flags = F_NORD;
+    ms.f.fd = -1;
+    const ms_buf_start: [*]u8 = @ptrCast(&ms.buf);
+    ms.f.buf = ms_buf_start;
+    ms.f.buf_size = BUFSIZ;
+    ms.f.lbf = EOF;
+    ms.f.write_fn = &ms_write_impl;
+    ms.f.seek_fn = &ms_seek_impl;
+    ms.f.close_fn = &ms_close_impl;
+    ms.f.mode = -1;
+
+    if (libc_ptr.threaded == 0) ms.f.lock = -1;
+
+    return ofl_add_fn(&ms.f);
+}
+
+// --- open_wmemstream.c ---
+
+const WmsCookie = extern struct {
+    bufp: *?[*]wchar_t,
+    sizep: *usize,
+    pos: usize,
+    buf: ?[*]wchar_t,
+    len: usize,
+    space: usize,
+    mbs: mbstate_t,
+};
+
+const WmsFILE = extern struct {
+    f: FILE,
+    c: WmsCookie,
+    buf: [1]u8,
+};
+
+fn wms_seek_impl(f: *FILE, off: i64, whence: c_int) callconv(.c) i64 {
+    const c: *WmsCookie = @ptrCast(@alignCast(f.cookie.?));
+    const w: usize = @intCast(@as(c_uint, @bitCast(whence)));
+    if (w > 2) {
+        setErrno(.INVAL);
+        return -1;
+    }
+    const base: isize = @intCast(([3]usize{ 0, c.pos, c.len })[w]);
+    const ssize_max_div4: i64 = @divFloor(std.math.maxInt(isize), 4);
+    if (off < -@as(i64, base) or off > ssize_max_div4 - @as(i64, base)) {
+        setErrno(.INVAL);
+        return -1;
+    }
+    c.mbs = std.mem.zeroes(mbstate_t);
+    const new_pos: usize = @intCast(@as(i64, base) + off);
+    c.pos = new_pos;
+    return @intCast(new_pos);
+}
+
+fn wms_write_impl(f: *FILE, buf: [*]const u8, len: usize) callconv(.c) usize {
+    const c: *WmsCookie = @ptrCast(@alignCast(f.cookie.?));
+    const len2_init: usize = if (f.wpos != null and f.wbase != null)
+        @intFromPtr(f.wpos.?) - @intFromPtr(f.wbase.?)
+    else
+        0;
+    if (len2_init != 0) {
+        f.wpos = f.wbase;
+        if (wms_write_impl(f, @ptrCast(f.wbase.?), len2_init) < len2_init) return 0;
+    }
+    if (len + c.pos >= c.space) {
+        const new_space = (2 * c.space + 1) | (c.pos + len + 1);
+        const ssize_max_div4: usize = @intCast(@divFloor(std.math.maxInt(isize), 4));
+        if (new_space > ssize_max_div4) return 0;
+        const newbuf_raw = realloc_fn(@ptrCast(c.buf), new_space * @sizeOf(wchar_t)) orelse return 0;
+        const newbuf: [*]wchar_t = @ptrCast(@alignCast(newbuf_raw));
+        c.bufp.* = newbuf;
+        c.buf = newbuf;
+        const start_bytes: [*]u8 = @ptrCast(c.buf.? + c.space);
+        @memset(start_bytes[0 .. @sizeOf(wchar_t) * (new_space - c.space)], 0);
+        c.space = new_space;
+    }
+    var src_ptr: ?[*]const u8 = buf;
+    const result = mbsnrtowcs_fn(c.buf.? + c.pos, &src_ptr, len, c.space - c.pos, &c.mbs);
+    if (result == @as(usize, @bitCast(@as(isize, -1)))) return 0;
+    c.pos += result;
+    if (c.pos >= c.len) c.len = c.pos;
+    c.sizep.* = c.pos;
+    return len;
+}
+
+fn wms_close_impl(_: *FILE) callconv(.c) c_int {
+    return 0;
+}
+
+/// open_wmemstream.c: FILE *open_wmemstream(wchar_t **bufp, size_t *sizep)
+fn open_wmemstream_impl(bufp: *?[*]wchar_t, sizep: *usize) callconv(.c) ?*FILE {
+    const raw: *anyopaque = malloc_fn(@sizeOf(WmsFILE)) orelse return null;
+    const wms: *WmsFILE = @ptrCast(@alignCast(raw));
+    const buf_raw: *anyopaque = malloc_fn(@sizeOf(wchar_t)) orelse {
+        free_fn(raw);
+        return null;
+    };
+    const initial_buf: [*]wchar_t = @ptrCast(@alignCast(buf_raw));
+
+    wms.f = std.mem.zeroes(FILE);
+    wms.c = WmsCookie{
+        .bufp = bufp,
+        .sizep = sizep,
+        .pos = 0,
+        .buf = initial_buf,
+        .len = 0,
+        .space = 0,
+        .mbs = std.mem.zeroes(mbstate_t),
+    };
+    sizep.* = 0;
+    bufp.* = initial_buf;
+    initial_buf[0] = 0;
+
+    wms.f.cookie = @ptrCast(&wms.c);
+    wms.f.flags = F_NORD;
+    wms.f.fd = -1;
+    const wms_buf_start: [*]u8 = @ptrCast(&wms.buf);
+    wms.f.buf = wms_buf_start;
+    wms.f.buf_size = 0;
+    wms.f.lbf = EOF;
+    wms.f.write_fn = &wms_write_impl;
+    wms.f.seek_fn = &wms_seek_impl;
+    wms.f.close_fn = &wms_close_impl;
+
+    if (libc_ptr.threaded == 0) wms.f.lock = -1;
+
+    _ = fwide_fn(&wms.f, 1);
+
+    return ofl_add_fn(&wms.f);
+}
+
+// --- fopencookie.c ---
+
+const CookieReadFn = *const fn (?*anyopaque, [*]u8, usize) callconv(.c) isize;
+const CookieWriteFn = *const fn (?*anyopaque, [*]const u8, usize) callconv(.c) isize;
+const CookieSeekFn = *const fn (?*anyopaque, *i64, c_int) callconv(.c) c_int;
+const CookieCloseFn = *const fn (?*anyopaque) callconv(.c) c_int;
+
+const CookieIoFunctions = extern struct {
+    read: ?CookieReadFn,
+    write: ?CookieWriteFn,
+    seek: ?CookieSeekFn,
+    close: ?CookieCloseFn,
+};
+
+const FCookie = extern struct {
+    cookie: ?*anyopaque,
+    iofuncs: CookieIoFunctions,
+};
+
+const CookieFILE = extern struct {
+    f: FILE,
+    fc: FCookie,
+    buf: [UNGET + BUFSIZ]u8,
+};
+
+fn cookieread_impl(f: *FILE, buf: [*]u8, len: usize) callconv(.c) usize {
+    const fc: *FCookie = @ptrCast(@alignCast(f.cookie.?));
+    var ret: isize = -1;
+    var remain = len;
+    var readlen: usize = 0;
+    const has_buf: usize = @intFromBool(f.buf_size != 0);
+    const len2 = len - has_buf;
+
+    const read_fn = fc.iofuncs.read orelse {
+        f.flags |= F_ERR;
+        f.rpos = f.buf;
+        f.rend = f.buf;
+        return 0;
+    };
+
+    if (len2 != 0) {
+        ret = read_fn(fc.cookie, buf, len2);
+        if (ret <= 0) {
+            f.flags |= if (ret == 0) F_EOF else F_ERR;
+            f.rpos = f.buf;
+            f.rend = f.buf;
+            return readlen;
+        }
+        const ret_u: usize = @intCast(ret);
+        readlen += ret_u;
+        remain -= ret_u;
+    }
+
+    if (f.buf_size == 0 or remain > has_buf) return readlen;
+
+    f.rpos = f.buf;
+    ret = read_fn(fc.cookie, @ptrCast(f.rpos.?), f.buf_size);
+    if (ret <= 0) {
+        f.flags |= if (ret == 0) F_EOF else F_ERR;
+        f.rpos = f.buf;
+        f.rend = f.buf;
+        return readlen;
+    }
+    f.rend = f.rpos.? + @as(usize, @intCast(ret));
+
+    buf[readlen] = f.rpos.?[0];
+    f.rpos = f.rpos.? + 1;
+    readlen += 1;
+
+    return readlen;
+}
+
+fn cookiewrite_impl(f: *FILE, buf: [*]const u8, len: usize) callconv(.c) usize {
+    const fc: *FCookie = @ptrCast(@alignCast(f.cookie.?));
+    const len2: usize = if (f.wpos != null and f.wbase != null)
+        @intFromPtr(f.wpos.?) - @intFromPtr(f.wbase.?)
+    else
+        0;
+    const write_fn = fc.iofuncs.write orelse return len;
+    if (len2 != 0) {
+        f.wpos = f.wbase;
+        if (cookiewrite_impl(f, @ptrCast(f.wpos.?), len2) < len2) return 0;
+    }
+    const ret = write_fn(fc.cookie, buf, len);
+    if (ret < 0) {
+        f.wpos = null;
+        f.wbase = null;
+        f.wend = null;
+        f.flags |= F_ERR;
+        return 0;
+    }
+    return @intCast(ret);
+}
+
+fn cookieseek_impl(f: *FILE, off: i64, whence: c_int) callconv(.c) i64 {
+    const fc: *FCookie = @ptrCast(@alignCast(f.cookie.?));
+    const w: c_uint = @bitCast(whence);
+    if (w > 2) {
+        setErrno(.INVAL);
+        return -1;
+    }
+    const seek_fn = fc.iofuncs.seek orelse {
+        setErrno(.OPNOTSUPP);
+        return -1;
+    };
+    var off_mut = off;
+    const res = seek_fn(fc.cookie, &off_mut, whence);
+    if (res < 0) return @intCast(res);
+    return off_mut;
+}
+
+fn cookieclose_impl(f: *FILE) callconv(.c) c_int {
+    const fc: *FCookie = @ptrCast(@alignCast(f.cookie.?));
+    if (fc.iofuncs.close) |close_fn| return close_fn(fc.cookie);
+    return 0;
+}
+
+/// fopencookie.c: FILE *fopencookie(void *cookie, const char *mode, cookie_io_functions_t iofuncs)
+fn fopencookie_impl(cookie: ?*anyopaque, mode: [*:0]const u8, iofuncs: CookieIoFunctions) callconv(.c) ?*FILE {
+    const mode_char = mode[0];
+    if (mode_char != 'r' and mode_char != 'w' and mode_char != 'a') {
+        setErrno(.INVAL);
+        return null;
+    }
+    const raw: *anyopaque = malloc_fn(@sizeOf(CookieFILE)) orelse return null;
+    const cf: *CookieFILE = @ptrCast(@alignCast(raw));
+
+    cf.f = std.mem.zeroes(FILE);
+
+    if (std.mem.indexOfScalar(u8, std.mem.span(mode), '+') == null)
+        cf.f.flags = if (mode_char == 'r') F_NOWR else F_NORD;
+
+    cf.fc = FCookie{
+        .cookie = cookie,
+        .iofuncs = iofuncs,
+    };
+
+    cf.f.fd = -1;
+    cf.f.cookie = @ptrCast(&cf.fc);
+    const cf_buf_start: [*]u8 = @ptrCast(&cf.buf);
+    cf.f.buf = cf_buf_start + UNGET;
+    cf.f.buf_size = (UNGET + BUFSIZ) - UNGET;
+    cf.f.lbf = EOF;
+
+    cf.f.read_fn = &cookieread_impl;
+    cf.f.write_fn = &cookiewrite_impl;
+    cf.f.seek_fn = &cookieseek_impl;
+    cf.f.close_fn = &cookieclose_impl;
+
+    return ofl_add_fn(&cf.f);
+}
+
+// Extern references to musl C functions that are still compiled from C sources.
+const free_fn = @extern(*const fn (?*anyopaque) callconv(.c) void, .{ .name = "free" });
+const ofl_add_fn = @extern(*const fn (*FILE) callconv(.c) ?*FILE, .{ .name = "__ofl_add" });
+const libc_ptr = @extern(*const Libc, .{ .name = "__libc" });
+const fwide_fn = @extern(*const fn (*FILE, c_int) callconv(.c) c_int, .{ .name = "fwide" });
+const mbsnrtowcs_fn = @extern(*const fn (?[*]wchar_t, *?[*]const u8, usize, usize, *mbstate_t) callconv(.c) usize, .{ .name = "mbsnrtowcs" });
