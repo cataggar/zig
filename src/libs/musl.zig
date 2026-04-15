@@ -711,13 +711,13 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/putwchar.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/stderr.c",
     "musl/src/stdio/stdin.c",
-    "musl/src/stdio/__stdio_close.c",
+    //"musl/src/stdio/__stdio_close.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/__stdio_exit.c",
-    "musl/src/stdio/__stdio_read.c",
+    //"musl/src/stdio/__stdio_read.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/__stdio_seek.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/__stdio_write.c",
+    //"musl/src/stdio/__stdio_write.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/stdout.c",
-    "musl/src/stdio/__stdout_write.c",
+    //"musl/src/stdio/__stdout_write.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/swprintf.c",
     "musl/src/stdio/swscanf.c",
     "musl/src/stdio/tempnam.c",

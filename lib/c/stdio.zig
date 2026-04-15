@@ -103,7 +103,7 @@ const memchr_fn = @extern(*const fn (?[*]const u8, c_int, usize) callconv(.c) ?[
 const lseek_fn = @extern(*const fn (c_int, i64, c_int) callconv(.c) i64, .{ .name = "__lseek" });
 const malloc_fn = @extern(*const fn (usize) callconv(.c) ?*anyopaque, .{ .name = "malloc" });
 const realloc_fn = @extern(*const fn (?*anyopaque, usize) callconv(.c) ?*anyopaque, .{ .name = "realloc" });
-const stdio_write_ext = @extern(*const fn (*FILE, [*]const u8, usize) callconv(.c) usize, .{ .name = "__stdio_write" });
+const aio_close_fn = @extern(*const fn (c_int) callconv(.c) c_int, .{ .name = "__aio_close" });
 const mbtowc_fn = @extern(*const fn (?*wchar_t, ?[*]const u8, usize) callconv(.c) c_int, .{ .name = "mbtowc" });
 const wcsrtombs_fn = @extern(*const fn (?[*]u8, *?[*:0]const wchar_t, usize, ?*anyopaque) callconv(.c) usize, .{ .name = "wcsrtombs" });
 
@@ -180,6 +180,13 @@ comptime {
         symbol(&fclose_ca_impl, "__fclose_ca");
         symbol(&fgetln_impl, "fgetln");
         symbol(&stdio_seek_impl, "__stdio_seek");
+
+        // Internal I/O (__stdio_close.c, __stdio_read.c, __stdio_write.c, __stdout_write.c)
+        symbol(&stdio_close_impl, "__stdio_close");
+        symbol(&stdio_read_impl, "__stdio_read");
+        symbol(&stdio_write_impl, "__stdio_write");
+        symbol(&stdout_write_impl, "__stdout_write");
+
         // vasprintf, vdprintf kept as C (see #243)
         symbol(&getdelim_impl, "getdelim");
     }
@@ -923,6 +930,103 @@ fn stdio_seek_impl(f: *FILE, off: i64, whence: c_int) callconv(.c) i64 {
     return lseek_fn(f.fd, off, whence);
 }
 
+// --- Internal I/O (__stdio_close.c) ---
+
+/// __stdio_close.c: int __stdio_close(FILE *f)
+fn stdio_close_impl(f: *FILE) callconv(.c) c_int {
+    const fd = aio_close_fn(f.fd);
+    return c_errno(linux.close(@bitCast(fd)));
+}
+
+// --- Internal I/O (__stdio_read.c) ---
+
+/// __stdio_read.c: size_t __stdio_read(FILE *f, unsigned char *buf, size_t len)
+fn stdio_read_impl(f: *FILE, buf: [*]u8, len: usize) callconv(.c) usize {
+    const has_buf: usize = @intFromBool(f.buf_size != 0);
+    var iov = [2]std.posix.iovec{
+        .{ .base = buf, .len = len -| has_buf },
+        .{ .base = f.buf orelse buf, .len = f.buf_size },
+    };
+    const cnt_raw = if (iov[0].len != 0)
+        linux.readv(@bitCast(f.fd), &iov, 2)
+    else
+        linux.read(@bitCast(f.fd), iov[1].base, iov[1].len);
+    const cnt: isize = @bitCast(cnt_raw);
+    if (cnt <= 0) {
+        f.flags |= if (cnt != 0) F_ERR else F_EOF;
+        return 0;
+    }
+    const ucnt: usize = @intCast(cnt);
+    if (ucnt <= iov[0].len) return ucnt;
+    const buf_cnt = ucnt - iov[0].len;
+    f.rpos = f.buf;
+    f.rend = f.buf.? + buf_cnt;
+    if (f.buf_size != 0) {
+        buf[len - 1] = f.rpos.?[0];
+        f.rpos = f.rpos.? + 1;
+    }
+    return len;
+}
+
+// --- Internal I/O (__stdio_write.c) ---
+
+/// __stdio_write.c: size_t __stdio_write(FILE *f, const unsigned char *buf, size_t len)
+fn stdio_write_impl(f: *FILE, buf: [*]const u8, len: usize) callconv(.c) usize {
+    const wbase = f.wbase orelse @as([*]u8, @ptrCast(@constCast(buf)));
+    const wpos = f.wpos orelse wbase;
+    var iovs = [2]std.posix.iovec_const{
+        .{ .base = wbase, .len = @intFromPtr(wpos) - @intFromPtr(wbase) },
+        .{ .base = buf, .len = len },
+    };
+    var iov_idx: usize = 0;
+    var rem = iovs[0].len + iovs[1].len;
+    while (true) {
+        const iov_slice: [*]const std.posix.iovec_const = @ptrCast(&iovs[iov_idx]);
+        const iovcnt: u32 = @intCast(2 - iov_idx);
+        const cnt_raw = linux.writev(@bitCast(f.fd), iov_slice, iovcnt);
+        const cnt: isize = @bitCast(cnt_raw);
+        if (cnt == @as(isize, @intCast(rem))) {
+            f.wend = f.buf.? + f.buf_size;
+            f.wpos = f.buf;
+            f.wbase = f.buf;
+            return len;
+        }
+        if (cnt < 0) {
+            f.wpos = null;
+            f.wbase = null;
+            f.wend = null;
+            f.flags |= F_ERR;
+            return if (iov_idx == 0) 0 else len - iovs[iov_idx].len;
+        }
+        const ucnt: usize = @intCast(cnt);
+        rem -= ucnt;
+        if (ucnt > iovs[iov_idx].len) {
+            const skip = ucnt - iovs[iov_idx].len;
+            iov_idx += 1;
+            iovs[iov_idx].base += skip;
+            iovs[iov_idx].len -= skip;
+        } else {
+            iovs[iov_idx].base += ucnt;
+            iovs[iov_idx].len -= ucnt;
+        }
+    }
+}
+
+// --- Internal I/O (__stdout_write.c) ---
+
+const TIOCGWINSZ: u32 = 0x5413;
+
+/// __stdout_write.c: size_t __stdout_write(FILE *f, const unsigned char *buf, size_t len)
+fn stdout_write_impl(f: *FILE, buf: [*]const u8, len: usize) callconv(.c) usize {
+    f.write_fn = &stdio_write_impl;
+    if (f.flags & F_SVB == 0) {
+        var wsz: [4]u16 = undefined; // struct winsize placeholder
+        const r: isize = @bitCast(linux.ioctl(@bitCast(f.fd), TIOCGWINSZ, @intFromPtr(&wsz)));
+        if (r != 0) f.lbf = -1;
+    }
+    return stdio_write_impl(f, buf, len);
+}
+
 /// vasprintf.c: int vasprintf(char **s, const char *fmt, va_list ap)
 fn vasprintf_impl(s: *?[*]u8, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
     var ap_src = ap;
@@ -942,7 +1046,7 @@ fn vdprintf_impl(fd: c_int, fmt: [*:0]const u8, ap: VaList) callconv(.c) c_int {
     var f = std.mem.zeroes(FILE);
     f.fd = fd;
     f.lbf = EOF;
-    f.write_fn = stdio_write_ext;
+    f.write_fn = &stdio_write_impl;
     f.buf = @ptrCast(@constCast(fmt));
     f.buf_size = 0;
     f.lock = -1;
