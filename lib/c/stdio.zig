@@ -3,11 +3,16 @@ const std = @import("std");
 const symbol = @import("../c.zig").symbol;
 
 /// Musl internal FILE struct layout (struct _IO_FILE from stdio_impl.h).
+/// Field order MUST match musl's struct _IO_FILE exactly.
 const FILE = extern struct {
     flags: c_uint,
     rpos: ?[*]u8,
     rend: ?[*]u8,
     close_fn: ?*const fn (*FILE) callconv(.c) c_int,
+    wend: ?[*]u8,
+    wpos: ?[*]u8,
+    mustbezero_1: ?[*]u8,
+    wbase: ?[*]u8,
     read_fn: ?*const fn (*FILE, [*]u8, usize) callconv(.c) usize,
     write_fn: ?*const fn (*FILE, [*]const u8, usize) callconv(.c) usize,
     seek_fn: ?*const fn (*FILE, i64, c_int) callconv(.c) i64,
@@ -24,17 +29,13 @@ const FILE = extern struct {
     cookie: ?*anyopaque,
     off: i64,
     getln_buf: ?[*]u8,
-    getln_buf_size: usize,
-    mustbezero_1: ?*anyopaque,
+    mustbezero_2: ?*anyopaque,
     shend: ?[*]u8,
     shlim: i64,
     shcnt: i64,
     prev_locked: ?*FILE,
     next_locked: ?*FILE,
     locale: ?*anyopaque,
-    wpos: ?[*]u8,
-    wbase: ?[*]u8,
-    wend: ?[*]u8,
 };
 const wchar_t = std.c.wchar_t;
 const wint_t = std.c.wint_t;
@@ -173,37 +174,13 @@ comptime {
         symbol(&towrite_impl, "__towrite");
         symbol(&uflow_impl, "__uflow");
         symbol(&overflow_impl, "__overflow");
-        symbol(&fprintf_impl, "fprintf");
-        symbol(&printf_impl, "printf");
-        symbol(&snprintf_impl, "snprintf");
-        symbol(&sprintf_impl, "sprintf");
-        symbol(&asprintf_impl, "asprintf");
-        symbol(&dprintf_impl, "dprintf");
-        symbol(&scanf_impl, "scanf");
-        symbol(&fscanf_impl, "fscanf");
-        symbol(&sscanf_impl, "sscanf");
         symbol(&perror_impl, "perror");
-        symbol(&wprintf_impl, "wprintf");
-        symbol(&fwprintf_impl, "fwprintf");
-        symbol(&swprintf_impl, "swprintf");
-        symbol(&wscanf_impl, "wscanf");
-        symbol(&fwscanf_impl, "fwscanf");
-        symbol(&swscanf_impl, "swscanf");
-        symbol(&vwprintf_impl, "vwprintf");
-        symbol(&vwscanf_impl, "vwscanf");
-        symbol(&vprintf_impl, "vprintf");
-        symbol(&vscanf_impl, "vscanf");
-        symbol(&vsnprintf_impl, "vsnprintf");
-        symbol(&vsprintf_impl, "vsprintf");
-        symbol(&vsscanf_impl, "vsscanf");
-        symbol(&vswprintf_impl, "vswprintf");
-        symbol(&vswscanf_impl, "vswscanf");
+        // va_list-receiving functions kept as C (see #243 — VaList ABI mismatch on x86_64)
         symbol(&fmodeflags_impl, "__fmodeflags");
         symbol(&fclose_ca_impl, "__fclose_ca");
         symbol(&fgetln_impl, "fgetln");
         symbol(&stdio_seek_impl, "__stdio_seek");
-        symbol(&vasprintf_impl, "vasprintf");
-        symbol(&vdprintf_impl, "vdprintf");
+        // vasprintf, vdprintf kept as C (see #243)
         symbol(&getdelim_impl, "getdelim");
     }
 }
@@ -833,67 +810,22 @@ fn overflow_impl(f: *FILE, _c: c_int) callconv(.c) c_int {
 }
 
 /// fprintf.c: int fprintf(FILE *restrict f, const char *restrict fmt, ...)
-fn fprintf_impl(f: ?*FILE, fmt: [*:0]const u8, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vfprintf_fn(f, fmt, ap);
-}
 
 /// printf.c: int printf(const char *restrict fmt, ...)
-fn printf_impl(fmt: [*:0]const u8, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vfprintf_fn(stdout_ext.*, fmt, ap);
-}
 
 /// snprintf.c: int snprintf(char *restrict s, size_t n, const char *restrict fmt, ...)
-fn snprintf_impl(s: [*]u8, n: usize, fmt: [*:0]const u8, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vsnprintf_impl(s, n, fmt, ap);
-}
 
 /// sprintf.c: int sprintf(char *restrict s, const char *restrict fmt, ...)
-fn sprintf_impl(s: [*]u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vsprintf_impl(s, fmt, ap);
-}
 
 /// asprintf.c: int asprintf(char **s, const char *fmt, ...)
-fn asprintf_impl(s: *?[*]u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vasprintf_impl(s, fmt, ap);
-}
 
 /// dprintf.c: int dprintf(int fd, const char *restrict fmt, ...)
-fn dprintf_impl(fd: c_int, fmt: [*:0]const u8, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vdprintf_impl(fd, fmt, ap);
-}
 
 /// scanf.c: int scanf(const char *restrict fmt, ...)
-fn scanf_impl(fmt: [*:0]const u8, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vscanf_impl(fmt, ap);
-}
 
 /// fscanf.c: int fscanf(FILE *restrict f, const char *restrict fmt, ...)
-fn fscanf_impl(f: ?*FILE, fmt: [*:0]const u8, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vfscanf_fn(f, fmt, ap);
-}
 
 /// sscanf.c: int sscanf(const char *restrict s, const char *restrict fmt, ...)
-fn sscanf_impl(s: [*:0]const u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vsscanf_impl(s, fmt, ap);
-}
 
 /// perror.c: void perror(const char *msg)
 fn perror_impl(msg: ?[*:0]const u8) callconv(.c) void {
@@ -1281,46 +1213,16 @@ fn vswscanf_impl(s: [*:0]const wchar_t, fmt: [*:0]const wchar_t, ap: VaList) cal
 }
 
 /// wprintf.c: int wprintf(const wchar_t *restrict fmt, ...)
-fn wprintf_impl(fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vfwprintf_fn(stdout_ext.*, fmt, ap);
-}
 
 /// fwprintf.c: int fwprintf(FILE *restrict f, const wchar_t *restrict fmt, ...)
-fn fwprintf_impl(f: ?*FILE, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vfwprintf_fn(f, fmt, ap);
-}
 
 /// swprintf.c: int swprintf(wchar_t *restrict s, size_t n, const wchar_t *restrict fmt, ...)
-fn swprintf_impl(s: [*]wchar_t, n: usize, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vswprintf_impl(s, n, fmt, ap);
-}
 
 /// wscanf.c: int wscanf(const wchar_t *restrict fmt, ...)
-fn wscanf_impl(fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vfwscanf_fn(stdin_ext.*, fmt, ap);
-}
 
 /// fwscanf.c: int fwscanf(FILE *restrict f, const wchar_t *restrict fmt, ...)
-fn fwscanf_impl(f: ?*FILE, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vfwscanf_fn(f, fmt, ap);
-}
 
 /// swscanf.c: int swscanf(const wchar_t *restrict s, const wchar_t *restrict fmt, ...)
-fn swscanf_impl(s: [*:0]const wchar_t, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    return vswscanf_impl(s, fmt, ap);
-}
 
 /// vwprintf.c: int vwprintf(const wchar_t *restrict fmt, va_list ap)
 fn vwprintf_impl(fmt: [*:0]const wchar_t, ap: VaList) callconv(.c) c_int {
