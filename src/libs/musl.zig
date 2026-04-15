@@ -685,7 +685,7 @@ const src_files = [_][]const u8{
     //"musl/src/stdio/__fmodeflags.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fopen.c",
     "musl/src/stdio/fopencookie.c",
-    "musl/src/stdio/__fopen_rb_ca.c",
+    //"musl/src/stdio/__fopen_rb_ca.c", // migrated to lib/c/stdio.zig
     //"musl/src/stdio/fputs.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/fputwc.c",
     "musl/src/stdio/fputws.c",

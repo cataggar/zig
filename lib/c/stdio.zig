@@ -176,8 +176,10 @@ comptime {
         symbol(&overflow_impl, "__overflow");
         symbol(&perror_impl, "perror");
         // va_list-receiving functions kept as C (see #243 — VaList ABI mismatch on x86_64)
+        // Internal helpers (__fmodeflags.c, __fclose_ca.c, __fopen_rb_ca.c)
         symbol(&fmodeflags_impl, "__fmodeflags");
         symbol(&fclose_ca_impl, "__fclose_ca");
+        symbol(&fopen_rb_ca_impl, "__fopen_rb_ca");
         symbol(&fgetln_impl, "fgetln");
         symbol(&stdio_seek_impl, "__stdio_seek");
 
@@ -894,6 +896,32 @@ fn fmodeflags_impl(mode: [*:0]const u8) callconv(.c) c_int {
 /// __fclose_ca.c: int __fclose_ca(FILE *f)
 fn fclose_ca_impl(f: *FILE) callconv(.c) c_int {
     return f.close_fn.?(f);
+}
+
+// --- Internal helper (__fopen_rb_ca.c) ---
+
+const F_PERM: c_uint = 1;
+
+/// __fopen_rb_ca.c: FILE *__fopen_rb_ca(const char *filename, FILE *f, unsigned char *buf, size_t len)
+fn fopen_rb_ca_impl(filename: [*:0]const u8, f: *FILE, buf: [*]u8, len: usize) callconv(.c) ?*FILE {
+    f.* = std.mem.zeroes(FILE);
+    const O = linux.O;
+    var o = O{};
+    o.ACCMODE = .RDONLY;
+    o.CLOEXEC = true;
+    const fd_raw: isize = @bitCast(linux.openat(linux.AT.FDCWD, @ptrCast(filename), o, 0));
+    if (fd_raw < 0) return null;
+    const fd: c_int = @intCast(fd_raw);
+    _ = linux.fcntl(fd, linux.F.SETFD, @as(usize, linux.FD_CLOEXEC));
+    f.flags = F_NOWR | F_PERM;
+    f.buf = buf + UNGET;
+    f.buf_size = len - UNGET;
+    f.read_fn = &stdio_read_impl;
+    f.seek_fn = &stdio_seek_impl;
+    f.close_fn = &stdio_close_impl;
+    f.fd = fd;
+    f.lock = -1;
+    return f;
 }
 
 /// fgetln.c: char *fgetln(FILE *f, size_t *plen)
