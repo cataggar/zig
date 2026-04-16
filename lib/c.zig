@@ -61,26 +61,82 @@ pub fn errno(syscall_return_value: usize) c_int {
     };
 }
 
+/// Like `errno`, but for syscalls that return `ssize_t` (e.g. read, write).
+/// Like `errno`, but for syscalls that return `isize` (ssize_t) values such as
+/// read, write, pread, pwrite, readlink, etc.
+pub fn errnoSize(syscall_return_value: usize) isize {
+    return switch (builtin.os.tag) {
+        .linux => {
+            const signed: isize = @bitCast(syscall_return_value);
+            if (signed < 0) {
+                @branchHint(.unlikely);
+                std.c._errno().* = @intCast(-signed);
+                return -1;
+            }
+            return signed;
+        },
+        else => comptime unreachable,
+    };
+}
+
 comptime {
+    _ = @import("c/conf.zig");
+    _ = @import("c/crypt.zig");
     _ = @import("c/ctype.zig");
+    _ = @import("c/errno.zig");
+    _ = @import("c/exit.zig");
+    _ = @import("c/dirent.zig");
     _ = @import("c/fcntl.zig");
+    _ = @import("c/fenv.zig");
     _ = @import("c/inttypes.zig");
+    _ = @import("c/ldso.zig");
+    _ = @import("c/ipc.zig");
     if (!builtin.target.isMinGW()) {
         _ = @import("c/malloc.zig");
     }
     _ = @import("c/math.zig");
+    _ = @import("c/legacy.zig");
+    _ = @import("c/passwd.zig");
+    _ = @import("c/multibyte.zig");
+    _ = @import("c/regex.zig");
+    _ = @import("c/sched.zig");
     _ = @import("c/search.zig");
+    _ = @import("c/stat.zig");
+    _ = @import("c/setjmp.zig");
     _ = @import("c/stdlib.zig");
     _ = @import("c/string.zig");
     _ = @import("c/strings.zig");
     _ = @import("c/stropts.zig");
+    _ = @import("c/temp.zig");
 
     _ = @import("c/sys/capability.zig");
     _ = @import("c/sys/file.zig");
     _ = @import("c/sys/mman.zig");
     _ = @import("c/sys/reboot.zig");
+    _ = @import("c/sys/select.zig");
     _ = @import("c/sys/utsname.zig");
 
+    _ = @import("c/aio.zig");
+    _ = @import("c/complex.zig");
+    _ = @import("c/env.zig");
+    _ = @import("c/internal.zig");
+    _ = @import("c/linux.zig");
+    _ = @import("c/locale.zig");
+    _ = @import("c/misc.zig");
+    _ = @import("c/mq.zig");
+    _ = @import("c/process.zig");
+    _ = @import("c/signal.zig");
+    _ = @import("c/spawn.zig");
+    _ = @import("c/stdio.zig");
+    _ = @import("c/termios.zig");
+    _ = @import("c/thread.zig");
+    _ = @import("c/time.zig");
     _ = @import("c/unistd.zig");
     _ = @import("c/wchar.zig");
+
+    if (builtin.target.isWasiLibC()) {
+        _ = @import("c/wasi_cloudlibc.zig");
+        _ = @import("c/wasi_sources.zig");
+        _ = @import("c/wasi_thread_stub.zig");
+    }
 }

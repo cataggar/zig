@@ -1429,11 +1429,11 @@ pub fn write(fd: i32, buf: [*]const u8, count: usize) usize {
 }
 
 pub fn ftruncate(fd: i32, length: i64) usize {
-    if (@hasField(SYS, "ftruncate64") and usize_bits < 64) {
+    if (usize_bits < 64) {
         const length_halves = splitValue64(length);
         if (require_aligned_register_pair) {
             return syscall4(
-                .ftruncate64,
+                if (@hasField(SYS, "ftruncate64")) .ftruncate64 else .ftruncate,
                 @as(usize, @bitCast(@as(isize, fd))),
                 0,
                 length_halves[0],
@@ -1441,7 +1441,7 @@ pub fn ftruncate(fd: i32, length: i64) usize {
             );
         } else {
             return syscall3(
-                .ftruncate64,
+                if (@hasField(SYS, "ftruncate64")) .ftruncate64 else .ftruncate,
                 @as(usize, @bitCast(@as(isize, fd))),
                 length_halves[0],
                 length_halves[1],

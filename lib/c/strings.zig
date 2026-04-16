@@ -20,8 +20,6 @@ comptime {
         symbol(&__strcasecmp_l, "__strcasecmp_l");
         symbol(&__strncasecmp_l, "__strncasecmp_l");
 
-        symbol(&__strcasecmp_l, "strcasecmp_l");
-        symbol(&__strncasecmp_l, "strncasecmp_l");
     }
 }
 

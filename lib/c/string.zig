@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const symbol = @import("../c.zig").symbol;
+const wchar_t = std.c.wchar_t;
 
 comptime {
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
@@ -45,21 +46,30 @@ comptime {
         symbol(&mempcpy, "mempcpy");
 
         symbol(&__strcoll_l, "__strcoll_l");
-        symbol(&__strxfrm_l, "__strxfrm_l");
-        symbol(&__strcoll_l, "strcoll_l");
         symbol(&__strxfrm_l, "strxfrm_l");
+        symbol(&__strcoll_l, "strcoll_l");
+        symbol(&__strxfrm_l, "__strxfrm_l");
+        symbol(&strchrnul, "__strchrnul");
+
+        symbol(&strverscmp_fn, "strverscmp");
+
+        symbol(&wcscasecmp_fn, "wcscasecmp");
+        symbol(&wcsncasecmp_fn, "wcsncasecmp");
+        symbol(&wcscasecmp_l_fn, "wcscasecmp_l");
+        symbol(&wcsncasecmp_l_fn, "wcsncasecmp_l");
+
+        if (builtin.link_libc) {
+            symbol(&strdup_fn, "strdup");
+            symbol(&strndup_fn, "strndup");
+            symbol(&wcsdup_fn, "wcsdup");
+            symbol(&strerror_r_fn, "strerror_r");
+            symbol(&strsignal_fn, "strsignal");
+        }
 
         // These symbols are not in the public ABI of musl/wasi. However they depend on these exports internally.
-        symbol(&stpcpy, "__stpcpy");
-        symbol(&stpncpy, "__stpncpy");
-        symbol(&strchrnul, "__strchrnul");
-        symbol(&memrchr, "__memrchr");
     }
 
     if (builtin.target.isMinGW()) {
-        symbol(&strnlen, "strnlen");
-        symbol(&mempcpy, "mempcpy");
-        symbol(&strtok_r, "strtok_r");
     }
 }
 
@@ -289,6 +299,211 @@ fn mempcpy(noalias dst: *anyopaque, noalias src: *const anyopaque, len: usize) c
     const src_bytes: [*]const u8 = @ptrCast(src);
     @memcpy(dst_bytes[0..len], src_bytes[0..len]);
     return dst_bytes + len;
+}
+
+fn strdup_fn(s: [*:0]const u8) callconv(.c) ?[*:0]u8 {
+    const l = std.mem.len(s);
+    const d: [*]u8 = @ptrCast(std.c.malloc(l + 1) orelse return null);
+    @memcpy(d[0 .. l + 1], s[0 .. l + 1]);
+    return d[0 .. l + 1 :0].ptr;
+}
+
+fn strndup_fn(s: [*:0]const u8, n: usize) callconv(.c) ?[*:0]u8 {
+    const l = strnlen(@ptrCast(s), n);
+    const d: [*]u8 = @ptrCast(std.c.malloc(l + 1) orelse return null);
+    @memcpy(d[0..l], s[0..l]);
+    d[l] = 0;
+    return d[0 .. l + 1 :0].ptr;
+}
+
+fn wcsdup_fn(s: [*:0]const wchar_t) callconv(.c) ?[*:0]wchar_t {
+    const l = std.mem.len(s);
+    const byte_len = (l + 1) * @sizeOf(wchar_t);
+    const d: [*]wchar_t = @ptrCast(@alignCast(@as([*]u8, @ptrCast(std.c.malloc(byte_len) orelse return null))));
+    @memcpy(d[0 .. l + 1], s[0 .. l + 1]);
+    return d[0 .. l + 1 :0].ptr;
+}
+
+const strerror_c = @extern(*const fn (c_int) callconv(.c) [*:0]u8, .{ .name = "strerror" });
+
+fn strerror_r_fn(err: c_int, buf: ?[*]u8, buflen: usize) callconv(.c) c_int {
+    const msg: [*:0]const u8 = strerror_c(err);
+    const l = std.mem.len(msg);
+    if (l >= buflen) {
+        if (buflen != 0) {
+            @memcpy(buf.?[0 .. buflen - 1], msg[0 .. buflen - 1]);
+            buf.?[buflen - 1] = 0;
+        }
+        return @intFromEnum(std.c.E.RANGE);
+    }
+    @memcpy(buf.?[0 .. l + 1], msg[0 .. l + 1]);
+    return 0;
+}
+
+const signal_descriptions = blk: {
+    @setEvalBranchQuota(10000);
+    const base = [_][*:0]const u8{
+        "Unknown signal",
+        "Hangup",
+        "Interrupt",
+        "Quit",
+        "Illegal instruction",
+        "Trace/breakpoint trap",
+        "Aborted",
+        "Bus error",
+        "Arithmetic exception",
+        "Killed",
+        "User defined signal 1",
+        "Segmentation fault",
+        "User defined signal 2",
+        "Broken pipe",
+        "Alarm clock",
+        "Terminated",
+        "Stack fault",
+        "Child process status",
+        "Continued",
+        "Stopped (signal)",
+        "Stopped",
+        "Stopped (tty input)",
+        "Stopped (tty output)",
+        "Urgent I/O condition",
+        "CPU time limit exceeded",
+        "File size limit exceeded",
+        "Virtual timer expired",
+        "Profiling timer expired",
+        "Window changed",
+        "I/O possible",
+        "Power failure",
+        "Bad system call",
+    };
+
+    const nsig: usize = if (builtin.cpu.arch.isMIPS()) 128 else 65;
+    var desc: [nsig][*:0]const u8 = undefined;
+
+    for (0..nsig) |i| {
+        desc[i] = "Unknown signal";
+    }
+
+    if (builtin.cpu.arch.isMIPS() or builtin.cpu.arch.isSPARC()) {
+        const linux = std.os.linux;
+        const SIG = linux.SIG;
+        desc[@intFromEnum(SIG.HUP)] = base[1];
+        desc[@intFromEnum(SIG.INT)] = base[2];
+        desc[@intFromEnum(SIG.QUIT)] = base[3];
+        desc[@intFromEnum(SIG.ILL)] = base[4];
+        desc[@intFromEnum(SIG.TRAP)] = base[5];
+        desc[@intFromEnum(SIG.ABRT)] = base[6];
+        desc[@intFromEnum(SIG.EMT)] = "Emulator trap";
+        desc[@intFromEnum(SIG.FPE)] = base[8];
+        desc[@intFromEnum(SIG.KILL)] = base[9];
+        desc[@intFromEnum(SIG.BUS)] = base[7];
+        desc[@intFromEnum(SIG.SEGV)] = base[11];
+        desc[@intFromEnum(SIG.SYS)] = base[31];
+        desc[@intFromEnum(SIG.PIPE)] = base[13];
+        desc[@intFromEnum(SIG.ALRM)] = base[14];
+        desc[@intFromEnum(SIG.TERM)] = base[15];
+        desc[@intFromEnum(SIG.USR1)] = base[10];
+        desc[@intFromEnum(SIG.USR2)] = base[12];
+        desc[@intFromEnum(SIG.CHLD)] = base[17];
+        desc[@intFromEnum(SIG.WINCH)] = base[28];
+        desc[@intFromEnum(SIG.URG)] = base[23];
+        desc[@intFromEnum(SIG.IO)] = base[29];
+        desc[@intFromEnum(SIG.STOP)] = base[19];
+        desc[@intFromEnum(SIG.TSTP)] = base[20];
+        desc[@intFromEnum(SIG.CONT)] = base[18];
+        desc[@intFromEnum(SIG.TTIN)] = base[21];
+        desc[@intFromEnum(SIG.TTOU)] = base[22];
+        desc[@intFromEnum(SIG.VTALRM)] = base[26];
+        desc[@intFromEnum(SIG.PROF)] = base[27];
+        desc[@intFromEnum(SIG.XCPU)] = base[24];
+        if (builtin.cpu.arch.isMIPS()) {
+            desc[@intFromEnum(SIG.XFZ)] = base[25];
+            desc[@intFromEnum(SIG.PWR)] = base[30];
+        } else {
+            desc[@intFromEnum(SIG.XFSZ)] = base[25];
+            // SPARC: PWR is alias for LOST
+            desc[@intFromEnum(SIG.LOST)] = base[30];
+        }
+    } else {
+        for (0..base.len) |i| {
+            desc[i] = base[i];
+        }
+    }
+
+    for (32..nsig) |i| {
+        desc[i] = std.fmt.comptimePrint("RT{d}", .{i});
+    }
+
+    break :blk desc;
+};
+
+fn strsignal_fn(sig_arg: c_int) callconv(.c) [*:0]const u8 {
+    const nsig: c_uint = if (builtin.cpu.arch.isMIPS()) 128 else 65;
+    const sig: c_uint = @bitCast(sig_arg);
+    if (sig -% 1 >= nsig - 1) return signal_descriptions[0];
+    return signal_descriptions[sig];
+}
+
+fn strverscmp_fn(l0: [*:0]const u8, r0: [*:0]const u8) callconv(.c) c_int {
+    var i: usize = 0;
+    var dp: usize = 0;
+    var z: bool = true;
+
+    while (l0[i] == r0[i]) {
+        const c = l0[i];
+        if (c == 0) return 0;
+        if (!std.ascii.isDigit(c)) {
+            dp = i + 1;
+            z = true;
+        } else if (c != '0') {
+            z = false;
+        }
+        i += 1;
+    }
+
+    if (l0[dp] -% '1' < 9 and r0[dp] -% '1' < 9) {
+        var j = i;
+        while (std.ascii.isDigit(l0[j])) {
+            if (!std.ascii.isDigit(r0[j])) return 1;
+            j += 1;
+        }
+        if (std.ascii.isDigit(r0[j])) return -1;
+    } else if (z and dp < i and (std.ascii.isDigit(l0[i]) or std.ascii.isDigit(r0[i]))) {
+        return @as(c_int, l0[i]) - @as(c_int, '0') - (@as(c_int, r0[i]) - @as(c_int, '0'));
+    }
+
+    return @as(c_int, l0[i]) - @as(c_int, r0[i]);
+}
+
+const towlower_ext = @extern(*const fn (c_uint) callconv(.c) c_uint, .{ .name = "towlower" });
+
+fn wcsncasecmp_fn(l: [*:0]const wchar_t, r: [*:0]const wchar_t, n_arg: usize) callconv(.c) c_int {
+    var n = n_arg;
+    if (n == 0) return 0;
+    n -= 1;
+    var li: usize = 0;
+    while (l[li] != 0 and r[li] != 0 and n > 0 and
+        (l[li] == r[li] or towlower_ext(@as(c_uint, @bitCast(l[li]))) == towlower_ext(@as(c_uint, @bitCast(r[li])))))
+    {
+        li += 1;
+        n -= 1;
+    }
+    return @as(c_int, @bitCast(towlower_ext(@as(c_uint, @bitCast(l[li]))))) -
+        @as(c_int, @bitCast(towlower_ext(@as(c_uint, @bitCast(r[li])))));
+}
+
+fn wcscasecmp_fn(l: [*:0]const wchar_t, r: [*:0]const wchar_t) callconv(.c) c_int {
+    return wcsncasecmp_fn(l, r, std.math.maxInt(usize));
+}
+
+fn wcscasecmp_l_fn(l: [*:0]const wchar_t, r: [*:0]const wchar_t, locale: *anyopaque) callconv(.c) c_int {
+    _ = locale;
+    return wcscasecmp_fn(l, r);
+}
+
+fn wcsncasecmp_l_fn(l: [*:0]const wchar_t, r: [*:0]const wchar_t, n: usize, locale: *anyopaque) callconv(.c) c_int {
+    _ = locale;
+    return wcsncasecmp_fn(l, r, n);
 }
 
 test strncmp {

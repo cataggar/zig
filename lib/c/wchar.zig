@@ -34,13 +34,7 @@ comptime {
     }
 
     if (builtin.target.isMinGW()) {
-        symbol(&wmemchr, "wmemchr");
-        symbol(&wmemcmp, "wmemcmp");
-        symbol(&wmemcpy, "wmemcpy");
         symbol(&wmempcpy, "wmempcpy");
-        symbol(&wmemmove, "wmemmove");
-        symbol(&wmemset, "wmemset");
-        symbol(&wcsnlen, "wcsnlen");
     }
 }
 

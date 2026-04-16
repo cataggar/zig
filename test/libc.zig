@@ -140,15 +140,15 @@ pub fn addCases(cases: *tests.LibcContext) void {
 
     cases.addLibcTestCase("math/acos.c", true, .{});
     cases.addLibcTestCase("math/acosf.c", true, .{});
-    // cases.addLibcTestCase("math/acosh.c", true, .{});
+    cases.addLibcTestCase("math/acosh.c", true, .{});
     cases.addLibcTestCase("math/acoshf.c", true, .{});
-    // cases.addLibcTestCase("math/acoshl.c", true, .{});
+    cases.addLibcTestCase("math/acoshl.c", true, .{});
     // cases.addLibcTestCase("math/acosl.c", true, .{});
     cases.addLibcTestCase("math/asin.c", true, .{});
     cases.addLibcTestCase("math/asinf.c", true, .{});
-    // cases.addLibcTestCase("math/asinh.c", true, .{});
+    cases.addLibcTestCase("math/asinh.c", true, .{});
     cases.addLibcTestCase("math/asinhf.c", true, .{});
-    // cases.addLibcTestCase("math/asinhl.c", true, .{});
+    cases.addLibcTestCase("math/asinhl.c", true, .{});
     cases.addLibcTestCase("math/asinl.c", true, .{});
     cases.addLibcTestCase("math/atan.c", true, .{});
     // cases.addLibcTestCase("math/atan2.c", true, .{});
@@ -191,15 +191,17 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/exp2l.c", true, .{});
     cases.addLibcTestCase("math/expf.c", true, .{});
     cases.addLibcTestCase("math/expl.c", true, .{});
-    // cases.addLibcTestCase("math/expm1.c", true, .{});
-    // cases.addLibcTestCase("math/expm1f.c", true, .{});
-    // cases.addLibcTestCase("math/expm1l.c", true, .{});
+    cases.addLibcTestCase("math/expm1.c", true, .{});
+    cases.addLibcTestCase("math/expm1f.c", true, .{});
+    cases.addLibcTestCase("math/expm1l.c", true, .{});
     cases.addLibcTestCase("math/fabs.c", true, .{});
     cases.addLibcTestCase("math/fabsf.c", true, .{});
     cases.addLibcTestCase("math/fabsl.c", true, .{});
     cases.addLibcTestCase("math/fdim.c", true, .{});
     // cases.addLibcTestCase("math/fdimf.c", true, .{});
     // cases.addLibcTestCase("math/fdiml.c", true, .{});
+    cases.addLibcTestCase("math/fdimf.c", true, .{});
+    cases.addLibcTestCase("math/fdiml.c", true, .{});
     cases.addLibcTestCase("math/fenv.c", true, .{});
     cases.addLibcTestCase("math/floor.c", true, .{});
     cases.addLibcTestCase("math/floorf.c", true, .{});
@@ -223,10 +225,13 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/hypot.c", true, .{});
     cases.addLibcTestCase("math/hypotf.c", true, .{});
     cases.addLibcTestCase("math/hypotl.c", true, .{});
-    // cases.addLibcTestCase("math/ilogb.c", true, .{});
-    // cases.addLibcTestCase("math/ilogbf.c", true, .{});
-    // cases.addLibcTestCase("math/ilogbl.c", true, .{});
+    cases.addLibcTestCase("math/ilogb.c", true, .{});
+    cases.addLibcTestCase("math/ilogbf.c", true, .{});
+    cases.addLibcTestCase("math/ilogbl.c", true, .{});
     cases.addLibcTestCase("math/isless.c", true, .{});
+    // j0.c disabled: musl's P0/Q0 polynomial coefficients (~2^-60 precision)
+    // cause catastrophic ULP errors near J0 zeros where cancellation
+    // loses ~52 bits. No arithmetic precision (f80/f128) can fix this.
     // cases.addLibcTestCase("math/j0.c", true, .{});
     cases.addLibcTestCase("math/j0f.c", true, .{});
     cases.addLibcTestCase("math/j1.c", true, .{});
@@ -252,9 +257,9 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/log10.c", true, .{});
     cases.addLibcTestCase("math/log10f.c", true, .{});
     cases.addLibcTestCase("math/log10l.c", true, .{});
-    // cases.addLibcTestCase("math/log1p.c", true, .{});
-    // cases.addLibcTestCase("math/log1pf.c", true, .{});
-    // cases.addLibcTestCase("math/log1pl.c", true, .{});
+    cases.addLibcTestCase("math/log1p.c", true, .{});
+    cases.addLibcTestCase("math/log1pf.c", true, .{});
+    cases.addLibcTestCase("math/log1pl.c", true, .{});
     cases.addLibcTestCase("math/log2.c", true, .{});
     cases.addLibcTestCase("math/log2f.c", true, .{});
     cases.addLibcTestCase("math/log2l.c", true, .{});
@@ -285,7 +290,7 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/pow10.c", true, .{});
     cases.addLibcTestCase("math/pow10f.c", true, .{});
     cases.addLibcTestCase("math/pow10l.c", true, .{});
-    // cases.addLibcTestCase("math/powf.c", true, .{});
+    cases.addLibcTestCase("math/powf.c", true, .{});
     // cases.addLibcTestCase("math/powl.c", true, .{});
     cases.addLibcTestCase("math/remainder.c", true, .{});
     cases.addLibcTestCase("math/remainderf.c", true, .{});
@@ -295,7 +300,7 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/remquol.c", true, .{});
     cases.addLibcTestCase("math/rint.c", true, .{});
     cases.addLibcTestCase("math/rintf.c", true, .{});
-    // cases.addLibcTestCase("math/rintl.c", true, .{});
+    cases.addLibcTestCase("math/rintl.c", true, .{});
     cases.addLibcTestCase("math/round.c", true, .{});
     cases.addLibcTestCase("math/roundf.c", true, .{});
     cases.addLibcTestCase("math/roundl.c", true, .{});
@@ -312,9 +317,9 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/sincosf.c", true, .{});
     cases.addLibcTestCase("math/sincosl.c", true, .{});
     cases.addLibcTestCase("math/sinf.c", true, .{});
-    // cases.addLibcTestCase("math/sinh.c", true, .{});
+    cases.addLibcTestCase("math/sinh.c", true, .{});
     cases.addLibcTestCase("math/sinhf.c", true, .{});
-    // cases.addLibcTestCase("math/sinhl.c", true, .{});
+    cases.addLibcTestCase("math/sinhl.c", true, .{});
     cases.addLibcTestCase("math/sinl.c", true, .{});
     cases.addLibcTestCase("math/sqrt.c", true, .{});
     cases.addLibcTestCase("math/sqrtf.c", true, .{});
@@ -325,6 +330,9 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/tanhf.c", true, .{});
     cases.addLibcTestCase("math/tanhl.c", true, .{});
     cases.addLibcTestCase("math/tanl.c", true, .{});
+    // known musl accuracy issue: tgamma (f64) fails on x86_64; tgammaf and tgammal
+    // delegate to tgamma and fail on arm/thumb/powerpc where there is no x87 extended
+    // precision and c_longdouble == f64.
     // cases.addLibcTestCase("math/tgamma.c", true, .{});
     // cases.addLibcTestCase("math/tgammaf.c", true, .{});
     // cases.addLibcTestCase("math/tgammal.c", true, .{});
