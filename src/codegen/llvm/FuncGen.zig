@@ -6793,6 +6793,16 @@ const ParamTypeIterator = struct {
         const zcu = it.object.zcu;
         const ip = &zcu.intern_pool;
         ty.assertHasLayout(zcu);
+        // Per x86_64 SysV ABI §3.5.7, arguments of type `va_list` are passed by invisible reference:
+        // a pointer in a register, *not* the MEMORY classification which would spill to the caller's
+        // stack via LLVM's `byval` attribute. Using `byval` here is an ABI mismatch that causes C
+        // callers (which pass a plain pointer in a register) to crash the Zig callee.
+        // See https://github.com/ctaggart/zig/issues/243.
+        if (zcu.builtin_decl_values.get(.VaList) == ty.toIntern()) {
+            it.zig_index += 1;
+            it.llvm_index += 1;
+            return .byref_mut;
+        }
         const classes = x86_64_abi.classifySystemV(ty, zcu, zcu.getTarget(), .arg);
         if (classes[0] == .memory) {
             it.zig_index += 1;
