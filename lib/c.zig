@@ -94,59 +94,66 @@ pub fn errnoSize(syscall_return_value: usize) isize {
 }
 
 comptime {
-    _ = @import("c/conf.zig");
+    // Portable libzigc modules — compile on all targets libzigc supports.
     _ = @import("c/crypt.zig");
     _ = @import("c/ctype.zig");
     _ = @import("c/errno.zig");
-    _ = @import("c/exit.zig");
-    _ = @import("c/dirent.zig");
-    _ = @import("c/fcntl.zig");
-    _ = @import("c/fenv.zig");
     _ = @import("c/inttypes.zig");
-    _ = @import("c/ldso.zig");
-    _ = @import("c/ipc.zig");
     if (!builtin.target.isMinGW()) {
         _ = @import("c/malloc.zig");
     }
     _ = @import("c/math.zig");
-    _ = @import("c/legacy.zig");
-    _ = @import("c/passwd.zig");
-    _ = @import("c/multibyte.zig");
-    _ = @import("c/regex.zig");
-    _ = @import("c/sched.zig");
-    _ = @import("c/search.zig");
-    _ = @import("c/stat.zig");
     _ = @import("c/setjmp.zig");
     _ = @import("c/stdlib.zig");
     _ = @import("c/string.zig");
     _ = @import("c/strings.zig");
-    _ = @import("c/stropts.zig");
-    _ = @import("c/temp.zig");
-
-    _ = @import("c/sys/capability.zig");
-    _ = @import("c/sys/file.zig");
-    _ = @import("c/sys/mman.zig");
-    _ = @import("c/sys/reboot.zig");
-    _ = @import("c/sys/select.zig");
-    _ = @import("c/sys/utsname.zig");
-
-    _ = @import("c/aio.zig");
     _ = @import("c/complex.zig");
-    _ = @import("c/env.zig");
-    _ = @import("c/internal.zig");
-    _ = @import("c/linux.zig");
     _ = @import("c/locale.zig");
-    _ = @import("c/misc.zig");
-    _ = @import("c/mq.zig");
-    _ = @import("c/process.zig");
-    _ = @import("c/signal.zig");
-    _ = @import("c/spawn.zig");
-    _ = @import("c/stdio.zig");
-    _ = @import("c/termios.zig");
-    _ = @import("c/thread.zig");
-    _ = @import("c/time.zig");
-    _ = @import("c/unistd.zig");
     _ = @import("c/wchar.zig");
+
+    // Linux/POSIX-heavy modules — ported from musl, rely on linux syscalls
+    // and musl-internal helpers. Compiled only on Linux until Win32 shims
+    // land (see #248 / Phase 3+).
+    if (builtin.os.tag == .linux) {
+        _ = @import("c/conf.zig");
+        _ = @import("c/exit.zig");
+        _ = @import("c/dirent.zig");
+        _ = @import("c/fcntl.zig");
+        _ = @import("c/fenv.zig");
+        _ = @import("c/ldso.zig");
+        _ = @import("c/ipc.zig");
+        _ = @import("c/legacy.zig");
+        _ = @import("c/passwd.zig");
+        _ = @import("c/multibyte.zig");
+        _ = @import("c/regex.zig");
+        _ = @import("c/sched.zig");
+        _ = @import("c/search.zig");
+        _ = @import("c/stat.zig");
+        _ = @import("c/stropts.zig");
+        _ = @import("c/temp.zig");
+
+        _ = @import("c/sys/capability.zig");
+        _ = @import("c/sys/file.zig");
+        _ = @import("c/sys/mman.zig");
+        _ = @import("c/sys/reboot.zig");
+        _ = @import("c/sys/select.zig");
+        _ = @import("c/sys/utsname.zig");
+
+        _ = @import("c/aio.zig");
+        _ = @import("c/env.zig");
+        _ = @import("c/internal.zig");
+        _ = @import("c/linux.zig");
+        _ = @import("c/misc.zig");
+        _ = @import("c/mq.zig");
+        _ = @import("c/process.zig");
+        _ = @import("c/signal.zig");
+        _ = @import("c/spawn.zig");
+        _ = @import("c/stdio.zig");
+        _ = @import("c/termios.zig");
+        _ = @import("c/thread.zig");
+        _ = @import("c/time.zig");
+        _ = @import("c/unistd.zig");
+    }
 
     if (builtin.target.isWasiLibC()) {
         _ = @import("c/wasi_cloudlibc.zig");
