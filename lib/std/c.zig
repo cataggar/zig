@@ -7977,11 +7977,14 @@ pub const pthread_mutex_t = switch (native_os) {
         level: c_int = 0,
         type: c_int = 0,
     },
-    // libzigc Win32 pthread port: 40-byte opaque buffer sized to fit
-    // SRWLOCK (1 pointer) plus recursive-mutex owner/count state.
-    .windows => extern struct {
-        data: [40]u8 align(@alignOf(usize)) = [_]u8{0} ** 40,
-    },
+    // libzigc Win32 pthread port: match mingw-w64 winpthreads, which
+    // Zig already ships via src/libs/mingw.zig and whose header is at
+    // lib/libc/include/any-windows-any/pthread.h. winpthreads defines
+    // pthread_mutex_t as `intptr_t` with sentinel initializers
+    // (-1 / -2 / -3 for normal / errorcheck / recursive). Using an
+    // opaque buffer here would ABI-conflict with winpthreads symbols
+    // already resolved by libwinpthread.a.
+    .windows => isize,
     else => void,
 };
 
@@ -8030,11 +8033,9 @@ pub const pthread_cond_t = switch (native_os) {
         value: u32 = 0,
         clockid: clockid_t = .REALTIME_COARSE,
     },
-    // libzigc Win32 pthread port: 48-byte opaque buffer sized to fit
-    // CONDITION_VARIABLE (1 pointer) plus waiter bookkeeping.
-    .windows => extern struct {
-        data: [48]u8 align(@alignOf(usize)) = [_]u8{0} ** 48,
-    },
+    // libzigc Win32 pthread port: matches winpthreads `intptr_t`
+    // (PTHREAD_COND_INITIALIZER == -1).
+    .windows => isize,
     else => void,
 };
 
@@ -8097,11 +8098,9 @@ pub const pthread_rwlock_t = switch (native_os) {
     .serenity => extern struct {
         inner: u64 = 0,
     },
-    // libzigc Win32 pthread port: 56-byte opaque buffer sized to fit
-    // an SRWLOCK plus reader/writer bookkeeping.
-    .windows => extern struct {
-        data: [56]u8 align(@alignOf(usize)) = [_]u8{0} ** 56,
-    },
+    // libzigc Win32 pthread port: matches winpthreads `intptr_t`
+    // (PTHREAD_RWLOCK_INITIALIZER == -1).
+    .windows => isize,
     else => void,
 };
 
@@ -8133,11 +8132,18 @@ pub const pthread_attr_t = switch (native_os) {
         guard_size: i32,
         stack_address: ?*anyopaque,
     },
-    // libzigc Win32 pthread port: stores stack size, detach state, and
-    // guard size. 56 bytes mirrors the Linux layout so the same fields
-    // fit naturally once the Win32 thread shim lands in Phase 3.
+    // libzigc Win32 pthread port: matches winpthreads
+    //   struct pthread_attr_t {
+    //     unsigned p_state;
+    //     void *stack;
+    //     size_t s_size;
+    //     struct sched_param param;  // { int sched_priority; }
+    //   };
     .windows => extern struct {
-        __size: [56]u8 align(@alignOf(usize)) = [_]u8{0} ** 56,
+        p_state: c_uint = 0,
+        stack: ?*anyopaque = null,
+        s_size: usize = 0,
+        sched_priority: c_int = 0,
     },
     else => void,
 };
@@ -8147,9 +8153,9 @@ pub const pthread_key_t = switch (native_os) {
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => c_ulong,
     // https://github.com/SerenityOS/serenity/blob/b98f537f117b341788023ab82e0c11ca9ae29a57/Kernel/API/POSIX/sys/types.h#L65
     .openbsd, .illumos, .serenity => c_int,
-    // libzigc Win32 pthread port: FlsAlloc returns a DWORD (c_ulong)
-    // FLS index.
-    .windows => c_ulong,
+    // libzigc Win32 pthread port: winpthreads defines
+    // `typedef unsigned pthread_key_t;` (i.e. c_uint, not c_ulong).
+    .windows => c_uint,
     else => void,
 };
 
@@ -10853,10 +10859,11 @@ pub const pthread_cancelstate = switch (native_os) {
         ENABLE = 0,
         DISABLE = 1,
     },
-    // libzigc Win32 pthread port: matches mingw-w64 winpthreads.
+    // libzigc Win32 pthread port: matches winpthreads
+    // PTHREAD_CANCEL_DISABLE=0 / PTHREAD_CANCEL_ENABLE=1.
     .windows => enum(c_int) {
-        ENABLE = 0,
-        DISABLE = 1,
+        DISABLE = 0,
+        ENABLE = 1,
     },
     else => void,
 };
@@ -10998,13 +11005,21 @@ pub extern "c" fn dn_expand(
     length: c_int,
 ) c_int;
 
-pub const PTHREAD_MUTEX_INITIALIZER: pthread_mutex_t = .{};
+pub const PTHREAD_MUTEX_INITIALIZER: pthread_mutex_t = switch (native_os) {
+    // winpthreads `PTHREAD_MUTEX_INITIALIZER == (pthread_mutex_t)-1`.
+    .windows => -1,
+    else => .{},
+};
 pub extern "c" fn pthread_mutex_lock(mutex: *pthread_mutex_t) E;
 pub extern "c" fn pthread_mutex_unlock(mutex: *pthread_mutex_t) E;
 pub extern "c" fn pthread_mutex_trylock(mutex: *pthread_mutex_t) E;
 pub extern "c" fn pthread_mutex_destroy(mutex: *pthread_mutex_t) E;
 
-pub const PTHREAD_COND_INITIALIZER: pthread_cond_t = .{};
+pub const PTHREAD_COND_INITIALIZER: pthread_cond_t = switch (native_os) {
+    // winpthreads `PTHREAD_COND_INITIALIZER == (pthread_cond_t)-1`.
+    .windows => -1,
+    else => .{},
+};
 pub extern "c" fn pthread_cond_wait(noalias cond: *pthread_cond_t, noalias mutex: *pthread_mutex_t) E;
 pub extern "c" fn pthread_cond_timedwait(noalias cond: *pthread_cond_t, noalias mutex: *pthread_mutex_t, noalias abstime: *const timespec) E;
 pub extern "c" fn pthread_cond_signal(cond: *pthread_cond_t) E;
