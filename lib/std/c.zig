@@ -376,6 +376,16 @@ pub const clockid_t = switch (native_os) {
         REALTIME_COARSE = 3,
         MONOTONIC_COARSE = 4,
     },
+    // libzigc Win32 pthread port: values chosen to match mingw-w64
+    // winpthreads (lib/x86_64-windows-gnu) so libzigc stays ABI-
+    // compatible with code linked against the same type definitions.
+    .windows => enum(c_int) {
+        REALTIME = 0,
+        MONOTONIC = 1,
+        PROCESS_CPUTIME_ID = 2,
+        THREAD_CPUTIME_ID = 3,
+        _,
+    },
     else => void,
 };
 pub const CPU_COUNT = switch (native_os) {
@@ -7004,6 +7014,9 @@ pub const time_t = switch (native_os) {
     // https://github.com/SerenityOS/serenity/blob/b98f537f117b341788023ab82e0c11ca9ae29a57/Kernel/API/POSIX/sys/types.h#L47
     // lib/libc/include/wasm-wasi-musl/__typedef_time_t.h
     .netbsd, .openbsd, .serenity, .wasi => c_longlong,
+    // Matches mingw-w64 ucrt's `__time64_t` (which Zig targets by
+    // default via `-D__MSVCRT_VERSION__=0xE00`).
+    .windows => c_longlong,
     else => void,
 };
 pub const suseconds_t = switch (native_os) {
@@ -7964,6 +7977,11 @@ pub const pthread_mutex_t = switch (native_os) {
         level: c_int = 0,
         type: c_int = 0,
     },
+    // libzigc Win32 pthread port: 40-byte opaque buffer sized to fit
+    // SRWLOCK (1 pointer) plus recursive-mutex owner/count state.
+    .windows => extern struct {
+        data: [40]u8 align(@alignOf(usize)) = [_]u8{0} ** 40,
+    },
     else => void,
 };
 
@@ -8011,6 +8029,11 @@ pub const pthread_cond_t = switch (native_os) {
         mutex: ?*pthread_mutex_t = null,
         value: u32 = 0,
         clockid: clockid_t = .REALTIME_COARSE,
+    },
+    // libzigc Win32 pthread port: 48-byte opaque buffer sized to fit
+    // CONDITION_VARIABLE (1 pointer) plus waiter bookkeeping.
+    .windows => extern struct {
+        data: [48]u8 align(@alignOf(usize)) = [_]u8{0} ** 48,
     },
     else => void,
 };
@@ -8074,6 +8097,11 @@ pub const pthread_rwlock_t = switch (native_os) {
     .serenity => extern struct {
         inner: u64 = 0,
     },
+    // libzigc Win32 pthread port: 56-byte opaque buffer sized to fit
+    // an SRWLOCK plus reader/writer bookkeeping.
+    .windows => extern struct {
+        data: [56]u8 align(@alignOf(usize)) = [_]u8{0} ** 56,
+    },
     else => void,
 };
 
@@ -8105,6 +8133,12 @@ pub const pthread_attr_t = switch (native_os) {
         guard_size: i32,
         stack_address: ?*anyopaque,
     },
+    // libzigc Win32 pthread port: stores stack size, detach state, and
+    // guard size. 56 bytes mirrors the Linux layout so the same fields
+    // fit naturally once the Win32 thread shim lands in Phase 3.
+    .windows => extern struct {
+        __size: [56]u8 align(@alignOf(usize)) = [_]u8{0} ** 56,
+    },
     else => void,
 };
 
@@ -8113,6 +8147,9 @@ pub const pthread_key_t = switch (native_os) {
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => c_ulong,
     // https://github.com/SerenityOS/serenity/blob/b98f537f117b341788023ab82e0c11ca9ae29a57/Kernel/API/POSIX/sys/types.h#L65
     .openbsd, .illumos, .serenity => c_int,
+    // libzigc Win32 pthread port: FlsAlloc returns a DWORD (c_ulong)
+    // FLS index.
+    .windows => c_ulong,
     else => void,
 };
 
@@ -10813,6 +10850,11 @@ pub const pthread_cancelstate = switch (native_os) {
         DISABLE = 1,
         MASKED = 2,
     } else if (native_abi.isGnu()) enum(c_int) {
+        ENABLE = 0,
+        DISABLE = 1,
+    },
+    // libzigc Win32 pthread port: matches mingw-w64 winpthreads.
+    .windows => enum(c_int) {
         ENABLE = 0,
         DISABLE = 1,
     },
