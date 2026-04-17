@@ -160,4 +160,11 @@ comptime {
         _ = @import("c/wasi_sources.zig");
         _ = @import("c/wasi_thread_stub.zig");
     }
+
+    // Windows (MinGW) — libzigc Win32 port (issue #248). Replaces
+    // primitives previously provided by mingw-w64 C sources that are
+    // dropped from src/libs/mingw.zig in the same commits.
+    if (builtin.os.tag == .windows) {
+        _ = @import("c/win32/time.zig");
+    }
 }

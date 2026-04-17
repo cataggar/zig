@@ -581,7 +581,7 @@ const mingw32_generic_src = [_][]const u8{
     "misc" ++ path.sep_str ++ "fwide.c",
     "misc" ++ path.sep_str ++ "getlogin.c",
     "misc" ++ path.sep_str ++ "getopt.c",
-    "misc" ++ path.sep_str ++ "gettimeofday.c",
+    // gettimeofday.c dropped — provided by lib/c/win32/time.zig (libzigc #248 Phase 2).
     "misc" ++ path.sep_str ++ "mingw-access.c",
     "misc" ++ path.sep_str ++ "mingw-aligned-malloc.c",
     "misc" ++ path.sep_str ++ "mingw_getsp.S",
@@ -907,11 +907,11 @@ const mingw32_arm_src = [_][]const u8{
 const mingw32_winpthreads_src = [_][]const u8{
     // winpthreads
     "winpthreads" ++ path.sep_str ++ "barrier.c",
-    "winpthreads" ++ path.sep_str ++ "clock.c",
+    // clock.c dropped — provided by lib/c/win32/time.zig (libzigc #248 Phase 2).
     "winpthreads" ++ path.sep_str ++ "cond.c",
     "winpthreads" ++ path.sep_str ++ "misc.c",
     "winpthreads" ++ path.sep_str ++ "mutex.c",
-    "winpthreads" ++ path.sep_str ++ "nanosleep.c",
+    // nanosleep.c dropped — provided by lib/c/win32/time.zig (libzigc #248 Phase 2).
     "winpthreads" ++ path.sep_str ++ "rwlock.c",
     "winpthreads" ++ path.sep_str ++ "sched.c",
     "winpthreads" ++ path.sep_str ++ "sem.c",
