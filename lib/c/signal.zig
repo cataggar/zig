@@ -61,7 +61,7 @@ comptime {
         symbol(&sigrelseLinux, "sigrelse");
         symbol(&sigpauseLinux, "sigpause");
     }
-    if (builtin.link_libc) {
+    if (builtin.link_libc and builtin.os.tag == .linux) {
         symbol(&signalImpl, "signal");
         symbol(&siginterruptImpl, "siginterrupt");
         symbol(&sigignoreImpl, "sigignore");

@@ -240,23 +240,27 @@ fn verrx(status: c_int, fmt: ?[*:0]const u8, ap: VaList) callconv(.c) noreturn {
 }
 
 fn warn_fn(fmt: ?[*:0]const u8, ...) callconv(.c) void {
-    const ap = @cVaStart();
-    vwarn(fmt, @as(VaList, @bitCast(ap)));
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    vwarn(fmt, ap);
 }
 
 fn warnx_fn(fmt: ?[*:0]const u8, ...) callconv(.c) void {
-    const ap = @cVaStart();
-    vwarnx(fmt, @as(VaList, @bitCast(ap)));
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    vwarnx(fmt, ap);
 }
 
 fn err_fn(status: c_int, fmt: ?[*:0]const u8, ...) callconv(.c) noreturn {
-    const ap = @cVaStart();
-    verr(status, fmt, @as(VaList, @bitCast(ap)));
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    verr(status, fmt, ap);
 }
 
 fn errx_fn(status: c_int, fmt: ?[*:0]const u8, ...) callconv(.c) noreturn {
-    const ap = @cVaStart();
-    verrx(status, fmt, @as(VaList, @bitCast(ap)));
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    verrx(status, fmt, ap);
 }
 
 fn endusershell() callconv(.c) void {

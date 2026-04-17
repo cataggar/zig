@@ -1291,8 +1291,9 @@ fn __vsyslog(priority: c_int, message: [*:0]const u8, ap: VaList) callconv(.c) v
 }
 
 fn syslog(priority: c_int, message: [*:0]const u8, ...) callconv(.c) void {
-    const ap = @cVaStart();
-    __vsyslog(priority, message, @as(VaList, @bitCast(ap)));
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    __vsyslog(priority, message, ap);
 }
 
 fn permute(argv: [*]const ?[*:0]u8, dest: c_int, src: c_int) void {

@@ -57,6 +57,16 @@ pub fn errno(syscall_return_value: usize) c_int {
             }
             return casted;
         },
+        // Windows has no Linux-style syscall return ABI; libzigc should
+        // not translate raw syscall returns on Windows. Callers are being
+        // migrated per-module. Until then, return a runtime `-1/ENOSYS`
+        // so Windows builds can progress past this helper without hitting
+        // `comptime unreachable`. Replace per-module as the Win32 port
+        // proceeds.
+        .windows => {
+            std.c._errno().* = @intFromEnum(std.posix.E.NOSYS);
+            return -1;
+        },
         else => comptime unreachable,
     };
 }
@@ -74,6 +84,10 @@ pub fn errnoSize(syscall_return_value: usize) isize {
                 return -1;
             }
             return signed;
+        },
+        .windows => {
+            std.c._errno().* = @intFromEnum(std.posix.E.NOSYS);
+            return -1;
         },
         else => comptime unreachable,
     };
