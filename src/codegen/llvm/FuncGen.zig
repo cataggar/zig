@@ -1081,7 +1081,217 @@ fn airCVaArg(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value
         return self.wip.load(.normal, llvm_arg_ty, cur, slot_align, "");
     }
 
+    // AArch64 non-Darwin/non-Windows uses AAPCS64 `va_list`, which is a
+    // 32-byte struct with separate register save areas for GP and FP regs
+    // plus an overflow-stack pointer. LLVM's `va_arg` instruction is
+    // Darwin-only on AArch64 (ziglang/zig#14096; upstream
+    // AArch64TargetLowering::LowerVAARG asserts `isTargetDarwin`), so we
+    // must emit the walk manually. Algorithm follows clang's
+    // `AArch64ABIInfo::EmitAAPCSVAArg` in clang/lib/CodeGen/Targets/AArch64.cpp.
+    // See ctaggart/zig#251.
+    // Restrict to little-endian AArch64 for now. Big-endian (`aarch64_be`)
+    // requires extra right-alignment for sub-slot scalars/small direct values
+    // in both register and stack paths (see clang EmitAAPCSVAArg BE handling),
+    // which is not implemented yet.
+    const is_aapcs_aarch64 = target.cpu.arch == .aarch64 and
+        switch (target.os.tag) {
+            .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .windows => false,
+            else => true,
+        };
+    if (is_aapcs_aarch64) {
+        return self.airCVaArgAapcsAarch64(list, arg_ty, llvm_arg_ty);
+    }
+
     return self.wip.vaArg(list, llvm_arg_ty, "");
+}
+
+/// Emit AAPCS64 `va_arg` walk for non-Darwin/non-Windows AArch64. Handles:
+///   - GP scalar / small aggregate (size ≤ 16) passed through x0..x7 save area.
+///   - Single-register FP/vector passed through q0..q7 save area.
+///   - Indirect large aggregate (size > 16): register save area slot / stack
+///     slot holds a pointer to the actual argument.
+///   - Overflow stack path when register save area is exhausted.
+/// HFA/HVA with N > 1 members (whose elements are spread across consecutive
+/// 16-byte q-register slots and must be deinterleaved to a contiguous temp)
+/// is not yet supported and falls through to LLVM's `va_arg` instruction
+/// (which will fail to lower on non-Darwin — same as before this fix;
+/// libzigc does not use FP variadic args).
+fn airCVaArgAapcsAarch64(
+    self: *FuncGen,
+    list: Builder.Value,
+    arg_ty: Type,
+    llvm_arg_ty: Builder.Type,
+) Allocator.Error!Builder.Value {
+    const o = self.object;
+    const zcu = o.zcu;
+    const ty_tag = arg_ty.zigTypeTag(zcu);
+    const ty_size: u32 = @intCast(arg_ty.abiSize(zcu));
+    const ty_align_bytes: u32 = @intCast(arg_ty.abiAlignment(zcu).toByteUnits() orelse 1);
+
+    // Classify argument.
+    // Only treat scalar FP/vector as FPR when it fits in one 128-bit q register.
+    // Larger/illegal vectors need different classification (clang
+    // classifyArgumentType) — fall back to the GP/indirect path.
+    const is_fpr_scalar = (ty_tag == .float or ty_tag == .vector) and ty_size <= 16;
+    const is_aggregate = switch (ty_tag) {
+        .@"struct", .@"union", .array => true,
+        else => false,
+    };
+    const is_indirect = is_aggregate and ty_size > 16;
+
+    // HFA (homogeneous floating-point/short-vector aggregate) is not yet
+    // supported here; fall back to LLVM's va_arg (will assert on non-Darwin
+    // AArch64, but libzigc never takes this path). Same for vector aggregates
+    // we can't classify trivially.
+    if (is_aggregate and !is_indirect and !isTrivialGpAggregate(arg_ty, zcu)) {
+        return self.wip.vaArg(list, llvm_arg_ty, "");
+    }
+
+    const is_fpr = is_fpr_scalar; // multi-register HFA path not handled above
+    const reg_size_bytes: u32 = if (is_indirect)
+        8
+    else if (is_fpr)
+        16 // single q-register slot
+    else
+        std.mem.alignForward(u32, ty_size, 8);
+
+    // Field indices in VaListAarch64 (must match lib/std/builtin.zig).
+    const stack_field: u32 = 0;
+    const reg_top_field: u32 = if (is_fpr) 2 else 1;
+    const reg_offs_field: u32 = if (is_fpr) 4 else 3;
+
+    // Look up the AAPCS va_list struct type from the list parameter's
+    // pointee. The list value is a `*VaListAarch64`, so we GEP struct fields
+    // using the type that `@cVaStart` lowered the alloca to.
+    const va_list_struct_ty = try o.lowerType(Type.fromInterned(zcu.builtin_decl_values.get(.VaList)));
+
+    const i32_ty: Builder.Type = .i32;
+    const usize_ty = try o.lowerType(.usize);
+    const ptr_align: Builder.Alignment = comptime .fromByteUnits(8);
+
+    // Load reg_offs (signed i32, negative when regs remaining).
+    const reg_offs_p = try self.wip.gepStruct(va_list_struct_ty, list, reg_offs_field, "");
+    var reg_offs = try self.wip.load(.normal, i32_ty, reg_offs_p, .fromByteUnits(4), "");
+
+    // Blocks.
+    const maybe_reg_block = try self.wip.block(1, "vaarg.maybe_reg");
+    const in_reg_block = try self.wip.block(1, "vaarg.in_reg");
+    const on_stack_block = try self.wip.block(2, "vaarg.on_stack");
+    const cont_block = try self.wip.block(2, "vaarg.end");
+
+    // If reg_offs >= 0, registers exhausted; go to stack.
+    const zero_i32 = try o.builder.intValue(i32_ty, 0);
+    const using_stack = try self.wip.icmp(.sge, reg_offs, zero_i32, "");
+    _ = try self.wip.brCond(using_stack, on_stack_block, maybe_reg_block, .none);
+
+    // -- maybe_reg_block --
+    self.wip.cursor = .{ .block = maybe_reg_block };
+    // Align reg_offs for 16-byte-aligned GP args (e.g. __int128).
+    if (!is_fpr and !is_indirect and ty_align_bytes > 8) {
+        const align_val = try o.builder.intValue(i32_ty, @as(i32, @intCast(ty_align_bytes)) - 1);
+        const neg_align = try o.builder.intValue(i32_ty, -@as(i32, @intCast(ty_align_bytes)));
+        const sum = try self.wip.bin(.add, reg_offs, align_val, "align_regoffs");
+        reg_offs = try self.wip.bin(.@"and", sum, neg_align, "aligned_regoffs");
+    }
+    // new_offs = reg_offs + reg_size; store; branch on new_offs <= 0.
+    const reg_size_val = try o.builder.intValue(i32_ty, @as(i32, @intCast(reg_size_bytes)));
+    const new_offs = try self.wip.bin(.add, reg_offs, reg_size_val, "new_reg_offs");
+    _ = try self.wip.store(.normal, new_offs, reg_offs_p, .fromByteUnits(4));
+    const in_regs = try self.wip.icmp(.sle, new_offs, zero_i32, "inreg");
+    _ = try self.wip.brCond(in_regs, in_reg_block, on_stack_block, .none);
+
+    // -- in_reg_block --
+    self.wip.cursor = .{ .block = in_reg_block };
+    const reg_top_p = try self.wip.gepStruct(va_list_struct_ty, list, reg_top_field, "");
+    const reg_top = try self.wip.load(.normal, .ptr, reg_top_p, ptr_align, "");
+    // Extend reg_offs to usize (signed) for pointer arithmetic.
+    const reg_offs_sext = try self.wip.cast(.sext, reg_offs, usize_ty, "");
+    const reg_base_addr = try self.wip.gep(.inbounds, .i8, reg_top, &.{reg_offs_sext}, "reg_addr");
+    const in_reg_end_block = self.wip.cursor.block;
+    _ = try self.wip.br(cont_block);
+
+    // -- on_stack_block --
+    self.wip.cursor = .{ .block = on_stack_block };
+    const stack_p = try self.wip.gepStruct(va_list_struct_ty, list, stack_field, "");
+    var stack_addr = try self.wip.load(.normal, .ptr, stack_p, ptr_align, "");
+    // Align stack_addr up to ty_align_bytes if > 8. Indirect args occupy an
+    // 8-byte pointer slot on the stack, so no over-alignment is applied.
+    if (!is_indirect and ty_align_bytes > 8) {
+        const stack_int = try self.wip.cast(.ptrtoint, stack_addr, usize_ty, "");
+        const align_m1 = try o.builder.intValue(usize_ty, ty_align_bytes - 1);
+        const neg_align_bits: u64 = @bitCast(-@as(i64, ty_align_bytes));
+        const neg_align = try o.builder.intValue(usize_ty, neg_align_bits);
+        const sum = try self.wip.bin(.add, stack_int, align_m1, "");
+        const aligned = try self.wip.bin(.@"and", sum, neg_align, "");
+        stack_addr = try self.wip.cast(.inttoptr, aligned, .ptr, "");
+    }
+    // Bump ap.__stack by padded size.
+    const stack_slot_size: u64 = if (is_indirect)
+        8
+    else
+        std.mem.alignForward(u64, ty_size, 8);
+    const stack_slot_size_val = try o.builder.intValue(usize_ty, stack_slot_size);
+    const new_stack = try self.wip.gep(.inbounds, .i8, stack_addr, &.{stack_slot_size_val}, "new_stack");
+    _ = try self.wip.store(.normal, new_stack, stack_p, ptr_align);
+    const on_stack_end_block = self.wip.cursor.block;
+    _ = try self.wip.br(cont_block);
+
+    // -- cont_block -- phi between reg_base_addr and stack_addr.
+    self.wip.cursor = .{ .block = cont_block };
+    const addr_phi = try self.wip.phi(.ptr, "vaarg.addr");
+    addr_phi.finish(
+        &.{ reg_base_addr, stack_addr },
+        &.{ in_reg_end_block, on_stack_end_block },
+        &self.wip,
+    );
+    var result_addr = addr_phi.toValue();
+
+    // For indirect, dereference once to get actual arg pointer.
+    if (is_indirect) {
+        result_addr = try self.wip.load(.normal, .ptr, result_addr, ptr_align, "");
+    }
+
+    // Load the value.
+    const load_align = arg_ty.abiAlignment(zcu).toLlvm();
+    return self.wip.load(.normal, llvm_arg_ty, result_addr, load_align, "");
+}
+
+/// Returns true if `ty` is a small aggregate (≤16B) that can be loaded
+/// directly from a GP register save-area slot without special HFA/HVA
+/// deinterleaving. Used by airCVaArgAapcsAarch64 to decide between the
+/// manual walk and falling back to LLVM's `va_arg`.
+fn isTrivialGpAggregate(ty: Type, zcu: *Zcu) bool {
+    const tag = ty.zigTypeTag(zcu);
+    if (tag != .@"struct" and tag != .@"union" and tag != .array) return false;
+    if (ty.abiSize(zcu) > 16) return false;
+    // TODO: classify HFA (all float/vec leaves of same type, 1..4 members).
+    // Such aggregates must be deinterleaved from consecutive 16-byte q-slots
+    // to a contiguous temp. Until that path is implemented, reject composite
+    // types containing any float/vector so we fall back to LLVM va_arg.
+    return !containsFloatOrVector(ty, zcu);
+}
+
+fn containsFloatOrVector(ty: Type, zcu: *Zcu) bool {
+    switch (ty.zigTypeTag(zcu)) {
+        .float, .vector => return true,
+        .array => return containsFloatOrVector(ty.childType(zcu), zcu),
+        .@"struct" => {
+            const n = ty.structFieldCount(zcu);
+            var i: u32 = 0;
+            while (i < n) : (i += 1) {
+                if (containsFloatOrVector(ty.fieldType(i, zcu), zcu)) return true;
+            }
+            return false;
+        },
+        .@"union" => {
+            const union_obj = zcu.typeToUnion(ty) orelse return false;
+            for (union_obj.field_types.get(&zcu.intern_pool)) |field_ty_ip| {
+                if (containsFloatOrVector(Type.fromInterned(field_ty_ip), zcu)) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
 }
 
 fn airCVaCopy(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Value {

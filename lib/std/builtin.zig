@@ -1034,13 +1034,27 @@ pub const VaList = switch (builtin.cpu.arch) {
     .wasm64,
     .xcore,
     => *anyopaque,
-    .aarch64, .aarch64_be => switch (builtin.os.tag) {
+    .aarch64 => switch (builtin.os.tag) {
+        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .windows => *u8,
+        else => VaListAarch64,
+    },
+    // Big-endian AArch64 still needs sub-slot right-alignment in the va_list
+    // walk (clang EmitAAPCSVAArg BE handling), which the LLVM backend's
+    // airCVaArg does not yet implement. Keep the stage2_llvm guard until
+    // that is added.
+    .aarch64_be => switch (builtin.os.tag) {
         .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .windows => *u8,
         else => switch (builtin.zig_backend) {
+            .stage2_llvm => @compileError("aarch64_be va_arg not yet implemented in LLVM backend"),
             else => VaListAarch64,
-            .stage2_llvm => @compileError("disabled due to miscompilations"),
         },
     },
+    // For little-endian AArch64 on non-Darwin, non-Windows the `.stage2_llvm`
+    // compile-error branch has been removed: airCVaArg in
+    // src/codegen/llvm/FuncGen.zig now emits the AAPCS64 va_list walk
+    // directly (LLVM's `va_arg` instruction is Darwin-only for AArch64 per
+    // upstream ziglang/zig#14096). Removed per
+    // https://github.com/ctaggart/zig/issues/251.
     // On x86_64 Windows/UEFI, `va_list` is a single pointer, so the
     // implementation is trivial compared to the SysV register-save-area
     // struct. The `.stage2_llvm` compile-error branch added when variadic
