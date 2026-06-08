@@ -1,0 +1,72 @@
+name: Publish Zig Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Zig version to publish (e.g. 0.15.2 or 0.16.0-dev.2962+08416b44f)"
+        required: true
+
+permissions: {}
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: gh-release
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Download Zig assets
+        run: uv run scripts/download_assets.py "${{ inputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zig-assets
+          path: dist/
+          retention-days: 1
+
+  release:
+    needs: download
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to create releases
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: zig-assets
+          path: dist/
+
+      - name: List assets
+        run: ls -lh dist/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          TAG="v${VERSION}"
+
+          # Determine if this is a dev build or stable release
+          if [[ "${VERSION}" == *"-dev."* ]]; then
+            PRERELEASE="--prerelease"
+            TITLE="Zig ${VERSION} (dev)"
+          else
+            PRERELEASE=""
+            TITLE="Zig ${VERSION}"
+          fi
+
+          NOTES="Mirror of Zig ${VERSION} from https://ziglang.org/download/
+
+          Assets downloaded from ziglang.org with SHA256 verification.
+          Minisig signatures are included for additional verification.
+
+          Original release: https://ziglang.org/download/#${VERSION}"
+
+          gh release create "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${TITLE}" \
+            --notes "${NOTES}" \
+            ${PRERELEASE} \
+            dist/*
