@@ -1,0 +1,295 @@
+name: build-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build and upload assets to (e.g. 0.17.0-dev.704.libc.1)'
+        required: false
+        default: '0.17.0-dev.704.libc.1'
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: "0.17.0-dev.704+b8cb78023"
+  LLVM_VERSION: "22.1.2"
+
+jobs:
+  build:
+    name: "${{ matrix.target }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-linux
+            runs-on: ubuntu-latest
+            host_asset: zig-x86_64-linux
+            llvm_asset: llvm-zig-22.1.2-x86_64-linux
+            zig_target: x86_64-linux-gnu
+            archive_ext: tar.xz
+          - target: aarch64-macos
+            runs-on: macos-latest
+            host_asset: zig-aarch64-macos
+            llvm_asset: llvm-zig-22.1.2-aarch64-macos
+            zig_target: aarch64-macos
+            archive_ext: tar.xz
+          - target: x86_64-windows
+            runs-on: windows-latest
+            host_asset: zig-x86_64-windows
+            llvm_asset: llvm-zig-22.1.2-x86_64-windows-msvc
+            zig_target: x86_64-windows-msvc
+            archive_ext: zip
+          # x86_64-macos intentionally excluded: the macos-latest runner
+          # is arm64 only, and the x86_64-macos SDK shipped with Xcode
+          # 16.x does not include libzstd.tbd, which llvm-zig-22.1.2 was
+          # built requiring. Cross builds therefore fail at link time.
+          # Users can cross-compile locally from an arm64 build.
+          # x86_64-windows re-enabled: #248 Phases 0/1/2/4/6/7/8
+          # provide a comprehensive Win32 libzigc surface (time,
+          # signals, process/identity, Linux-only stubs, dlopen +
+          # passwd/login via lib/c/win32/*). mingw-w64 + ucrt still
+          # provide stdio, filesystem, and core sockets. Phase 3
+          # (pthread atomic swap) is deferred; libwinpthread still
+          # ships with the target.
+
+    runs-on: ${{ matrix.runs-on }}
+    steps:
+      - name: Free disk space (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -x
+          df -h
+          sysctl hw.memsize hw.pagesize vm.swapusage
+          # Prune the 9 old Xcodes (~40GB) and other stuff we don't need
+          sudo rm -rf /Applications/Xcode_14*.app /Applications/Xcode_15*.app /Applications/Xcode_16.[0-3]*.app 2>/dev/null || true
+          sudo rm -rf /Library/Developer/CoreSimulator 2>/dev/null || true
+          sudo rm -rf ~/Library/Developer/CoreSimulator 2>/dev/null || true
+          sudo rm -rf /Users/runner/Library/Android 2>/dev/null || true
+          df -h
+          # Pre-allocate a big swap file by forcing dynamic_pager to eager-grow.
+          # Default macOS swap is 0 until memory pressure; link peaks blow past
+          # jetsam before swap can grow. Pre-touching VM volume works as a hint.
+          sudo mkdir -p /System/Volumes/VM
+          # Write a large zeroed file to prime the VM volume (not real swap,
+          # but confirms disk is writable and warms caches)
+          sudo dd if=/dev/zero of=/System/Volumes/VM/.prealloc bs=1048576 count=16384 2>/dev/null || true
+          sudo rm -f /System/Volumes/VM/.prealloc || true
+          # Increase ulimits
+          ulimit -a
+          sysctl vm.swapusage
+          df -h
+
+      - name: Checkout ${{ inputs.tag }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Download host zig (non-Windows)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          URL="https://github.com/cataggar/zig/releases/download/v${ZIG_VERSION}/${{ matrix.host_asset }}-${ZIG_VERSION}.tar.xz"
+          curl -sSfL "$URL" | tar -xJ -C "$HOME"
+          echo "ZIG=$HOME/${{ matrix.host_asset }}-${ZIG_VERSION}/zig" >> "$GITHUB_ENV"
+
+      - name: Download host zig (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/cataggar/zig/releases/download/v$env:ZIG_VERSION/${{ matrix.host_asset }}-$env:ZIG_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:USERPROFILE\zig.zip"
+          Expand-Archive -Path "$env:USERPROFILE\zig.zip" -DestinationPath "$env:USERPROFILE"
+          echo "ZIG=$env:USERPROFILE\${{ matrix.host_asset }}-$env:ZIG_VERSION\zig.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Download LLVM (non-Windows)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          URL="https://github.com/cataggar/llvm-project/releases/download/llvm-zig-${LLVM_VERSION}/${{ matrix.llvm_asset }}.tar.xz"
+          curl -sSfL "$URL" | tar -xJ -C "$HOME"
+          echo "LLVM_PREFIX=$HOME/${{ matrix.llvm_asset }}" >> "$GITHUB_ENV"
+
+      - name: Download LLVM (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/cataggar/llvm-project/releases/download/llvm-zig-$env:LLVM_VERSION/${{ matrix.llvm_asset }}.zip"
+          Invoke-WebRequest -Uri $url -OutFile "$env:USERPROFILE\llvm.zip"
+          Expand-Archive -Path "$env:USERPROFILE\llvm.zip" -DestinationPath "$env:USERPROFILE"
+          echo "LLVM_PREFIX=$env:USERPROFILE\${{ matrix.llvm_asset }}" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Build stage4 (non-Windows)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -eux
+          VERSION="${{ inputs.tag }}"
+          PKG="zig-${{ matrix.target }}-${VERSION}"
+          EXTRA_PREFIX=""
+          TARGET_FLAG="-Dtarget=${{ matrix.zig_target }}"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            export SDKROOT="$(xcrun --show-sdk-path)"
+            echo "SDKROOT=$SDKROOT"
+            # Stage a lib-only shim with symlinks to multi-arch SDK .tbd
+            # stubs so cross (arm64 host -> x86_64-macos) can link -lz /
+            # -lzstd without pulling $SDKROOT/usr/include into the header
+            # path and shadowing zig's bundled libc++ headers.
+            SDKSHIM="$RUNNER_TEMP/sdk-shim"
+            mkdir -p "$SDKSHIM/lib"
+            for f in libz.tbd libzstd.tbd; do
+              if [ -e "$SDKROOT/usr/lib/$f" ]; then
+                ln -sf "$SDKROOT/usr/lib/$f" "$SDKSHIM/lib/$f"
+              fi
+            done
+            EXTRA_PREFIX="--search-prefix $SDKSHIM"
+            # For cross builds from arm64 runner to x86_64-macos we must
+            # NOT add /opt/homebrew because its dylibs are arm64-only;
+            # zig would pick libz.dylib there and lld would abort with
+            # "invalid cpu architecture: aarch64".
+            if [ "${{ matrix.target }}" = "aarch64-macos" ]; then
+              EXTRA_PREFIX="$EXTRA_PREFIX --search-prefix /opt/homebrew"
+              # Drop -Dtarget on native so zig auto-detects the SDK for
+              # headers/libs.
+              TARGET_FLAG=""
+            fi
+            brew install zstd || true
+          fi
+          "$ZIG" build \
+            --prefix "$PKG" \
+            --search-prefix "$LLVM_PREFIX" \
+            $EXTRA_PREFIX \
+            --zig-lib-dir lib \
+            --maxrss 8000000000 \
+            -Denable-llvm \
+            -Dstatic-llvm \
+            -Doptimize=Debug \
+            -Dno-langref \
+            $TARGET_FLAG \
+            -Duse-zig-libcxx \
+            -Dversion-string="$VERSION" \
+            --verbose
+          ls -lR "$PKG" | head -40 || true
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+
+      - name: Build stage4 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $VERSION = "${{ inputs.tag }}"
+          $PKG = "zig-${{ matrix.target }}-$VERSION"
+          & $env:ZIG build `
+            --prefix $PKG `
+            --search-prefix $env:LLVM_PREFIX `
+            --zig-lib-dir lib `
+            --maxrss 8000000000 `
+            -Denable-llvm `
+            -Dstatic-llvm `
+            -Doptimize=Debug `
+            -Dno-langref `
+            -Dtarget=${{ matrix.zig_target }} `
+            -Duse-zig-libcxx `
+            -Dversion-string="$VERSION" `
+            --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          echo "PKG=$PKG" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Smoke-test stage4 (same-arch only)
+        if: (runner.os == 'Linux' && matrix.target == 'x86_64-linux') || (runner.os == 'macOS' && matrix.target == 'aarch64-macos') || (runner.os == 'Windows' && matrix.target == 'x86_64-windows')
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            "./$PKG/bin/zig.exe" version
+          else
+            "./$PKG/bin/zig" version
+          fi
+
+      - name: Package (tar.xz)
+        if: matrix.archive_ext == 'tar.xz'
+        shell: bash
+        run: |
+          tar -cJf "${PKG}.tar.xz" "$PKG"
+          ls -lh "${PKG}.tar.xz"
+          echo "ARCHIVE=${PKG}.tar.xz" >> "$GITHUB_ENV"
+
+      - name: Package (zip)
+        if: matrix.archive_ext == 'zip'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path $env:PKG -DestinationPath "$env:PKG.zip"
+          Get-Item "$env:PKG.zip" | Format-List
+          echo "ARCHIVE=$env:PKG.zip" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Upload archive as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ env.ARCHIVE }}
+          retention-days: 7
+
+  release:
+    name: "attach assets to release"
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (for scripts/sign-asset.exp)
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -lh dist/
+
+      - name: Sign archives with minisign (per-asset .minisig sidecars)
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD:   ${{ secrets.MINISIGN_PASSWORD }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y minisign expect
+          # Write secret key file with 0600. The runner workspace is
+          # ephemeral; the trap removes it before the step exits.
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > dist/minisign.key
+          trap 'rm -f dist/minisign.key' EXIT
+          cd dist
+          shopt -s nullglob
+          for asset in zig-*.tar.xz zig-*.zip; do
+            comment="timestamp:$(date +%s) file:${asset} commit:${GITHUB_SHA} tag:${TAG}"
+            echo "signing ${asset} (trusted comment: ${comment})"
+            expect ../scripts/sign-asset.exp "$asset" "$comment"
+          done
+          ls -la *.minisig
+
+      - name: Ensure release exists (create as draft if missing)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --prerelease \
+              --notes "libzigc build of Zig at tag \`$TAG\`. Verify with minisign — see project README for the public key."
+          fi
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release upload "$TAG" dist/zig-*.tar.xz dist/zig-*.zip dist/zig-*.minisig \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
