@@ -57,12 +57,11 @@ jobs:
             TITLE="Zig ${VERSION}"
           fi
 
-          NOTES="Mirror of Zig ${VERSION} from https://ziglang.org/download/
+          NOTES="Mirrored https://ziglang.org/download/ . Verified with their minisig. Install using [ghr](https://github.com/cataggar/ghr):
 
-          Assets downloaded from ziglang.org with SHA256 verification.
-          Minisig signatures are included for additional verification.
-
-          Original release: https://ziglang.org/download/#${VERSION}"
+          \`\`\`
+          ghr install ${GITHUB_REPOSITORY}@${TAG} RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
+          \`\`\`"
 
           gh release create "${TAG}" \
             --repo "${GITHUB_REPOSITORY}" \
