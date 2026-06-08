@@ -49,12 +49,11 @@ jobs:
           TAG="v${VERSION}"
 
           # Determine if this is a dev build or stable release
+          TITLE="Zig ${VERSION}"
           if [[ "${VERSION}" == *"-dev."* ]]; then
             PRERELEASE="--prerelease"
-            TITLE="Zig ${VERSION} (dev)"
           else
             PRERELEASE=""
-            TITLE="Zig ${VERSION}"
           fi
 
           NOTES="Mirrored https://ziglang.org/download/ . Verified with their minisig. Install using [ghr](https://github.com/cataggar/ghr):
