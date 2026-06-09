@@ -113,6 +113,7 @@ comptime {
         _ = @import("c/sched.zig");
         _ = @import("c/search.zig");
         _ = @import("c/stat.zig");
+        _ = @import("c/stdio.zig");
         _ = @import("c/stropts.zig");
         _ = @import("c/temp.zig");
         _ = @import("c/termios.zig");
