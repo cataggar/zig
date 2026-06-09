@@ -110,12 +110,17 @@ fn semgetLinux(key: c_int, n: c_int, fl: c_int) callconv(.c) c_int {
 }
 
 fn semopLinux(id: c_int, buf: *anyopaque, n: usize) callconv(.c) c_int {
-    return errno(linux.syscall3(
-        .semop,
-        syscallArg(id),
-        @intFromPtr(buf),
-        n,
-    ));
+    // Some 0.17 targets (e.g. x86, s390x) have no direct `semop` syscall; like
+    // musl, implement semop as semtimedop with a null timeout.
+    if (@hasField(linux.SYS, "semop")) {
+        return errno(linux.syscall3(
+            .semop,
+            syscallArg(id),
+            @intFromPtr(buf),
+            n,
+        ));
+    }
+    return semtimedopLinux(id, buf, n, null);
 }
 
 fn semtimedopLinux(id: c_int, buf: *anyopaque, n: usize, ts: ?*const anyopaque) callconv(.c) c_int {
