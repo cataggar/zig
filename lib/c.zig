@@ -104,7 +104,6 @@ comptime {
     _ = @import("c/wchar.zig");
 
     if (builtin.os.tag == .linux) {
-        _ = @import("c/conf.zig");
         _ = @import("c/dirent.zig");
         _ = @import("c/fcntl.zig");
         _ = @import("c/internal.zig");
@@ -127,6 +126,7 @@ comptime {
         _ = @import("c/sys/utsname.zig");
     }
     if (builtin.target.isWasiLibC()) {
+        _ = @import("c/search.zig");
         _ = @import("c/unistd.zig");
     }
 }

@@ -4,6 +4,7 @@ const linux = std.os.linux;
 
 const symbol = @import("../c.zig").symbol;
 const errno = @import("../c.zig").errno;
+const syscallArg = @import("../c.zig").syscallArg;
 
 comptime {
     if (builtin.target.isMuslLibC()) {
@@ -52,10 +53,10 @@ fn mkdiratLinux(fd: c_int, path: [*:0]const u8, mode: linux.mode_t) callconv(.c)
 fn mknodatSyscall(fd: c_int, path: [*:0]const u8, mode: linux.mode_t, dev: linux.dev_t) usize {
     return linux.syscall4(
         .mknodat,
-        @as(linux.syscall_arg_t, @bitCast(@as(isize, @intCast(fd)))),
-        @as(linux.syscall_arg_t, @intCast(@intFromPtr(path))),
-        @as(linux.syscall_arg_t, @intCast(mode)),
-        @as(linux.syscall_arg_t, @truncate(dev)),
+        syscallArg(fd),
+        @intFromPtr(path),
+        syscallArg(mode),
+        syscallArg(dev),
     );
 }
 fn mknodLinux(path: [*:0]const u8, mode: linux.mode_t, dev: linux.dev_t) callconv(.c) c_int {
@@ -344,10 +345,10 @@ fn fstatatImpl(fd: c_int, path: [*:0]const u8, buf: *anyopaque, flag: c_int) cal
         // Kernel stat struct matches musl stat — pass buffer directly.
         return errno(linux.syscall4(
             .fstatat64,
-            @as(usize, @bitCast(@as(isize, fd))),
+            syscallArg(fd),
             @intFromPtr(path),
             @intFromPtr(buf),
-            @as(usize, @bitCast(@as(isize, flag))),
+            syscallArg(flag),
         ));
     }
     // Use statx and convert to the arch-specific musl stat struct.
@@ -543,18 +544,18 @@ fn fchmodatLinux(fd: c_int, path: [*:0]const u8, mode: linux.mode_t, flag: c_int
 // --- statvfs/fstatvfs (define kernel statfs struct) ---
 
 const Statfs = extern struct {
-    f_type: usize,
-    f_bsize: usize,
-    f_blocks: usize,
-    f_bfree: usize,
-    f_bavail: usize,
-    f_files: usize,
-    f_ffree: usize,
+    f_type: c_ulong,
+    f_bsize: c_ulong,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
     f_fsid: extern struct { val: [2]c_int },
-    f_namelen: usize,
-    f_frsize: usize,
-    f_flags: usize,
-    f_spare: [4]usize,
+    f_namelen: c_ulong,
+    f_frsize: c_ulong,
+    f_flags: c_ulong,
+    f_spare: [4]c_ulong,
 };
 
 const Statvfs = extern struct {
@@ -575,12 +576,18 @@ const Statvfs = extern struct {
 
 fn statfsLinux(path: [*:0]const u8, buf: *Statfs) callconv(.c) c_int {
     buf.* = std.mem.zeroes(Statfs);
+    if (@hasField(linux.SYS, "statfs64")) {
+        return errno(linux.syscall3(.statfs64, @intFromPtr(path), @sizeOf(Statfs), @intFromPtr(buf)));
+    }
     return errno(linux.syscall2(.statfs, @intFromPtr(path), @intFromPtr(buf)));
 }
 
 fn fstatfsLinux(fd: c_int, buf: *Statfs) callconv(.c) c_int {
     buf.* = std.mem.zeroes(Statfs);
-    return errno(linux.syscall2(.fstatfs, @as(usize, @bitCast(@as(isize, fd))), @intFromPtr(buf)));
+    if (@hasField(linux.SYS, "fstatfs64")) {
+        return errno(linux.syscall3(.fstatfs64, syscallArg(fd), @sizeOf(Statfs), @intFromPtr(buf)));
+    }
+    return errno(linux.syscall2(.fstatfs, syscallArg(fd), @intFromPtr(buf)));
 }
 
 fn fixup(out: *Statvfs, in_buf: *const Statfs) void {

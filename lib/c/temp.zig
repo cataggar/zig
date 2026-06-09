@@ -22,7 +22,8 @@ comptime {
 fn __randname(template: [*]u8) callconv(.c) [*]u8 {
     var ts: linux.timespec = undefined;
     _ = linux.clock_gettime(.REALTIME, &ts);
-    var r: usize = @bitCast(ts.sec +% ts.nsec +% @as(isize, linux.gettid()) *% 65537);
+    const mix = @as(i64, @intCast(ts.sec)) +% @as(i64, @intCast(ts.nsec)) +% @as(i64, linux.gettid()) *% 65537;
+    var r: usize = @truncate(@as(u64, @bitCast(mix)));
     for (0..6) |i| {
         template[i] = @intCast(@as(u8, 'A') + (@as(u8, @truncate(r & 15))) + (@as(u8, @truncate(r & 16)) * 2));
         r >>= 5;

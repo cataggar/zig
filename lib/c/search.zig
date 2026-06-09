@@ -326,7 +326,7 @@ fn resize(tab: *Tab, nel: usize) bool {
     var new_size: usize = MINSIZE;
     while (new_size < nel) {
         if (new_size >= MAXSIZE) {
-            // Cannot grow further.
+            std.c._errno().* = @intFromEnum(std.c.E.NOMEM);
             return false;
         }
         new_size *= 2;

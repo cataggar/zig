@@ -270,15 +270,7 @@ fn pipe2Linux(fd: *[2]c_int, flags: c_int) callconv(.c) c_int {
 
 fn lseekLinux(fd: c_int, offset: linux.off_t, whence: c_int) callconv(.c) linux.off_t {
     const whence_u32: u32 = @intCast(@as(c_uint, @bitCast(whence)));
-    if (@bitSizeOf(usize) == 64) {
-        const signed: isize = @bitCast(linux.lseek(fd, offset, whence_u32));
-        if (signed < 0) {
-            @branchHint(.unlikely);
-            std.c._errno().* = @intCast(-signed);
-            return -1;
-        }
-        return signed;
-    } else {
+    if (@hasField(linux.SYS, "llseek")) {
         var result: linux.off_t = undefined;
         const signed: isize = @bitCast(linux.llseek(fd, offset, &result, whence_u32));
         if (signed < 0) {
@@ -287,6 +279,14 @@ fn lseekLinux(fd: c_int, offset: linux.off_t, whence: c_int) callconv(.c) linux.
             return -1;
         }
         return result;
+    } else {
+        const signed: isize = @bitCast(linux.lseek(fd, offset, whence_u32));
+        if (signed < 0) {
+            @branchHint(.unlikely);
+            std.c._errno().* = @intCast(-signed);
+            return -1;
+        }
+        return @intCast(signed);
     }
 }
 

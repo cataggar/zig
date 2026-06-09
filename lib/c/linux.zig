@@ -140,12 +140,12 @@ comptime {
         symbol(&syncfsLinux, "syncfs");
 
         // sync_file_range
-        if (@hasField(linux.SYS, "sync_file_range"))
-            symbol(&sync_file_rangeLinux, "sync_file_range")
-        else if (@hasField(linux.SYS, "sync_file_range2"))
+        if (@hasField(linux.SYS, "sync_file_range") or @hasField(linux.SYS, "sync_file_range2"))
+            symbol(&sync_file_rangeLinux, "sync_file_range");
 
-            // sysinfo
-            symbol(&sysinfoLinux, "__lsysinfo");
+        // sysinfo
+        symbol(&sysinfoLinux, "__lsysinfo");
+        symbol(&sysinfoLinux, "sysinfo");
 
         // timerfd
         symbol(&timerfd_createLinux, "timerfd_create");
@@ -611,7 +611,42 @@ fn wait3Linux(status: ?*c_int, options: c_int, usage: ?*anyopaque) callconv(.c) 
 }
 
 fn wait4Linux(pid: linux.pid_t, status: ?*c_int, options: c_int, ru: ?*anyopaque) callconv(.c) linux.pid_t {
-    return errno(linux.syscall4(.wait4, arg(pid), arg(status), arg(options), arg(ru)));
+    if (@hasField(linux.SYS, "wait4")) {
+        return errno(linux.syscall4(.wait4, arg(pid), arg(status), arg(options), arg(ru)));
+    }
+
+    var info: linux.siginfo_t = std.mem.zeroes(linux.siginfo_t);
+    const wait_id: linux.pid_t, const id_type: linux.P = if (pid < -1)
+        .{ -pid, .PGID }
+    else if (pid == -1)
+        .{ pid, .ALL }
+    else if (pid == 0)
+        .{ pid, .PGID }
+    else
+        .{ pid, .PID };
+    const WEXITED: c_int = 4;
+    const rc: isize = @bitCast(linux.syscall5(.waitid, arg(id_type), arg(wait_id), arg(&info), arg(options | WEXITED), arg(ru)));
+    if (rc < 0) {
+        std.c._errno().* = @intCast(-rc);
+        return -1;
+    }
+
+    const child_pid = info.fields.common.first.piduid.pid;
+    if (child_pid != 0) {
+        if (status) |st| {
+            const si_status: u32 = @bitCast(info.fields.common.second.sigchld.status);
+            const wait_status: u32 = switch (@as(linux.CLD, @enumFromInt(info.code))) {
+                .CONTINUED => 0xffff,
+                .DUMPED => (si_status & 0x7f) | 0x80,
+                .EXITED => (si_status & 0xff) << 8,
+                .KILLED => si_status & 0x7f,
+                .STOPPED, .TRAPPED => (si_status << 8) + 0x7f,
+                _ => 0,
+            };
+            st.* = @bitCast(wait_status);
+        }
+    }
+    return child_pid;
 }
 
 // ─── xattr ──────────────────────────────────────────────────────────────────
@@ -701,8 +736,8 @@ fn settimeofdayLinux(tv: ?*const linux.timeval, _: ?*const anyopaque) callconv(.
 }
 
 fn stimeLinux(t: *const linux.time_t) callconv(.c) c_int {
-    const tv = linux.timeval{ .sec = t.*, .usec = 0 };
-    return settimeofdayLinux(&tv, null);
+    const ts = linux.timespec{ .sec = @intCast(t.*), .nsec = 0 };
+    return errno(linux.clock_settime(.REALTIME, &ts));
 }
 
 // ─── utimes ─────────────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ const linux = std.os.linux;
 
 const symbol = @import("../../c.zig").symbol;
 const errno = @import("../../c.zig").errno;
+const syscallArg = @import("../../c.zig").syscallArg;
 
 comptime {
     if (builtin.target.isMuslLibC()) {
@@ -30,10 +31,11 @@ fn pselectLinux(
     timeout: ?*const linux.timespec,
     sigmask: ?*const linux.sigset_t,
 ) callconv(.c) c_int {
-    const data = [2]usize{ @intFromPtr(sigmask), linux.NSIG / 8 };
+    const sys = if (@hasField(linux.SYS, "pselect6")) linux.SYS.pselect6 else linux.SYS.pselect6_time64;
+    const data = [2]linux.syscall_arg_t{ @intFromPtr(sigmask), linux.NSIG / 8 };
     return errno(linux.syscall6(
-        .pselect6,
-        @as(usize, @intCast(@as(c_uint, @bitCast(nfds)))),
+        sys,
+        syscallArg(nfds),
         @intFromPtr(readfds),
         @intFromPtr(writefds),
         @intFromPtr(exceptfds),
@@ -58,10 +60,11 @@ fn selectLinux(
             .sec = @intCast(tv.sec + @divTrunc(tv.usec, 1000000)),
             .nsec = @intCast(@rem(tv.usec, 1000000) * 1000),
         };
-        const data = [2]usize{ 0, linux.NSIG / 8 };
+        const sys = if (@hasField(linux.SYS, "pselect6")) linux.SYS.pselect6 else linux.SYS.pselect6_time64;
+        const data = [2]linux.syscall_arg_t{ 0, linux.NSIG / 8 };
         return errno(linux.syscall6(
-            .pselect6,
-            @as(usize, @intCast(@as(c_uint, @bitCast(nfds)))),
+            sys,
+            syscallArg(nfds),
             @intFromPtr(readfds),
             @intFromPtr(writefds),
             @intFromPtr(exceptfds),
@@ -69,10 +72,11 @@ fn selectLinux(
             @intFromPtr(&data),
         ));
     } else {
-        const data = [2]usize{ 0, linux.NSIG / 8 };
+        const sys = if (@hasField(linux.SYS, "pselect6")) linux.SYS.pselect6 else linux.SYS.pselect6_time64;
+        const data = [2]linux.syscall_arg_t{ 0, linux.NSIG / 8 };
         return errno(linux.syscall6(
-            .pselect6,
-            @as(usize, @intCast(@as(c_uint, @bitCast(nfds)))),
+            sys,
+            syscallArg(nfds),
             @intFromPtr(readfds),
             @intFromPtr(writefds),
             @intFromPtr(exceptfds),
