@@ -472,7 +472,7 @@ fn strverscmp_fn(l0: [*:0]const u8, r0: [*:0]const u8) callconv(.c) c_int {
         }
         if (std.ascii.isDigit(r0[j])) return -1;
     } else if (z and dp < i and (std.ascii.isDigit(l0[i]) or std.ascii.isDigit(r0[i]))) {
-        return @as(c_int, l0[i]) - @as(c_int, '0') - (@as(c_int, r0[i]) - @as(c_int, '0'));
+        return @as(c_int, l0[i] -% '0') - @as(c_int, r0[i] -% '0');
     }
 
     return @as(c_int, l0[i]) - @as(c_int, r0[i]);
