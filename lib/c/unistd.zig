@@ -1,7 +1,7 @@
 const builtin = @import("builtin");
 
 const std = @import("std");
-const linux = std.os.linux;
+const linux = if (builtin.os.tag == .linux) std.os.linux else struct {};
 
 const symbol = @import("../c.zig").symbol;
 const errno = @import("../c.zig").errno;
@@ -86,7 +86,9 @@ comptime {
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&swab, "swab");
     }
-    if (builtin.target.isWasiLibC()) {}
+    if (builtin.target.isWasiLibC()) {
+        symbol(&closeWasi, "close");
+    }
 }
 
 fn _exit(exit_code: c_int) callconv(.c) noreturn {
@@ -267,13 +269,25 @@ fn pipe2Linux(fd: *[2]c_int, flags: c_int) callconv(.c) c_int {
 }
 
 fn lseekLinux(fd: c_int, offset: linux.off_t, whence: c_int) callconv(.c) linux.off_t {
-    const signed: isize = @bitCast(linux.lseek(fd, offset, @intCast(@as(c_uint, @bitCast(whence)))));
-    if (signed < 0) {
-        @branchHint(.unlikely);
-        std.c._errno().* = @intCast(-signed);
-        return -1;
+    const whence_u32: u32 = @intCast(@as(c_uint, @bitCast(whence)));
+    if (@bitSizeOf(usize) == 64) {
+        const signed: isize = @bitCast(linux.lseek(fd, offset, whence_u32));
+        if (signed < 0) {
+            @branchHint(.unlikely);
+            std.c._errno().* = @intCast(-signed);
+            return -1;
+        }
+        return signed;
+    } else {
+        var result: linux.off_t = undefined;
+        const signed: isize = @bitCast(linux.llseek(fd, offset, &result, whence_u32));
+        if (signed < 0) {
+            @branchHint(.unlikely);
+            std.c._errno().* = @intCast(-signed);
+            return -1;
+        }
+        return result;
     }
-    return signed;
 }
 
 fn readLinux(fd: c_int, buf: [*]u8, count: usize) callconv(.c) isize {

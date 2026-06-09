@@ -49,17 +49,26 @@ fn mkdirLinux(path: [*:0]const u8, mode: linux.mode_t) callconv(.c) c_int {
 fn mkdiratLinux(fd: c_int, path: [*:0]const u8, mode: linux.mode_t) callconv(.c) c_int {
     return errno(linux.mkdirat(fd, path, mode));
 }
+fn mknodatSyscall(fd: c_int, path: [*:0]const u8, mode: linux.mode_t, dev: linux.dev_t) usize {
+    return linux.syscall4(
+        .mknodat,
+        @as(linux.syscall_arg_t, @bitCast(@as(isize, @intCast(fd)))),
+        @as(linux.syscall_arg_t, @intCast(@intFromPtr(path))),
+        @as(linux.syscall_arg_t, @intCast(mode)),
+        @as(linux.syscall_arg_t, @truncate(dev)),
+    );
+}
 fn mknodLinux(path: [*:0]const u8, mode: linux.mode_t, dev: linux.dev_t) callconv(.c) c_int {
-    return errno(linux.mknodat(linux.AT.FDCWD, path, mode, @truncate(dev)));
+    return errno(mknodatSyscall(linux.AT.FDCWD, path, mode, dev));
 }
 fn mknodatLinux(fd: c_int, path: [*:0]const u8, mode: linux.mode_t, dev: linux.dev_t) callconv(.c) c_int {
-    return errno(linux.mknodat(fd, path, mode, @truncate(dev)));
+    return errno(mknodatSyscall(fd, path, mode, dev));
 }
 fn mkfifoLinux(path: [*:0]const u8, mode: linux.mode_t) callconv(.c) c_int {
-    return errno(linux.mknodat(linux.AT.FDCWD, path, mode | linux.S.IFIFO, 0));
+    return errno(mknodatSyscall(linux.AT.FDCWD, path, mode | linux.S.IFIFO, 0));
 }
 fn mkfifoatLinux(fd: c_int, path: [*:0]const u8, mode: linux.mode_t) callconv(.c) c_int {
-    return errno(linux.mknodat(fd, path, mode | linux.S.IFIFO, 0));
+    return errno(mknodatSyscall(fd, path, mode | linux.S.IFIFO, 0));
 }
 fn umaskLinux(mode: linux.mode_t) callconv(.c) linux.mode_t {
     return @truncate(linux.syscall1(.umask, mode));
@@ -375,7 +384,7 @@ fn fstatatImpl(fd: c_int, path: [*:0]const u8, buf: *anyopaque, flag: c_int) cal
         st.ctim32 = .{ .sec = @truncate(stx.ctime.sec), .nsec = @intCast(stx.ctime.nsec) };
     }
     if (@hasField(MuStat, "ino_truncated")) {
-        st.ino_truncated = @truncate(stx.ino);
+        st.ino_truncated = @bitCast(@as(u32, @truncate(stx.ino)));
     }
     return 0;
 }

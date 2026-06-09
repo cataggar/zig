@@ -126,4 +126,7 @@ comptime {
         _ = @import("c/sys/select.zig");
         _ = @import("c/sys/utsname.zig");
     }
+    if (builtin.target.isWasiLibC()) {
+        _ = @import("c/unistd.zig");
+    }
 }
