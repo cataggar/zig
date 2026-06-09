@@ -268,11 +268,33 @@ fn pipe2Linux(fd: *[2]c_int, flags: c_int) callconv(.c) c_int {
     return errno(linux.pipe2(@ptrCast(fd), @bitCast(flags)));
 }
 
+fn syscallArg(val: anytype) linux.syscall_arg_t {
+    const T = @TypeOf(val);
+    return switch (@typeInfo(T)) {
+        .pointer => @intFromPtr(val),
+        .optional => if (val) |p| @intFromPtr(p) else 0,
+        .int => |i| if (i.signedness == .signed)
+            @bitCast(@as(@Int(.signed, @bitSizeOf(linux.syscall_arg_t)), @intCast(val)))
+        else
+            @intCast(val),
+        .@"enum" => @intCast(@intFromEnum(val)),
+        else => @compileError("unsupported syscall argument type"),
+    };
+}
+
 fn lseekLinux(fd: c_int, offset: linux.off_t, whence: c_int) callconv(.c) linux.off_t {
     const whence_u32: u32 = @intCast(@as(c_uint, @bitCast(whence)));
     if (@hasField(linux.SYS, "llseek")) {
         var result: linux.off_t = undefined;
-        const signed: isize = @bitCast(linux.llseek(fd, offset, &result, whence_u32));
+        const offset_u: u64 = @bitCast(offset);
+        const signed: isize = @bitCast(linux.syscall5(
+            .llseek,
+            syscallArg(fd),
+            @truncate(offset_u >> 32),
+            @truncate(offset_u),
+            syscallArg(&result),
+            syscallArg(whence_u32),
+        ));
         if (signed < 0) {
             @branchHint(.unlikely);
             std.c._errno().* = @intCast(-signed);
@@ -280,7 +302,12 @@ fn lseekLinux(fd: c_int, offset: linux.off_t, whence: c_int) callconv(.c) linux.
         }
         return result;
     } else {
-        const signed: isize = @bitCast(linux.lseek(fd, offset, whence_u32));
+        const signed: isize = @bitCast(linux.syscall3(
+            .lseek,
+            syscallArg(fd),
+            syscallArg(offset),
+            syscallArg(whence_u32),
+        ));
         if (signed < 0) {
             @branchHint(.unlikely);
             std.c._errno().* = @intCast(-signed);

@@ -15,6 +15,7 @@ comptime {
         symbol(&sched_getschedulerStub, "sched_getscheduler");
         symbol(&sched_setschedulerStub, "sched_setscheduler");
         symbol(&sched_rr_get_intervalLinux, "sched_rr_get_interval");
+        symbol(&sched_rr_get_intervalLinux, "__sched_rr_get_interval_time64");
         symbol(&__sched_cpucount, "__sched_cpucount");
         symbol(&sched_getcpuLinux, "sched_getcpu");
     }
@@ -61,8 +62,62 @@ fn sched_setschedulerStub(pid: linux.pid_t, sched: c_int, param: *const linux.sc
     return -1;
 }
 
-fn sched_rr_get_intervalLinux(pid: linux.pid_t, ts: *linux.timespec) callconv(.c) c_int {
-    return errno(linux.sched_rr_get_interval(pid, ts));
+const Timespec = if (@sizeOf(c_long) >= 8)
+    extern struct { sec: i64, nsec: c_long }
+else if (builtin.cpu.arch.endian() == .little)
+    extern struct { sec: i64, nsec: c_long, __pad: c_long = 0 }
+else
+    extern struct { sec: i64, __pad: c_long = 0, nsec: c_long };
+
+fn syscallArg(val: anytype) linux.syscall_arg_t {
+    const T = @TypeOf(val);
+    return switch (@typeInfo(T)) {
+        .pointer => @intFromPtr(val),
+        .optional => if (val) |p| @intFromPtr(p) else 0,
+        .int => |i| if (i.signedness == .signed)
+            @bitCast(@as(@Int(.signed, @bitSizeOf(linux.syscall_arg_t)), @intCast(val)))
+        else
+            @intCast(val),
+        .@"enum" => @intCast(@intFromEnum(val)),
+        else => @compileError("unsupported syscall argument type"),
+    };
+}
+
+fn sched_rr_get_intervalLinux(pid: linux.pid_t, ts: *Timespec) callconv(.c) c_int {
+    if (@hasField(linux.SYS, "sched_rr_get_interval_time64")) {
+        if (@hasField(linux.SYS, "sched_rr_get_interval")) {
+            if (linux.SYS.sched_rr_get_interval != linux.SYS.sched_rr_get_interval_time64) {
+                var ts32: [2]c_long = undefined;
+                const rc: isize = @bitCast(linux.syscall2(
+                    .sched_rr_get_interval,
+                    syscallArg(pid),
+                    syscallArg(&ts32),
+                ));
+                if (rc < 0) {
+                    @branchHint(.unlikely);
+                    std.c._errno().* = @intCast(-rc);
+                    return -1;
+                }
+                ts.sec = ts32[0];
+                ts.nsec = ts32[1];
+                return 0;
+            }
+        }
+        return errno(linux.syscall2(
+            .sched_rr_get_interval_time64,
+            syscallArg(pid),
+            syscallArg(ts),
+        ));
+    } else if (@hasField(linux.SYS, "sched_rr_get_interval")) {
+        return errno(linux.syscall2(
+            .sched_rr_get_interval,
+            syscallArg(pid),
+            syscallArg(ts),
+        ));
+    } else {
+        std.c._errno().* = @intFromEnum(linux.E.NOSYS);
+        return -1;
+    }
 }
 
 fn __sched_cpucount(size: usize, set: [*]const u8) callconv(.c) c_int {

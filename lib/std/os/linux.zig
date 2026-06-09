@@ -1790,16 +1790,8 @@ pub fn fchmodat2(fd: fd_t, path: [*:0]const u8, mode: mode_t, flags: u32) usize 
     return syscall4(.fchmodat2, @as(u32, @bitCast(fd)), @intFromPtr(path), mode, flags);
 }
 
-/// Can only be called on systems with an llseek syscall. For others see `lseek`.
+/// Can only be called on 32 bit systems. For 64 bit see `lseek`.
 pub fn llseek(fd: fd_t, offset: off_t, result: ?*off_t, whence: u32) usize {
-    if (!@hasField(SYS, "llseek")) {
-        const rc = lseek(fd, offset, whence);
-        const signed: isize = @bitCast(rc);
-        if (signed >= 0) {
-            if (result) |r| r.* = @intCast(signed);
-        }
-        return rc;
-    }
     // NOTE: The offset parameter splitting is independent from the target
     // endianness.
     return syscall5(
@@ -2754,8 +2746,7 @@ pub fn sched_getattr(pid: pid_t, attr: *sched_attr, size: u32, flags: u32) usize
 }
 
 pub fn sched_rr_get_interval(pid: pid_t, tp: *timespec) usize {
-    const sys = if (@hasField(SYS, "sched_rr_get_interval")) SYS.sched_rr_get_interval else SYS.sched_rr_get_interval_time64;
-    return syscall2(sys, @as(u32, @bitCast(pid)), @intFromPtr(tp));
+    return syscall2(.sched_rr_get_interval, @as(u32, @bitCast(pid)), @intFromPtr(tp));
 }
 
 pub fn sched_yield() usize {

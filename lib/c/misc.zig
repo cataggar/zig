@@ -283,7 +283,6 @@ comptime {
         symbol(&getmntent_r, "getmntent_r");
         symbol(&addmntent, "addmntent");
         symbol(&hasmntopt, "hasmntopt");
-        symbol(&realpath, "realpath");
         @export(&optarg_val, .{ .name = "optarg" });
         symbol(&optind_val, "optind");
         symbol(&opterr_val, "opterr");
@@ -995,7 +994,7 @@ fn realpath(filename: ?[*:0]const u8, resolved: ?[*]u8) callconv(.c) ?[*:0]u8 {
                     continue;
                 }
             }
-            const k = readlink(@ptrCast(output[0 .. q + comp_l :0]), &stack, p);
+            const k = readlink(@ptrCast(output[0 .. q + comp_l :0].ptr), &stack, p);
             if (k == @as(isize, @intCast(p))) {
                 std.c._errno().* = @intFromEnum(linux.E.NAMETOOLONG);
                 return null;
@@ -1062,7 +1061,7 @@ fn realpath(filename: ?[*:0]const u8, resolved: ?[*]u8) callconv(.c) ?[*:0]u8 {
         _ = memcpy(r, @as(*const anyopaque, @ptrCast(&output)), q + 1);
         return @ptrCast(r);
     } else {
-        return strdup(@ptrCast(output[0..q :0]));
+        return strdup(@ptrCast(output[0..q :0].ptr));
     }
 }
 

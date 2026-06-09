@@ -160,7 +160,9 @@ comptime {
 
         // wait
         symbol(&wait3Linux, "wait3");
+        symbol(&wait3Linux, "__wait3_time64");
         symbol(&wait4Linux, "wait4");
+        symbol(&wait4Linux, "__wait4_time64");
 
         // xattr
         symbol(&getxattrLinux, "getxattr");

@@ -24,14 +24,20 @@ comptime {
         symbol(&fchmodLinux, "fchmod");
         if (builtin.link_libc) {
             symbol(&fstatatImpl, "fstatat");
+            symbol(&fstatatImpl, "__fstatat_time64");
             symbol(&statLinux, "stat");
+            symbol(&statLinux, "__stat_time64");
             symbol(&lstatLinux, "lstat");
+            symbol(&lstatLinux, "__lstat_time64");
             symbol(&fstatLinux, "__fstat");
             symbol(&fstatLinux, "fstat");
+            symbol(&fstatLinux, "__fstat_time64");
             symbol(&futimensLinux, "futimens");
+            symbol(&futimensLinux, "__futimens_time64");
             symbol(&lchmodLinux, "lchmod");
             symbol(&__futimesat, "__futimesat");
             symbol(&utimensatLinux, "utimensat");
+            symbol(&utimensatLinux, "__utimensat_time64");
             symbol(&__fxstat, "__fxstat");
             symbol(&__fxstatat, "__fxstatat");
             symbol(&__lxstat, "__lxstat");
