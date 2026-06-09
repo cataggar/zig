@@ -76,31 +76,57 @@ pub fn errnoSize(syscall_return_value: usize) isize {
     };
 }
 
+pub inline fn syscallArg(value: anytype) std.os.linux.syscall_arg_t {
+    const Arg = std.os.linux.syscall_arg_t;
+    return switch (@typeInfo(@TypeOf(value))) {
+        .int => |int| if (int.signedness == .signed)
+            @bitCast(@as(@Int(.signed, @bitSizeOf(Arg)), @intCast(value)))
+        else
+            @intCast(value),
+        .@"enum" => @intCast(@intFromEnum(value)),
+        else => @intCast(value),
+    };
+}
+
 comptime {
+    _ = @import("c/crypt.zig");
     _ = @import("c/ctype.zig");
     _ = @import("c/errno.zig");
-    _ = @import("c/fcntl.zig");
     _ = @import("c/inttypes.zig");
-    if (builtin.target.isMuslLibC()) {
-        _ = @import("c/internal.zig");
-    }
     if (!builtin.target.isMinGW()) {
         _ = @import("c/malloc.zig");
     }
     _ = @import("c/math.zig");
     _ = @import("c/pthread.zig");
-    _ = @import("c/search.zig");
     _ = @import("c/stdlib.zig");
     _ = @import("c/string.zig");
     _ = @import("c/strings.zig");
-    _ = @import("c/stropts.zig");
-
-    _ = @import("c/sys/capability.zig");
-    _ = @import("c/sys/file.zig");
-    _ = @import("c/sys/mman.zig");
-    _ = @import("c/sys/reboot.zig");
-    _ = @import("c/sys/utsname.zig");
-
-    _ = @import("c/unistd.zig");
     _ = @import("c/wchar.zig");
+
+    if (builtin.os.tag == .linux) {
+        _ = @import("c/dirent.zig");
+        _ = @import("c/fcntl.zig");
+        _ = @import("c/internal.zig");
+        _ = @import("c/ipc.zig");
+        _ = @import("c/linux.zig");
+        _ = @import("c/misc.zig");
+        _ = @import("c/sched.zig");
+        _ = @import("c/search.zig");
+        _ = @import("c/stat.zig");
+        _ = @import("c/stropts.zig");
+        _ = @import("c/temp.zig");
+        _ = @import("c/termios.zig");
+        _ = @import("c/unistd.zig");
+
+        _ = @import("c/sys/capability.zig");
+        _ = @import("c/sys/file.zig");
+        _ = @import("c/sys/mman.zig");
+        _ = @import("c/sys/reboot.zig");
+        _ = @import("c/sys/select.zig");
+        _ = @import("c/sys/utsname.zig");
+    }
+    if (builtin.target.isWasiLibC()) {
+        _ = @import("c/search.zig");
+        _ = @import("c/unistd.zig");
+    }
 }
