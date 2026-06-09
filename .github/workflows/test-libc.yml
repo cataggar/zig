@@ -125,9 +125,15 @@ jobs:
           - name: s390x
             target-filter: s390x
             qemu: true
-          - name: loongarch64
-            target-filter: loongarch64
-            qemu: true
+          # loongarch64 is skipped: under LLVM 22, the loongarch64 backend errors
+          # with `LLVM ERROR: Cannot select ... store (s128)` (128-bit/aggregate
+          # store) when compiling ordinary Zig libc code in Release modes. This is
+          # an LLVM 22 loongarch64 codegen regression, not a libzigc bug (the fork
+          # passed loongarch64 under LLVM 21, with structurally identical code).
+          # loongarch64 is not a release target. Revisit when LLVM fixes this. See #17.
+          # - name: loongarch64
+          #   target-filter: loongarch64
+          #   qemu: true
           - name: wasm32
             target-filter: wasm32-wasi
             wasmtime: true
@@ -209,4 +215,8 @@ jobs:
             ARGS+=(-fwasmtime)
           fi
 
-          stage4/bin/zig build test-libc --zig-lib-dir lib "${ARGS[@]}"
+          # Upstream 0.17 renamed the external libc-test runner step from
+          # `test-libc` to `test-libc-nsz` (musl-only `libc_test_nsz_targets`).
+          # `test-libc` on 0.17 is a different step that builds/runs lib/c for
+          # gnu/freebsd/netbsd/openbsd dynamic targets, which cannot run under QEMU.
+          stage4/bin/zig build test-libc-nsz --zig-lib-dir lib "${ARGS[@]}"
