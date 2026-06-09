@@ -10,6 +10,7 @@ const symbol = @import("../c.zig").symbol;
 
 comptime {
     _ = @import("stdlib/rand.zig");
+    _ = @import("stdlib/random.zig");
     _ = @import("stdlib/drand48.zig");
 
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
