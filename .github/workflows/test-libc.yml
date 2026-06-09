@@ -209,4 +209,8 @@ jobs:
             ARGS+=(-fwasmtime)
           fi
 
-          stage4/bin/zig build test-libc --zig-lib-dir lib "${ARGS[@]}"
+          # Upstream 0.17 renamed the external libc-test runner step from
+          # `test-libc` to `test-libc-nsz` (musl-only `libc_test_nsz_targets`).
+          # `test-libc` on 0.17 is a different step that builds/runs lib/c for
+          # gnu/freebsd/netbsd/openbsd dynamic targets, which cannot run under QEMU.
+          stage4/bin/zig build test-libc-nsz --zig-lib-dir lib "${ARGS[@]}"
