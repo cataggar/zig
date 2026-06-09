@@ -1365,8 +1365,8 @@ const src_files = [_][]const u8{
     "musl/src/stdio/asprintf.c",
     // "musl/src/stdio/clearerr.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/dprintf.c",
-    // "musl/src/stdio/ext2.c", // migrated to lib/c/stdio.zig
-    // "musl/src/stdio/ext.c", // migrated to lib/c/stdio.zig
+    "musl/src/stdio/ext2.c",
+    "musl/src/stdio/ext.c",
     "musl/src/stdio/fclose.c",
     // "musl/src/stdio/__fclose_ca.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/__fdopen.c",
