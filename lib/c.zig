@@ -99,6 +99,7 @@ comptime {
     _ = @import("c/math.zig");
     _ = @import("c/complex.zig");
     _ = @import("c/pthread.zig");
+    _ = @import("c/setjmp.zig");
     _ = @import("c/stdlib.zig");
     _ = @import("c/string.zig");
     _ = @import("c/strings.zig");
@@ -111,6 +112,7 @@ comptime {
         _ = @import("c/fenv.zig");
         _ = @import("c/internal.zig");
         _ = @import("c/ipc.zig");
+        _ = @import("c/ldso.zig");
         _ = @import("c/linux.zig");
         _ = @import("c/misc.zig");
         _ = @import("c/passwd.zig");
@@ -124,6 +126,7 @@ comptime {
         _ = @import("c/stropts.zig");
         _ = @import("c/temp.zig");
         _ = @import("c/termios.zig");
+        _ = @import("c/thread.zig");
         _ = @import("c/time.zig");
         _ = @import("c/unistd.zig");
 

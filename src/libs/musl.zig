@@ -647,16 +647,16 @@ const src_files = [_][]const u8{
     "musl/src/ldso/aarch64/tlsdesc.s",
     "musl/src/ldso/arm/dlsym.s",
     "musl/src/ldso/arm/dlsym_time64.S",
-    "musl/src/ldso/arm/find_exidx.c",
+    // "musl/src/ldso/arm/find_exidx.c", // migrated to lib/c/ldso.zig; exports: __gnu_Unwind_Find_exidx
     "musl/src/ldso/arm/tlsdesc.S",
-    "musl/src/ldso/dladdr.c",
-    "musl/src/ldso/dlclose.c",
+    // "musl/src/ldso/dladdr.c", // migrated to lib/c/ldso.zig
+    // "musl/src/ldso/dlclose.c", // migrated to lib/c/ldso.zig
     "musl/src/ldso/dlerror.c",
     "musl/src/ldso/dlinfo.c",
     "musl/src/ldso/dl_iterate_phdr.c",
-    "musl/src/ldso/dlopen.c",
-    "musl/src/ldso/__dlsym.c",
-    "musl/src/ldso/dlsym.c",
+    // "musl/src/ldso/dlopen.c", // migrated to lib/c/ldso.zig
+    // "musl/src/ldso/__dlsym.c", // migrated to lib/c/ldso.zig
+    // "musl/src/ldso/dlsym.c", // migrated to lib/c/ldso.zig
     "musl/src/ldso/i386/dlsym.s",
     "musl/src/ldso/i386/dlsym_time64.S",
     "musl/src/ldso/i386/tlsdesc.s",
@@ -675,7 +675,7 @@ const src_files = [_][]const u8{
     "musl/src/ldso/riscv64/dlsym.s",
     "musl/src/ldso/riscv64/tlsdesc.s",
     "musl/src/ldso/s390x/dlsym.s",
-    "musl/src/ldso/tlsdesc.c",
+    // "musl/src/ldso/tlsdesc.c", // migrated to lib/c/ldso.zig; exports: __tlsdesc_static
     "musl/src/ldso/x32/dlsym.s",
     "musl/src/ldso/x86_64/dlsym.s",
     "musl/src/ldso/x86_64/tlsdesc.s",
@@ -1540,7 +1540,7 @@ const src_files = [_][]const u8{
     "musl/src/thread/i386/tls.s",
     "musl/src/thread/i386/__unmapself.s",
     "musl/src/thread/__lock.c",
-    "musl/src/thread/lock_ptc.c",
+    // "musl/src/thread/lock_ptc.c", // migrated to lib/c/thread.zig; exports: __inhibit_ptc,__acquire_ptc,__release_ptc
     "musl/src/thread/loongarch64/clone.s",
     "musl/src/thread/loongarch64/__set_thread_area.s",
     "musl/src/thread/loongarch64/syscall_cp.s",
@@ -1557,12 +1557,12 @@ const src_files = [_][]const u8{
     "musl/src/thread/mipsn32/__unmapself.s",
     "musl/src/thread/mips/syscall_cp.s",
     "musl/src/thread/mips/__unmapself.s",
-    "musl/src/thread/mtx_destroy.c",
-    "musl/src/thread/mtx_init.c",
-    "musl/src/thread/mtx_lock.c",
-    "musl/src/thread/mtx_timedlock.c",
-    "musl/src/thread/mtx_trylock.c",
-    "musl/src/thread/mtx_unlock.c",
+    // "musl/src/thread/mtx_destroy.c", // migrated to lib/c/thread.zig
+    // "musl/src/thread/mtx_init.c", // migrated to lib/c/thread.zig
+    // "musl/src/thread/mtx_lock.c", // migrated to lib/c/thread.zig
+    // "musl/src/thread/mtx_timedlock.c", // migrated to lib/c/thread.zig
+    // "musl/src/thread/mtx_trylock.c", // migrated to lib/c/thread.zig
+    // "musl/src/thread/mtx_unlock.c", // migrated to lib/c/thread.zig
     "musl/src/thread/powerpc64/clone.s",
     "musl/src/thread/powerpc64/__set_thread_area.s",
     "musl/src/thread/powerpc64/syscall_cp.s",
@@ -1572,8 +1572,8 @@ const src_files = [_][]const u8{
     "musl/src/thread/powerpc/syscall_cp.s",
     "musl/src/thread/powerpc/__unmapself.s",
     "musl/src/thread/pthread_atfork.c",
-    "musl/src/thread/pthread_attr_destroy.c",
-    "musl/src/thread/pthread_attr_get.c",
+    // "musl/src/thread/pthread_attr_destroy.c", // migrated to lib/c/thread.zig
+    // "musl/src/thread/pthread_attr_get.c", // migrated to lib/c/thread.zig; exports: pthread_attr_getdetachstate,pthread_attr_getguardsize,pthread_attr_getinheritsched,pthread_attr_getschedparam,pthread_attr_getschedpolicy,pthread_attr_getscope,pthread_attr_getstack,pthread_attr_getstacksize,pthread_barrierattr_getpshared,pthread_condattr_getclock,pthread_condattr_getpshared,pthread_mutexattr_getprotocol,pthread_mutexattr_getpshared,pthread_mutexattr_getrobust,pthread_mutexattr_gettype,pthread_rwlockattr_getpshared
     "musl/src/thread/pthread_attr_init.c",
     "musl/src/thread/pthread_attr_setdetachstate.c",
     "musl/src/thread/pthread_attr_setguardsize.c",
@@ -1665,9 +1665,9 @@ const src_files = [_][]const u8{
     "musl/src/thread/s390x/syscall_cp.s",
     "musl/src/thread/s390x/__tls_get_offset.s",
     "musl/src/thread/s390x/__unmapself.s",
-    "musl/src/thread/sem_destroy.c",
-    "musl/src/thread/sem_getvalue.c",
-    "musl/src/thread/sem_init.c",
+    // "musl/src/thread/sem_destroy.c", // migrated to lib/c/thread.zig
+    // "musl/src/thread/sem_getvalue.c", // migrated to lib/c/thread.zig
+    // "musl/src/thread/sem_init.c", // migrated to lib/c/thread.zig
     "musl/src/thread/sem_open.c",
     "musl/src/thread/sem_post.c",
     "musl/src/thread/sem_timedwait.c",
@@ -1684,14 +1684,14 @@ const src_files = [_][]const u8{
     "musl/src/thread/thrd_sleep.c",
     "musl/src/thread/thrd_yield.c",
     "musl/src/thread/__timedwait.c",
-    "musl/src/thread/tls.c",
+    // "musl/src/thread/tls.c", // empty file
     "musl/src/thread/__tls_get_addr.c",
-    "musl/src/thread/tss_create.c",
-    "musl/src/thread/tss_delete.c",
+    // "musl/src/thread/tss_create.c", // migrated to lib/c/thread.zig
+    // "musl/src/thread/tss_delete.c", // migrated to lib/c/thread.zig
     "musl/src/thread/tss_set.c",
     "musl/src/thread/__unmapself.c",
-    "musl/src/thread/vmlock.c",
-    "musl/src/thread/__wait.c",
+    // "musl/src/thread/vmlock.c", // migrated to lib/c/thread.zig; exports: __vm_wait,__vm_lock,__vm_unlock,__vmlock_lockptr
+    // "musl/src/thread/__wait.c", // migrated to lib/c/thread.zig
     "musl/src/thread/x32/clone.s",
     "musl/src/thread/x32/__set_thread_area.s",
     "musl/src/thread/x32/syscall_cp.s",
