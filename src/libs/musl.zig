@@ -1156,26 +1156,26 @@ const src_files = [_][]const u8{
     "musl/src/network/sockatmark.c",
     "musl/src/network/socket.c",
     "musl/src/network/socketpair.c",
-    "musl/src/passwd/fgetgrent.c",
-    "musl/src/passwd/fgetpwent.c",
-    "musl/src/passwd/fgetspent.c",
-    "musl/src/passwd/getgr_a.c",
-    "musl/src/passwd/getgrent_a.c",
-    "musl/src/passwd/getgrent.c",
-    "musl/src/passwd/getgrouplist.c",
-    "musl/src/passwd/getgr_r.c",
-    "musl/src/passwd/getpw_a.c",
-    "musl/src/passwd/getpwent_a.c",
-    "musl/src/passwd/getpwent.c",
-    "musl/src/passwd/getpw_r.c",
-    "musl/src/passwd/getspent.c",
-    "musl/src/passwd/getspnam.c",
-    "musl/src/passwd/getspnam_r.c",
-    "musl/src/passwd/lckpwdf.c",
-    "musl/src/passwd/nscd_query.c",
-    "musl/src/passwd/putgrent.c",
-    "musl/src/passwd/putpwent.c",
-    "musl/src/passwd/putspent.c",
+    // "musl/src/passwd/fgetgrent.c", // migrated to lib/c/passwd.zig
+    // "musl/src/passwd/fgetpwent.c", // migrated to lib/c/passwd.zig
+    // "musl/src/passwd/fgetspent.c", // migrated to lib/c/passwd.zig
+    // "musl/src/passwd/getgr_a.c", // migrated to lib/c/passwd.zig; exports: __getgr_a
+    // "musl/src/passwd/getgrent_a.c", // migrated to lib/c/passwd.zig; exports: __getgrent_a
+    // "musl/src/passwd/getgrent.c", // migrated to lib/c/passwd.zig
+    // "musl/src/passwd/getgrouplist.c", // migrated to lib/c/passwd.zig
+    // "musl/src/passwd/getgr_r.c", // migrated to lib/c/passwd.zig; exports: getgrnam_r,getgrgid_r
+    // "musl/src/passwd/getpw_a.c", // migrated to lib/c/passwd.zig; exports: __getpw_a
+    // "musl/src/passwd/getpwent_a.c", // migrated to lib/c/passwd.zig; exports: __getpwent_a
+    // "musl/src/passwd/getpwent.c", // migrated to lib/c/passwd.zig
+    // "musl/src/passwd/getpw_r.c", // migrated to lib/c/passwd.zig; exports: getpwnam_r,getpwuid_r
+    // "musl/src/passwd/getspent.c", // migrated to lib/c/passwd.zig
+    // "musl/src/passwd/getspnam.c", // migrated to lib/c/passwd.zig
+    // "musl/src/passwd/getspnam_r.c", // migrated to lib/c/passwd.zig
+    // "musl/src/passwd/lckpwdf.c", // migrated to lib/c/passwd.zig; exports: lckpwdf,ulckpwdf
+    // "musl/src/passwd/nscd_query.c", // migrated to lib/c/passwd.zig; exports: __nscd_query
+    // "musl/src/passwd/putgrent.c", // migrated to lib/c/passwd.zig
+    // "musl/src/passwd/putpwent.c", // migrated to lib/c/passwd.zig
+    // "musl/src/passwd/putspent.c", // migrated to lib/c/passwd.zig
     // "musl/src/prng/random.c",
     // "musl/src/process/aarch64/vfork.s", // migrated to lib/c/process.zig
     // "musl/src/process/arm/vfork.s", // migrated to lib/c/process.zig

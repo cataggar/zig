@@ -1606,7 +1606,7 @@ pub fn ftruncate(fd: fd_t, length: off_t) usize {
         const length_halves = splitValue64(length);
         if (require_aligned_register_pair) {
             return syscall4(
-                .ftruncate64,
+                if (@hasField(SYS, "ftruncate64")) .ftruncate64 else .ftruncate,
                 @as(u32, @bitCast(fd)),
                 0,
                 length_halves[0],
@@ -1614,7 +1614,7 @@ pub fn ftruncate(fd: fd_t, length: off_t) usize {
             );
         } else {
             return syscall3(
-                .ftruncate64,
+                if (@hasField(SYS, "ftruncate64")) .ftruncate64 else .ftruncate,
                 @as(u32, @bitCast(fd)),
                 length_halves[0],
                 length_halves[1],
