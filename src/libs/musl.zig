@@ -588,35 +588,35 @@ const src_files = [_][]const u8{
     // "musl/src/fcntl/fcntl.c",
     // "musl/src/fcntl/openat.c",
     // "musl/src/fcntl/open.c",
-    "musl/src/fenv/aarch64/fenv.s",
-    "musl/src/fenv/arm/fenv.c",
-    "musl/src/fenv/arm/fenv-hf.S",
-    "musl/src/fenv/fegetexceptflag.c",
-    "musl/src/fenv/feholdexcept.c",
-    "musl/src/fenv/fenv.c",
-    "musl/src/fenv/fesetexceptflag.c",
-    "musl/src/fenv/fesetround.c",
-    "musl/src/fenv/feupdateenv.c",
-    "musl/src/fenv/__flt_rounds.c",
-    "musl/src/fenv/hexagon/fenv.S",
+    // "musl/src/fenv/aarch64/fenv.s", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/arm/fenv.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/arm/fenv-hf.S", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/fegetexceptflag.c", // migrated to lib/c/fenv.zig
+    // "musl/src/fenv/feholdexcept.c", // migrated to lib/c/fenv.zig
+    // "musl/src/fenv/fenv.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/fesetexceptflag.c", // migrated to lib/c/fenv.zig
+    // "musl/src/fenv/fesetround.c", // migrated to lib/c/fenv.zig
+    // "musl/src/fenv/feupdateenv.c", // migrated to lib/c/fenv.zig
+    // "musl/src/fenv/__flt_rounds.c", // migrated to lib/c/fenv.zig
+    // "musl/src/fenv/hexagon/fenv.S", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
     "musl/src/fenv/i386/fenv.s",
-    "musl/src/fenv/loongarch64/fenv.S",
-    "musl/src/fenv/loongarch64/fenv-sf.c",
-    "musl/src/fenv/m68k/fenv.c",
-    "musl/src/fenv/mips64/fenv.S",
-    "musl/src/fenv/mips64/fenv-sf.c",
-    "musl/src/fenv/mips/fenv.S",
-    "musl/src/fenv/mips/fenv-sf.c",
-    "musl/src/fenv/mipsn32/fenv.S",
-    "musl/src/fenv/mipsn32/fenv-sf.c",
-    "musl/src/fenv/powerpc64/fenv.c",
-    "musl/src/fenv/powerpc/fenv.S",
-    "musl/src/fenv/powerpc/fenv-sf.c",
-    "musl/src/fenv/riscv32/fenv.S",
-    "musl/src/fenv/riscv32/fenv-sf.c",
-    "musl/src/fenv/riscv64/fenv.S",
-    "musl/src/fenv/riscv64/fenv-sf.c",
-    "musl/src/fenv/s390x/fenv.c",
+    // "musl/src/fenv/loongarch64/fenv.S", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/loongarch64/fenv-sf.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/m68k/fenv.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/mips64/fenv.S", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/mips64/fenv-sf.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/mips/fenv.S", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/mips/fenv-sf.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/mipsn32/fenv.S", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/mipsn32/fenv-sf.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/powerpc64/fenv.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/powerpc/fenv.S", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/powerpc/fenv-sf.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/riscv32/fenv.S", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/riscv32/fenv-sf.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/riscv64/fenv.S", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/riscv64/fenv-sf.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/s390x/fenv.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
     "musl/src/fenv/x32/fenv.s",
     "musl/src/fenv/x86_64/fenv.s",
     // "musl/src/internal/defsysinfo.c",
