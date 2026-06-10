@@ -1177,46 +1177,46 @@ const src_files = [_][]const u8{
     "musl/src/passwd/putpwent.c",
     "musl/src/passwd/putspent.c",
     // "musl/src/prng/random.c",
-    "musl/src/process/aarch64/vfork.s",
-    "musl/src/process/arm/vfork.s",
+    // "musl/src/process/aarch64/vfork.s", // migrated to lib/c/process.zig
+    // "musl/src/process/arm/vfork.s", // migrated to lib/c/process.zig
     "musl/src/process/execl.c",
     "musl/src/process/execle.c",
     "musl/src/process/execlp.c",
-    "musl/src/process/execv.c",
-    "musl/src/process/execvp.c",
+    // "musl/src/process/execv.c", // migrated to lib/c/process.zig
+    // "musl/src/process/execvp.c", // migrated to lib/c/process.zig
     "musl/src/process/fexecve.c",
     "musl/src/process/fork.c",
     "musl/src/process/_Fork.c",
-    "musl/src/process/i386/vfork.s",
-    "musl/src/process/posix_spawnattr_destroy.c",
-    "musl/src/process/posix_spawnattr_getflags.c",
-    "musl/src/process/posix_spawnattr_getpgroup.c",
-    "musl/src/process/posix_spawnattr_getsigdefault.c",
-    "musl/src/process/posix_spawnattr_getsigmask.c",
-    "musl/src/process/posix_spawnattr_init.c",
-    "musl/src/process/posix_spawnattr_sched.c",
-    "musl/src/process/posix_spawnattr_setflags.c",
-    "musl/src/process/posix_spawnattr_setpgroup.c",
-    "musl/src/process/posix_spawnattr_setsigdefault.c",
-    "musl/src/process/posix_spawnattr_setsigmask.c",
+    // "musl/src/process/i386/vfork.s", // migrated to lib/c/process.zig
+    // "musl/src/process/posix_spawnattr_destroy.c", // migrated to lib/c/spawn.zig
+    // "musl/src/process/posix_spawnattr_getflags.c", // migrated to lib/c/process.zig
+    // "musl/src/process/posix_spawnattr_getpgroup.c", // migrated to lib/c/process.zig
+    // "musl/src/process/posix_spawnattr_getsigdefault.c", // migrated to lib/c/process.zig
+    // "musl/src/process/posix_spawnattr_getsigmask.c", // migrated to lib/c/process.zig
+    // "musl/src/process/posix_spawnattr_init.c", // migrated to lib/c/process.zig
+    // "musl/src/process/posix_spawnattr_sched.c", // migrated to lib/c/spawn.zig; exports: posix_spawnattr_getschedparam,posix_spawnattr_setschedparam,posix_spawnattr_getschedpolicy,posix_spawnattr_setschedpolicy
+    // "musl/src/process/posix_spawnattr_setflags.c", // migrated to lib/c/process.zig
+    // "musl/src/process/posix_spawnattr_setpgroup.c", // migrated to lib/c/process.zig
+    // "musl/src/process/posix_spawnattr_setsigdefault.c", // migrated to lib/c/process.zig
+    // "musl/src/process/posix_spawnattr_setsigmask.c", // migrated to lib/c/process.zig
     "musl/src/process/posix_spawn.c",
-    "musl/src/process/posix_spawn_file_actions_addchdir.c",
-    "musl/src/process/posix_spawn_file_actions_addclose.c",
-    "musl/src/process/posix_spawn_file_actions_adddup2.c",
-    "musl/src/process/posix_spawn_file_actions_addfchdir.c",
-    "musl/src/process/posix_spawn_file_actions_addopen.c",
-    "musl/src/process/posix_spawn_file_actions_destroy.c",
-    "musl/src/process/posix_spawn_file_actions_init.c",
+    // "musl/src/process/posix_spawn_file_actions_addchdir.c", // migrated to lib/c/process.zig; exports: posix_spawn_file_actions_addchdir_np
+    // "musl/src/process/posix_spawn_file_actions_addclose.c", // migrated to lib/c/process.zig
+    // "musl/src/process/posix_spawn_file_actions_adddup2.c", // migrated to lib/c/process.zig
+    // "musl/src/process/posix_spawn_file_actions_addfchdir.c", // migrated to lib/c/process.zig; exports: posix_spawn_file_actions_addfchdir_np
+    // "musl/src/process/posix_spawn_file_actions_addopen.c", // migrated to lib/c/process.zig
+    // "musl/src/process/posix_spawn_file_actions_destroy.c", // migrated to lib/c/process.zig
+    // "musl/src/process/posix_spawn_file_actions_init.c", // migrated to lib/c/process.zig
     "musl/src/process/posix_spawnp.c",
-    "musl/src/process/riscv64/vfork.s",
-    "musl/src/process/s390x/vfork.s",
+    // "musl/src/process/riscv64/vfork.s", // migrated to lib/c/process.zig
+    // "musl/src/process/s390x/vfork.s", // migrated to lib/c/process.zig
     "musl/src/process/system.c",
-    "musl/src/process/vfork.c",
+    // "musl/src/process/vfork.c", // migrated to lib/c/process.zig
     "musl/src/process/wait.c",
     "musl/src/process/waitid.c",
     "musl/src/process/waitpid.c",
-    "musl/src/process/x32/vfork.s",
-    "musl/src/process/x86_64/vfork.s",
+    // "musl/src/process/x32/vfork.s", // migrated to lib/c/process.zig
+    // "musl/src/process/x86_64/vfork.s", // migrated to lib/c/process.zig
     "musl/src/regex/fnmatch.c",
     "musl/src/regex/glob.c",
     "musl/src/regex/regcomp.c",
@@ -1283,7 +1283,7 @@ const src_files = [_][]const u8{
     "musl/src/signal/arm/restore.s",
     "musl/src/signal/arm/sigsetjmp.s",
     "musl/src/signal/block.c",
-    "musl/src/signal/getitimer.c",
+    // "musl/src/signal/getitimer.c", // migrated to lib/c/process.zig
     "musl/src/signal/hexagon/sigsetjmp.s",
     "musl/src/signal/i386/restore.s",
     "musl/src/signal/i386/sigsetjmp.s",
@@ -1300,13 +1300,13 @@ const src_files = [_][]const u8{
     "musl/src/signal/powerpc/sigsetjmp.s",
     "musl/src/signal/psiginfo.c",
     "musl/src/signal/psignal.c",
-    "musl/src/signal/raise.c",
+    // "musl/src/signal/raise.c", // migrated to lib/c/process.zig
     "musl/src/signal/restore.c",
     "musl/src/signal/riscv32/sigsetjmp.s",
     "musl/src/signal/riscv64/sigsetjmp.s",
     "musl/src/signal/s390x/restore.s",
     "musl/src/signal/s390x/sigsetjmp.s",
-    "musl/src/signal/setitimer.c",
+    // "musl/src/signal/setitimer.c", // migrated to lib/c/process.zig
     "musl/src/signal/sigaction.c",
     "musl/src/signal/sigaddset.c",
     "musl/src/signal/sigaltstack.c",
@@ -1336,9 +1336,9 @@ const src_files = [_][]const u8{
     "musl/src/signal/sigtimedwait.c",
     "musl/src/signal/sigwait.c",
     "musl/src/signal/sigwaitinfo.c",
-    "musl/src/signal/x32/getitimer.c",
+    // "musl/src/signal/x32/getitimer.c", // migrated to lib/c/process.zig
     "musl/src/signal/x32/restore.s",
-    "musl/src/signal/x32/setitimer.c",
+    // "musl/src/signal/x32/setitimer.c", // migrated to lib/c/process.zig
     "musl/src/signal/x32/sigsetjmp.s",
     "musl/src/signal/x86_64/restore.s",
     "musl/src/signal/x86_64/sigsetjmp.s",

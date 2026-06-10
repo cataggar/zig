@@ -111,7 +111,9 @@ comptime {
         _ = @import("c/ipc.zig");
         _ = @import("c/linux.zig");
         _ = @import("c/misc.zig");
+        _ = @import("c/process.zig");
         _ = @import("c/sched.zig");
+        _ = @import("c/spawn.zig");
         _ = @import("c/search.zig");
         _ = @import("c/stat.zig");
         _ = @import("c/stdio.zig");
