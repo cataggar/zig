@@ -113,6 +113,7 @@ comptime {
         _ = @import("c/misc.zig");
         _ = @import("c/process.zig");
         _ = @import("c/sched.zig");
+        _ = @import("c/signal.zig");
         _ = @import("c/spawn.zig");
         _ = @import("c/search.zig");
         _ = @import("c/stat.zig");

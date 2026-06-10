@@ -1282,13 +1282,13 @@ const src_files = [_][]const u8{
     "musl/src/signal/aarch64/sigsetjmp.s",
     "musl/src/signal/arm/restore.s",
     "musl/src/signal/arm/sigsetjmp.s",
-    "musl/src/signal/block.c",
+    // "musl/src/signal/block.c", // migrated to lib/c/signal.zig; exports: __block_all_sigs,__block_app_sigs,__restore_sigs
     // "musl/src/signal/getitimer.c", // migrated to lib/c/process.zig
     "musl/src/signal/hexagon/sigsetjmp.s",
     "musl/src/signal/i386/restore.s",
     "musl/src/signal/i386/sigsetjmp.s",
-    "musl/src/signal/kill.c",
-    "musl/src/signal/killpg.c",
+    // "musl/src/signal/kill.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/killpg.c", // migrated to lib/c/signal.zig
     "musl/src/signal/loongarch64/sigsetjmp.s",
     "musl/src/signal/m68k/sigsetjmp.s",
     "musl/src/signal/mips64/sigsetjmp.s",
@@ -1298,7 +1298,7 @@ const src_files = [_][]const u8{
     "musl/src/signal/powerpc64/sigsetjmp.s",
     "musl/src/signal/powerpc/restore.s",
     "musl/src/signal/powerpc/sigsetjmp.s",
-    "musl/src/signal/psiginfo.c",
+    // "musl/src/signal/psiginfo.c", // migrated to lib/c/signal.zig
     "musl/src/signal/psignal.c",
     // "musl/src/signal/raise.c", // migrated to lib/c/process.zig
     "musl/src/signal/restore.c",
@@ -1308,28 +1308,28 @@ const src_files = [_][]const u8{
     "musl/src/signal/s390x/sigsetjmp.s",
     // "musl/src/signal/setitimer.c", // migrated to lib/c/process.zig
     "musl/src/signal/sigaction.c",
-    "musl/src/signal/sigaddset.c",
-    "musl/src/signal/sigaltstack.c",
-    "musl/src/signal/sigandset.c",
-    "musl/src/signal/sigdelset.c",
-    "musl/src/signal/sigemptyset.c",
-    "musl/src/signal/sigfillset.c",
-    "musl/src/signal/sighold.c",
-    "musl/src/signal/sigignore.c",
-    "musl/src/signal/siginterrupt.c",
-    "musl/src/signal/sigisemptyset.c",
-    "musl/src/signal/sigismember.c",
+    // "musl/src/signal/sigaddset.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sigaltstack.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sigandset.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sigdelset.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sigemptyset.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sigfillset.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sighold.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sigignore.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/siginterrupt.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sigisemptyset.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sigismember.c", // migrated to lib/c/signal.zig
     "musl/src/signal/siglongjmp.c",
-    "musl/src/signal/signal.c",
-    "musl/src/signal/sigorset.c",
+    // "musl/src/signal/signal.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sigorset.c", // migrated to lib/c/signal.zig
     "musl/src/signal/sigpause.c",
-    "musl/src/signal/sigpending.c",
-    "musl/src/signal/sigprocmask.c",
-    "musl/src/signal/sigqueue.c",
-    "musl/src/signal/sigrelse.c",
-    "musl/src/signal/sigrtmax.c",
-    "musl/src/signal/sigrtmin.c",
-    "musl/src/signal/sigset.c",
+    // "musl/src/signal/sigpending.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sigprocmask.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sigqueue.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sigrelse.c", // migrated to lib/c/signal.zig
+    // "musl/src/signal/sigrtmax.c", // migrated to lib/c/signal.zig; exports: __libc_current_sigrtmax
+    // "musl/src/signal/sigrtmin.c", // migrated to lib/c/signal.zig; exports: __libc_current_sigrtmin
+    // "musl/src/signal/sigset.c", // migrated to lib/c/signal.zig
     "musl/src/signal/sigsetjmp.c",
     "musl/src/signal/sigsetjmp_tail.c",
     "musl/src/signal/sigsuspend.c",
