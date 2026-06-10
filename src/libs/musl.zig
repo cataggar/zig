@@ -1700,45 +1700,45 @@ const src_files = [_][]const u8{
     "musl/src/thread/x86_64/__set_thread_area.s",
     "musl/src/thread/x86_64/syscall_cp.s",
     "musl/src/thread/x86_64/__unmapself.s",
-    "musl/src/time/asctime.c",
-    "musl/src/time/asctime_r.c",
+    // "musl/src/time/asctime.c", // migrated to lib/c/time.zig
+    // "musl/src/time/asctime_r.c", // migrated to lib/c/time.zig
     "musl/src/time/clock.c",
     "musl/src/time/clock_getcpuclockid.c",
     "musl/src/time/clock_getres.c",
     "musl/src/time/clock_gettime.c",
     "musl/src/time/clock_nanosleep.c",
     "musl/src/time/clock_settime.c",
-    "musl/src/time/ctime.c",
-    "musl/src/time/ctime_r.c",
+    // "musl/src/time/ctime.c", // migrated to lib/c/time.zig
+    // "musl/src/time/ctime_r.c", // migrated to lib/c/time.zig
     "musl/src/time/difftime.c",
-    "musl/src/time/ftime.c",
-    "musl/src/time/getdate.c",
+    // "musl/src/time/ftime.c", // migrated to lib/c/time.zig
+    // "musl/src/time/getdate.c", // migrated to lib/c/time.zig
     "musl/src/time/gettimeofday.c",
-    "musl/src/time/gmtime.c",
-    "musl/src/time/gmtime_r.c",
-    "musl/src/time/localtime.c",
-    "musl/src/time/localtime_r.c",
+    // "musl/src/time/gmtime.c", // migrated to lib/c/time.zig
+    // "musl/src/time/gmtime_r.c", // migrated to lib/c/time.zig
+    // "musl/src/time/localtime.c", // migrated to lib/c/time.zig
+    // "musl/src/time/localtime_r.c", // migrated to lib/c/time.zig
     "musl/src/time/__map_file.c",
-    "musl/src/time/mktime.c",
-    "musl/src/time/__month_to_secs.c",
+    // "musl/src/time/mktime.c", // migrated to lib/c/time.zig
+    // "musl/src/time/__month_to_secs.c", // migrated to lib/c/time.zig
     "musl/src/time/nanosleep.c",
-    "musl/src/time/__secs_to_tm.c",
+    // "musl/src/time/__secs_to_tm.c", // migrated to lib/c/time.zig
     "musl/src/time/strftime.c",
     "musl/src/time/strptime.c",
     "musl/src/time/time.c",
-    "musl/src/time/timegm.c",
+    // "musl/src/time/timegm.c", // migrated to lib/c/time.zig
     "musl/src/time/timer_create.c",
     "musl/src/time/timer_delete.c",
     "musl/src/time/timer_getoverrun.c",
     "musl/src/time/timer_gettime.c",
     "musl/src/time/timer_settime.c",
     "musl/src/time/times.c",
-    "musl/src/time/timespec_get.c",
-    "musl/src/time/__tm_to_secs.c",
+    // "musl/src/time/timespec_get.c", // migrated to lib/c/time.zig
+    // "musl/src/time/__tm_to_secs.c", // migrated to lib/c/time.zig
     "musl/src/time/__tz.c",
     "musl/src/time/utime.c",
     "musl/src/time/wcsftime.c",
-    "musl/src/time/__year_to_secs.c",
+    // "musl/src/time/__year_to_secs.c", // migrated to lib/c/time.zig
     // "musl/src/unistd/alarm.c",
     // "musl/src/unistd/faccessat.c",
     // "musl/src/unistd/fchdir.c",
