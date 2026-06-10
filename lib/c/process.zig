@@ -230,7 +230,7 @@ fn posix_spawn_file_actions_init(fa: *posix_spawn_file_actions_t) callconv(.c) c
 }
 
 fn execvImpl(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) callconv(.c) c_int {
-    return execve(path, argv, @ptrCast(&__environ));
+    return execve(path, argv, @ptrCast(__environ));
 }
 
 fn allocFdop(extra: usize) ?*fdop {
@@ -367,7 +367,7 @@ fn __execvpe(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:n
 }
 
 fn execvpImpl(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) callconv(.c) c_int {
-    return __execvpe(file, argv, @ptrCast(&__environ));
+    return __execvpe(file, argv, @ptrCast(__environ));
 }
 
 fn execlImpl(path: [*:0]const u8, argv0: ?[*:0]const u8, ...) callconv(.c) c_int {
@@ -383,7 +383,7 @@ fn execlImpl(path: [*:0]const u8, argv0: ?[*:0]const u8, ...) callconv(.c) c_int
     }
     argv_buf[argc] = null;
 
-    return execve(path, @ptrCast(&argv_buf), @ptrCast(&__environ));
+    return execve(path, @ptrCast(&argv_buf), @ptrCast(__environ));
 }
 
 fn execleImpl(path: [*:0]const u8, argv0: ?[*:0]const u8, ...) callconv(.c) c_int {
@@ -448,7 +448,7 @@ fn systemImpl(cmd: ?[*:0]const u8) callconv(.c) c_int {
 
     var pid: linux.pid_t = undefined;
     var argv = [4:null]?[*:0]const u8{ "sh", "-c", cmd, null };
-    const ret = posix_spawn(&pid, "/bin/sh", null, &attr, @ptrCast(&argv), @ptrCast(&__environ));
+    const ret = posix_spawn(&pid, "/bin/sh", null, &attr, @ptrCast(&argv), @ptrCast(__environ));
     _ = posix_spawnattr_destroy(&attr);
 
     var status: c_int = -1;
