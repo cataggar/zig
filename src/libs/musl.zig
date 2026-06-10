@@ -448,74 +448,74 @@ const src_files = [_][]const u8{
     "musl/src/aio/aio.c",
     "musl/src/aio/aio_suspend.c",
     "musl/src/aio/lio_listio.c",
-    "musl/src/complex/cabs.c",
-    "musl/src/complex/cabsf.c",
-    "musl/src/complex/cabsl.c",
-    "musl/src/complex/cacos.c",
-    "musl/src/complex/cacosf.c",
-    "musl/src/complex/cacosh.c",
-    "musl/src/complex/cacoshf.c",
-    "musl/src/complex/cacoshl.c",
-    "musl/src/complex/cacosl.c",
-    "musl/src/complex/carg.c",
-    "musl/src/complex/cargf.c",
-    "musl/src/complex/cargl.c",
-    "musl/src/complex/casin.c",
-    "musl/src/complex/casinf.c",
-    "musl/src/complex/casinh.c",
-    "musl/src/complex/casinhf.c",
-    "musl/src/complex/casinhl.c",
-    "musl/src/complex/casinl.c",
-    "musl/src/complex/catan.c",
-    "musl/src/complex/catanf.c",
-    "musl/src/complex/catanh.c",
-    "musl/src/complex/catanhf.c",
-    "musl/src/complex/catanhl.c",
-    "musl/src/complex/catanl.c",
-    "musl/src/complex/ccos.c",
-    "musl/src/complex/ccosf.c",
-    "musl/src/complex/ccosh.c",
-    "musl/src/complex/ccoshf.c",
-    "musl/src/complex/ccoshl.c",
-    "musl/src/complex/ccosl.c",
+    //"musl/src/complex/cabs.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cabsf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cabsl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cacos.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cacosf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cacosh.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cacoshf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cacoshl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cacosl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/carg.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cargf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cargl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/casin.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/casinf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/casinh.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/casinhf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/casinhl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/casinl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/catan.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/catanf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/catanh.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/catanhf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/catanhl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/catanl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/ccos.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/ccosf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/ccosh.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/ccoshf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/ccoshl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/ccosl.c", // migrated to lib/c/complex.zig
     "musl/src/complex/__cexp.c",
-    "musl/src/complex/cexp.c",
+    //"musl/src/complex/cexp.c", // migrated to lib/c/complex.zig
     "musl/src/complex/__cexpf.c",
-    "musl/src/complex/cexpf.c",
-    "musl/src/complex/cexpl.c",
-    "musl/src/complex/cimag.c",
-    "musl/src/complex/cimagf.c",
-    "musl/src/complex/cimagl.c",
-    "musl/src/complex/clog.c",
-    "musl/src/complex/clogf.c",
-    "musl/src/complex/clogl.c",
-    "musl/src/complex/conj.c",
-    "musl/src/complex/conjf.c",
-    "musl/src/complex/conjl.c",
-    "musl/src/complex/cpow.c",
-    "musl/src/complex/cpowf.c",
-    "musl/src/complex/cpowl.c",
-    "musl/src/complex/cproj.c",
-    "musl/src/complex/cprojf.c",
-    "musl/src/complex/cprojl.c",
-    "musl/src/complex/creal.c",
-    "musl/src/complex/crealf.c",
-    "musl/src/complex/creall.c",
-    "musl/src/complex/csin.c",
-    "musl/src/complex/csinf.c",
-    "musl/src/complex/csinh.c",
-    "musl/src/complex/csinhf.c",
-    "musl/src/complex/csinhl.c",
-    "musl/src/complex/csinl.c",
-    "musl/src/complex/csqrt.c",
-    "musl/src/complex/csqrtf.c",
-    "musl/src/complex/csqrtl.c",
-    "musl/src/complex/ctan.c",
-    "musl/src/complex/ctanf.c",
-    "musl/src/complex/ctanh.c",
-    "musl/src/complex/ctanhf.c",
-    "musl/src/complex/ctanhl.c",
-    "musl/src/complex/ctanl.c",
+    //"musl/src/complex/cexpf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cexpl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cimag.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cimagf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cimagl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/clog.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/clogf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/clogl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/conj.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/conjf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/conjl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cpow.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cpowf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cpowl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cproj.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cprojf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/cprojl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/creal.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/crealf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/creall.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/csin.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/csinf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/csinh.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/csinhf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/csinhl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/csinl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/csqrt.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/csqrtf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/csqrtl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/ctan.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/ctanf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/ctanh.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/ctanhf.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/ctanhl.c", // migrated to lib/c/complex.zig
+    //"musl/src/complex/ctanl.c", // migrated to lib/c/complex.zig
     "musl/src/conf/confstr.c",
     "musl/src/conf/fpathconf.c",
     "musl/src/conf/legacy.c",
@@ -927,7 +927,7 @@ const src_files = [_][]const u8{
     "musl/src/math/powerpc64/lroundf.c",
     "musl/src/math/powerpc/fma.c",
     "musl/src/math/powerpc/fmaf.c",
-    "musl/src/math/powf.c",
+    //"musl/src/math/powf.c", // migrated to lib/c/math.zig
     "musl/src/math/powf_data.c",
     "musl/src/math/powl.c",
     "musl/src/math/remainder.c",
