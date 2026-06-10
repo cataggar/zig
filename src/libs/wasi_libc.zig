@@ -641,12 +641,12 @@ const libc_top_half_src_files = [_][]const u8{
     "musl/src/env/setenv.c",
     "musl/src/exit/assert.c",
     "musl/src/exit/quick_exit.c",
-    "musl/src/fenv/fegetexceptflag.c",
-    "musl/src/fenv/feholdexcept.c",
-    "musl/src/fenv/fenv.c",
-    "musl/src/fenv/fesetexceptflag.c",
-    "musl/src/fenv/fesetround.c",
-    "musl/src/fenv/feupdateenv.c",
+    // "musl/src/fenv/fegetexceptflag.c", // migrated to lib/c/fenv.zig
+    // "musl/src/fenv/feholdexcept.c", // migrated to lib/c/fenv.zig
+    // "musl/src/fenv/fenv.c", // migrated to lib/c/fenv.zig
+    // "musl/src/fenv/fesetexceptflag.c", // migrated to lib/c/fenv.zig
+    // "musl/src/fenv/fesetround.c", // migrated to lib/c/fenv.zig
+    // "musl/src/fenv/feupdateenv.c", // migrated to lib/c/fenv.zig
     "musl/src/legacy/getpagesize.c",
     "musl/src/locale/c_locale.c",
     "musl/src/locale/duplocale.c",

@@ -108,6 +108,7 @@ comptime {
         _ = @import("c/dirent.zig");
         _ = @import("c/env.zig");
         _ = @import("c/fcntl.zig");
+        _ = @import("c/fenv.zig");
         _ = @import("c/internal.zig");
         _ = @import("c/ipc.zig");
         _ = @import("c/linux.zig");
@@ -134,6 +135,7 @@ comptime {
         _ = @import("c/sys/utsname.zig");
     }
     if (builtin.target.isWasiLibC()) {
+        _ = @import("c/fenv.zig");
         _ = @import("c/search.zig");
         _ = @import("c/unistd.zig");
     }
