@@ -86,8 +86,6 @@ const SIG_SETMASK = 2;
 comptime {
     if (builtin.target.isMuslLibC()) {
         symbol(&raiseLinux, "raise");
-        symbol(&__restore, "__restore");
-        symbol(&__restore_rt, "__restore_rt");
         symbol(&getitimerLinux, "getitimer");
         symbol(&setitimerLinux, "setitimer");
         symbol(&vforkLinux, "vfork");
@@ -157,12 +155,6 @@ fn waitidLinux(idtype: c_uint, id: c_uint, info: ?*linux.siginfo_t, options: c_i
         0,
     ));
 }
-
-// Fallback signal restorer stubs. Architecture-specific .s files provide
-// real implementations where the kernel sigaction struct uses sa_restorer.
-fn __restore() callconv(.c) void {}
-
-fn __restore_rt() callconv(.c) void {}
 
 fn getitimerLinux(which: c_int, old: *itimerval) callconv(.c) c_int {
     return errno(linux.syscall2(.getitimer, @as(usize, @bitCast(@as(isize, which))), @intFromPtr(old)));
