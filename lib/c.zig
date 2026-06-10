@@ -106,6 +106,7 @@ comptime {
 
     if (builtin.os.tag == .linux) {
         _ = @import("c/dirent.zig");
+        _ = @import("c/env.zig");
         _ = @import("c/fcntl.zig");
         _ = @import("c/internal.zig");
         _ = @import("c/ipc.zig");
