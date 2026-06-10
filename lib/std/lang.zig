@@ -1022,10 +1022,7 @@ pub const VaList = switch (builtin.cpu.arch) {
     .s390x => VaListS390x,
     .sh, .sheb => VaListSh, // This is wrong for `sh_renesas`: https://github.com/ziglang/zig/issues/24692#issuecomment-3150779829
     .x86_64 => switch (builtin.os.tag) {
-        .uefi, .windows => switch (builtin.zig_backend) {
-            else => *u8,
-            .stage2_llvm => @compileError("disabled due to miscompilations"),
-        },
+        .uefi, .windows => *u8,
         else => VaListX86_64,
     },
     .xtensa, .xtensaeb => VaListXtensa,
