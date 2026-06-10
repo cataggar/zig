@@ -71,11 +71,6 @@ comptime {
         symbol(&ftimeLinux, "__ftime64");
         symbol(&__localtime_r, "localtime_r");
         symbol(&__localtime_r, "__localtime64_r");
-        symbol(&nanosleepLinux, "nanosleep");
-        symbol(&nanosleepLinux, "__nanosleep_time64");
-        symbol(&clock_nanosleepLinux, "clock_nanosleep");
-        symbol(&clock_nanosleepLinux, "__clock_nanosleep");
-        symbol(&clock_nanosleepLinux, "__clock_nanosleep_time64");
         symbol(&__gmtime_r, "gmtime_r");
         symbol(&__gmtime_r, "__gmtime64_r");
         symbol(&timespec_getLinux, "timespec_get");

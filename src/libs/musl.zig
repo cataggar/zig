@@ -1706,7 +1706,7 @@ const src_files = [_][]const u8{
     "musl/src/time/clock_getcpuclockid.c",
     "musl/src/time/clock_getres.c",
     "musl/src/time/clock_gettime.c",
-    // "musl/src/time/clock_nanosleep.c", // migrated to lib/c/time.zig
+    "musl/src/time/clock_nanosleep.c",
     "musl/src/time/clock_settime.c",
     // "musl/src/time/ctime.c", // migrated to lib/c/time.zig
     // "musl/src/time/ctime_r.c", // migrated to lib/c/time.zig
@@ -1721,7 +1721,7 @@ const src_files = [_][]const u8{
     "musl/src/time/__map_file.c",
     // "musl/src/time/mktime.c", // migrated to lib/c/time.zig
     // "musl/src/time/__month_to_secs.c", // migrated to lib/c/time.zig
-    // "musl/src/time/nanosleep.c", // migrated to lib/c/time.zig
+    "musl/src/time/nanosleep.c",
     // "musl/src/time/__secs_to_tm.c", // migrated to lib/c/time.zig
     "musl/src/time/strftime.c",
     "musl/src/time/strptime.c",
