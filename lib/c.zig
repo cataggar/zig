@@ -56,6 +56,10 @@ pub fn errno(syscall_return_value: usize) c_int {
             }
             return casted;
         },
+        .windows => {
+            std.c._errno().* = @intFromEnum(std.posix.E.NOSYS);
+            return -1;
+        },
         else => comptime unreachable,
     };
 }
@@ -71,6 +75,10 @@ pub fn errnoSize(syscall_return_value: usize) isize {
                 return -1;
             }
             return signed;
+        },
+        .windows => {
+            std.c._errno().* = @intFromEnum(std.posix.E.NOSYS);
+            return -1;
         },
         else => comptime unreachable,
     };
@@ -143,5 +151,16 @@ comptime {
         _ = @import("c/fenv.zig");
         _ = @import("c/search.zig");
         _ = @import("c/unistd.zig");
+        _ = @import("c/wasi_cloudlibc.zig");
+        _ = @import("c/wasi_sources.zig");
+        _ = @import("c/wasi_thread_stub.zig");
+    }
+
+    if (builtin.os.tag == .windows) {
+        _ = @import("c/win32/time.zig");
+        _ = @import("c/win32/signal.zig");
+        _ = @import("c/win32/process.zig");
+        _ = @import("c/win32/stubs.zig");
+        _ = @import("c/win32/misc.zig");
     }
 }
