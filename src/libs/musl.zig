@@ -565,7 +565,7 @@ const src_files = [_][]const u8{
     // "musl/src/env/clearenv.c", // migrated to lib/c/env.zig
     // "musl/src/env/__environ.c", // migrated to lib/c/env.zig
     // "musl/src/env/getenv.c", // migrated to lib/c/env.zig
-    "musl/src/env/__init_tls.c",
+    // "musl/src/env/__init_tls.c", // migrated to lib/c/env.zig; exports: __init_tls,__init_tp,__copy_tls,__thread_list_lock
     // "musl/src/env/__libc_start_main.c", // migrated to lib/c/env.zig
     // "musl/src/env/putenv.c", // migrated to lib/c/env.zig
     // "musl/src/env/__reset_tls.c", // migrated to lib/c/env.zig
