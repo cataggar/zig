@@ -68,14 +68,6 @@ var usridbuf: [L_cuserid]u8 = undefined;
 
 comptime {
     if (builtin.target.isMuslLibC()) {
-        symbol(&inet_addr_impl, "inet_addr");
-        symbol(&inet_aton_impl, "__inet_aton");
-        symbol(&inet_aton_impl, "inet_aton");
-        symbol(&inet_network_impl, "inet_network");
-        symbol(&inet_makeaddr_impl, "inet_makeaddr");
-        symbol(&inet_lnaof_impl, "inet_lnaof");
-        symbol(&inet_netof_impl, "inet_netof");
-        symbol(&inet_ntoa_impl, "inet_ntoa");
         symbol(&futimesLinux, "futimes");
         symbol(&lutimesLinux, "lutimes");
         symbol(&getpagesize, "getpagesize");
