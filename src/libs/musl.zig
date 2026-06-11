@@ -445,9 +445,9 @@ fn start_asm_path(comp: *Compilation, arena: Allocator, basename: []const u8) ![
 }
 
 const src_files = [_][]const u8{
-    "musl/src/aio/aio.c",
-    "musl/src/aio/aio_suspend.c",
-    "musl/src/aio/lio_listio.c",
+    // "musl/src/aio/aio.c", // migrated to lib/c/aio.zig; exports: aio_read,aio_write,aio_fsync,aio_return,aio_error,aio_cancel,__aio_close,__aio_atfork
+    // "musl/src/aio/aio_suspend.c", // migrated to lib/c/aio.zig
+    // "musl/src/aio/lio_listio.c", // migrated to lib/c/aio.zig
     //"musl/src/complex/cabs.c", // migrated to lib/c/complex.zig
     //"musl/src/complex/cabsf.c", // migrated to lib/c/complex.zig
     //"musl/src/complex/cabsl.c", // migrated to lib/c/complex.zig
@@ -516,11 +516,11 @@ const src_files = [_][]const u8{
     //"musl/src/complex/ctanhf.c", // migrated to lib/c/complex.zig
     //"musl/src/complex/ctanhl.c", // migrated to lib/c/complex.zig
     //"musl/src/complex/ctanl.c", // migrated to lib/c/complex.zig
-    "musl/src/conf/confstr.c",
-    "musl/src/conf/fpathconf.c",
-    "musl/src/conf/legacy.c",
-    "musl/src/conf/pathconf.c",
-    "musl/src/conf/sysconf.c",
+    // "musl/src/conf/confstr.c", // migrated to lib/c/conf.zig
+    // "musl/src/conf/fpathconf.c", // migrated to lib/c/conf.zig
+    // "musl/src/conf/legacy.c", // migrated to lib/c/conf.zig; exports: get_nprocs_conf,get_nprocs,get_phys_pages,get_avphys_pages
+    // "musl/src/conf/pathconf.c", // migrated to lib/c/conf.zig
+    // "musl/src/conf/sysconf.c", // migrated to lib/c/conf.zig
     // "musl/src/crypt/crypt_blowfish.c",
     // "musl/src/crypt/crypt.c",
     // "musl/src/crypt/crypt_des.c",
@@ -691,7 +691,7 @@ const src_files = [_][]const u8{
     // "musl/src/legacy/getpass.c", // migrated to lib/c/legacy.zig
     // "musl/src/legacy/getusershell.c", // migrated to lib/c/legacy.zig; exports: endusershell,setusershell,getusershell
     // "musl/src/legacy/lutimes.c", // migrated to lib/c/legacy.zig
-    "musl/src/legacy/ulimit.c",
+    // "musl/src/legacy/ulimit.c", // migrated to lib/c/legacy.zig
     // "musl/src/legacy/utmpx.c", // migrated to lib/c/legacy.zig; exports: endutxent,endutent,setutxent,setutent,getutxent,getutent,getutxid,getutid,getutline,getutxline,pututline,pututxline,updwtmp,updwtmpx,utmpname,utmpxname
     // "musl/src/linux/adjtime.c",
     // "musl/src/linux/adjtimex.c",
@@ -1028,7 +1028,7 @@ const src_files = [_][]const u8{
     // "musl/src/misc/getrusage.c",
     // "musl/src/misc/getsubopt.c",
     // "musl/src/misc/initgroups.c",
-    "musl/src/misc/ioctl.c",
+    // "musl/src/misc/ioctl.c", // migrated to lib/c/misc.zig; exports: ioctl
     "musl/src/misc/issetugid.c",
     // "musl/src/misc/lockf.c",
     // "musl/src/misc/login_tty.c",
@@ -1037,11 +1037,11 @@ const src_files = [_][]const u8{
     // "musl/src/misc/openpty.c",
     // "musl/src/misc/ptsname.c",
     // "musl/src/misc/pty.c",
-    "musl/src/misc/realpath.c",
+    // "musl/src/misc/realpath.c", // migrated to lib/c/misc.zig
     // "musl/src/misc/setdomainname.c",
     // "musl/src/misc/setpriority.c",
     // "musl/src/misc/setrlimit.c",
-    "musl/src/misc/syscall.c",
+    // "musl/src/misc/syscall.c", // migrated to lib/c/misc.zig; exports: syscall
     "musl/src/misc/syslog.c",
     // "musl/src/misc/wordexp.c",
     // "musl/src/mman/mmap.c",
@@ -1049,16 +1049,16 @@ const src_files = [_][]const u8{
     // "musl/src/mman/msync.c",
     // "musl/src/mman/munmap.c",
     "musl/src/mman/shm_open.c",
-    "musl/src/mq/mq_close.c",
-    "musl/src/mq/mq_getattr.c",
-    "musl/src/mq/mq_notify.c",
-    "musl/src/mq/mq_open.c",
-    "musl/src/mq/mq_receive.c",
-    "musl/src/mq/mq_send.c",
-    "musl/src/mq/mq_setattr.c",
-    "musl/src/mq/mq_timedreceive.c",
-    "musl/src/mq/mq_timedsend.c",
-    "musl/src/mq/mq_unlink.c",
+    // "musl/src/mq/mq_close.c", // migrated to lib/c/mq.zig
+    // "musl/src/mq/mq_getattr.c", // migrated to lib/c/mq.zig
+    // "musl/src/mq/mq_notify.c", // migrated to lib/c/mq.zig
+    // "musl/src/mq/mq_open.c", // migrated to lib/c/mq.zig
+    // "musl/src/mq/mq_receive.c", // migrated to lib/c/mq.zig
+    // "musl/src/mq/mq_send.c", // migrated to lib/c/mq.zig
+    // "musl/src/mq/mq_setattr.c", // migrated to lib/c/mq.zig
+    // "musl/src/mq/mq_timedreceive.c", // migrated to lib/c/mq.zig
+    // "musl/src/mq/mq_timedsend.c", // migrated to lib/c/mq.zig
+    // "musl/src/mq/mq_unlink.c", // migrated to lib/c/mq.zig
     "musl/src/multibyte/btowc.c",
     "musl/src/multibyte/c16rtomb.c",
     "musl/src/multibyte/c32rtomb.c",
@@ -1418,7 +1418,7 @@ const src_files = [_][]const u8{
     "musl/src/stdio/ofl.c",
     // "musl/src/stdio/open_memstream.c", // migrated to lib/c/stdio.zig
     // "musl/src/stdio/open_wmemstream.c", // migrated to lib/c/stdio.zig
-    "musl/src/stdio/__overflow.c",
+    // "musl/src/stdio/__overflow.c", // migrated to lib/c/stdio.zig; exports: __overflow
     "musl/src/stdio/pclose.c",
     // "musl/src/stdio/perror.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/popen.c",
@@ -1456,9 +1456,9 @@ const src_files = [_][]const u8{
     "musl/src/stdio/tempnam.c",
     "musl/src/stdio/tmpfile.c",
     "musl/src/stdio/tmpnam.c",
-    "musl/src/stdio/__toread.c",
-    "musl/src/stdio/__towrite.c",
-    "musl/src/stdio/__uflow.c",
+    // "musl/src/stdio/__toread.c", // migrated to lib/c/stdio.zig; exports: __toread
+    // "musl/src/stdio/__towrite.c", // migrated to lib/c/stdio.zig; exports: __towrite
+    // "musl/src/stdio/__uflow.c", // migrated to lib/c/stdio.zig; exports: __uflow
     // "musl/src/stdio/ungetc.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/ungetwc.c",
     "musl/src/stdio/vasprintf.c",

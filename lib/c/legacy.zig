@@ -12,7 +12,10 @@ extern "c" fn nftw(
     fd_limit: c_int,
     flags: c_int,
 ) c_int;
-const VaList = std.builtin.VaList;
+const VaList = switch (builtin.cpu.arch) {
+    .aarch64, .aarch64_be => std.builtin.VaListAarch64,
+    else => std.builtin.VaList,
+};
 extern "c" var stderr: *anyopaque;
 extern "c" var __progname: [*:0]const u8;
 extern "c" fn fprintf(stream: *anyopaque, fmt: [*:0]const u8, ...) c_int;
@@ -92,6 +95,7 @@ comptime {
         symbol(&utmpxname, "utmpxname");
         symbol(&getloadavgLinux, "getloadavg");
         symbol(&daemonLinux, "daemon");
+        symbol(&ulimitLinux, "ulimit");
     }
     if (builtin.target.isWasiLibC()) {}
     if (builtin.link_libc) {
@@ -406,13 +410,10 @@ fn daemonLinux(nochdir: c_int, noclose: c_int) callconv(.c) c_int {
     return 0;
 }
 
-fn ulimitLinux(cmd: c_int, ...) callconv(.c) c_long {
+fn ulimitLinux(cmd: c_int, val: c_long) callconv(.c) c_long {
     var rl: linux.rlimit = undefined;
     _ = linux.getrlimit(.FSIZE, &rl);
     if (cmd == UL_SETFSIZE) {
-        var ap = @cVaStart();
-        const val = @cVaArg(&ap, c_long);
-        @cVaEnd(&ap);
         rl.cur = @as(u64, 512) * @as(u64, @intCast(val));
         if (errno(linux.setrlimit(.FSIZE, &rl)) < 0) return -1;
     }
