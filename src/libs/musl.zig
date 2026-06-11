@@ -575,15 +575,15 @@ const src_files = [_][]const u8{
     // "musl/src/env/unsetenv.c", // migrated to lib/c/env.zig
     // "musl/src/errno/__errno_location.c",
     // "musl/src/errno/strerror.c",
-    "musl/src/exit/abort.c",
-    "musl/src/exit/abort_lock.c",
-    "musl/src/exit/arm/__aeabi_atexit.c",
-    "musl/src/exit/assert.c",
-    "musl/src/exit/atexit.c",
-    "musl/src/exit/at_quick_exit.c",
-    "musl/src/exit/exit.c",
-    "musl/src/exit/_Exit.c",
-    "musl/src/exit/quick_exit.c",
+    // "musl/src/exit/abort.c", // migrated to lib/c/exit.zig
+    // "musl/src/exit/abort_lock.c", // migrated to lib/c/exit.zig; exports: __abort_lock
+    // "musl/src/exit/arm/__aeabi_atexit.c", // migrated to lib/c/exit.zig; exports: __aeabi_atexit
+    // "musl/src/exit/assert.c", // migrated to lib/c/exit.zig; exports: __assert_fail
+    // "musl/src/exit/atexit.c", // migrated to lib/c/exit.zig; exports: __funcs_on_exit,__cxa_finalize,__cxa_atexit,atexit,__atexit_lockptr
+    // "musl/src/exit/at_quick_exit.c", // migrated to lib/c/exit.zig; exports: __funcs_on_quick_exit,at_quick_exit,__at_quick_exit_lockptr
+    // "musl/src/exit/exit.c", // migrated to lib/c/exit.zig; exports: exit,__libc_exit_fini
+    // "musl/src/exit/_Exit.c", // migrated to lib/c/exit.zig
+    // "musl/src/exit/quick_exit.c", // migrated to lib/c/exit.zig,
     // "musl/src/fcntl/creat.c",
     // "musl/src/fcntl/fcntl.c",
     // "musl/src/fcntl/openat.c",
@@ -679,20 +679,20 @@ const src_files = [_][]const u8{
     "musl/src/ldso/x32/dlsym.s",
     "musl/src/ldso/x86_64/dlsym.s",
     "musl/src/ldso/x86_64/tlsdesc.s",
-    "musl/src/legacy/cuserid.c",
-    "musl/src/legacy/daemon.c",
+    // "musl/src/legacy/cuserid.c", // migrated to lib/c/legacy.zig
+    // "musl/src/legacy/daemon.c", // migrated to lib/c/legacy.zig
     "musl/src/legacy/err.c",
-    "musl/src/legacy/euidaccess.c",
-    "musl/src/legacy/ftw.c",
-    "musl/src/legacy/futimes.c",
-    "musl/src/legacy/getdtablesize.c",
-    "musl/src/legacy/getloadavg.c",
-    "musl/src/legacy/getpagesize.c",
-    "musl/src/legacy/getpass.c",
-    "musl/src/legacy/getusershell.c",
-    "musl/src/legacy/lutimes.c",
+    // "musl/src/legacy/euidaccess.c", // migrated to lib/c/legacy.zig; exports: euidaccess,eaccess
+    // "musl/src/legacy/ftw.c", // migrated to lib/c/legacy.zig
+    // "musl/src/legacy/futimes.c", // migrated to lib/c/legacy.zig
+    // "musl/src/legacy/getdtablesize.c", // migrated to lib/c/legacy.zig
+    // "musl/src/legacy/getloadavg.c", // migrated to lib/c/legacy.zig
+    // "musl/src/legacy/getpagesize.c", // migrated to lib/c/legacy.zig
+    // "musl/src/legacy/getpass.c", // migrated to lib/c/legacy.zig
+    // "musl/src/legacy/getusershell.c", // migrated to lib/c/legacy.zig; exports: endusershell,setusershell,getusershell
+    // "musl/src/legacy/lutimes.c", // migrated to lib/c/legacy.zig
     "musl/src/legacy/ulimit.c",
-    "musl/src/legacy/utmpx.c",
+    // "musl/src/legacy/utmpx.c", // migrated to lib/c/legacy.zig; exports: endutxent,endutent,setutxent,setutent,getutxent,getutent,getutxid,getutid,getutline,getutxline,pututline,pututxline,updwtmp,updwtmpx,utmpname,utmpxname
     // "musl/src/linux/adjtime.c",
     // "musl/src/linux/adjtimex.c",
     // "musl/src/linux/arch_prctl.c",
@@ -1780,7 +1780,7 @@ const src_files = [_][]const u8{
     "musl/src/unistd/truncate.c",
     "musl/src/unistd/ttyname.c",
     "musl/src/unistd/ttyname_r.c",
-    // "musl/src/unistd/ualarm.c",
+    // "musl/src/unistd/ualarm.c", // migrated to lib/c/unistd.zig
     "musl/src/unistd/usleep.c",
     // "musl/src/unistd/write.c",
     // "musl/src/unistd/writev.c",
