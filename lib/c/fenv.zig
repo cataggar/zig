@@ -134,15 +134,13 @@ const M68kEnv = extern struct {
 
 comptime {
     if (builtin.link_libc) {
-        if (!is_x86_family) {
-            symbol(&feclearexcept, "feclearexcept");
-            symbol(&feraiseexcept, "feraiseexcept");
-            symbol(&fetestexcept, "fetestexcept");
-            symbol(&fegetround, "fegetround");
-            symbol(&__fesetround, "__fesetround");
-            symbol(&fegetenv, "fegetenv");
-            symbol(&fesetenv, "fesetenv");
-        }
+        symbol(&feclearexcept, "feclearexcept");
+        symbol(&feraiseexcept, "feraiseexcept");
+        symbol(&fetestexcept, "fetestexcept");
+        symbol(&fegetround, "fegetround");
+        symbol(&__fesetround, "__fesetround");
+        symbol(&fegetenv, "fegetenv");
+        symbol(&fesetenv, "fesetenv");
         symbol(&__flt_rounds, "__flt_rounds");
         symbol(&fegetexceptflag, "fegetexceptflag");
         symbol(&feholdexcept, "feholdexcept");
@@ -180,7 +178,7 @@ fn x86Fnstsw() u16 {
 }
 
 fn x86Fnclex() void {
-    asm volatile ("fnclex");
+    asm volatile ("fnclex" ::: .{ .memory = true });
 }
 
 fn x86Fnstcw() u16 {
@@ -307,14 +305,11 @@ fn x86Feclearexcept(mask_arg: c_int) c_int {
 
 fn x86Feraiseexcept(mask_arg: c_int) c_int {
     const mask = @as(u32, @bitCast(mask_arg)) & 0x3f;
-    if (comptime is_x86_64) {
-        x86Ldmxcsr(x86Stmxcsr() | mask);
-    } else {
-        var env: X87Env = undefined;
-        x86FnstenvTo(&env);
-        env.bytes[4] |= @truncate(mask);
-        x86FldenvFrom(&env);
-    }
+    var env: X87Env = undefined;
+    x86FnstenvTo(&env);
+    env.bytes[4] |= @truncate(mask);
+    x86FldenvFrom(&env);
+    if (x86HasSse()) x86Ldmxcsr(x86Stmxcsr() | mask);
     return 0;
 }
 
@@ -326,8 +321,12 @@ fn x86Fetestexcept(mask_arg: c_int) c_int {
 }
 
 fn x86Fegetround() c_int {
-    if (comptime is_x86_64) return @intCast((x86Stmxcsr() >> 3) & 0xc00);
-    return @intCast(x86Fnstcw() & 0xc00);
+    const x87_round = @as(u32, x86Fnstcw()) & 0xc00;
+    if (x86HasSse()) {
+        const sse_round = (x86Stmxcsr() >> 3) & 0xc00;
+        if (comptime is_x86_64) return @intCast(sse_round);
+    }
+    return @intCast(x87_round);
 }
 
 fn x86Fesetround(r_arg: c_int) c_int {
@@ -1122,7 +1121,7 @@ fn fegetmode(modep: *anyopaque) callconv(.c) c_int {
         const mode: *X86Mode = @ptrCast(@alignCast(modep));
         mode.control_word = x86Fnstcw();
         mode.reserved = 0;
-        mode.mxcsr = x86Stmxcsr() & ~@as(c_uint, 0x3f);
+        mode.mxcsr = if (x86HasSse()) x86Stmxcsr() & ~@as(c_uint, 0x3f) else 0;
         return 0;
     }
     if (comptime is_aarch64) {
