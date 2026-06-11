@@ -599,7 +599,7 @@ const src_files = [_][]const u8{
     // "musl/src/fenv/feupdateenv.c", // migrated to lib/c/fenv.zig
     // "musl/src/fenv/__flt_rounds.c", // migrated to lib/c/fenv.zig
     // "musl/src/fenv/hexagon/fenv.S", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
-    "musl/src/fenv/i386/fenv.s",
+    // "musl/src/fenv/i386/fenv.s", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
     // "musl/src/fenv/loongarch64/fenv.S", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
     // "musl/src/fenv/loongarch64/fenv-sf.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
     // "musl/src/fenv/m68k/fenv.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
@@ -617,8 +617,8 @@ const src_files = [_][]const u8{
     // "musl/src/fenv/riscv64/fenv.S", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
     // "musl/src/fenv/riscv64/fenv-sf.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
     // "musl/src/fenv/s390x/fenv.c", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
-    "musl/src/fenv/x32/fenv.s",
-    "musl/src/fenv/x86_64/fenv.s",
+    // "musl/src/fenv/x32/fenv.s", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
+    // "musl/src/fenv/x86_64/fenv.s", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
     // "musl/src/internal/defsysinfo.c",
     "musl/src/internal/emulate_wait4.c",
     "musl/src/internal/floatscan.c",
