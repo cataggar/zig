@@ -288,7 +288,6 @@ comptime {
         symbol(&getmntent_r, "getmntent_r");
         symbol(&addmntent, "addmntent");
         symbol(&hasmntopt, "hasmntopt");
-        symbol(&realpath, "realpath");
         @export(&optarg_val, .{ .name = "optarg" });
         symbol(&optind_val, "optind");
         symbol(&opterr_val, "opterr");
