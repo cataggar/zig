@@ -263,8 +263,6 @@ comptime {
         symbol(&grantpt, "grantpt");
         symbol(&unlockptLinux, "unlockpt");
         symbol(&__ptsname_rLinux, "__ptsname_r");
-        symbol(&ioctlImpl, "ioctl");
-        symbol(&syscall_fn, "syscall");
     }
     if (builtin.target.isWasiLibC()) {}
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {

@@ -61,21 +61,7 @@ const sz_long: c_int = @sizeOf(c_long);
 const TABLE_SIZE = 200;
 
 comptime {
-    if (builtin.target.isMuslLibC()) {
-        symbol(&fpathconf, "fpathconf");
-        symbol(&pathconf, "pathconf");
-    }
     if (builtin.target.isWasiLibC()) {}
-    if (builtin.link_libc) {
-        symbol(&get_nprocs_conf, "get_nprocs_conf");
-        symbol(&get_nprocs, "get_nprocs");
-        symbol(&get_phys_pages, "get_phys_pages");
-        symbol(&get_avphys_pages, "get_avphys_pages");
-        symbol(&sysconf, "sysconf");
-    }
-    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
-        symbol(&confstr, "confstr");
-    }
 }
 
 fn fpathconf(_: c_int, name: c_int) callconv(.c) c_long {
