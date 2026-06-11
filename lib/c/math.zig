@@ -2497,7 +2497,7 @@ fn __fpclassifyl(x: c_longdouble) callconv(.c) c_int {
             const ux: u128 = @bitCast(x);
             const e: u32 = @truncate((ux >> 112) & 0x7fff);
             if (e == 0) break :blk if ((ux << 1) != 0) @as(c_int, 3) else @as(c_int, 2);
-            if (e == 0x7fff) break :blk if ((ux << 17) != 0) @as(c_int, 0) else @as(c_int, 1);
+            if (e == 0x7fff) break :blk if ((ux << 16) != 0) @as(c_int, 0) else @as(c_int, 1);
             break :blk @as(c_int, 4);
         },
         else => unreachable,
