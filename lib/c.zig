@@ -99,7 +99,9 @@ pub inline fn syscallArg(value: anytype) std.os.linux.syscall_arg_t {
 comptime {
     _ = @import("c/crypt.zig");
     _ = @import("c/ctype.zig");
-    _ = @import("c/errno.zig");
+    if (!builtin.target.isWasiLibC()) {
+        _ = @import("c/errno.zig");
+    }
     _ = @import("c/inttypes.zig");
     if (!builtin.target.isMinGW()) {
         _ = @import("c/malloc.zig");
@@ -114,6 +116,8 @@ comptime {
     _ = @import("c/wchar.zig");
 
     if (builtin.os.tag == .linux) {
+        _ = @import("c/aio.zig");
+        _ = @import("c/conf.zig");
         _ = @import("c/dirent.zig");
         _ = @import("c/env.zig");
         _ = @import("c/exit.zig");
@@ -125,6 +129,7 @@ comptime {
         _ = @import("c/legacy.zig");
         _ = @import("c/linux.zig");
         _ = @import("c/misc.zig");
+        _ = @import("c/mq.zig");
         _ = @import("c/passwd.zig");
         _ = @import("c/process.zig");
         _ = @import("c/sched.zig");

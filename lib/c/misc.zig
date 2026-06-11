@@ -116,7 +116,10 @@ var opterr_val: c_int = 1;
 var optopt_val: c_int = 0;
 var optpos_val: c_int = 0;
 var optreset_val: c_int = 0;
-const VaList = std.builtin.VaList;
+const VaList = switch (builtin.cpu.arch) {
+    .aarch64, .aarch64_be => std.builtin.VaListAarch64,
+    else => std.builtin.VaList,
+};
 extern "c" fn __lock(lock: *c_int) void;
 extern "c" fn __unlock(lock: *c_int) void;
 extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
@@ -1427,12 +1430,8 @@ fn getopt_long_only_fn(argc: c_int, argv: [*]const ?[*:0]u8, optstring: [*:0]con
     return getopt_long_impl(argc, argv, optstring, longopts, idx, 1);
 }
 
-fn ioctlImpl(fd: c_int, req: c_int, ...) callconv(.c) c_int {
-    var ap = @cVaStart();
-    const arg = @cVaArg(&ap, usize);
-    @cVaEnd(&ap);
-
-    const rc: isize = @bitCast(linux.ioctl(@intCast(fd), @bitCast(@as(c_uint, @bitCast(req))), arg));
+fn ioctlImpl(fd: c_int, req: c_ulong, arg: usize) callconv(.c) c_int {
+    const rc: isize = @bitCast(linux.ioctl(@intCast(fd), @intCast(req), arg));
     if (rc >= 0) return @intCast(rc);
 
     // On 64-bit, time_t == long, so no ioctl compat conversion is needed.
@@ -1599,24 +1598,15 @@ fn wordfree_fn(we: *wordexp_t) callconv(.c) void {
     we.we_wordc = 0;
 }
 
-fn syscall_fn(n: c_long, ...) callconv(.c) c_long {
-    var ap = @cVaStart();
-    const a = @cVaArg(&ap, usize);
-    const b = @cVaArg(&ap, usize);
-    const c = @cVaArg(&ap, usize);
-    const d = @cVaArg(&ap, usize);
-    const e = @cVaArg(&ap, usize);
-    const f = @cVaArg(&ap, usize);
-    @cVaEnd(&ap);
-
+fn syscall_fn(n: c_long, a: usize, b: usize, c_arg: usize, d: usize, e: usize, f: usize) callconv(.c) c_long {
     const rc = linux.syscall6(
         @enumFromInt(@as(usize, @bitCast(@as(isize, n)))),
-        a,
-        b,
-        c,
-        d,
-        e,
-        f,
+        @import("../c.zig").syscallArg(a),
+        @import("../c.zig").syscallArg(b),
+        @import("../c.zig").syscallArg(c_arg),
+        @import("../c.zig").syscallArg(d),
+        @import("../c.zig").syscallArg(e),
+        @import("../c.zig").syscallArg(f),
     );
 
     const signed: isize = @bitCast(rc);
