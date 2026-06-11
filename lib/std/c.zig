@@ -376,6 +376,13 @@ pub const clockid_t = switch (native_os) {
         REALTIME_COARSE = 3,
         MONOTONIC_COARSE = 4,
     },
+    .windows => enum(c_int) {
+        REALTIME = 0,
+        MONOTONIC = 1,
+        PROCESS_CPUTIME_ID = 2,
+        THREAD_CPUTIME_ID = 3,
+        _,
+    },
     else => void,
 };
 pub const CPU_COUNT = switch (native_os) {
@@ -7005,6 +7012,7 @@ pub const time_t = switch (native_os) {
     // https://github.com/SerenityOS/serenity/blob/b98f537f117b341788023ab82e0c11ca9ae29a57/Kernel/API/POSIX/sys/types.h#L47
     // lib/libc/include/wasm-wasi-musl/__typedef_time_t.h
     .netbsd, .openbsd, .serenity, .wasi => c_longlong,
+    .windows => c_longlong,
     else => void,
 };
 pub const suseconds_t = switch (native_os) {
@@ -7979,6 +7987,7 @@ pub const pthread_mutex_t = switch (native_os) {
         level: c_int = 0,
         type: c_int = 0,
     },
+    .windows => isize,
     else => void,
 };
 
@@ -8027,6 +8036,7 @@ pub const pthread_cond_t = switch (native_os) {
         value: u32 = 0,
         clockid: clockid_t = .REALTIME_COARSE,
     },
+    .windows => isize,
     else => void,
 };
 
@@ -8089,6 +8099,7 @@ pub const pthread_rwlock_t = switch (native_os) {
     .serenity => extern struct {
         inner: u64 = 0,
     },
+    .windows => isize,
     else => void,
 };
 
@@ -8120,6 +8131,12 @@ pub const pthread_attr_t = switch (native_os) {
         guard_size: i32,
         stack_address: ?*anyopaque,
     },
+    .windows => extern struct {
+        p_state: c_uint = 0,
+        stack: ?*anyopaque = null,
+        s_size: usize = 0,
+        sched_priority: c_int = 0,
+    },
     else => void,
 };
 
@@ -8128,6 +8145,7 @@ pub const pthread_key_t = switch (native_os) {
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => c_ulong,
     // https://github.com/SerenityOS/serenity/blob/b98f537f117b341788023ab82e0c11ca9ae29a57/Kernel/API/POSIX/sys/types.h#L65
     .openbsd, .illumos, .serenity => c_int,
+    .windows => c_uint,
     else => void,
 };
 
@@ -10831,6 +10849,10 @@ pub const pthread_cancelstate = switch (native_os) {
         ENABLE = 0,
         DISABLE = 1,
     },
+    .windows => enum(c_int) {
+        DISABLE = 0,
+        ENABLE = 1,
+    },
     else => void,
 };
 pub extern "c" fn pthread_setcancelstate(pthread_cancelstate, ?*pthread_cancelstate) E;
@@ -10984,13 +11006,19 @@ pub extern "c" fn pthread_spin_unlock(spin: *pthread_spinlock_t) c_int;
 pub extern "c" fn pthread_spin_trylock(spin: *pthread_spinlock_t) c_int;
 pub extern "c" fn pthread_spin_destroy(spin: *pthread_spinlock_t) c_int;
 
-pub const PTHREAD_MUTEX_INITIALIZER: pthread_mutex_t = .{};
+pub const PTHREAD_MUTEX_INITIALIZER: pthread_mutex_t = switch (native_os) {
+    .windows => -1,
+    else => .{},
+};
 pub extern "c" fn pthread_mutex_lock(mutex: *pthread_mutex_t) E;
 pub extern "c" fn pthread_mutex_unlock(mutex: *pthread_mutex_t) E;
 pub extern "c" fn pthread_mutex_trylock(mutex: *pthread_mutex_t) E;
 pub extern "c" fn pthread_mutex_destroy(mutex: *pthread_mutex_t) E;
 
-pub const PTHREAD_COND_INITIALIZER: pthread_cond_t = .{};
+pub const PTHREAD_COND_INITIALIZER: pthread_cond_t = switch (native_os) {
+    .windows => -1,
+    else => .{},
+};
 pub extern "c" fn pthread_cond_wait(noalias cond: *pthread_cond_t, noalias mutex: *pthread_mutex_t) E;
 pub extern "c" fn pthread_cond_timedwait(noalias cond: *pthread_cond_t, noalias mutex: *pthread_mutex_t, noalias abstime: *const timespec) E;
 pub extern "c" fn pthread_cond_signal(cond: *pthread_cond_t) E;
