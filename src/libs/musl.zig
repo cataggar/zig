@@ -778,28 +778,28 @@ const src_files = [_][]const u8{
     "musl/src/locale/uselocale.c",
     "musl/src/locale/wcscoll.c",
     "musl/src/locale/wcsxfrm.c",
-    "musl/src/math/aarch64/fma.c",
-    "musl/src/math/aarch64/fmaf.c",
-    "musl/src/math/aarch64/llrint.c",
-    "musl/src/math/aarch64/llrintf.c",
+    //"musl/src/math/aarch64/fma.c", // migrated to lib/c/math.zig
+    //"musl/src/math/aarch64/fmaf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/aarch64/llrint.c", // migrated to lib/c/math.zig
+    //"musl/src/math/aarch64/llrintf.c", // migrated to lib/c/math.zig
     "musl/src/math/aarch64/llround.c",
-    "musl/src/math/aarch64/llroundf.c",
+    //"musl/src/math/aarch64/llroundf.c", // migrated to lib/c/math.zig
     "musl/src/math/aarch64/lround.c",
-    "musl/src/math/aarch64/lroundf.c",
+    //"musl/src/math/aarch64/lroundf.c", // migrated to lib/c/math.zig
     "musl/src/math/aarch64/nearbyint.c",
     "musl/src/math/aarch64/nearbyintf.c",
     "musl/src/math/acosh.c",
     "musl/src/math/acoshl.c",
-    "musl/src/math/acosl.c",
-    "musl/src/math/arm/fma.c",
-    "musl/src/math/arm/fmaf.c",
-    "musl/src/math/asinf.c",
+    //"musl/src/math/acosl.c", // migrated to lib/c/math.zig
+    //"musl/src/math/arm/fma.c", // migrated to lib/c/math.zig
+    //"musl/src/math/arm/fmaf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/asinf.c", // migrated to lib/c/math.zig
     "musl/src/math/asinh.c",
-    "musl/src/math/asinhf.c",
+    //"musl/src/math/asinhf.c", // migrated to lib/c/math.zig
     "musl/src/math/asinhl.c",
-    "musl/src/math/asinl.c",
-    "musl/src/math/atan2.c",
-    "musl/src/math/atan2f.c",
+    //"musl/src/math/asinl.c", // migrated to lib/c/math.zig
+    //"musl/src/math/atan2.c", // migrated to lib/c/math.zig
+    //"musl/src/math/atan2f.c", // migrated to lib/c/math.zig
     "musl/src/math/atan2l.c",
     "musl/src/math/atanh.c",
     "musl/src/math/atanhf.c",
@@ -808,8 +808,8 @@ const src_files = [_][]const u8{
     "musl/src/math/__cos.c",
     "musl/src/math/__cosdf.c",
     "musl/src/math/coshl.c",
-    "musl/src/math/erf.c",
-    "musl/src/math/erff.c",
+    //"musl/src/math/erf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/erff.c", // migrated to lib/c/math.zig
     "musl/src/math/erfl.c",
     "musl/src/math/exp10l.c",
     "musl/src/math/exp2f_data.c",
@@ -821,18 +821,18 @@ const src_files = [_][]const u8{
     "musl/src/math/expm1l.c",
     "musl/src/math/__expo2.c",
     "musl/src/math/__expo2f.c",
-    "musl/src/math/fma.c",
-    "musl/src/math/fmaf.c",
-    "musl/src/math/fmal.c",
-    "musl/src/math/__fpclassify.c",
-    "musl/src/math/__fpclassifyf.c",
-    "musl/src/math/__fpclassifyl.c",
-    "musl/src/math/i386/acosl.s",
-    "musl/src/math/i386/asinf.s",
-    "musl/src/math/i386/asinl.s",
-    "musl/src/math/i386/atan2f.s",
+    //"musl/src/math/fma.c", // migrated to lib/c/math.zig
+    //"musl/src/math/fmaf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/fmal.c", // migrated to lib/c/math.zig
+    //"musl/src/math/__fpclassify.c", // migrated to lib/c/math.zig
+    //"musl/src/math/__fpclassifyf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/__fpclassifyl.c", // migrated to lib/c/math.zig
+    //"musl/src/math/i386/acosl.s", // migrated to lib/c/math.zig
+    //"musl/src/math/i386/asinf.s", // migrated to lib/c/math.zig
+    //"musl/src/math/i386/asinl.s", // migrated to lib/c/math.zig
+    //"musl/src/math/i386/atan2f.s", // migrated to lib/c/math.zig
     "musl/src/math/i386/atan2l.s",
-    "musl/src/math/i386/atan2.s",
+    //"musl/src/math/i386/atan2.s", // migrated to lib/c/math.zig
     "musl/src/math/i386/exp2l.s",
     "musl/src/math/i386/exp_ld.s",
     "musl/src/math/i386/expl.s",
@@ -841,21 +841,21 @@ const src_files = [_][]const u8{
     "musl/src/math/i386/ldexpf.s",
     "musl/src/math/i386/ldexpl.s",
     "musl/src/math/i386/ldexp.s",
-    "musl/src/math/i386/llrint.c",
-    "musl/src/math/i386/llrintf.c",
-    "musl/src/math/i386/llrintl.c",
+    //"musl/src/math/i386/llrint.c", // migrated to lib/c/math.zig
+    //"musl/src/math/i386/llrintf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/i386/llrintl.c", // migrated to lib/c/math.zig
     "musl/src/math/i386/log10l.s",
     "musl/src/math/i386/log1pf.s",
     "musl/src/math/i386/log1pl.s",
     "musl/src/math/i386/log1p.s",
     "musl/src/math/i386/log2l.s",
     "musl/src/math/i386/logl.s",
-    "musl/src/math/i386/remainder.c",
-    "musl/src/math/i386/remainderf.c",
-    "musl/src/math/i386/remainderl.c",
-    "musl/src/math/i386/remquof.s",
-    "musl/src/math/i386/remquol.s",
-    "musl/src/math/i386/remquo.s",
+    //"musl/src/math/i386/remainder.c", // migrated to lib/c/math.zig
+    //"musl/src/math/i386/remainderf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/i386/remainderl.c", // migrated to lib/c/math.zig
+    //"musl/src/math/i386/remquof.s", // migrated to lib/c/math.zig
+    //"musl/src/math/i386/remquol.s", // migrated to lib/c/math.zig
+    //"musl/src/math/i386/remquo.s", // migrated to lib/c/math.zig
     "musl/src/math/i386/scalblnf.s",
     "musl/src/math/i386/scalblnl.s",
     "musl/src/math/i386/scalbln.s",
@@ -875,17 +875,17 @@ const src_files = [_][]const u8{
     "musl/src/math/ldexp.c",
     "musl/src/math/ldexpf.c",
     "musl/src/math/ldexpl.c",
-    "musl/src/math/lgamma.c",
-    "musl/src/math/lgammaf.c",
-    "musl/src/math/lgammaf_r.c",
+    //"musl/src/math/lgamma.c", // migrated to lib/c/math.zig
+    //"musl/src/math/lgammaf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/lgammaf_r.c", // migrated to lib/c/math.zig; exports: __lgammaf_r
     "musl/src/math/lgammal.c",
-    "musl/src/math/lgamma_r.c",
-    "musl/src/math/llrint.c",
-    "musl/src/math/llrintf.c",
-    "musl/src/math/llrintl.c",
+    //"musl/src/math/lgamma_r.c", // migrated to lib/c/math.zig; exports: __lgamma_r
+    //"musl/src/math/llrint.c", // migrated to lib/c/math.zig
+    //"musl/src/math/llrintf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/llrintl.c", // migrated to lib/c/math.zig
     "musl/src/math/llround.c",
-    "musl/src/math/llroundf.c",
-    "musl/src/math/llroundl.c",
+    //"musl/src/math/llroundf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/llroundl.c", // migrated to lib/c/math.zig
     "musl/src/math/log10l.c",
     "musl/src/math/log1p.c",
     "musl/src/math/log1pf.c",
@@ -896,8 +896,8 @@ const src_files = [_][]const u8{
     "musl/src/math/logbl.c",
     "musl/src/math/logl.c",
     "musl/src/math/lround.c",
-    "musl/src/math/lroundf.c",
-    "musl/src/math/lroundl.c",
+    //"musl/src/math/lroundf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/lroundl.c", // migrated to lib/c/math.zig
     "musl/src/math/__math_divzero.c",
     "musl/src/math/__math_divzerof.c",
     "musl/src/math/__math_invalid.c",
@@ -912,40 +912,40 @@ const src_files = [_][]const u8{
     "musl/src/math/nearbyint.c",
     "musl/src/math/nearbyintf.c",
     "musl/src/math/nearbyintl.c",
-    "musl/src/math/nextafter.c",
-    "musl/src/math/nextafterf.c",
-    "musl/src/math/nextafterl.c",
-    "musl/src/math/nexttoward.c",
-    "musl/src/math/nexttowardf.c",
-    "musl/src/math/nexttowardl.c",
+    //"musl/src/math/nextafter.c", // migrated to lib/c/math.zig
+    //"musl/src/math/nextafterf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/nextafterl.c", // migrated to lib/c/math.zig
+    //"musl/src/math/nexttoward.c", // migrated to lib/c/math.zig
+    //"musl/src/math/nexttowardf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/nexttowardl.c", // migrated to lib/c/math.zig
     "musl/src/math/__polevll.c",
-    "musl/src/math/pow.c",
+    //"musl/src/math/pow.c", // migrated to lib/c/math.zig
     "musl/src/math/pow_data.c",
-    "musl/src/math/powerpc64/fma.c",
-    "musl/src/math/powerpc64/fmaf.c",
+    //"musl/src/math/powerpc64/fma.c", // migrated to lib/c/math.zig
+    //"musl/src/math/powerpc64/fmaf.c", // migrated to lib/c/math.zig
     "musl/src/math/powerpc64/lround.c",
-    "musl/src/math/powerpc64/lroundf.c",
-    "musl/src/math/powerpc/fma.c",
-    "musl/src/math/powerpc/fmaf.c",
+    //"musl/src/math/powerpc64/lroundf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/powerpc/fma.c", // migrated to lib/c/math.zig
+    //"musl/src/math/powerpc/fmaf.c", // migrated to lib/c/math.zig
     //"musl/src/math/powf.c", // migrated to lib/c/math.zig
     "musl/src/math/powf_data.c",
-    "musl/src/math/powl.c",
-    "musl/src/math/remainder.c",
-    "musl/src/math/remainderf.c",
-    "musl/src/math/remainderl.c",
+    //"musl/src/math/powl.c", // migrated to lib/c/math.zig
+    //"musl/src/math/remainder.c", // migrated to lib/c/math.zig
+    //"musl/src/math/remainderf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/remainderl.c", // migrated to lib/c/math.zig
     "musl/src/math/__rem_pio2.c",
     "musl/src/math/__rem_pio2f.c",
     "musl/src/math/__rem_pio2_large.c",
     "musl/src/math/__rem_pio2l.c",
-    "musl/src/math/remquo.c",
-    "musl/src/math/remquof.c",
-    "musl/src/math/remquol.c",
-    "musl/src/math/riscv32/fma.c",
-    "musl/src/math/riscv32/fmaf.c",
-    "musl/src/math/riscv64/fma.c",
-    "musl/src/math/riscv64/fmaf.c",
-    "musl/src/math/s390x/fma.c",
-    "musl/src/math/s390x/fmaf.c",
+    //"musl/src/math/remquo.c", // migrated to lib/c/math.zig
+    //"musl/src/math/remquof.c", // migrated to lib/c/math.zig
+    //"musl/src/math/remquol.c", // migrated to lib/c/math.zig
+    //"musl/src/math/riscv32/fma.c", // migrated to lib/c/math.zig
+    //"musl/src/math/riscv32/fmaf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/riscv64/fma.c", // migrated to lib/c/math.zig
+    //"musl/src/math/riscv64/fmaf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/s390x/fma.c", // migrated to lib/c/math.zig
+    //"musl/src/math/s390x/fmaf.c", // migrated to lib/c/math.zig
     "musl/src/math/s390x/nearbyint.c",
     "musl/src/math/s390x/nearbyintf.c",
     "musl/src/math/s390x/nearbyintl.c",
@@ -957,12 +957,12 @@ const src_files = [_][]const u8{
     "musl/src/math/scalbn.c",
     "musl/src/math/scalbnf.c",
     "musl/src/math/scalbnl.c",
-    "musl/src/math/__signbit.c",
-    "musl/src/math/__signbitf.c",
-    "musl/src/math/__signbitl.c",
-    "musl/src/math/signgam.c",
-    "musl/src/math/significand.c",
-    "musl/src/math/significandf.c",
+    //"musl/src/math/__signbit.c", // migrated to lib/c/math.zig
+    //"musl/src/math/__signbitf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/__signbitl.c", // migrated to lib/c/math.zig
+    //"musl/src/math/signgam.c", // migrated to lib/c/math.zig
+    //"musl/src/math/significand.c", // migrated to lib/c/math.zig
+    //"musl/src/math/significandf.c", // migrated to lib/c/math.zig
     "musl/src/math/__sin.c",
     "musl/src/math/__sindf.c",
     "musl/src/math/sinh.c",
@@ -974,41 +974,41 @@ const src_files = [_][]const u8{
     "musl/src/math/tgamma.c",
     "musl/src/math/tgammaf.c",
     "musl/src/math/tgammal.c",
-    "musl/src/math/x32/acosl.s",
-    "musl/src/math/x32/asinl.s",
+    //"musl/src/math/x32/acosl.s", // migrated to lib/c/math.zig
+    //"musl/src/math/x32/asinl.s", // migrated to lib/c/math.zig
     "musl/src/math/x32/atan2l.s",
     "musl/src/math/x32/exp2l.s",
     "musl/src/math/x32/expl.s",
     "musl/src/math/x32/expm1l.s",
-    "musl/src/math/x32/fma.c",
-    "musl/src/math/x32/fmaf.c",
+    //"musl/src/math/x32/fma.c", // migrated to lib/c/math.zig
+    //"musl/src/math/x32/fmaf.c", // migrated to lib/c/math.zig
     "musl/src/math/x32/__invtrigl.s",
-    "musl/src/math/x32/llrintf.s",
-    "musl/src/math/x32/llrintl.s",
-    "musl/src/math/x32/llrint.s",
+    //"musl/src/math/x32/llrintf.s", // migrated to lib/c/math.zig
+    //"musl/src/math/x32/llrintl.s", // migrated to lib/c/math.zig
+    //"musl/src/math/x32/llrint.s", // migrated to lib/c/math.zig
     "musl/src/math/x32/log10l.s",
     "musl/src/math/x32/log1pl.s",
     "musl/src/math/x32/log2l.s",
     "musl/src/math/x32/logl.s",
-    "musl/src/math/x32/remainderl.s",
-    "musl/src/math/x86_64/acosl.s",
-    "musl/src/math/x86_64/asinl.s",
+    //"musl/src/math/x32/remainderl.s", // migrated to lib/c/math.zig
+    //"musl/src/math/x86_64/acosl.s", // migrated to lib/c/math.zig
+    //"musl/src/math/x86_64/asinl.s", // migrated to lib/c/math.zig
     "musl/src/math/x86_64/atan2l.s",
     "musl/src/math/x86_64/exp2l.s",
     "musl/src/math/x86_64/expl.s",
     "musl/src/math/x86_64/expm1l.s",
-    "musl/src/math/x86_64/fma.c",
-    "musl/src/math/x86_64/fmaf.c",
+    //"musl/src/math/x86_64/fma.c", // migrated to lib/c/math.zig
+    //"musl/src/math/x86_64/fmaf.c", // migrated to lib/c/math.zig
     "musl/src/math/x86_64/__invtrigl.s",
-    "musl/src/math/x86_64/llrint.c",
-    "musl/src/math/x86_64/llrintf.c",
-    "musl/src/math/x86_64/llrintl.c",
+    //"musl/src/math/x86_64/llrint.c", // migrated to lib/c/math.zig
+    //"musl/src/math/x86_64/llrintf.c", // migrated to lib/c/math.zig
+    //"musl/src/math/x86_64/llrintl.c", // migrated to lib/c/math.zig
     "musl/src/math/x86_64/log10l.s",
     "musl/src/math/x86_64/log1pl.s",
     "musl/src/math/x86_64/log2l.s",
     "musl/src/math/x86_64/logl.s",
-    "musl/src/math/x86_64/remainderl.c",
-    "musl/src/math/x86_64/remquol.c",
+    //"musl/src/math/x86_64/remainderl.c", // migrated to lib/c/math.zig
+    //"musl/src/math/x86_64/remquol.c", // migrated to lib/c/math.zig
     // "musl/src/misc/a64l.c",
     // "musl/src/misc/basename.c",
     // "musl/src/misc/dirname.c",
