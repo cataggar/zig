@@ -100,6 +100,10 @@ comptime {
     if (builtin.target.isWasiLibC()) {}
     if (builtin.link_libc) {
         symbol(&ftw, "ftw");
+        symbol(&vwarn, "vwarn");
+        symbol(&vwarnx, "vwarnx");
+        symbol(&verr, "verr");
+        symbol(&verrx, "verrx");
         symbol(&endusershell, "endusershell");
         symbol(&setusershell, "setusershell");
         symbol(&getusershell, "getusershell");

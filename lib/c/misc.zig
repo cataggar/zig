@@ -263,6 +263,8 @@ comptime {
         symbol(&grantpt, "grantpt");
         symbol(&unlockptLinux, "unlockpt");
         symbol(&__ptsname_rLinux, "__ptsname_r");
+        symbol(&ioctlImpl, "ioctl");
+        symbol(&syscall_fn, "syscall");
     }
     if (builtin.target.isWasiLibC()) {}
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
@@ -286,6 +288,7 @@ comptime {
         symbol(&getmntent_r, "getmntent_r");
         symbol(&addmntent, "addmntent");
         symbol(&hasmntopt, "hasmntopt");
+        symbol(&realpath, "realpath");
         @export(&optarg_val, .{ .name = "optarg" });
         symbol(&optind_val, "optind");
         symbol(&opterr_val, "opterr");
@@ -296,6 +299,11 @@ comptime {
         symbol(&getopt_fn, "getopt");
         symbol(&getopt_long_fn, "getopt_long");
         symbol(&getopt_long_only_fn, "getopt_long_only");
+        symbol(&setlogmask, "setlogmask");
+        symbol(&closelog, "closelog");
+        symbol(&openlog, "openlog");
+        symbol(&__vsyslog, "vsyslog");
+        symbol(&sl_lock, "__syslog_lockptr");
         symbol(&wordexp_fn, "wordexp");
         symbol(&wordfree_fn, "wordfree");
         symbol(&nftw_fn, "nftw");
@@ -937,8 +945,7 @@ fn realpath(filename: ?[*:0]const u8, resolved: ?[*]u8) callconv(.c) ?[*:0]u8 {
     _ = memcpy(@ptrCast(&stack[p]), @as(*const anyopaque, @ptrCast(fname)), l + 1);
 
     restart: while (true) {
-        while (true) {
-            p += slash_len(stack[p..]);
+        while (true) : (p += slash_len(stack[p..])) {
             if (stack[p] == '/') {
                 check_dir = false;
                 nup = 0;

@@ -136,6 +136,8 @@ comptime {
         symbol(&rewind, "rewind");
         symbol(&fgetpos, "fgetpos");
         symbol(&fsetpos, "fsetpos");
+        symbol(&fputs, "fputs");
+        symbol(&fputs, "fputs_unlocked");
         symbol(&puts, "puts");
         symbol(&gets, "gets");
         symbol(&ungetc, "ungetc");
@@ -146,6 +148,9 @@ comptime {
         symbol(&__ftello_unlocked, "__ftello_unlocked");
         symbol(&__ftello, "__ftello");
         symbol(&ftell, "ftell");
+        symbol(&__fwritex, "__fwritex");
+        symbol(&fwrite, "fwrite");
+        symbol(&fwrite, "fwrite_unlocked");
         symbol(&fread, "fread");
         symbol(&fgets, "fgets");
         symbol(&_flushlbf, "_flushlbf");
@@ -167,9 +172,12 @@ comptime {
         symbol(&getc_unlocked_impl, "getc_unlocked");
         symbol(&putc_unlocked_impl, "putc_unlocked");
         symbol(&fgetc_impl, "fgetc");
+        symbol(&fputc_impl, "fputc");
+        symbol(&toread_impl, "__toread");
+        symbol(&towrite_impl, "__towrite");
+        symbol(&uflow_impl, "__uflow");
+        symbol(&overflow_impl, "__overflow");
         symbol(&perror_impl, "perror");
-        // v-prefix stdio wrappers stay in musl C on 0.17: C va_list
-        // parameters are still mis-lowered by stage2 on tier-2 ABIs.
         // Internal helpers (__fmodeflags.c, __fclose_ca.c, __fopen_rb_ca.c)
         symbol(&fmodeflags_impl, "__fmodeflags");
         symbol(&fclose_ca_impl, "__fclose_ca");

@@ -84,10 +84,11 @@ const O_DIRECTORY: c_int = 2 << 12; // __WASI_OFLAGS_DIRECTORY << 12
 const O_RDONLY: c_int = 0x04000000;
 const clock_monotonic = ClockId{ .id = .MONOTONIC };
 const clock_realtime = ClockId{ .id = .REALTIME };
-export threadlocal var errno: c_int = 0;
+var errno: c_int = 0;
 
 comptime {
     if (builtin.target.isWasiLibC()) {
+        symbol(&errno, "errno");
         symbol(&readWasi, "read");
         symbol(&writeWasi, "write");
         symbol(&lseekWasi, "__lseek");
