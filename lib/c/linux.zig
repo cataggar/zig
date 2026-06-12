@@ -5,6 +5,16 @@ const linux = std.os.linux;
 
 const symbol = @import("../c.zig").symbol;
 const errno = @import("../c.zig").errno;
+const syscallArg = @import("../c.zig").syscallArg;
+
+const time_t = c_longlong;
+const Timespec = if (@sizeOf(c_long) >= 8)
+    extern struct { sec: time_t, nsec: c_long }
+else if (builtin.cpu.arch.endian() == .little)
+    extern struct { sec: time_t, nsec: c_long, _pad: c_long = 0 }
+else
+    extern struct { sec: time_t, _pad: c_long = 0, nsec: c_long };
+const Timeval = extern struct { sec: time_t, usec: c_long };
 
 /// Like `errno` but for syscalls that return an `isize` (ssize_t).
 fn errnoSize(v: usize) isize {
@@ -15,6 +25,39 @@ fn errnoSize(v: usize) isize {
         return -1;
     }
     return signed;
+}
+
+fn negativeErrno(err: linux.E) usize {
+    return @bitCast(-@as(isize, @intCast(@intFromEnum(err))));
+}
+
+fn is32BitTime(x: time_t) bool {
+    return x >= std.math.minInt(i32) and x <= std.math.maxInt(i32);
+}
+
+fn utimensatTime64(fd: c_int, path: ?[*:0]const u8, times: ?*const [2]Timespec, flags: c_int) c_int {
+    const path_arg = if (path) |p| @intFromPtr(p) else 0;
+    if (comptime @hasField(linux.SYS, "utimensat_time64")) {
+        var kts: [2]linux.kernel_timespec = undefined;
+        const times_arg = if (times) |ts| blk: {
+            kts = .{
+                .{ .sec = ts[0].sec, .nsec = @intCast(ts[0].nsec) },
+                .{ .sec = ts[1].sec, .nsec = @intCast(ts[1].nsec) },
+            };
+            break :blk @intFromPtr(&kts);
+        } else 0;
+        const ret = linux.syscall4(.utimensat_time64, syscallArg(fd), path_arg, times_arg, syscallArg(flags));
+        if ((comptime !@hasField(linux.SYS, "utimensat")) or ret != negativeErrno(.NOSYS)) return errno(ret);
+    }
+
+    var ts32: [4]c_long = undefined;
+    var ts32_arg: usize = 0;
+    if (times) |ts| {
+        if (!is32BitTime(ts[0].sec) or !is32BitTime(ts[1].sec)) return errno(negativeErrno(.OPNOTSUPP));
+        ts32 = .{ @intCast(ts[0].sec), @intCast(ts[0].nsec), @intCast(ts[1].sec), @intCast(ts[1].nsec) };
+        ts32_arg = @intFromPtr(&ts32);
+    }
+    return errno(linux.syscall4(.utimensat, syscallArg(fd), path_arg, ts32_arg, syscallArg(flags)));
 }
 
 comptime {
@@ -192,6 +235,7 @@ comptime {
 
         // utimes
         symbol(&utimesLinux, "utimes");
+        symbol(&utimesLinux, "__utimes_time64");
 
         // arch-specific
         if (@hasField(linux.SYS, "ioperm"))
@@ -744,15 +788,15 @@ fn stimeLinux(t: *const linux.time_t) callconv(.c) c_int {
 
 // ─── utimes ─────────────────────────────────────────────────────────────────
 
-fn utimesLinux(path: [*:0]const u8, times: ?*const [2]linux.timeval) callconv(.c) c_int {
+fn utimesLinux(path: [*:0]const u8, times: ?*const [2]Timeval) callconv(.c) c_int {
     if (times) |tv| {
-        const ts = [2]linux.timespec{
+        const ts = [2]Timespec{
             .{ .sec = tv[0].sec, .nsec = @intCast(tv[0].usec * 1000) },
             .{ .sec = tv[1].sec, .nsec = @intCast(tv[1].usec * 1000) },
         };
-        return errno(linux.utimensat(linux.AT.FDCWD, path, &ts, 0));
+        return utimensatTime64(linux.AT.FDCWD, path, &ts, 0);
     }
-    return errno(linux.utimensat(linux.AT.FDCWD, path, null, 0));
+    return utimensatTime64(linux.AT.FDCWD, path, null, 0);
 }
 
 // ─── arch-specific ──────────────────────────────────────────────────────────
