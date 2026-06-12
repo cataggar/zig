@@ -204,6 +204,146 @@ const SIG_BLOCK: c_int = 0;
 
 comptime {
     if (builtin.target.isMuslLibC()) {
+        switch (arch) {
+            .x86_64 => if (builtin.target.abi == .muslx32) {
+                asm (
+                    \\.text
+                    \\.global __clone
+                    \\.hidden __clone
+                    \\.type __clone,@function
+                    \\__clone:
+                    \\    movl $0x40000038,%eax
+                    \\    mov %rdi,%r11
+                    \\    mov %rdx,%rdi
+                    \\    mov %r8,%rdx
+                    \\    mov %r9,%r8
+                    \\    mov 8(%rsp),%r10
+                    \\    mov %r11,%r9
+                    \\    and $-16,%rsi
+                    \\    sub $8,%rsi
+                    \\    mov %rcx,(%rsi)
+                    \\    syscall
+                    \\    test %eax,%eax
+                    \\    jz 1f
+                    \\    ret
+                    \\1:  xor %ebp,%ebp
+                    \\    pop %rdi
+                    \\    call *%r9
+                    \\    mov %eax,%edi
+                    \\    movl $0x4000003c,%eax
+                    \\    syscall
+                    \\    hlt
+                );
+            } else {
+                asm (
+                    \\.text
+                    \\.global __clone
+                    \\.hidden __clone
+                    \\.type __clone,@function
+                    \\__clone:
+                    \\    xor %eax,%eax
+                    \\    mov $56,%al
+                    \\    mov %rdi,%r11
+                    \\    mov %rdx,%rdi
+                    \\    mov %r8,%rdx
+                    \\    mov %r9,%r8
+                    \\    mov 8(%rsp),%r10
+                    \\    mov %r11,%r9
+                    \\    and $-16,%rsi
+                    \\    sub $8,%rsi
+                    \\    mov %rcx,(%rsi)
+                    \\    syscall
+                    \\    test %eax,%eax
+                    \\    jz 1f
+                    \\    ret
+                    \\1:  xor %ebp,%ebp
+                    \\    pop %rdi
+                    \\    call *%r9
+                    \\    mov %eax,%edi
+                    \\    xor %eax,%eax
+                    \\    mov $60,%al
+                    \\    syscall
+                    \\    hlt
+                );
+            },
+            .x86 => asm (
+                \\.text
+                \\.global __clone
+                \\.hidden __clone
+                \\.type __clone,@function
+                \\__clone:
+                \\    push %ebp
+                \\    mov %esp,%ebp
+                \\    push %ebx
+                \\    push %esi
+                \\    push %edi
+                \\
+                \\    xor %eax,%eax
+                \\    push $0x51
+                \\    mov %gs,%ax
+                \\    push $0xfffff
+                \\    shr $3,%eax
+                \\    push 28(%ebp)
+                \\    push %eax
+                \\    mov $120,%al
+                \\
+                \\    mov 12(%ebp),%ecx
+                \\    mov 16(%ebp),%ebx
+                \\    and $-16,%ecx
+                \\    sub $16,%ecx
+                \\    mov 20(%ebp),%edi
+                \\    mov %edi,(%ecx)
+                \\    mov 24(%ebp),%edx
+                \\    mov %esp,%esi
+                \\    mov 32(%ebp),%edi
+                \\    mov 8(%ebp),%ebp
+                \\    int $128
+                \\    test %eax,%eax
+                \\    jz 1f
+                \\    add $16,%esp
+                \\    pop %edi
+                \\    pop %esi
+                \\    pop %ebx
+                \\    pop %ebp
+                \\    ret
+                \\
+                \\1:  mov %ebp,%eax
+                \\    xor %ebp,%ebp
+                \\    call *%eax
+                \\    mov %eax,%ebx
+                \\    xor %eax,%eax
+                \\    inc %eax
+                \\    int $128
+                \\    hlt
+            ),
+            .aarch64, .aarch64_be => asm (
+                \\.global __clone
+                \\.hidden __clone
+                \\.type __clone,%function
+                \\__clone:
+                \\    and x1,x1,#-16
+                \\    stp x0,x3,[x1,#-16]!
+                \\    uxtw x0,w2
+                \\    mov x2,x4
+                \\    mov x3,x5
+                \\    mov x4,x6
+                \\    mov x8,#220
+                \\    svc #0
+                \\    cbz x0,1f
+                \\    ret
+                \\1:  mov fp, 0
+                \\    ldp x1,x0,[sp],#16
+                \\    blr x1
+                \\    mov x8,#93
+                \\    svc #0
+            ),
+            else => {},
+        }
+    }
+}
+
+comptime {
+    if (builtin.target.isMuslLibC()) {
         symbol(&pthread_attr_destroy, "pthread_attr_destroy");
         symbol(&pthread_mutexattr_destroy, "pthread_mutexattr_destroy");
         symbol(&pthread_condattr_destroy, "pthread_condattr_destroy");
@@ -263,6 +403,13 @@ comptime {
         symbol(&pthread_self_fn, "pthread_self");
         symbol(&pthread_getspecific_fn, "pthread_getspecific");
         symbol(&pthread_setspecific_fn, "pthread_setspecific");
+        symbol(&pthread_setcancelstate_fn, "__pthread_setcancelstate");
+        symbol(&pthread_setcancelstate_fn, "pthread_setcancelstate");
+        symbol(&pthread_setcanceltype_fn, "pthread_setcanceltype");
+        symbol(&pthread_testcancel_fn, "__pthread_testcancel");
+        symbol(&pthread_testcancel_fn, "pthread_testcancel");
+        symbol(&sem_trywait_fn, "sem_trywait");
+        symbol(&sem_post_fn, "sem_post");
         symbol(&__default_stacksize, "__default_stacksize");
         symbol(&__default_guardsize, "__default_guardsize");
     }
@@ -295,6 +442,10 @@ comptime {
             symbol(&pthread_mutexattr_setprotocol_fn, "pthread_mutexattr_setprotocol");
             symbol(&pthread_mutexattr_setrobust_fn, "pthread_mutexattr_setrobust");
             symbol(&pthread_mutex_destroy_fn, "pthread_mutex_destroy");
+            symbol(&sem_wait_fn, "sem_wait");
+            symbol(&sem_unlink_fn, "sem_unlink");
+            symbol(&sem_timedwait_fn, "sem_timedwait");
+            symbol(&sem_timedwait_fn, "__sem_timedwait_time64");
             symbol(&__pthread_once_fn, "__pthread_once");
             symbol(&pthread_once_fn, "pthread_once");
             symbol(&barrier_destroy_fn, "pthread_barrier_destroy");
@@ -1407,10 +1558,6 @@ fn vm_unlock_fn() callconv(.c) void {
     {
         wake(@ptrCast(&vmlock[0]), -1, 1);
     }
-}
-
-fn __clone_fn(_: ?*const fn (?*anyopaque) callconv(.c) c_int, _: ?*anyopaque, _: c_int, _: ?*anyopaque) callconv(.c) c_int {
-    return -@as(c_int, @intCast(@intFromEnum(E.NOSYS)));
 }
 
 fn futexWait(addr: *volatile c_int, val: c_int, priv_flag: bool) void {

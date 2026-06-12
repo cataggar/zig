@@ -1244,14 +1244,14 @@ const src_files = [_][]const u8{
     // "musl/src/select/ppoll.c",
     // "musl/src/select/pselect.c",
     // "musl/src/select/select.c",
-    "musl/src/setjmp/aarch64/longjmp.s",
-    "musl/src/setjmp/aarch64/setjmp.s",
+    // "musl/src/setjmp/aarch64/longjmp.s", // migrated to lib/c/setjmp.zig (global asm)
+    // "musl/src/setjmp/aarch64/setjmp.s", // migrated to lib/c/setjmp.zig (global asm)
     "musl/src/setjmp/arm/longjmp.S",
     "musl/src/setjmp/arm/setjmp.S",
     "musl/src/setjmp/hexagon/longjmp.s",
     "musl/src/setjmp/hexagon/setjmp.s",
-    "musl/src/setjmp/i386/longjmp.s",
-    "musl/src/setjmp/i386/setjmp.s",
+    // "musl/src/setjmp/i386/longjmp.s", // migrated to lib/c/setjmp.zig (global asm)
+    // "musl/src/setjmp/i386/setjmp.s", // migrated to lib/c/setjmp.zig (global asm)
     // "musl/src/setjmp/longjmp.c", // empty file
     "musl/src/setjmp/loongarch64/longjmp.S",
     "musl/src/setjmp/loongarch64/setjmp.S",
@@ -1274,19 +1274,19 @@ const src_files = [_][]const u8{
     "musl/src/setjmp/s390x/longjmp.s",
     "musl/src/setjmp/s390x/setjmp.s",
     // "musl/src/setjmp/setjmp.c", // empty file
-    "musl/src/setjmp/x32/longjmp.s",
-    "musl/src/setjmp/x32/setjmp.s",
-    "musl/src/setjmp/x86_64/longjmp.s",
-    "musl/src/setjmp/x86_64/setjmp.s",
+    // "musl/src/setjmp/x32/longjmp.s", // migrated to lib/c/setjmp.zig (global asm)
+    // "musl/src/setjmp/x32/setjmp.s", // migrated to lib/c/setjmp.zig (global asm)
+    // "musl/src/setjmp/x86_64/longjmp.s", // migrated to lib/c/setjmp.zig (global asm)
+    // "musl/src/setjmp/x86_64/setjmp.s", // migrated to lib/c/setjmp.zig (global asm)
     "musl/src/signal/aarch64/restore.s",
-    "musl/src/signal/aarch64/sigsetjmp.s",
+    // "musl/src/signal/aarch64/sigsetjmp.s", // migrated to lib/c/setjmp.zig (global asm)
     "musl/src/signal/arm/restore.s",
     "musl/src/signal/arm/sigsetjmp.s",
     // "musl/src/signal/block.c", // migrated to lib/c/signal.zig; exports: __block_all_sigs,__block_app_sigs,__restore_sigs
     // "musl/src/signal/getitimer.c", // migrated to lib/c/process.zig
     "musl/src/signal/hexagon/sigsetjmp.s",
     "musl/src/signal/i386/restore.s",
-    "musl/src/signal/i386/sigsetjmp.s",
+    // "musl/src/signal/i386/sigsetjmp.s", // migrated to lib/c/setjmp.zig (global asm)
     // "musl/src/signal/kill.c", // migrated to lib/c/signal.zig
     // "musl/src/signal/killpg.c", // migrated to lib/c/signal.zig
     "musl/src/signal/loongarch64/sigsetjmp.s",
@@ -1339,9 +1339,9 @@ const src_files = [_][]const u8{
     // "musl/src/signal/x32/getitimer.c", // migrated to lib/c/process.zig
     "musl/src/signal/x32/restore.s",
     // "musl/src/signal/x32/setitimer.c", // migrated to lib/c/process.zig
-    "musl/src/signal/x32/sigsetjmp.s",
+    // "musl/src/signal/x32/sigsetjmp.s", // migrated to lib/c/setjmp.zig (global asm)
     "musl/src/signal/x86_64/restore.s",
-    "musl/src/signal/x86_64/sigsetjmp.s",
+    // "musl/src/signal/x86_64/sigsetjmp.s", // migrated to lib/c/setjmp.zig (global asm)
     // "musl/src/stat/chmod.c",
     // "musl/src/stat/fchmodat.c",
     // "musl/src/stat/fchmod.c",
@@ -1511,7 +1511,7 @@ const src_files = [_][]const u8{
     // "musl/src/termios/tcsendbreak.c",
     // "musl/src/termios/tcsetattr.c",
     // "musl/src/termios/tcsetwinsize.c",
-    "musl/src/thread/aarch64/clone.s",
+    // "musl/src/thread/aarch64/clone.s", // migrated to lib/c/thread.zig (global asm)
     "musl/src/thread/aarch64/__set_thread_area.s",
     "musl/src/thread/aarch64/syscall_cp.s",
     "musl/src/thread/aarch64/__unmapself.s",
@@ -1522,7 +1522,7 @@ const src_files = [_][]const u8{
     "musl/src/thread/arm/syscall_cp.s",
     "musl/src/thread/arm/__unmapself.s",
     // "musl/src/thread/call_once.c", // migrated to lib/c/thread.zig
-    "musl/src/thread/clone.c",
+    // "musl/src/thread/clone.c", // disabled; arch-specific __clone is provided by lib/c/thread.zig or musl asm
     // "musl/src/thread/cnd_broadcast.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/cnd_destroy.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/cnd_init.c", // migrated to lib/c/thread.zig
@@ -1534,7 +1534,7 @@ const src_files = [_][]const u8{
     "musl/src/thread/hexagon/__set_thread_area.s",
     "musl/src/thread/hexagon/syscall_cp.s",
     "musl/src/thread/hexagon/__unmapself.s",
-    "musl/src/thread/i386/clone.s",
+    // "musl/src/thread/i386/clone.s", // migrated to lib/c/thread.zig (global asm)
     "musl/src/thread/i386/__set_thread_area.s",
     "musl/src/thread/i386/syscall_cp.s",
     "musl/src/thread/i386/tls.s",
@@ -1643,15 +1643,15 @@ const src_files = [_][]const u8{
     "musl/src/thread/pthread_rwlock_wrlock.c",
     // "musl/src/thread/pthread_self.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_setattr_default_np.c", // migrated to lib/c/thread.zig
-    "musl/src/thread/pthread_setcancelstate.c",
-    "musl/src/thread/pthread_setcanceltype.c",
+    // "musl/src/thread/pthread_setcancelstate.c", // migrated to lib/c/thread.zig; exports: __pthread_setcancelstate,pthread_setcancelstate
+    // "musl/src/thread/pthread_setcanceltype.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_setconcurrency.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_setname_np.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_setschedparam.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_setschedprio.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_setspecific.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_sigmask.c", // migrated to lib/c/thread.zig
-    "musl/src/thread/pthread_testcancel.c",
+    // "musl/src/thread/pthread_testcancel.c", // migrated to lib/c/thread.zig; exports: __pthread_testcancel,pthread_testcancel
     "musl/src/thread/riscv32/clone.s",
     "musl/src/thread/riscv32/__set_thread_area.s",
     "musl/src/thread/riscv32/syscall_cp.s",
@@ -1669,11 +1669,11 @@ const src_files = [_][]const u8{
     // "musl/src/thread/sem_getvalue.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/sem_init.c", // migrated to lib/c/thread.zig
     "musl/src/thread/sem_open.c",
-    "musl/src/thread/sem_post.c",
-    "musl/src/thread/sem_timedwait.c",
-    "musl/src/thread/sem_trywait.c",
-    "musl/src/thread/sem_unlink.c",
-    "musl/src/thread/sem_wait.c",
+    // "musl/src/thread/sem_post.c", // migrated to lib/c/thread.zig
+    // "musl/src/thread/sem_timedwait.c", // migrated to lib/c/thread.zig
+    // "musl/src/thread/sem_trywait.c", // migrated to lib/c/thread.zig
+    // "musl/src/thread/sem_unlink.c", // migrated to lib/c/thread.zig
+    // "musl/src/thread/sem_wait.c", // migrated to lib/c/thread.zig
     "musl/src/thread/__set_thread_area.c",
     "musl/src/thread/synccall.c",
     "musl/src/thread/__syscall_cp.c",
@@ -1692,11 +1692,11 @@ const src_files = [_][]const u8{
     "musl/src/thread/__unmapself.c",
     "musl/src/thread/vmlock.c",
     "musl/src/thread/__wait.c",
-    "musl/src/thread/x32/clone.s",
+    // "musl/src/thread/x32/clone.s", // migrated to lib/c/thread.zig (global asm)
     "musl/src/thread/x32/__set_thread_area.s",
     "musl/src/thread/x32/syscall_cp.s",
     "musl/src/thread/x32/__unmapself.s",
-    "musl/src/thread/x86_64/clone.s",
+    // "musl/src/thread/x86_64/clone.s", // migrated to lib/c/thread.zig (global asm)
     "musl/src/thread/x86_64/__set_thread_area.s",
     "musl/src/thread/x86_64/syscall_cp.s",
     "musl/src/thread/x86_64/__unmapself.s",
