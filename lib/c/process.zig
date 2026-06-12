@@ -82,6 +82,81 @@ const SIGQUIT = 3;
 const SIGCHLD = 17;
 const SIG_BLOCK = 0;
 const SIG_SETMASK = 2;
+const E = linux.E;
+const ptr_size = @sizeOf(usize);
+const arch = builtin.target.cpu.arch;
+const tls_above_tp = switch (arch) {
+    .aarch64, .aarch64_be, .arm, .armeb, .thumb, .thumbeb, .riscv64, .riscv32, .mips, .mipsel, .mips64, .mips64el, .powerpc, .powerpcle, .powerpc64, .powerpc64le, .loongarch64, .m68k => true,
+    else => false,
+};
+const tp_offset: usize = switch (arch) {
+    .mips, .mipsel, .mips64, .mips64el, .powerpc, .powerpcle, .powerpc64, .powerpc64le, .m68k => 0x7000,
+    else => 0,
+};
+const part1_size: usize = if (tls_above_tp) 4 * ptr_size else 6 * ptr_size;
+const sizeof_pthread: usize = if (ptr_size == 8) 200 else 112;
+const map_base_off: usize = if (ptr_size == 8) 24 else 20;
+const off_prev = if (tls_above_tp) ptr_size else 2 * ptr_size;
+const off_next = off_prev + ptr_size;
+const off_tid = part1_size;
+const off_robust_head: usize = part1_size + map_base_off + 8 * ptr_size;
+const off_robust_off: usize = off_robust_head + ptr_size;
+const off_robust_pending: usize = off_robust_head + 2 * ptr_size;
+
+const LibC = extern struct {
+    can_do_threads: u8,
+    threaded: u8,
+    secure: u8,
+    need_locks: i8,
+    threads_minus_1: c_int,
+    auxv: ?[*]usize,
+    tls_head: ?*anyopaque,
+    tls_size: usize,
+    tls_align: usize,
+    tls_cnt: usize,
+    page_size: usize,
+};
+
+extern var __libc: LibC;
+extern var __abort_lock: c_int;
+extern var __thread_list_lock: c_int;
+extern "c" fn __lock(lock: *c_int) void;
+extern "c" fn __unlock(lock: *c_int) void;
+extern "c" fn __block_all_sigs(set: ?*sigset_t) void;
+extern "c" fn __block_app_sigs(set: ?*sigset_t) void;
+extern "c" fn __restore_sigs(set: *const sigset_t) void;
+extern "c" fn __inhibit_ptc() void;
+extern "c" fn __release_ptc() void;
+extern "c" fn __tl_lock() void;
+extern "c" fn __tl_unlock() void;
+extern "c" fn __fork_handler(who: c_int) void;
+extern "c" fn __malloc_atfork(who: c_int) void;
+extern "c" fn __aio_atfork(who: c_int) void;
+extern "c" fn __pthread_key_atfork(who: c_int) void;
+extern "c" fn __ldso_atfork(who: c_int) void;
+extern var __at_quick_exit_lockptr: ?*c_int;
+extern var __atexit_lockptr: ?*c_int;
+extern var __vmlock_lockptr: ?[*]c_int;
+extern var __gettext_lockptr: ?*c_int;
+extern var __locale_lockptr: ?*c_int;
+extern var __random_lockptr: ?*c_int;
+extern var __sem_open_lockptr: ?*c_int;
+extern var __stdio_ofl_lockptr: ?*c_int;
+extern var __syslog_lockptr: ?*c_int;
+extern var __timezone_lockptr: ?*c_int;
+extern var __bump_lockptr: ?*c_int;
+const atfork_locks = [_]*?*c_int{
+    &__at_quick_exit_lockptr,
+    &__atexit_lockptr,
+    &__gettext_lockptr,
+    &__locale_lockptr,
+    &__random_lockptr,
+    &__sem_open_lockptr,
+    &__stdio_ofl_lockptr,
+    &__syslog_lockptr,
+    &__timezone_lockptr,
+    &__bump_lockptr,
+};
 
 comptime {
     if (builtin.target.isMuslLibC()) {
@@ -99,6 +174,8 @@ comptime {
         symbol(&posix_spawnattr_getsigmask, "posix_spawnattr_getsigmask");
         symbol(&posix_spawnattr_setsigmask, "posix_spawnattr_setsigmask");
         symbol(&posix_spawn_file_actions_init, "posix_spawn_file_actions_init");
+        symbol(&_ForkImpl, "_Fork");
+        symbol(&__post_Fork, "__post_Fork");
     }
     if (builtin.link_libc) {
         symbol(&execvImpl, "execv");
@@ -110,7 +187,177 @@ comptime {
         symbol(&posix_spawn_file_actions_destroy_impl, "posix_spawn_file_actions_destroy");
         symbol(&__execvpe, "__execvpe");
         symbol(&execvpImpl, "execvp");
+        symbol(&forkImpl, "fork");
+        symbol(&dummyForkHandler, "__fork_handler");
+        symbol(&dummyForkHandler, "__malloc_atfork");
+        symbol(&dummyForkHandler, "__ldso_atfork");
+        symbol(&dummy0, "__tl_lock");
+        symbol(&dummy0, "__tl_unlock");
+        symbol(@ptrCast(&dummyLockPtr), "__gettext_lockptr");
+        symbol(@ptrCast(&dummyLockPtr), "__locale_lockptr");
+        symbol(@ptrCast(&dummyLockPtr), "__random_lockptr");
+        symbol(@ptrCast(&dummyLockPtr), "__sem_open_lockptr");
+        symbol(@ptrCast(&dummyLockPtr), "__stdio_ofl_lockptr");
+        symbol(@ptrCast(&dummyLockPtr), "__bump_lockptr");
+        symbol(@ptrCast(&dummyVmlockLockPtr), "__vmlock_lockptr");
     }
+}
+
+var dummyLockPtr: ?*c_int = null;
+var dummyVmlockLockPtr: ?[*]c_int = null;
+
+fn dummyForkHandler(_: c_int) callconv(.c) void {}
+
+fn dummy0() callconv(.c) void {}
+
+fn pthreadSelfPtr() usize {
+    const tp = switch (arch) {
+        .x86_64 => if (@sizeOf(usize) == 8) asm volatile ("movq %%fs:0, %[ret]"
+            : [ret] "=r" (-> usize),
+        ) else asm volatile ("movl %%fs:0, %[ret]"
+            : [ret] "=r" (-> usize),
+        ),
+        .x86 => asm volatile ("movl %%gs:0, %[ret]"
+            : [ret] "=r" (-> usize),
+        ),
+        .aarch64, .aarch64_be => asm volatile ("mrs %[ret], tpidr_el0"
+            : [ret] "=r" (-> usize),
+        ),
+        .arm, .armeb, .thumb, .thumbeb => asm volatile ("mrc p15,0,%[ret],c13,c0,3"
+            : [ret] "=r" (-> usize),
+        ),
+        .riscv64, .riscv32 => asm volatile ("mv %[ret], tp"
+            : [ret] "=r" (-> usize),
+        ),
+        .s390x => asm volatile (
+            \\ear  %[ret], %%a0
+            \\sllg %[ret], %[ret], 32
+            \\ear  %[ret], %%a1
+            : [ret] "=r" (-> usize),
+        ),
+        .mips, .mipsel => asm volatile (
+            \\.set push
+            \\.set mips32r2
+            \\rdhwr %[ret], $29
+            \\.set pop
+            : [ret] "=r" (-> usize),
+        ),
+        .mips64, .mips64el => asm volatile (
+            \\rdhwr %[ret], $29
+            : [ret] "=r" (-> usize),
+        ),
+        .powerpc, .powerpcle => asm volatile (""
+            : [ret] "={r2}" (-> usize),
+        ),
+        .powerpc64, .powerpc64le => asm volatile (""
+            : [ret] "={r13}" (-> usize),
+        ),
+        .loongarch64 => asm volatile (""
+            : [ret] "={$r2}" (-> usize),
+        ),
+        .m68k => linux.syscall0(.get_thread_area),
+        else => @compileError("unsupported architecture for __pthread_self"),
+    };
+    return if (tls_above_tp) tp - sizeof_pthread - tp_offset else tp;
+}
+
+fn pthreadField(comptime T: type, self: usize, comptime off: usize) *T {
+    return @ptrFromInt(self + off);
+}
+
+fn errnoPid(r: usize) linux.pid_t {
+    const signed: isize = @bitCast(r);
+    if (signed < 0) {
+        @branchHint(.unlikely);
+        std.c._errno().* = @intCast(-signed);
+        return -1;
+    }
+    return @intCast(signed);
+}
+
+fn __post_Fork(ret: linux.pid_t) callconv(.c) void {
+    if (ret == 0) {
+        const self = pthreadSelfPtr();
+        pthreadField(c_int, self, off_tid).* = @intCast(@as(isize, @bitCast(linux.syscall2(
+            .set_tid_address,
+            @intFromPtr(&__thread_list_lock),
+            0,
+        ))));
+        pthreadField(isize, self, off_robust_off).* = 0;
+        pthreadField(usize, self, off_robust_pending).* = 0;
+        pthreadField(usize, self, off_next).* = self;
+        pthreadField(usize, self, off_prev).* = self;
+        __thread_list_lock = 0;
+        __libc.threads_minus_1 = 0;
+        if (__libc.need_locks != 0) __libc.need_locks = -1;
+    }
+    __unlock(&__abort_lock);
+    if (ret == 0) __aio_atfork(1);
+}
+
+fn _ForkImpl() callconv(.c) linux.pid_t {
+    var set: sigset_t = undefined;
+    __block_all_sigs(&set);
+    __lock(&__abort_lock);
+    const ret_raw = linux.fork();
+    const ret: linux.pid_t = @intCast(@as(isize, @bitCast(ret_raw)));
+    __post_Fork(ret);
+    __restore_sigs(&set);
+    return errnoPid(ret_raw);
+}
+
+fn forkImpl() callconv(.c) linux.pid_t {
+    var set: sigset_t = undefined;
+    __fork_handler(-1);
+    __block_app_sigs(&set);
+    const need_locks = __libc.need_locks > 0;
+    if (need_locks) {
+        __ldso_atfork(-1);
+        __pthread_key_atfork(-1);
+        __aio_atfork(-1);
+        __inhibit_ptc();
+        for (atfork_locks) |lockp| {
+            if (lockp.*) |lock| __lock(lock);
+        }
+        __malloc_atfork(-1);
+        __tl_lock();
+    }
+    const self = pthreadSelfPtr();
+    const next = pthreadField(usize, self, off_next).*;
+    const ret = _ForkImpl();
+    const errno_save = std.c._errno().*;
+    if (need_locks) {
+        if (ret == 0) {
+            var td = next;
+            while (td != self) {
+                pthreadField(c_int, td, off_tid).* = -1;
+                td = pthreadField(usize, td, off_next).*;
+            }
+            if (__vmlock_lockptr) |vm| {
+                vm[0] = 0;
+                vm[1] = 0;
+            }
+        }
+        __tl_unlock();
+        __malloc_atfork(@intFromBool(ret == 0));
+        for (atfork_locks) |lockp| {
+            if (lockp.*) |lock| {
+                if (ret != 0) {
+                    __unlock(lock);
+                } else {
+                    lock.* = 0;
+                }
+            }
+        }
+        __release_ptc();
+        if (ret != 0) __aio_atfork(0);
+        __pthread_key_atfork(@intFromBool(ret == 0));
+        __ldso_atfork(@intFromBool(ret == 0));
+    }
+    __restore_sigs(&set);
+    __fork_handler(@intFromBool(ret == 0));
+    if (ret < 0) std.c._errno().* = errno_save;
+    return ret;
 }
 
 fn raiseLinux(sig: c_int) callconv(.c) c_int {

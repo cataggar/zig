@@ -750,8 +750,8 @@ const src_files = [_][]const u8{
     // "musl/src/linux/utimes.c",
     // "musl/src/linux/vhangup.c",
     // "musl/src/linux/vmsplice.c",
-    // "musl/src/linux/wait3.c",
-    // "musl/src/linux/wait4.c",
+    "musl/src/linux/wait3.c",
+    "musl/src/linux/wait4.c",
     // "musl/src/linux/x32/sysinfo.c",
     // "musl/src/linux/xattr.c",
     "musl/src/locale/bind_textdomain_codeset.c",
@@ -1184,9 +1184,9 @@ const src_files = [_][]const u8{
     "musl/src/process/execlp.c",
     // "musl/src/process/execv.c", // migrated to lib/c/process.zig
     // "musl/src/process/execvp.c", // migrated to lib/c/process.zig
-    "musl/src/process/fexecve.c",
-    "musl/src/process/fork.c",
-    "musl/src/process/_Fork.c",
+    // "musl/src/process/fexecve.c", // migrated to lib/c/unistd.zig
+    // "musl/src/process/fork.c", // migrated to lib/c/process.zig
+    // "musl/src/process/_Fork.c", // migrated to lib/c/process.zig
     // "musl/src/process/i386/vfork.s", // migrated to lib/c/process.zig
     // "musl/src/process/posix_spawnattr_destroy.c", // migrated to lib/c/spawn.zig
     // "musl/src/process/posix_spawnattr_getflags.c", // migrated to lib/c/process.zig
@@ -1199,7 +1199,7 @@ const src_files = [_][]const u8{
     // "musl/src/process/posix_spawnattr_setpgroup.c", // migrated to lib/c/process.zig
     // "musl/src/process/posix_spawnattr_setsigdefault.c", // migrated to lib/c/process.zig
     // "musl/src/process/posix_spawnattr_setsigmask.c", // migrated to lib/c/process.zig
-    "musl/src/process/posix_spawn.c",
+    // "musl/src/process/posix_spawn.c", // migrated to lib/c/spawn.zig
     // "musl/src/process/posix_spawn_file_actions_addchdir.c", // migrated to lib/c/process.zig; exports: posix_spawn_file_actions_addchdir_np
     // "musl/src/process/posix_spawn_file_actions_addclose.c", // migrated to lib/c/process.zig
     // "musl/src/process/posix_spawn_file_actions_adddup2.c", // migrated to lib/c/process.zig
@@ -1207,7 +1207,7 @@ const src_files = [_][]const u8{
     // "musl/src/process/posix_spawn_file_actions_addopen.c", // migrated to lib/c/process.zig
     // "musl/src/process/posix_spawn_file_actions_destroy.c", // migrated to lib/c/process.zig
     // "musl/src/process/posix_spawn_file_actions_init.c", // migrated to lib/c/process.zig
-    "musl/src/process/posix_spawnp.c",
+    // "musl/src/process/posix_spawnp.c", // migrated to lib/c/spawn.zig
     // "musl/src/process/riscv64/vfork.s", // migrated to lib/c/process.zig
     // "musl/src/process/s390x/vfork.s", // migrated to lib/c/process.zig
     "musl/src/process/system.c",
