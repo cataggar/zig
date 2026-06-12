@@ -54,14 +54,38 @@ const JT_ZERO: c_int = -256 | 10;
 const JT_DELAYTIMER_MAX: c_int = -256 | 11;
 const JT_MINSIGSTKSZ: c_int = -256 | 12;
 const JT_SIGSTKSZ: c_int = -256 | 13;
-const RLIM_NPROC: c_int = @bitCast(@as(c_uint, 0x80000000 | 6)); // RLIMIT_NPROC
-const RLIM_NOFILE: c_int = @bitCast(@as(c_uint, 0x80000000 | 7)); // RLIMIT_NOFILE
+const RLIM_NPROC: c_int = -32768 | 6; // RLIMIT_NPROC
+const RLIM_NOFILE: c_int = -32768 | 7; // RLIMIT_NOFILE
 const sz_long: c_int = @sizeOf(c_long);
-// Table size: _SC values go up to ~199 on Linux
-const TABLE_SIZE = 200;
+const ARG_MAX: c_long = 131072;
+const TZNAME_MAX: c_long = 6;
+const SEM_NSEMS_MAX: c_long = 256;
+const IOV_MAX: c_long = 1024;
+const TTY_NAME_MAX: c_long = 32;
+const PTHREAD_DESTRUCTOR_ITERATIONS: c_long = 4;
+const PTHREAD_KEYS_MAX: c_long = 128;
+const PTHREAD_STACK_MIN: c_long = 2048;
+const XOPEN_VERSION: c_long = 700;
+const NZERO: c_long = 20;
+const SYMLOOP_MAX: c_long = 40;
+const HOST_NAME_MAX: c_long = 255;
 
 comptime {
+    if (builtin.target.isMuslLibC()) {
+        symbol(&fpathconf, "fpathconf");
+        symbol(&pathconf, "pathconf");
+    }
     if (builtin.target.isWasiLibC()) {}
+    if (builtin.link_libc) {
+        symbol(&get_nprocs_conf, "get_nprocs_conf");
+        symbol(&get_nprocs, "get_nprocs");
+        symbol(&get_phys_pages, "get_phys_pages");
+        symbol(&get_avphys_pages, "get_avphys_pages");
+        symbol(&sysconf, "sysconf");
+    }
+    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
+        symbol(&confstr, "confstr");
+    }
 }
 
 fn fpathconf(_: c_int, name: c_int) callconv(.c) c_long {
@@ -120,19 +144,61 @@ fn confstr(name: c_int, buf: ?[*]u8, len: usize) callconv(.c) usize {
     return slen + 1;
 }
 
+fn sysconfValue(name: c_int) c_int {
+    return switch (name) {
+        0 => JT_ARG_MAX,
+        1 => RLIM_NPROC,
+        2 => 100,
+        3 => 32,
+        4 => RLIM_NOFILE,
+        5, 10, 13, 14, 23, 24, 27, 34, 35, 42, 43, 48, 49, 50, 51, 52, 76, 80, 81, 87, 88, 92, 95, 97, 98, 99, 100, 125, 128, 129, 130, 131, 160, 161, 165, 168, 169, 170, 171, 172, 175, 176, 179, 181, 182, 183, 184, 237, 240, 241, 242, 243, 244, 245, 247, 248 => -1,
+        6 => TZNAME_MAX,
+        7, 8, 91, 93, 94, 155, 157 => 1,
+        9, 11, 12, 15, 16, 17, 18, 19, 20, 21, 22, 29, 46, 47, 67, 68, 77, 78, 79, 82, 132, 133, 137, 138, 139, 149, 153, 154, 159, 164, 235, 236 => VER,
+        25, 174, 246 => JT_ZERO,
+        26 => JT_DELAYTIMER_MAX,
+        28 => JT_MQ_PRIO_MAX,
+        30 => JT_PAGE_SIZE,
+        31 => linux.NSIG - 1 - 31 - 3,
+        32 => SEM_NSEMS_MAX,
+        33 => JT_SEM_VALUE_MAX,
+        36 => 99,
+        37 => 2048,
+        38 => 99,
+        39 => 1000,
+        40 => 2,
+        44 => 255,
+        60 => IOV_MAX,
+        69, 70 => -1,
+        71 => 256,
+        72 => TTY_NAME_MAX,
+        73 => PTHREAD_DESTRUCTOR_ITERATIONS,
+        74 => PTHREAD_KEYS_MAX,
+        75 => PTHREAD_STACK_MIN,
+        83 => JT_NPROCESSORS,
+        84 => JT_NPROCESSORS,
+        85 => JT_PHYS_PAGES,
+        86 => JT_AVPHYS_PAGES,
+        89, 90 => XOPEN_VERSION,
+        109 => NZERO,
+        126, 177, 238 => if (sz_long == 4) 1 else -1,
+        127, 178, 239 => if (sz_long == 8) 1 else -1,
+        173 => SYMLOOP_MAX,
+        180 => HOST_NAME_MAX,
+        249 => JT_MINSIGSTKSZ,
+        250 => JT_SIGSTKSZ,
+        else => 0,
+    };
+}
+
 fn sysconf(name: c_int) callconv(.c) c_long {
-    if (name < 0 or name >= TABLE_SIZE) {
-        std.c._errno().* = @intFromEnum(linux.E.INVAL);
-        return -1;
-    }
-    const v = values[@intCast(name)];
+    const v = sysconfValue(name);
     if (v == 0) {
         std.c._errno().* = @intFromEnum(linux.E.INVAL);
         return -1;
     }
     if (v >= -1) return v;
 
-    // RLIMIT query
     if (v < -256) {
         var rl: linux.rlimit = undefined;
         _ = linux.getrlimit(@enumFromInt(v & 0x3FFF), &rl);
@@ -140,15 +206,14 @@ fn sysconf(name: c_int) callconv(.c) c_long {
         return if (rl.cur > LONG_MAX) LONG_MAX else @intCast(rl.cur);
     }
 
-    // Jump table entries
-    const code: u8 = @truncate(@as(c_uint, @intCast(v)));
+    const code: u8 = @truncate(@as(c_uint, @bitCast(v)));
     return switch (code) {
-        1 => _POSIX_VERSION, // VER
-        2 => 2097152, // ARG_MAX
-        3 => 32768, // MQ_PRIO_MAX
-        4 => @intCast(std.heap.page_size_min), // PAGE_SIZE
-        5 => 2147483647, // SEM_VALUE_MAX (INT_MAX)
-        6, 7 => blk: { // NPROCESSORS_CONF, NPROCESSORS_ONLN
+        1 => _POSIX_VERSION,
+        2 => ARG_MAX,
+        3 => 32768,
+        4 => @intCast(std.heap.page_size_min),
+        5 => 2147483647,
+        6, 7 => blk: {
             var set: [128]u8 = @splat(0);
             set[0] = 1;
             _ = linux.syscall3(.sched_getaffinity, 0, set.len, @intFromPtr(&set));
@@ -159,7 +224,7 @@ fn sysconf(name: c_int) callconv(.c) c_long {
             }
             break :blk cnt;
         },
-        8, 9 => blk: { // PHYS_PAGES, AVPHYS_PAGES
+        8, 9 => blk: {
             var si: linux.Sysinfo = undefined;
             _ = linux.sysinfo(&si);
             const mem_unit: u64 = if (si.mem_unit == 0) 1 else si.mem_unit;
@@ -167,14 +232,14 @@ fn sysconf(name: c_int) callconv(.c) c_long {
             const result = (mem *% mem_unit) / std.heap.page_size_min;
             break :blk if (result > LONG_MAX) LONG_MAX else @intCast(result);
         },
-        10 => 0, // ZERO
-        11 => 2147483647, // DELAYTIMER_MAX (INT_MAX)
-        12, 13 => blk: { // MINSIGSTKSZ, SIGSTKSZ
+        10 => 0,
+        11 => 2147483647,
+        12, 13 => blk: {
             var val: c_long = @intCast(linux.getauxval(std.elf.AT_MINSIGSTKSZ));
             if (val < linux.MINSIGSTKSZ) val = linux.MINSIGSTKSZ;
             if (code == 13) val += linux.SIGSTKSZ - linux.MINSIGSTKSZ;
             break :blk val;
         },
-        else => -1,
+        else => v,
     };
 }
