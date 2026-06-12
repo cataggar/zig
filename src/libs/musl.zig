@@ -1278,14 +1278,14 @@ const src_files = [_][]const u8{
     // "musl/src/setjmp/x32/setjmp.s", // migrated to lib/c/setjmp.zig (global asm)
     // "musl/src/setjmp/x86_64/longjmp.s", // migrated to lib/c/setjmp.zig (global asm)
     // "musl/src/setjmp/x86_64/setjmp.s", // migrated to lib/c/setjmp.zig (global asm)
-    "musl/src/signal/aarch64/restore.s",
+    // "musl/src/signal/aarch64/restore.s", // migrated to lib/c/signal.zig; exports: __restore,__restore_rt
     // "musl/src/signal/aarch64/sigsetjmp.s", // migrated to lib/c/setjmp.zig (global asm)
-    "musl/src/signal/arm/restore.s",
+    // "musl/src/signal/arm/restore.s", // migrated to lib/c/signal.zig; exports: __restore,__restore_rt
     "musl/src/signal/arm/sigsetjmp.s",
     // "musl/src/signal/block.c", // migrated to lib/c/signal.zig; exports: __block_all_sigs,__block_app_sigs,__restore_sigs
     // "musl/src/signal/getitimer.c", // migrated to lib/c/process.zig
     "musl/src/signal/hexagon/sigsetjmp.s",
-    "musl/src/signal/i386/restore.s",
+    // "musl/src/signal/i386/restore.s", // migrated to lib/c/signal.zig; exports: __restore,__restore_rt
     // "musl/src/signal/i386/sigsetjmp.s", // migrated to lib/c/setjmp.zig (global asm)
     // "musl/src/signal/kill.c", // migrated to lib/c/signal.zig
     // "musl/src/signal/killpg.c", // migrated to lib/c/signal.zig
@@ -1294,20 +1294,20 @@ const src_files = [_][]const u8{
     "musl/src/signal/mips64/sigsetjmp.s",
     "musl/src/signal/mipsn32/sigsetjmp.s",
     "musl/src/signal/mips/sigsetjmp.s",
-    "musl/src/signal/powerpc64/restore.s",
+    // "musl/src/signal/powerpc64/restore.s", // migrated to lib/c/signal.zig; exports: __restore,__restore_rt
     "musl/src/signal/powerpc64/sigsetjmp.s",
-    "musl/src/signal/powerpc/restore.s",
+    // "musl/src/signal/powerpc/restore.s", // migrated to lib/c/signal.zig; exports: __restore,__restore_rt
     "musl/src/signal/powerpc/sigsetjmp.s",
     // "musl/src/signal/psiginfo.c", // migrated to lib/c/signal.zig
-    "musl/src/signal/psignal.c",
+    // "musl/src/signal/psignal.c", // migrated to lib/c/signal.zig
     // "musl/src/signal/raise.c", // migrated to lib/c/process.zig
-    "musl/src/signal/restore.c",
+    // "musl/src/signal/restore.c", // migrated to lib/c/signal.zig; exports: __restore,__restore_rt
     "musl/src/signal/riscv32/sigsetjmp.s",
     "musl/src/signal/riscv64/sigsetjmp.s",
-    "musl/src/signal/s390x/restore.s",
+    // "musl/src/signal/s390x/restore.s", // migrated to lib/c/signal.zig; exports: __restore,__restore_rt
     "musl/src/signal/s390x/sigsetjmp.s",
     // "musl/src/signal/setitimer.c", // migrated to lib/c/process.zig
-    "musl/src/signal/sigaction.c",
+    // "musl/src/signal/sigaction.c", // migrated to lib/c/signal.zig; exports: __get_handler_set,__eintr_valid_flag,__libc_sigaction,__sigaction,sigaction
     // "musl/src/signal/sigaddset.c", // migrated to lib/c/signal.zig
     // "musl/src/signal/sigaltstack.c", // migrated to lib/c/signal.zig
     // "musl/src/signal/sigandset.c", // migrated to lib/c/signal.zig
@@ -1337,10 +1337,10 @@ const src_files = [_][]const u8{
     "musl/src/signal/sigwait.c",
     "musl/src/signal/sigwaitinfo.c",
     // "musl/src/signal/x32/getitimer.c", // migrated to lib/c/process.zig
-    "musl/src/signal/x32/restore.s",
+    // "musl/src/signal/x32/restore.s", // migrated to lib/c/signal.zig; exports: __restore,__restore_rt
     // "musl/src/signal/x32/setitimer.c", // migrated to lib/c/process.zig
     // "musl/src/signal/x32/sigsetjmp.s", // migrated to lib/c/setjmp.zig (global asm)
-    "musl/src/signal/x86_64/restore.s",
+    // "musl/src/signal/x86_64/restore.s", // migrated to lib/c/signal.zig; exports: __restore,__restore_rt
     // "musl/src/signal/x86_64/sigsetjmp.s", // migrated to lib/c/setjmp.zig (global asm)
     // "musl/src/stat/chmod.c",
     // "musl/src/stat/fchmodat.c",
