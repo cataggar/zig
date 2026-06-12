@@ -1539,8 +1539,8 @@ const src_files = [_][]const u8{
     "musl/src/thread/i386/syscall_cp.s",
     "musl/src/thread/i386/tls.s",
     "musl/src/thread/i386/__unmapself.s",
-    // "musl/src/thread/__lock.c", // migrated to lib/c/thread.zig; exports: __lock,__unlock
-    // "musl/src/thread/lock_ptc.c", // migrated to lib/c/thread.zig; exports: __inhibit_ptc,__acquire_ptc,__release_ptc
+    "musl/src/thread/__lock.c",
+    "musl/src/thread/lock_ptc.c",
     "musl/src/thread/loongarch64/clone.s",
     "musl/src/thread/loongarch64/__set_thread_area.s",
     "musl/src/thread/loongarch64/syscall_cp.s",
@@ -1595,12 +1595,12 @@ const src_files = [_][]const u8{
     // "musl/src/thread/pthread_condattr_init.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_condattr_setclock.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_condattr_setpshared.c", // migrated to lib/c/thread.zig
-    // "musl/src/thread/pthread_cond_broadcast.c", // migrated to lib/c/thread.zig
-    // "musl/src/thread/pthread_cond_destroy.c", // migrated to lib/c/thread.zig
-    // "musl/src/thread/pthread_cond_init.c", // migrated to lib/c/thread.zig
-    // "musl/src/thread/pthread_cond_signal.c", // migrated to lib/c/thread.zig
+    "musl/src/thread/pthread_cond_broadcast.c",
+    "musl/src/thread/pthread_cond_destroy.c",
+    "musl/src/thread/pthread_cond_init.c",
+    "musl/src/thread/pthread_cond_signal.c",
     "musl/src/thread/pthread_cond_timedwait.c",
-    // "musl/src/thread/pthread_cond_wait.c", // migrated to lib/c/thread.zig
+    "musl/src/thread/pthread_cond_wait.c",
     "musl/src/thread/pthread_create.c",
     // "musl/src/thread/pthread_detach.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_equal.c", // migrated to lib/c/thread.zig
@@ -1623,24 +1623,24 @@ const src_files = [_][]const u8{
     // "musl/src/thread/pthread_mutex_destroy.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_mutex_getprioceiling.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_mutex_init.c", // migrated to lib/c/thread.zig
-    // "musl/src/thread/pthread_mutex_lock.c", // migrated to lib/c/thread.zig; exports: __pthread_mutex_lock,pthread_mutex_lock
+    "musl/src/thread/pthread_mutex_lock.c",
     // "musl/src/thread/pthread_mutex_setprioceiling.c", // migrated to lib/c/thread.zig
-    // "musl/src/thread/pthread_mutex_timedlock.c", // migrated to lib/c/thread.zig; exports: __pthread_mutex_timedlock,pthread_mutex_timedlock
-    // "musl/src/thread/pthread_mutex_trylock.c", // migrated to lib/c/thread.zig; exports: __pthread_mutex_trylock_owner,__pthread_mutex_trylock,pthread_mutex_trylock
-    // "musl/src/thread/pthread_mutex_unlock.c", // migrated to lib/c/thread.zig; exports: __pthread_mutex_unlock,pthread_mutex_unlock
+    "musl/src/thread/pthread_mutex_timedlock.c",
+    "musl/src/thread/pthread_mutex_trylock.c",
+    "musl/src/thread/pthread_mutex_unlock.c",
     // "musl/src/thread/pthread_once.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_rwlockattr_destroy.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_rwlockattr_init.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_rwlockattr_setpshared.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_rwlock_destroy.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_rwlock_init.c", // migrated to lib/c/thread.zig
-    // "musl/src/thread/pthread_rwlock_rdlock.c", // migrated to lib/c/thread.zig; exports: __pthread_rwlock_rdlock,pthread_rwlock_rdlock
-    // "musl/src/thread/pthread_rwlock_timedrdlock.c", // migrated to lib/c/thread.zig; exports: __pthread_rwlock_timedrdlock,pthread_rwlock_timedrdlock
-    // "musl/src/thread/pthread_rwlock_timedwrlock.c", // migrated to lib/c/thread.zig; exports: __pthread_rwlock_timedwrlock,pthread_rwlock_timedwrlock
-    // "musl/src/thread/pthread_rwlock_tryrdlock.c", // migrated to lib/c/thread.zig; exports: __pthread_rwlock_tryrdlock,pthread_rwlock_tryrdlock
-    // "musl/src/thread/pthread_rwlock_trywrlock.c", // migrated to lib/c/thread.zig; exports: __pthread_rwlock_trywrlock,pthread_rwlock_trywrlock
-    // "musl/src/thread/pthread_rwlock_unlock.c", // migrated to lib/c/thread.zig; exports: __pthread_rwlock_unlock,pthread_rwlock_unlock
-    // "musl/src/thread/pthread_rwlock_wrlock.c", // migrated to lib/c/thread.zig; exports: __pthread_rwlock_wrlock,pthread_rwlock_wrlock
+    "musl/src/thread/pthread_rwlock_rdlock.c",
+    "musl/src/thread/pthread_rwlock_timedrdlock.c",
+    "musl/src/thread/pthread_rwlock_timedwrlock.c",
+    "musl/src/thread/pthread_rwlock_tryrdlock.c",
+    "musl/src/thread/pthread_rwlock_trywrlock.c",
+    "musl/src/thread/pthread_rwlock_unlock.c",
+    "musl/src/thread/pthread_rwlock_wrlock.c",
     // "musl/src/thread/pthread_self.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_setattr_default_np.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/pthread_setcancelstate.c", // migrated to lib/c/thread.zig; exports: __pthread_setcancelstate,pthread_setcancelstate
@@ -1690,8 +1690,8 @@ const src_files = [_][]const u8{
     // "musl/src/thread/tss_delete.c", // migrated to lib/c/thread.zig
     // "musl/src/thread/tss_set.c", // migrated to lib/c/thread.zig
     "musl/src/thread/__unmapself.c",
-    // "musl/src/thread/vmlock.c", // migrated to lib/c/thread.zig; exports: __vm_wait,__vm_lock,__vm_unlock,__vmlock_lockptr
-    // "musl/src/thread/__wait.c", // migrated to lib/c/thread.zig; exports: __wait
+    "musl/src/thread/vmlock.c",
+    "musl/src/thread/__wait.c",
     // "musl/src/thread/x32/clone.s", // migrated to lib/c/thread.zig (global asm)
     "musl/src/thread/x32/__set_thread_area.s",
     "musl/src/thread/x32/syscall_cp.s",
