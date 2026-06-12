@@ -100,8 +100,37 @@ fn fchmodLinux(fd: c_int, mode: linux.mode_t) callconv(.c) c_int {
     return errno(linux.fchmodat(linux.AT.FDCWD, @ptrCast(path.ptr), mode));
 }
 
-fn utimensatLinux(fd: c_int, path: ?[*:0]const u8, times: ?*const [2]linux.timespec, flags: c_int) callconv(.c) c_int {
-    return errno(linux.utimensat(fd, if (path) |p| @ptrCast(p) else null, if (times) |t| t else null, @bitCast(flags)));
+fn negativeErrno(err: linux.E) usize {
+    return @bitCast(-@as(isize, @intCast(@intFromEnum(err))));
+}
+
+fn is32BitTime(x: i64) bool {
+    return x >= std.math.minInt(i32) and x <= std.math.maxInt(i32);
+}
+
+fn utimensatLinux(fd: c_int, path: ?[*:0]const u8, times: ?*const [2]Ts, flags: c_int) callconv(.c) c_int {
+    const path_arg = if (path) |p| @intFromPtr(p) else 0;
+    if (comptime @hasField(linux.SYS, "utimensat_time64")) {
+        var kts: [2]linux.kernel_timespec = undefined;
+        const times_arg = if (times) |ts| blk: {
+            kts = .{
+                .{ .sec = ts[0].sec, .nsec = @intCast(ts[0].nsec) },
+                .{ .sec = ts[1].sec, .nsec = @intCast(ts[1].nsec) },
+            };
+            break :blk @intFromPtr(&kts);
+        } else 0;
+        const ret = linux.syscall4(.utimensat_time64, syscallArg(fd), path_arg, times_arg, syscallArg(flags));
+        if ((comptime !@hasField(linux.SYS, "utimensat")) or ret != negativeErrno(.NOSYS)) return errno(ret);
+    }
+
+    var ts32: [4]c_long = undefined;
+    var ts32_arg: usize = 0;
+    if (times) |ts| {
+        if (!is32BitTime(ts[0].sec) or !is32BitTime(ts[1].sec)) return errno(negativeErrno(.OPNOTSUPP));
+        ts32 = .{ @intCast(ts[0].sec), @intCast(ts[0].nsec), @intCast(ts[1].sec), @intCast(ts[1].nsec) };
+        ts32_arg = @intFromPtr(&ts32);
+    }
+    return errno(linux.syscall4(.utimensat, syscallArg(fd), path_arg, ts32_arg, syscallArg(flags)));
 }
 
 // --- fstatat implementation (replaces musl/src/stat/fstatat.c) ---
@@ -413,24 +442,24 @@ fn fstatLinux(fd: c_int, buf: *anyopaque) callconv(.c) c_int {
     }
     return fstatat(fd, "", buf, linux.AT.EMPTY_PATH);
 }
-fn futimensLinux(fd: c_int, times: ?*const [2]linux.timespec) callconv(.c) c_int {
+fn futimensLinux(fd: c_int, times: ?*const [2]Ts) callconv(.c) c_int {
     return utimensatLinux(fd, null, times, 0);
 }
 fn lchmodLinux(path: [*:0]const u8, mode: linux.mode_t) callconv(.c) c_int {
     return fchmodatLinux(linux.AT.FDCWD, path, mode, linux.AT.SYMLINK_NOFOLLOW);
 }
 
-const timeval = extern struct { tv_sec: isize, tv_usec: isize };
+const Timeval = extern struct { tv_sec: i64, tv_usec: c_long };
 
-fn __futimesat(dirfd: c_int, pathname: ?[*:0]const u8, times: ?*const [2]timeval) callconv(.c) c_int {
+fn __futimesat(dirfd: c_int, pathname: ?[*:0]const u8, times: ?*const [2]Timeval) callconv(.c) c_int {
     if (times) |tv| {
         if (tv[0].tv_usec >= 1000000 or tv[1].tv_usec >= 1000000) {
             std.c._errno().* = @intFromEnum(linux.E.INVAL);
             return -1;
         }
-        const ts = [2]linux.timespec{
-            .{ .sec = tv[0].tv_sec, .nsec = tv[0].tv_usec * 1000 },
-            .{ .sec = tv[1].tv_sec, .nsec = tv[1].tv_usec * 1000 },
+        const ts = [2]Ts{
+            .{ .sec = tv[0].tv_sec, .nsec = @intCast(tv[0].tv_usec * 1000) },
+            .{ .sec = tv[1].tv_sec, .nsec = @intCast(tv[1].tv_usec * 1000) },
         };
         return utimensatLinux(dirfd, pathname, &ts, 0);
     }
