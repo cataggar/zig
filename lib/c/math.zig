@@ -789,7 +789,6 @@ fn tanhf(x: f32) callconv(.c) f32 {
     return math.tanh(x);
 }
 
-
 comptime {
     if (builtin.target.isMinGW()) {
         symbol(&isnan, "isnan");
@@ -829,6 +828,7 @@ comptime {
         symbol(&asinl, "asinl");
         symbol(&atan, "atan");
         symbol(&atanf, "atanf");
+        symbol(&atanhf, "atanhf");
         symbol(&atanl, "atanl");
         symbol(&cbrt, "cbrt");
         symbol(&cbrtf, "cbrtf");
@@ -843,6 +843,10 @@ comptime {
         symbol(&frexpf, "frexpf");
         symbol(&frexpl, "frexpl");
         symbol(&hypot, "hypot");
+        symbol(&ilogbf, "ilogbf");
+        symbol(&ilogbl, "ilogbl");
+        symbol(&ldexpf, "ldexpf");
+        symbol(&ldexpl, "ldexpl");
         symbol(&llrintf, "llrintf");
         symbol(&llrintl, "llrintl");
         symbol(&llroundf, "llroundf");
@@ -852,8 +856,8 @@ comptime {
         symbol(&lroundf, "lroundf");
         symbol(&lroundl, "lroundl");
         symbol(&modf, "modf");
-        if (!builtin.target.isWasiLibC())
-            symbol(&nextafterf, "nextafterf");
+        symbol(&nearbyintl, "nearbyintl");
+        symbol(&nextafterf, "nextafterf");
         symbol(&nextafterl, "nextafterl");
         symbol(&nexttowardf, "nexttowardf");
         symbol(&nexttowardl, "nexttowardl");
@@ -861,18 +865,31 @@ comptime {
         symbol(&pow10, "pow10");
         symbol(&pow10f, "pow10f");
         symbol(&sincosl, "sincosl");
+        symbol(&sinhf, "sinhf");
         symbol(&sinl, "sinl");
         symbol(&tanh, "tanh");
         symbol(&tanl, "tanl");
+        symbol(&logbf, "logbf");
+        symbol(&logbl, "logbl");
+        symbol(&scalblnf, "scalblnf");
+        symbol(&scalblnl, "scalblnl");
+        symbol(&scalbnf, "scalbnf");
+        symbol(&scalbnl, "scalbnl");
         symbol(&fdim, "fdim");
         symbol(&powf, "powf");
         symbol(&asinf, "asinf");
         symbol(&finite_, "finite");
         symbol(&finitef_, "finitef");
         symbol(&frexp_, "frexp");
+        symbol(&ilogb_, "ilogb");
+        symbol(&ldexp_, "ldexp");
+        symbol(&logb_, "logb");
+        symbol(&scalbln_, "scalbln");
+        symbol(&scalbn_, "scalbn");
         symbol(&significand_, "significand");
         symbol(&significandf_, "significandf");
         symbol(&rintl, "rintl");
+        symbol(&atanh_, "atanh");
         symbol(&remainder_, "remainder");
         symbol(&remainder_, "drem");
         symbol(&remainderf_, "remainderf");
@@ -902,6 +919,7 @@ comptime {
         symbol(&copysign, "copysign");
         symbol(&copysignf, "copysignf");
         symbol(&rint, "rint");
+        symbol(&scalbf, "scalbf");
         symbol(&rintf, "rintf");
         symbol(&__fpclassify, "__fpclassify");
         symbol(&__fpclassifyf, "__fpclassifyf");
@@ -911,7 +929,7 @@ comptime {
         symbol(&__signbitl, "__signbitl");
         symbol(&nextafter, "nextafter");
         symbol(&nexttoward, "nexttoward");
-        symbol(&scalb, "scalb");
+        symbol(&nearbyint, "nearbyint");
     }
     symbol(&copysignl, "copysignl");
     @export(&__signgam, .{ .name = "signgam", .linkage = .weak });
@@ -977,7 +995,17 @@ fn cosh(x: f64) callconv(.c) f64 {
 }
 
 fn coshf(x: f32) callconv(.c) f32 {
-    return math.cosh(x);
+    @setFloatMode(.strict);
+    const ux: u32 = @bitCast(x);
+    const w = ux & 0x7fffffff;
+    const absx: f32 = @bitCast(w);
+
+    if (w < 0x42b17217) {
+        const t = math.expm1(absx);
+        return 1.0 + t * t / (2.0 * (1.0 + t));
+    }
+
+    return expo2f(absx, 1.0);
 }
 
 fn exp10(x: f64) callconv(.c) f64 {
@@ -997,7 +1025,10 @@ fn hypotf(x: f32, y: f32) callconv(.c) f32 {
 }
 
 fn hypotl(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
-    return math.hypot(x, y);
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => math.hypot(@as(f64, @bitCast(x)), @as(f64, @bitCast(y))),
+        else => @floatCast(math.hypot(@as(f64, @floatCast(x)), @as(f64, @floatCast(y)))),
+    };
 }
 
 fn isnan(x: f64) callconv(.c) c_int {
@@ -1140,8 +1171,6 @@ fn rint(x: f64) callconv(.c) f64 {
     return y;
 }
 
-
-
 fn acosl(x: c_longdouble) callconv(.c) c_longdouble {
     return math.acos(x);
 }
@@ -1155,11 +1184,15 @@ fn asinl(x: c_longdouble) callconv(.c) c_longdouble {
 }
 
 fn atanhf(x: f32) callconv(.c) f32 {
-    return math.atanh(x);
+    return atanhGeneric(f32, x);
 }
 
 fn cosl(x: c_longdouble) callconv(.c) c_longdouble {
-    return math.cos(x);
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => math.cos(@as(f64, @bitCast(x))),
+        80 => x87Cos(x),
+        else => math.cos(x),
+    };
 }
 
 fn expm1f(x: f32) callconv(.c) f32 {
@@ -1169,7 +1202,8 @@ fn expm1f(x: f32) callconv(.c) f32 {
 fn fdimGeneric(comptime T: type, x: T, y: T) T {
     if (math.isNan(x)) return x;
     if (math.isNan(y)) return y;
-    return if (x > y) x - y else 0;
+    if (x > y) return x - y;
+    return 0;
 }
 
 fn fdimf(x: f32, y: f32) callconv(.c) f32 {
@@ -1177,13 +1211,15 @@ fn fdimf(x: f32, y: f32) callconv(.c) f32 {
     const uy: u32 = @bitCast(y);
     if ((ux & 0x7fffffff) > 0x7f800000) return x;
     if ((uy & 0x7fffffff) > 0x7f800000) return y;
-    return if (x > y) x - y else 0.0;
+    if (x > y) return x - y;
+    return 0.0;
 }
 
 fn fdiml(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
     if (__fpclassifyl(x) == 0) return x;
     if (__fpclassifyl(y) == 0) return y;
-    return if (x > y) x - y else 0.0;
+    if (x > y) return x - y;
+    return 0.0;
 }
 
 fn finitef(x: f32) callconv(.c) c_int {
@@ -1221,11 +1257,11 @@ fn ilogbl(x: c_longdouble) callconv(.c) c_int {
 }
 
 fn ldexpf(x: f32, n: c_int) callconv(.c) f32 {
-    return math.ldexp(x, n);
+    return scalbnStrict(f32, x, n);
 }
 
 fn ldexpl(x: c_longdouble, n: c_int) callconv(.c) c_longdouble {
-    return math.ldexp(x, n);
+    return scalbnStrict(c_longdouble, x, n);
 }
 
 fn llrintf(x: f32) callconv(.c) c_longlong {
@@ -1245,6 +1281,16 @@ fn llroundl(x: c_longdouble) callconv(.c) c_longlong {
 }
 
 fn log1pf(x: f32) callconv(.c) f32 {
+    @setFloatMode(.strict);
+    if (math.isNan(x)) return x + x;
+    if (x == -1.0) {
+        std.math.raiseDivByZero();
+        return -math.inf(f32);
+    }
+    if (x < -1.0) {
+        std.math.raiseInvalid();
+        return math.nan(f32);
+    }
     return math.log1p(x);
 }
 
@@ -1379,20 +1425,160 @@ fn significandf(x: f32) callconv(.c) f32 {
 }
 
 fn sincosl(x: c_longdouble, sin_ptr: *c_longdouble, cos_ptr: *c_longdouble) callconv(.c) void {
-    sin_ptr.* = math.sin(x);
-    cos_ptr.* = math.cos(x);
+    sin_ptr.* = sinl(x);
+    cos_ptr.* = cosl(x);
 }
 
 fn sinhf(x: f32) callconv(.c) f32 {
-    return math.sinh(x);
+    @setFloatMode(.strict);
+    const ux: u32 = @bitCast(x);
+    const w = ux & 0x7fffffff;
+    const absx: f32 = @bitCast(w);
+    const h: f32 = if (ux >> 31 != 0) -0.5 else 0.5;
+
+    if (w < 0x42b17217) {
+        const t = math.expm1(absx);
+        if (w < 0x3f800000) {
+            if (w < 0x3f800000 - (12 << 23)) return x;
+            return h * (2 * t - t * t / (t + 1));
+        }
+        return h * (t + t / (t + 1));
+    }
+
+    return expo2f(absx, 2 * h);
+}
+
+fn expo2f(x: f32, sign: f32) f32 {
+    const k = 235;
+    const kln2: f32 = 0x1.45c778p+7;
+    const scale: f32 = @bitCast(@as(u32, (0x7f + k / 2) << 23));
+    return math.exp(x - kln2) * (sign * scale) * scale;
 }
 
 fn sinl(x: c_longdouble) callconv(.c) c_longdouble {
-    return math.sin(x);
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => math.sin(@as(f64, @bitCast(x))),
+        80 => x87Sin(x),
+        else => math.sin(x),
+    };
 }
 
 fn tanl(x: c_longdouble) callconv(.c) c_longdouble {
-    return math.tan(x);
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => math.tan(@as(f64, @bitCast(x))),
+        80 => x87Tan(x),
+        else => math.tan(x),
+    };
+}
+
+fn x87Cos(x: c_longdouble) c_longdouble {
+    if (math.isNan(x)) return x + x;
+    if (!math.isFinite(x)) {
+        std.math.raiseInvalid();
+        return math.nan(c_longdouble);
+    }
+    return switch (builtin.target.cpu.arch) {
+        .x86, .x86_64 => blk: {
+            var input = x;
+            var r: c_longdouble = undefined;
+            if (comptime builtin.target.cpu.arch == .x86_64) {
+                asm volatile (
+                    \\fldt (%%rax)
+                    \\fcos
+                    \\fstpt (%%rcx)
+                    :
+                    : [in] "{rax}" (&input),
+                      [out] "{rcx}" (&r),
+                    : .{ .memory = true, .st0 = true });
+            } else {
+                asm volatile (
+                    \\fldt (%%eax)
+                    \\fcos
+                    \\fstpt (%%ecx)
+                    :
+                    : [in] "{eax}" (&input),
+                      [out] "{ecx}" (&r),
+                    : .{ .memory = true, .st0 = true });
+            }
+            break :blk r;
+        },
+        else => math.cos(x),
+    };
+}
+
+fn x87Sin(x: c_longdouble) c_longdouble {
+    if (math.isNan(x)) return x + x;
+    if (!math.isFinite(x)) {
+        std.math.raiseInvalid();
+        return math.nan(c_longdouble);
+    }
+    return switch (builtin.target.cpu.arch) {
+        .x86, .x86_64 => blk: {
+            var input = x;
+            var r: c_longdouble = undefined;
+            if (comptime builtin.target.cpu.arch == .x86_64) {
+                asm volatile (
+                    \\fldt (%%rax)
+                    \\fsin
+                    \\fstpt (%%rcx)
+                    :
+                    : [in] "{rax}" (&input),
+                      [out] "{rcx}" (&r),
+                    : .{ .memory = true, .st0 = true });
+            } else {
+                asm volatile (
+                    \\fldt (%%eax)
+                    \\fsin
+                    \\fstpt (%%ecx)
+                    :
+                    : [in] "{eax}" (&input),
+                      [out] "{ecx}" (&r),
+                    : .{ .memory = true, .st0 = true });
+            }
+            break :blk r;
+        },
+        else => math.sin(x),
+    };
+}
+
+fn x87Tan(x: c_longdouble) c_longdouble {
+    if (math.isNan(x)) return x + x;
+    if (!math.isFinite(x)) {
+        std.math.raiseInvalid();
+        return math.nan(c_longdouble);
+    }
+    return switch (builtin.target.cpu.arch) {
+        .x86, .x86_64 => blk: {
+            var input = x;
+            var r: c_longdouble = undefined;
+            var one: c_longdouble = undefined;
+            if (comptime builtin.target.cpu.arch == .x86_64) {
+                asm volatile (
+                    \\fldt (%%rax)
+                    \\fptan
+                    \\fstpt (%%rdx)
+                    \\fstpt (%%rcx)
+                    :
+                    : [in] "{rax}" (&input),
+                      [out] "{rcx}" (&r),
+                      [one] "{rdx}" (&one),
+                    : .{ .memory = true, .st0 = true, .st1 = true });
+            } else {
+                asm volatile (
+                    \\fldt (%%eax)
+                    \\fptan
+                    \\fstpt (%%edx)
+                    \\fstpt (%%ecx)
+                    :
+                    : [in] "{eax}" (&input),
+                      [out] "{ecx}" (&r),
+                      [one] "{edx}" (&one),
+                    : .{ .memory = true, .st0 = true, .st1 = true });
+            }
+            break :blk r;
+        },
+        else => math.tan(x),
+    };
 }
 
 fn exp2l(x: c_longdouble) callconv(.c) c_longdouble {
@@ -1413,7 +1599,10 @@ fn log2l(x: c_longdouble) callconv(.c) c_longdouble {
 
 fn logbGeneric(comptime T: type, x: T) T {
     if (!math.isFinite(x)) return x * x;
-    if (x == 0) return -math.inf(T);
+    if (x == 0) {
+        std.math.raiseDivByZero();
+        return -math.inf(T);
+    }
     return @floatFromInt(math.ilogb(x));
 }
 
@@ -1436,9 +1625,9 @@ fn scalbf(x: f32, fn_arg: f32) callconv(.c) f32 {
         return x / (-fn_arg);
     }
     if (rintGeneric(f32, fn_arg) != fn_arg) return (fn_arg - fn_arg) / (fn_arg - fn_arg);
-    if (fn_arg > 65000.0) return math.scalbn(x, 65000);
-    if (-fn_arg > 65000.0) return math.scalbn(x, -65000);
-    return math.scalbn(x, @intFromFloat(fn_arg));
+    if (fn_arg > 65000.0) return scalbnStrict(f32, x, 65000);
+    if (-fn_arg > 65000.0) return scalbnStrict(f32, x, -65000);
+    return scalbnStrict(f32, x, @intFromFloat(fn_arg));
 }
 
 fn scalblnGeneric(comptime T: type, x: T, n: c_long) T {
@@ -1448,7 +1637,7 @@ fn scalblnGeneric(comptime T: type, x: T, n: c_long) T {
         std.math.minInt(i32)
     else
         @intCast(n);
-    return math.scalbn(x, clamped);
+    return scalbnStrict(T, x, clamped);
 }
 
 fn scalblnf(x: f32, n: c_long) callconv(.c) f32 {
@@ -1460,11 +1649,69 @@ fn scalblnl(x: c_longdouble, n: c_long) callconv(.c) c_longdouble {
 }
 
 fn scalbnf(x: f32, n: c_int) callconv(.c) f32 {
-    return math.scalbn(x, n);
+    return scalbnStrict(f32, x, n);
 }
 
 fn scalbnl(x: c_longdouble, n: c_int) callconv(.c) c_longdouble {
-    return math.scalbn(x, n);
+    return scalbnStrict(c_longdouble, x, n);
+}
+
+fn scalbnStrict(comptime T: type, x: T, n: c_int) T {
+    @setFloatMode(.strict);
+    if (T == c_longdouble and @typeInfo(c_longdouble).float.bits == 80 and (builtin.target.cpu.arch == .x86 or builtin.target.cpu.arch == .x86_64)) {
+        return x87Scalbn(x, n);
+    }
+    if (x == 0.0 or !math.isFinite(x)) return x;
+
+    const y = math.scalbn(x, n);
+    if (math.isInf(y)) {
+        std.math.raiseOverflow();
+        return y;
+    }
+    if (y == 0.0) {
+        std.math.raiseUnderflow();
+        return y;
+    }
+    if (@abs(y) < math.floatMin(T)) {
+        const inverse_n: c_int = if (n == minInt(c_int)) maxInt(c_int) else -n;
+        if (math.scalbn(y, inverse_n) != x) std.math.raiseUnderflow();
+    }
+    return y;
+}
+
+fn x87Scalbn(x: c_longdouble, n: c_int) c_longdouble {
+    var input = x;
+    var exp = n;
+    var r: c_longdouble = undefined;
+    var junk: c_longdouble = undefined;
+    if (comptime builtin.target.cpu.arch == .x86_64) {
+        asm volatile (
+            \\fildl (%%rdx)
+            \\fldt (%%rax)
+            \\fscale
+            \\fstpt (%%rcx)
+            \\fstpt (%%rsi)
+            :
+            : [in] "{rax}" (&input),
+              [out] "{rcx}" (&r),
+              [exp] "{rdx}" (&exp),
+              [junk] "{rsi}" (&junk),
+            : .{ .memory = true, .st0 = true, .st1 = true });
+    } else {
+        asm volatile (
+            \\fildl (%%edx)
+            \\fldt (%%eax)
+            \\fscale
+            \\fstpt (%%ecx)
+            \\fstpt (%%esi)
+            :
+            : [in] "{eax}" (&input),
+              [out] "{ecx}" (&r),
+              [exp] "{edx}" (&exp),
+              [junk] "{esi}" (&junk),
+            : .{ .memory = true, .st0 = true, .st1 = true });
+    }
+    return r;
 }
 
 fn fdim(x: f64, y: f64) callconv(.c) f64 {
@@ -1545,15 +1792,15 @@ fn ilogbl_(x: c_longdouble) callconv(.c) c_int {
 }
 
 fn ldexp_(x: f64, n: c_int) callconv(.c) f64 {
-    return math.ldexp(x, n);
+    return scalbnStrict(f64, x, n);
 }
 
 fn ldexpf_(x: f32, n: c_int) callconv(.c) f32 {
-    return math.ldexp(x, n);
+    return scalbnStrict(f32, x, n);
 }
 
 fn ldexpl_(x: c_longdouble, n: c_int) callconv(.c) c_longdouble {
-    return math.ldexp(x, n);
+    return scalbnStrict(c_longdouble, x, n);
 }
 
 fn logb_(x: f64) callconv(.c) f64 {
@@ -1570,29 +1817,29 @@ fn logbl_(x: c_longdouble) callconv(.c) c_longdouble {
 
 fn scalbln_(x: f64, n: c_long) callconv(.c) f64 {
     const ni: c_int = if (n > maxInt(c_int)) maxInt(c_int) else if (n < minInt(c_int)) minInt(c_int) else @intCast(n);
-    return math.scalbn(x, ni);
+    return scalbnStrict(f64, x, ni);
 }
 
 fn scalblnf_(x: f32, n: c_long) callconv(.c) f32 {
     const ni: c_int = if (n > maxInt(c_int)) maxInt(c_int) else if (n < minInt(c_int)) minInt(c_int) else @intCast(n);
-    return math.scalbn(x, ni);
+    return scalbnStrict(f32, x, ni);
 }
 
 fn scalblnl_(x: c_longdouble, n: c_long) callconv(.c) c_longdouble {
     const ni: c_int = if (n > maxInt(c_int)) maxInt(c_int) else if (n < minInt(c_int)) minInt(c_int) else @intCast(n);
-    return math.scalbn(x, ni);
+    return scalbnStrict(c_longdouble, x, ni);
 }
 
 fn scalbn_(x: f64, n: c_int) callconv(.c) f64 {
-    return math.scalbn(x, n);
+    return scalbnStrict(f64, x, n);
 }
 
 fn scalbnf_(x: f32, n: c_int) callconv(.c) f32 {
-    return math.scalbn(x, n);
+    return scalbnStrict(f32, x, n);
 }
 
 fn scalbnl_(x: c_longdouble, n: c_int) callconv(.c) c_longdouble {
-    return math.scalbn(x, n);
+    return scalbnStrict(c_longdouble, x, n);
 }
 
 fn significand_(x: f64) callconv(.c) f64 {
@@ -1808,12 +2055,41 @@ fn asinhl_impl(comptime T: type, x_: T) T {
     }
 }
 
+fn atanhGeneric(comptime T: type, x: T) T {
+    if (math.isNan(x)) return x + x;
+    const ax = @abs(x);
+    if (ax > 1.0) {
+        std.math.raiseInvalid();
+        return math.nan(T);
+    }
+    if (ax == 1.0) {
+        std.math.raiseDivByZero();
+        return math.copysign(math.inf(T), x);
+    }
+    if (ax != 0.0 and ax < math.floatMin(T)) {
+        std.math.raiseUnderflow();
+        return x;
+    }
+    if (T == f32 or T == f64) return math.atanh(x);
+
+    const half: T = 0.5;
+    const y = if (ax < half) blk: {
+        if (ax < @sqrt(math.floatEps(T))) {
+            if (ax != 0.0) mem.doNotOptimizeAway(ax + @as(T, 0x1p120));
+            break :blk ax;
+        }
+        break :blk half * log1p_wide(T, 2.0 * ax + 2.0 * ax * ax / (1.0 - ax));
+    } else half * log1p_wide(T, 2.0 * (ax / (1.0 - ax)));
+
+    return if (math.signbit(x)) -y else y;
+}
+
 fn atanh_(x: f64) callconv(.c) f64 {
-    return math.atanh(x);
+    return atanhGeneric(f64, x);
 }
 
 fn atanhf_(x: f32) callconv(.c) f32 {
-    return math.atanh(x);
+    return atanhGeneric(f32, x);
 }
 
 fn atanhl_(x: c_longdouble) callconv(.c) c_longdouble {
@@ -1841,6 +2117,7 @@ fn sinh_(x_: f64) callconv(.c) f64 {
     const absu = u & (std.math.maxInt(u64) >> 1);
     const w: u32 = @intCast(absu >> 32);
     const absx: f128 = @abs(@as(f128, @floatCast(x_)));
+    if (absx != 0 and absx < @as(f128, math.floatMin(f64))) std.math.raiseUnderflow();
     var h: f128 = 0.5;
     if (u >> 63 != 0) h = -h;
 
@@ -1857,6 +2134,7 @@ fn sinh_(x_: f64) callconv(.c) f64 {
 
     // |x| > log(DBL_MAX) or nan: f128 exp won't overflow here
     const t: f128 = exp_pure(f128, absx);
+    if (math.isFinite(x_) and t > @as(f128, math.floatMax(f64))) std.math.raiseOverflow();
     return @floatCast(h * t);
 }
 
@@ -1871,6 +2149,7 @@ fn sinhl_(x: c_longdouble) callconv(.c) c_longdouble {
 fn sinhl_impl(comptime T: type, x_: T) T {
     @setFloatMode(.strict);
     const absx = @abs(x_);
+    if (absx != 0 and absx < math.floatMin(T)) std.math.raiseUnderflow();
     var h: T = 0.5;
     if (math.signbit(x_)) h = -h;
 
@@ -1886,6 +2165,7 @@ fn sinhl_impl(comptime T: type, x_: T) T {
     }
 
     // |x| > log(FLT_MAX) or nan
+    if (math.isFinite(x_)) std.math.raiseOverflow();
     const t = exp_pure(T, @as(T, 0.5) * absx);
     return h * t * t;
 }
@@ -2481,12 +2761,8 @@ fn __fpclassifyl(x: c_longdouble) callconv(.c) c_int {
         80 => blk: {
             const ux: u80 = @bitCast(x);
             const e: u32 = @truncate((ux >> 64) & 0x7fff);
-            const mant = ux & ((@as(u80, 1) << 64) - 1);
+            if (e == 0) break :blk if ((ux << 1) != 0) @as(c_int, 3) else @as(c_int, 2);
             const msb: u1 = @truncate(ux >> 63);
-            if (e == 0) {
-                if (mant == 0) break :blk @as(c_int, 2);
-                break :blk if (msb != 0) @as(c_int, 4) else @as(c_int, 3);
-            }
             if (e == 0x7fff) {
                 if (msb == 0) break :blk @as(c_int, 0);
                 break :blk if ((ux & ((@as(u80, 1) << 63) - 1)) != 0) @as(c_int, 0) else @as(c_int, 1);
