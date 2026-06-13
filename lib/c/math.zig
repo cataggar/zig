@@ -942,6 +942,11 @@ comptime {
         symbol(&nexttoward, "nexttoward");
         symbol(&nearbyint, "nearbyint");
     }
+    if (builtin.target.isWasiLibC()) {
+        symbol(&scalbf, "scalbf");
+        symbol(&nextafter, "nextafter");
+        symbol(&nexttoward, "nexttoward");
+    }
     symbol(&copysignl, "copysignl");
     @export(&__signgam, .{ .name = "signgam", .linkage = .weak });
 }

@@ -166,6 +166,7 @@ comptime {
         symbol(&timegmImpl, "timegm");
         symbol(&timegmImpl, "__timegm_time64");
         symbol(&__gmtime_r, "__gmtime_r");
+        if (builtin.target.isWasiLibC()) symbol(&__gmtime_r, "gmtime_r");
         symbol(&gmtimeImpl, "gmtime");
         symbol(&gmtimeImpl, "__gmtime64");
         symbol(&__utc, "__utc");
@@ -173,7 +174,7 @@ comptime {
         symbol(&__asctime_r, "asctime_r");
         symbol(&asctimeImpl, "asctime");
     }
-    if (builtin.link_libc) {
+    if (builtin.target.isMuslLibC() and builtin.link_libc) {
         symbol(&ctimeImpl, "ctime");
         symbol(&ctimeImpl, "__ctime64");
         symbol(&ctime_rImpl, "ctime_r");
@@ -186,6 +187,12 @@ comptime {
         symbol(&strptimeImpl, "strptime");
         symbol(&getdate_err, "getdate_err");
         symbol(&getdateImpl, "getdate");
+    }
+    if (builtin.target.isWasiLibC() and builtin.link_libc) {
+        symbol(&ctimeImpl, "ctime");
+        symbol(&ctimeImpl, "__ctime64");
+        symbol(&ctime_rImpl, "ctime_r");
+        symbol(&ctime_rImpl, "__ctime64_r");
     }
 }
 
