@@ -1037,9 +1037,58 @@ fn hypotf(x: f32, y: f32) callconv(.c) f32 {
 
 fn hypotl(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
     return switch (@typeInfo(c_longdouble).float.bits) {
-        64 => math.hypot(@as(f64, @bitCast(x)), @as(f64, @bitCast(y))),
+        64 => hypot64Strict(@bitCast(x), @bitCast(y)),
         else => hypotWide(c_longdouble, x, y),
     };
+}
+
+const DoubleWord = struct { hi: f64, lo: f64 };
+
+fn sq64(x: f64) DoubleWord {
+    @setFloatMode(.strict);
+    const split: f64 = 0x1p27 + 1;
+    const xc = x * split;
+    const xh = x - xc + xc;
+    const xl = x - xh;
+    const hi = x * x;
+    const lo = xh * xh - hi + 2.0 * xh * xl + xl * xl;
+    return .{ .hi = hi, .lo = lo };
+}
+
+fn hypot64Strict(x_: f64, y_: f64) f64 {
+    @setFloatMode(.strict);
+    var ux: u64 = @bitCast(x_);
+    var uy: u64 = @bitCast(y_);
+    ux &= std.math.maxInt(u64) >> 1;
+    uy &= std.math.maxInt(u64) >> 1;
+    if (ux < uy) {
+        const ut = ux;
+        ux = uy;
+        uy = ut;
+    }
+
+    const ex: i32 = @intCast(ux >> 52);
+    const ey: i32 = @intCast(uy >> 52);
+    var x: f64 = @bitCast(ux);
+    var y: f64 = @bitCast(uy);
+    if (ey == 0x7ff) return y;
+    if (ex == 0x7ff or uy == 0) return x;
+    if (ex - ey > 64) return x + y;
+
+    var z: f64 = 1.0;
+    if (ex > 0x3ff + 510) {
+        z = 0x1p700;
+        x *= 0x1p-700;
+        y *= 0x1p-700;
+    } else if (ey < 0x3ff - 450) {
+        z = 0x1p-700;
+        x *= 0x1p700;
+        y *= 0x1p700;
+    }
+
+    const hx = sq64(x);
+    const hy = sq64(y);
+    return z * @sqrt(hy.lo + hx.lo + hy.hi + hx.hi);
 }
 
 fn hypotWide(comptime T: type, x: T, y: T) T {
@@ -1323,9 +1372,29 @@ fn log1pf(x: f32) callconv(.c) f32 {
 
 fn log1pl(x: c_longdouble) callconv(.c) c_longdouble {
     return switch (@typeInfo(c_longdouble).float.bits) {
-        64 => math.log1p(@as(f64, @bitCast(x))),
+        64 => log1p64Strict(@bitCast(x)),
         else => log1plChecked(c_longdouble, x),
     };
+}
+
+fn log1p64Strict(x: f64) f64 {
+    @setFloatMode(.strict);
+    if (math.isNan(x)) return x + x;
+    if (x == math.inf(f64)) return x;
+    if (x == 0.0) return x;
+    if (x == -1.0) {
+        std.math.raiseDivByZero();
+        return -math.inf(f64);
+    }
+    if (x < -1.0) {
+        std.math.raiseInvalid();
+        return math.nan(f64);
+    }
+    if (@abs(x) < 0x1p-53) {
+        if (@abs(x) < math.floatMin(f64)) std.math.raiseUnderflow();
+        return x;
+    }
+    return @floatCast(log1p_wide(f128, @floatCast(x)));
 }
 
 fn lrintf(x: f32) callconv(.c) c_long {
@@ -1977,9 +2046,14 @@ fn acosh_(x: f64) callconv(.c) f64 {
 
 fn acoshl_(x: c_longdouble) callconv(.c) c_longdouble {
     return switch (@typeInfo(c_longdouble).float.bits) {
-        64 => math.acosh(@as(f64, @bitCast(x))),
+        64 => acosh64Strict(@bitCast(x)),
         else => acoshl_impl(c_longdouble, x),
     };
+}
+
+fn acosh64Strict(x: f64) f64 {
+    @setFloatMode(.strict);
+    return @floatCast(acoshl_impl(f128, @floatCast(x)));
 }
 
 fn acoshl_impl(comptime T: type, x: T) T {
@@ -2276,10 +2350,69 @@ fn atanhf_(x: f32) callconv(.c) f32 {
     return atanhGeneric(f32, x);
 }
 
+fn atanhWide(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
+    if (math.isNan(x)) return x + x;
+    const ax = @abs(x);
+    if (ax > 1.0) {
+        std.math.raiseInvalid();
+        return math.nan(T);
+    }
+    if (ax == 1.0) {
+        std.math.raiseDivByZero();
+        return math.copysign(math.inf(T), x);
+    }
+    if (ax != 0.0 and ax < math.floatMin(T)) {
+        std.math.raiseUnderflow();
+        return x;
+    }
+
+    const half: T = 0.5;
+    const y = if (ax < half) blk: {
+        if (ax < @sqrt(math.floatEps(T))) {
+            if (ax != 0.0) mem.doNotOptimizeAway(ax + @as(T, 0x1p120));
+            break :blk ax;
+        }
+        break :blk half * log1p_wide(T, 2.0 * ax + 2.0 * ax * ax / (1.0 - ax));
+    } else half * log1p_wide(T, 2.0 * (ax / (1.0 - ax)));
+
+    return if (math.signbit(x)) -y else y;
+}
+
+fn atanh64Strict(x: f64) f64 {
+    @setFloatMode(.strict);
+    const u: u64 = @bitCast(x);
+    const e = (u >> 52) & 0x7ff;
+    const s = u >> 63;
+    const y: f64 = @bitCast(u & (std.math.maxInt(u64) >> 1));
+
+    if (math.isNan(x)) return x + x;
+    if (y > 1.0) {
+        std.math.raiseInvalid();
+        return math.nan(f64);
+    }
+    if (y == 1.0) {
+        std.math.raiseDivByZero();
+        return math.copysign(math.inf(f64), x);
+    }
+    if (e < 0x3ff - 32) {
+        if (y != 0.0 and y < math.floatMin(f64)) std.math.raiseUnderflow();
+        return x;
+    }
+
+    const ay: f128 = @floatCast(y);
+    const r: f64 = if (e < 0x3ff - 1)
+        @floatCast(0.5 * log1p_wide(f128, 2.0 * ay + 2.0 * ay * ay / (1.0 - ay)))
+    else
+        @floatCast(0.5 * log1p_wide(f128, 2.0 * (ay / (1.0 - ay))));
+
+    return if (s != 0) -r else r;
+}
+
 fn atanhl_(x: c_longdouble) callconv(.c) c_longdouble {
     return switch (@typeInfo(c_longdouble).float.bits) {
-        64 => math.atanh(@as(f64, @bitCast(x))),
-        else => atanhGeneric(c_longdouble, x),
+        64 => atanh64Strict(@bitCast(x)),
+        else => atanhWide(c_longdouble, x),
     };
 }
 
@@ -2338,8 +2471,9 @@ fn sinh_(x_: f64) callconv(.c) f64 {
 
     // |x| > log(DBL_MAX) or nan: f128 exp won't overflow here
     const t: f128 = exp_pure(f128, absx);
-    if (math.isFinite(x_) and t > @as(f128, math.floatMax(f64))) std.math.raiseOverflow();
-    return @floatCast(h * t);
+    const r = h * t;
+    if (math.isFinite(x_) and @abs(r) > @as(f128, math.floatMax(f64))) std.math.raiseOverflow();
+    return @floatCast(r);
 }
 
 fn sinhl_(x: c_longdouble) callconv(.c) c_longdouble {
