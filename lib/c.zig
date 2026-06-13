@@ -130,6 +130,7 @@ comptime {
         _ = @import("c/linux.zig");
         _ = @import("c/misc.zig");
         _ = @import("c/mq.zig");
+        _ = @import("c/multibyte.zig");
         _ = @import("c/passwd.zig");
         _ = @import("c/process.zig");
         _ = @import("c/sched.zig");
