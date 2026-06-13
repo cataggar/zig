@@ -142,13 +142,13 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/acosf.c", true, .{});
     // cases.addLibcTestCase("math/acosh.c", true, .{}); // deferred to musl C
     cases.addLibcTestCase("math/acoshf.c", true, .{});
-    // cases.addLibcTestCase("math/acoshl.c", true, .{}); // deferred to musl C
+    cases.addLibcTestCase("math/acoshl.c", true, .{});
     // cases.addLibcTestCase("math/acosl.c", true, .{});
     cases.addLibcTestCase("math/asin.c", true, .{});
     cases.addLibcTestCase("math/asinf.c", true, .{});
     // cases.addLibcTestCase("math/asinh.c", true, .{}); // deferred to musl C
     cases.addLibcTestCase("math/asinhf.c", true, .{});
-    // cases.addLibcTestCase("math/asinhl.c", true, .{}); // deferred to musl C
+    cases.addLibcTestCase("math/asinhl.c", true, .{});
     cases.addLibcTestCase("math/asinl.c", true, .{});
     cases.addLibcTestCase("math/atan.c", true, .{});
     // cases.addLibcTestCase("math/atan2.c", true, .{});
@@ -157,7 +157,7 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/atanf.c", true, .{});
     cases.addLibcTestCase("math/atanh.c", true, .{});
     cases.addLibcTestCase("math/atanhf.c", true, .{});
-    // cases.addLibcTestCase("math/atanhl.c", true, .{}); // deferred to musl C
+    cases.addLibcTestCase("math/atanhl.c", true, .{});
     cases.addLibcTestCase("math/atanl.c", true, .{});
     cases.addLibcTestCase("math/cbrt.c", true, .{});
     cases.addLibcTestCase("math/cbrtf.c", true, .{});
@@ -172,7 +172,7 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/cosf.c", true, .{});
     cases.addLibcTestCase("math/cosh.c", true, .{});
     // cases.addLibcTestCase("math/coshf.c", true, .{}); // residual f32 fenv drift
-    // cases.addLibcTestCase("math/coshl.c", true, .{}); // deferred to musl C
+    cases.addLibcTestCase("math/coshl.c", true, .{});
     cases.addLibcTestCase("math/cosl.c", true, .{});
     cases.addLibcTestCase("math/drem.c", true, .{});
     cases.addLibcTestCase("math/dremf.c", true, .{});
@@ -190,7 +190,7 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/exp2f.c", true, .{});
     // cases.addLibcTestCase("math/exp2l.c", true, .{}); // deferred to musl C
     cases.addLibcTestCase("math/expf.c", true, .{});
-    // cases.addLibcTestCase("math/expl.c", true, .{}); // deferred to musl C
+    cases.addLibcTestCase("math/expl.c", true, .{});
     // cases.addLibcTestCase("math/expm1.c", true, .{}); // deferred to musl C
     // cases.addLibcTestCase("math/expm1f.c", true, .{}); // deferred to musl C
     // cases.addLibcTestCase("math/expm1l.c", true, .{}); // deferred to musl C
@@ -224,7 +224,7 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/frexpl.c", true, .{});
     // cases.addLibcTestCase("math/hypot.c", true, .{}); // residual std.math drift
     // cases.addLibcTestCase("math/hypotf.c", true, .{}); // residual std.math drift
-    // cases.addLibcTestCase("math/hypotl.c", true, .{}); // residual ld80 std.math drift
+    cases.addLibcTestCase("math/hypotl.c", true, .{});
     cases.addLibcTestCase("math/ilogb.c", true, .{});
     cases.addLibcTestCase("math/ilogbf.c", true, .{});
     cases.addLibcTestCase("math/ilogbl.c", true, .{});
@@ -256,18 +256,18 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/log.c", true, .{});
     cases.addLibcTestCase("math/log10.c", true, .{});
     cases.addLibcTestCase("math/log10f.c", true, .{});
-    // cases.addLibcTestCase("math/log10l.c", true, .{}); // deferred to musl C
+    cases.addLibcTestCase("math/log10l.c", true, .{});
     // cases.addLibcTestCase("math/log1p.c", true, .{}); // deferred to musl C
     // cases.addLibcTestCase("math/log1pf.c", true, .{}); // deferred to musl C
-    // cases.addLibcTestCase("math/log1pl.c", true, .{}); // deferred to musl C
+    cases.addLibcTestCase("math/log1pl.c", true, .{});
     cases.addLibcTestCase("math/log2.c", true, .{});
     cases.addLibcTestCase("math/log2f.c", true, .{});
-    // cases.addLibcTestCase("math/log2l.c", true, .{}); // deferred to musl C
+    cases.addLibcTestCase("math/log2l.c", true, .{});
     cases.addLibcTestCase("math/logb.c", true, .{});
     cases.addLibcTestCase("math/logbf.c", true, .{});
     cases.addLibcTestCase("math/logbl.c", true, .{});
     cases.addLibcTestCase("math/logf.c", true, .{});
-    // cases.addLibcTestCase("math/logl.c", true, .{}); // deferred to musl C
+    cases.addLibcTestCase("math/logl.c", true, .{});
     cases.addLibcTestCase("math/lrint.c", true, .{});
     cases.addLibcTestCase("math/lrintf.c", true, .{});
     cases.addLibcTestCase("math/lrintl.c", true, .{});
@@ -319,7 +319,7 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/sinf.c", true, .{});
     // cases.addLibcTestCase("math/sinh.c", true, .{}); // deferred to musl C
     cases.addLibcTestCase("math/sinhf.c", true, .{});
-    // cases.addLibcTestCase("math/sinhl.c", true, .{}); // deferred to musl C
+    cases.addLibcTestCase("math/sinhl.c", true, .{});
     cases.addLibcTestCase("math/sinl.c", true, .{});
     cases.addLibcTestCase("math/sqrt.c", true, .{});
     cases.addLibcTestCase("math/sqrtf.c", true, .{});
@@ -328,7 +328,7 @@ pub fn addCases(cases: *tests.LibcContext) void {
     cases.addLibcTestCase("math/tanf.c", true, .{});
     cases.addLibcTestCase("math/tanh.c", true, .{});
     cases.addLibcTestCase("math/tanhf.c", true, .{});
-    // cases.addLibcTestCase("math/tanhl.c", true, .{}); // deferred to musl C
+    cases.addLibcTestCase("math/tanhl.c", true, .{});
     cases.addLibcTestCase("math/tanl.c", true, .{});
     // known musl accuracy issue: tgamma (f64) fails on x86_64; tgammaf and tgammal
     // delegate to tgamma and fail on arm/thumb/powerpc where there is no x87 extended

@@ -855,6 +855,7 @@ comptime {
         symbol(&lrintl, "lrintl");
         symbol(&lroundf, "lroundf");
         symbol(&lroundl, "lroundl");
+        symbol(&log1pl, "log1pl");
         symbol(&modf, "modf");
         symbol(&nearbyintl, "nearbyintl");
         symbol(&nextafterf, "nextafterf");
@@ -869,8 +870,12 @@ comptime {
         symbol(&sinl, "sinl");
         symbol(&tanh, "tanh");
         symbol(&tanl, "tanl");
+        symbol(&expl, "expl");
+        symbol(&log10l, "log10l");
+        symbol(&log2l, "log2l");
         symbol(&logbf, "logbf");
         symbol(&logbl, "logbl");
+        symbol(&logl, "logl");
         symbol(&scalblnf, "scalblnf");
         symbol(&scalblnl, "scalblnl");
         symbol(&scalbnf, "scalbnf");
@@ -889,7 +894,13 @@ comptime {
         symbol(&significand_, "significand");
         symbol(&significandf_, "significandf");
         symbol(&rintl, "rintl");
+        symbol(&acoshl_, "acoshl");
+        symbol(&asinhl_, "asinhl");
         symbol(&atanh_, "atanh");
+        symbol(&atanhl_, "atanhl");
+        symbol(&coshl_, "coshl");
+        symbol(&sinhl_, "sinhl");
+        symbol(&tanhl_, "tanhl");
         symbol(&remainder_, "remainder");
         symbol(&remainder_, "drem");
         symbol(&remainderf_, "remainderf");
@@ -1026,9 +1037,74 @@ fn hypotf(x: f32, y: f32) callconv(.c) f32 {
 
 fn hypotl(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
     return switch (@typeInfo(c_longdouble).float.bits) {
-        64 => math.hypot(@as(f64, @bitCast(x)), @as(f64, @bitCast(y))),
-        else => @floatCast(math.hypot(@as(f64, @floatCast(x)), @as(f64, @floatCast(y)))),
+        64 => hypot64Strict(@bitCast(x), @bitCast(y)),
+        else => hypotWide(c_longdouble, x, y),
     };
+}
+
+const DoubleWord = struct { hi: f64, lo: f64 };
+
+fn sq64(x: f64) DoubleWord {
+    @setFloatMode(.strict);
+    const split: f64 = 0x1p27 + 1;
+    const xc = x * split;
+    const xh = x - xc + xc;
+    const xl = x - xh;
+    const hi = x * x;
+    const lo = xh * xh - hi + 2.0 * xh * xl + xl * xl;
+    return .{ .hi = hi, .lo = lo };
+}
+
+fn hypot64Strict(x_: f64, y_: f64) f64 {
+    @setFloatMode(.strict);
+    var ux: u64 = @bitCast(x_);
+    var uy: u64 = @bitCast(y_);
+    ux &= std.math.maxInt(u64) >> 1;
+    uy &= std.math.maxInt(u64) >> 1;
+    if (ux < uy) {
+        const ut = ux;
+        ux = uy;
+        uy = ut;
+    }
+
+    const ex: i32 = @intCast(ux >> 52);
+    const ey: i32 = @intCast(uy >> 52);
+    var x: f64 = @bitCast(ux);
+    var y: f64 = @bitCast(uy);
+    if (ey == 0x7ff) return y;
+    if (ex == 0x7ff or uy == 0) return x;
+    if (ex - ey > 64) return x + y;
+
+    var z: f64 = 1.0;
+    if (ex > 0x3ff + 510) {
+        z = 0x1p700;
+        x *= 0x1p-700;
+        y *= 0x1p-700;
+    } else if (ey < 0x3ff - 450) {
+        z = 0x1p-700;
+        x *= 0x1p700;
+        y *= 0x1p700;
+    }
+
+    const hx = sq64(x);
+    const hy = sq64(y);
+    return z * @sqrt(hy.lo + hx.lo + hy.hi + hx.hi);
+}
+
+fn hypotWide(comptime T: type, x: T, y: T) T {
+    @setFloatMode(.strict);
+    const ax = @abs(x);
+    const ay = @abs(y);
+    if (math.isInf(ax) or math.isInf(ay)) return math.inf(T);
+    if (math.isNan(ax) or math.isNan(ay)) return x + y;
+    const hi = @max(ax, ay);
+    const lo = @min(ax, ay);
+    if (lo == 0.0) return hi;
+
+    const fr = math.frexp(hi);
+    const scale = scalbnStrict(T, 1.0, -fr.exponent);
+    const r = @sqrt((hi * scale) * (hi * scale) + (lo * scale) * (lo * scale));
+    return scalbnStrict(T, r, fr.exponent);
 }
 
 fn isnan(x: f64) callconv(.c) c_int {
@@ -1292,6 +1368,33 @@ fn log1pf(x: f32) callconv(.c) f32 {
         return math.nan(f32);
     }
     return math.log1p(x);
+}
+
+fn log1pl(x: c_longdouble) callconv(.c) c_longdouble {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => log1p64Strict(@bitCast(x)),
+        else => log1plChecked(c_longdouble, x),
+    };
+}
+
+fn log1p64Strict(x: f64) f64 {
+    @setFloatMode(.strict);
+    if (math.isNan(x)) return x + x;
+    if (x == math.inf(f64)) return x;
+    if (x == 0.0) return x;
+    if (x == -1.0) {
+        std.math.raiseDivByZero();
+        return -math.inf(f64);
+    }
+    if (x < -1.0) {
+        std.math.raiseInvalid();
+        return math.nan(f64);
+    }
+    if (@abs(x) < 0x1p-53) {
+        if (@abs(x) < math.floatMin(f64)) std.math.raiseUnderflow();
+        return x;
+    }
+    return @floatCast(log1p_wide(f128, @floatCast(x)));
 }
 
 fn lrintf(x: f32) callconv(.c) c_long {
@@ -1582,19 +1685,38 @@ fn x87Tan(x: c_longdouble) c_longdouble {
 }
 
 fn exp2l(x: c_longdouble) callconv(.c) c_longdouble {
-    return math.exp2(x);
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => math.exp2(@as(f64, @bitCast(x))),
+        else => exp_pure(c_longdouble, x * @as(c_longdouble, 0.6931471805599453094172321214581765680755001343602552541206800094)),
+    };
 }
 
 fn expl(x: c_longdouble) callconv(.c) c_longdouble {
-    return math.exp(x);
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => math.exp(@as(f64, @bitCast(x))),
+        else => exp_pure(c_longdouble, x),
+    };
+}
+
+fn expm1l(x: c_longdouble) callconv(.c) c_longdouble {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => math.expm1(@as(f64, @bitCast(x))),
+        else => expm1_wide(c_longdouble, x),
+    };
 }
 
 fn log10l(x: c_longdouble) callconv(.c) c_longdouble {
-    return math.log10(x);
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => math.log10(@as(f64, @bitCast(x))),
+        else => loglChecked(c_longdouble, x) * @as(c_longdouble, 0.4342944819032518276511289189166050822943970058036665661144537832),
+    };
 }
 
 fn log2l(x: c_longdouble) callconv(.c) c_longdouble {
-    return math.log2(x);
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => math.log2(@as(f64, @bitCast(x))),
+        else => loglChecked(c_longdouble, x) * @as(c_longdouble, 1.4426950408889634073599246810018921374266459541529859341354494069),
+    };
 }
 
 fn logbGeneric(comptime T: type, x: T) T {
@@ -1615,7 +1737,41 @@ fn logbl(x: c_longdouble) callconv(.c) c_longdouble {
 }
 
 fn logl(x: c_longdouble) callconv(.c) c_longdouble {
-    return @log(x);
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => @log(@as(f64, @bitCast(x))),
+        else => loglChecked(c_longdouble, x),
+    };
+}
+
+fn loglChecked(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
+    if (math.isNan(x)) return x + x;
+    if (x == math.inf(T)) return x;
+    if (x == 0.0) {
+        std.math.raiseDivByZero();
+        return -math.inf(T);
+    }
+    if (x < 0.0) {
+        std.math.raiseInvalid();
+        return math.nan(T);
+    }
+    return log_pure(T, x);
+}
+
+fn log1plChecked(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
+    if (math.isNan(x)) return x + x;
+    if (x == math.inf(T)) return x;
+    if (x == 0.0) return x;
+    if (x == -1.0) {
+        std.math.raiseDivByZero();
+        return -math.inf(T);
+    }
+    if (x < -1.0) {
+        std.math.raiseInvalid();
+        return math.nan(T);
+    }
+    return log1p_wide(T, x);
 }
 
 fn scalbf(x: f32, fn_arg: f32) callconv(.c) f32 {
@@ -1890,9 +2046,29 @@ fn acosh_(x: f64) callconv(.c) f64 {
 
 fn acoshl_(x: c_longdouble) callconv(.c) c_longdouble {
     return switch (@typeInfo(c_longdouble).float.bits) {
-        64 => math.acosh(@as(f64, @bitCast(x))),
-        else => @floatCast(math.acosh(@as(f64, @floatCast(x)))),
+        64 => acosh64Strict(@bitCast(x)),
+        else => acoshl_impl(c_longdouble, x),
     };
+}
+
+fn acosh64Strict(x: f64) f64 {
+    @setFloatMode(.strict);
+    return @floatCast(acoshl_impl(f128, @floatCast(x)));
+}
+
+fn acoshl_impl(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
+    if (math.isNan(x)) return x + x;
+    if (x < 1.0) {
+        std.math.raiseInvalid();
+        return math.nan(T);
+    }
+    if (x < 2.0) {
+        const xm1 = x - 1.0;
+        return log1p_wide(T, xm1 + @sqrt(xm1 * xm1 + 2.0 * xm1));
+    }
+    if (x < 0x1p32) return log_pure(T, 2.0 * x - 1.0 / (x + @sqrt(x * x - 1.0)));
+    return loglChecked(T, x) + @as(T, 0.6931471805599453094172321214581765680755001343602552541206800094);
 }
 
 fn asinhf_(x: f32) callconv(.c) f32 {
@@ -1903,6 +2079,7 @@ fn asinhf_(x: f32) callconv(.c) f32 {
 /// and the series atanh(s) = s + s³/3 + s⁵/5 + ...
 /// Uses only basic arithmetic (+, -, *, /) — no @log.
 fn log1p_wide(comptime T: type, x: T) T {
+    if (math.isNan(x) or x == math.inf(T)) return x;
     if (x == 0) return x;
     const one: T = 1.0;
     const u = one + x;
@@ -1931,6 +2108,7 @@ fn log1p_wide(comptime T: type, x: T) T {
 /// Compute log(x) for x > 0 using frexp range reduction + log1p_wide.
 /// Uses only basic arithmetic — no @log.
 fn log_pure(comptime T: type, x: T) T {
+    if (math.isNan(x) or x == math.inf(T)) return x;
     const fr = math.frexp(x);
     var sig = fr.significand;
     var exp_val = fr.exponent;
@@ -1962,6 +2140,7 @@ fn taylor_expm1(comptime T: type, x: T) T {
 /// Compute exp(x)-1 using Taylor series with range reduction.
 /// Uses only basic arithmetic — no @exp.
 fn expm1_wide(comptime T: type, x: T) T {
+    if (T == c_longdouble and @typeInfo(c_longdouble).float.bits == 80) return @floatCast(expm1l_ld80(@floatCast(x)));
     if (x == 0) return x;
     if (math.isNan(x)) return x;
     if (!math.isFinite(x)) {
@@ -1986,12 +2165,91 @@ fn expm1_wide(comptime T: type, x: T) T {
     const sum = taylor_expm1(T, r);
     if (k == 0) return sum;
     // expm1(x) = 2^k * (1 + expm1(r)) - 1 = 2^k * expm1(r) + (2^k - 1)
-    const two_k = math.scalbn(@as(T, 1.0), k);
+    const two_k = scalbnStrict(T, 1.0, k);
     return two_k * sum + (two_k - 1);
+}
+
+fn expm1l_ld80(x_: c_longdouble) c_longdouble {
+    @setFloatMode(.strict);
+    var x = x_;
+    const T = c_longdouble;
+    const P0: T = -1.586135578666346600772998894928250240826E4;
+    const P1: T = 2.642771505685952966904660652518429479531E3;
+    const P2: T = -3.423199068835684263987132888286791620673E2;
+    const P3: T = 1.800826371455042224581246202420972737840E1;
+    const P4: T = -5.238523121205561042771939008061958820811E-1;
+    const Q0: T = -9.516813471998079611319047060563358064497E4;
+    const Q1: T = 3.964866271411091674556850458227710004570E4;
+    const Q2: T = -7.207678383830091850230366618190187434796E3;
+    const Q3: T = 7.206038318724600171970199625081491823079E2;
+    const Q4: T = -4.002027679107076077238836622982900945173E1;
+    const C1: T = 6.93145751953125E-1;
+    const C2: T = 1.428606820309417232121458176568075500134E-6;
+    const minarg: T = -4.5054566736396445112120088E1;
+    const maxarg: T = 1.1356523406294143949492E4;
+
+    if (math.isNan(x)) return x;
+    if (x > maxarg) return x * @as(T, 0x1p16383);
+    if (x == 0.0) return x;
+    if (x < minarg) return -1.0;
+
+    const ln2 = C1 + C2;
+    const px0 = @floor(0.5 + x / ln2);
+    const k: c_int = @intFromFloat(px0);
+    x -= px0 * C1;
+    x -= px0 * C2;
+
+    const px = ((((P4 * x + P3) * x + P2) * x + P1) * x + P0) * x;
+    const qx = ((((x + Q4) * x + Q3) * x + Q2) * x + Q1) * x + Q0;
+    const xx = x * x;
+    const r = x + (0.5 * xx + xx * px / qx);
+    const scale = scalbnStrict(T, 1.0, k);
+    return scale * r + (scale - 1.0);
+}
+
+fn expl_ld80(x_: c_longdouble) c_longdouble {
+    @setFloatMode(.strict);
+    var x = x_;
+    const T = c_longdouble;
+    const P = [_]T{
+        1.2617719307481059087798E-4,
+        3.0299440770744196129956E-2,
+        9.9999999999999999991025E-1,
+    };
+    const Q = [_]T{
+        3.0019850513866445504159E-6,
+        2.5244834034968410419224E-3,
+        2.2726554820815502876593E-1,
+        2.0000000000000000000897E0,
+    };
+    const LN2HI: T = 6.9314575195312500000000E-1;
+    const LN2LO: T = 1.4286068203094172321215E-6;
+    const LOG2E: T = 1.4426950408889634073599E0;
+
+    if (math.isNan(x)) return x;
+    if (x > 11356.5234062941439488) return x * @as(T, 0x1p16383);
+    if (x < -11399.4985314888605581) return -@as(T, 0x1p-16445) / x;
+
+    const px0 = @floor(LOG2E * x + 0.5);
+    const k: c_int = @intFromFloat(px0);
+    x -= px0 * LN2HI;
+    x -= px0 * LN2LO;
+
+    const xx = x * x;
+    const px = x * polevl(T, xx, &P);
+    const y = 1.0 + 2.0 * (px / (polevl(T, xx, &Q) - px));
+    return scalbnStrict(T, y, k);
+}
+
+fn polevl(comptime T: type, x: T, coeffs: []const T) T {
+    var y = coeffs[0];
+    for (coeffs[1..]) |c| y = y * x + c;
+    return y;
 }
 
 /// Compute exp(x) using expm1. Uses only basic arithmetic — no @exp.
 fn exp_pure(comptime T: type, x: T) T {
+    if (T == c_longdouble and @typeInfo(c_longdouble).float.bits == 80) return @floatCast(expl_ld80(@floatCast(x)));
     return 1.0 + expm1_wide(T, x);
 }
 
@@ -2092,18 +2350,97 @@ fn atanhf_(x: f32) callconv(.c) f32 {
     return atanhGeneric(f32, x);
 }
 
+fn atanhWide(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
+    if (math.isNan(x)) return x + x;
+    const ax = @abs(x);
+    if (ax > 1.0) {
+        std.math.raiseInvalid();
+        return math.nan(T);
+    }
+    if (ax == 1.0) {
+        std.math.raiseDivByZero();
+        return math.copysign(math.inf(T), x);
+    }
+    if (ax != 0.0 and ax < math.floatMin(T)) {
+        std.math.raiseUnderflow();
+        return x;
+    }
+
+    const half: T = 0.5;
+    const y = if (ax < half) blk: {
+        if (ax < @sqrt(math.floatEps(T))) {
+            if (ax != 0.0) mem.doNotOptimizeAway(ax + @as(T, 0x1p120));
+            break :blk ax;
+        }
+        break :blk half * log1p_wide(T, 2.0 * ax + 2.0 * ax * ax / (1.0 - ax));
+    } else half * log1p_wide(T, 2.0 * (ax / (1.0 - ax)));
+
+    return if (math.signbit(x)) -y else y;
+}
+
+fn atanh64Strict(x: f64) f64 {
+    @setFloatMode(.strict);
+    const u: u64 = @bitCast(x);
+    const e = (u >> 52) & 0x7ff;
+    const s = u >> 63;
+    const y: f64 = @bitCast(u & (std.math.maxInt(u64) >> 1));
+
+    if (math.isNan(x)) return x + x;
+    if (y > 1.0) {
+        std.math.raiseInvalid();
+        return math.nan(f64);
+    }
+    if (y == 1.0) {
+        std.math.raiseDivByZero();
+        return math.copysign(math.inf(f64), x);
+    }
+    if (e < 0x3ff - 32) {
+        if (y != 0.0 and y < math.floatMin(f64)) std.math.raiseUnderflow();
+        return x;
+    }
+
+    const ay: f128 = @floatCast(y);
+    const r: f64 = if (e < 0x3ff - 1)
+        @floatCast(0.5 * log1p_wide(f128, 2.0 * ay + 2.0 * ay * ay / (1.0 - ay)))
+    else
+        @floatCast(0.5 * log1p_wide(f128, 2.0 * (ay / (1.0 - ay))));
+
+    return if (s != 0) -r else r;
+}
+
 fn atanhl_(x: c_longdouble) callconv(.c) c_longdouble {
     return switch (@typeInfo(c_longdouble).float.bits) {
-        64 => math.atanh(@as(f64, @bitCast(x))),
-        else => @floatCast(math.atanh(@as(f64, @floatCast(x)))),
+        64 => atanh64Strict(@bitCast(x)),
+        else => atanhWide(c_longdouble, x),
     };
 }
 
 fn coshl_(x: c_longdouble) callconv(.c) c_longdouble {
     return switch (@typeInfo(c_longdouble).float.bits) {
         64 => math.cosh(@as(f64, @bitCast(x))),
-        else => @floatCast(math.cosh(@as(f64, @floatCast(x)))),
+        else => coshl_impl(c_longdouble, x),
     };
+}
+
+fn coshl_impl(comptime T: type, x_: T) T {
+    @setFloatMode(.strict);
+    const x = @abs(x_);
+    if (x < @as(T, 0.6931471805599453094172321214581765680755001343602552541206800094)) {
+        if (x < 0x1p-32) {
+            mem.doNotOptimizeAway(x + @as(T, 0x1p120));
+            return 1.0;
+        }
+        const t = expm1_wide(T, x);
+        return 1.0 + t * t / (2.0 * (1.0 + t));
+    }
+    if (x < @as(T, 0x1.62e42fefa39efp+13)) {
+        const t = exp_pure(T, x);
+        return 0.5 * (t + 1.0 / t);
+    }
+    if (math.isFinite(x_)) std.math.raiseOverflow();
+    const t = exp_pure(T, 0.5 * x);
+    return 0.5 * t * t;
 }
 
 /// Port of musl sinh.c using f128 intermediates.
@@ -2134,8 +2471,9 @@ fn sinh_(x_: f64) callconv(.c) f64 {
 
     // |x| > log(DBL_MAX) or nan: f128 exp won't overflow here
     const t: f128 = exp_pure(f128, absx);
-    if (math.isFinite(x_) and t > @as(f128, math.floatMax(f64))) std.math.raiseOverflow();
-    return @floatCast(h * t);
+    const r = h * t;
+    if (math.isFinite(x_) and @abs(r) > @as(f128, math.floatMax(f64))) std.math.raiseOverflow();
+    return @floatCast(r);
 }
 
 fn sinhl_(x: c_longdouble) callconv(.c) c_longdouble {
@@ -2173,8 +2511,25 @@ fn sinhl_impl(comptime T: type, x_: T) T {
 fn tanhl_(x: c_longdouble) callconv(.c) c_longdouble {
     return switch (@typeInfo(c_longdouble).float.bits) {
         64 => math.tanh(@as(f64, @bitCast(x))),
-        else => @floatCast(math.tanh(@as(f64, @floatCast(x)))),
+        else => tanhl_impl(c_longdouble, x),
     };
+}
+
+fn tanhl_impl(comptime T: type, x_: T) T {
+    @setFloatMode(.strict);
+    const x = @abs(x_);
+    const t = if (x > @as(T, 0.54930614433405484569762261846126285232374527891137472586735) or math.isNan(x)) blk: {
+        if (x >= 32.0) break :blk 1.0 + 0.0 / (x + @as(T, 0x1p-120));
+        const u = expm1_wide(T, 2.0 * x);
+        break :blk 1.0 - 2.0 / (u + 2.0);
+    } else if (x > @as(T, 0.25541281188299534160275704815183096747321036424720147422818)) blk: {
+        const u = expm1_wide(T, 2.0 * x);
+        break :blk u / (u + 2.0);
+    } else blk: {
+        const u = expm1_wide(T, -2.0 * x);
+        break :blk -u / (u + 2.0);
+    };
+    return if (math.signbit(x_)) -t else t;
 }
 
 fn remainder_(x: f64, y: f64) callconv(.c) f64 {
@@ -2761,11 +3116,12 @@ fn __fpclassifyl(x: c_longdouble) callconv(.c) c_int {
         80 => blk: {
             const ux: u80 = @bitCast(x);
             const e: u32 = @truncate((ux >> 64) & 0x7fff);
-            if (e == 0) break :blk if ((ux << 1) != 0) @as(c_int, 3) else @as(c_int, 2);
-            const msb: u1 = @truncate(ux >> 63);
+            const m: u64 = @truncate(ux);
+            const msb: u1 = @truncate(m >> 63);
+            if (e == 0 and msb == 0) break :blk if (m != 0) @as(c_int, 3) else @as(c_int, 2);
             if (e == 0x7fff) {
                 if (msb == 0) break :blk @as(c_int, 0);
-                break :blk if ((ux & ((@as(u80, 1) << 63) - 1)) != 0) @as(c_int, 0) else @as(c_int, 1);
+                break :blk if ((m << 1) != 0) @as(c_int, 0) else @as(c_int, 1);
             }
             break :blk if (msb != 0) @as(c_int, 4) else @as(c_int, 0);
         },
