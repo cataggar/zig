@@ -120,6 +120,10 @@ const VaList = switch (builtin.cpu.arch) {
     .aarch64, .aarch64_be => std.builtin.VaListAarch64,
     else => std.builtin.VaList,
 };
+const can_compile_c_va_start = switch (builtin.cpu.arch) {
+    .aarch64, .aarch64_be => false,
+    else => true,
+};
 extern "c" fn __lock(lock: *c_int) void;
 extern "c" fn __unlock(lock: *c_int) void;
 extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
@@ -303,6 +307,7 @@ comptime {
         symbol(&closelog, "closelog");
         symbol(&openlog, "openlog");
         symbol(&__vsyslog, "vsyslog");
+        if (can_compile_c_va_start) symbol(&syslog, "syslog");
         symbol(&sl_lock, "__syslog_lockptr");
         symbol(&wordexp_fn, "wordexp");
         symbol(&wordfree_fn, "wordfree");

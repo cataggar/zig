@@ -1059,26 +1059,26 @@ const src_files = [_][]const u8{
     // "musl/src/mq/mq_timedreceive.c", // migrated to lib/c/mq.zig
     // "musl/src/mq/mq_timedsend.c", // migrated to lib/c/mq.zig
     // "musl/src/mq/mq_unlink.c", // migrated to lib/c/mq.zig
-    "musl/src/multibyte/btowc.c",
-    "musl/src/multibyte/c16rtomb.c",
-    "musl/src/multibyte/c32rtomb.c",
-    "musl/src/multibyte/internal.c",
-    "musl/src/multibyte/mblen.c",
-    "musl/src/multibyte/mbrlen.c",
-    "musl/src/multibyte/mbrtoc16.c",
-    "musl/src/multibyte/mbrtoc32.c",
-    "musl/src/multibyte/mbrtowc.c",
-    "musl/src/multibyte/mbsinit.c",
-    "musl/src/multibyte/mbsnrtowcs.c",
-    "musl/src/multibyte/mbsrtowcs.c",
-    "musl/src/multibyte/mbstowcs.c",
-    "musl/src/multibyte/mbtowc.c",
-    "musl/src/multibyte/wcrtomb.c",
-    "musl/src/multibyte/wcsnrtombs.c",
-    "musl/src/multibyte/wcsrtombs.c",
-    "musl/src/multibyte/wcstombs.c",
-    "musl/src/multibyte/wctob.c",
-    "musl/src/multibyte/wctomb.c",
+    // "musl/src/multibyte/btowc.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/c16rtomb.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/c32rtomb.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/internal.c", // helper table inlined in lib/c/multibyte.zig
+    // "musl/src/multibyte/mblen.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbrlen.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbrtoc16.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbrtoc32.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbrtowc.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbsinit.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbsnrtowcs.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbsrtowcs.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbstowcs.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbtowc.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/wcrtomb.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/wcsnrtombs.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/wcsrtombs.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/wcstombs.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/wctob.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/wctomb.c", // migrated to lib/c/multibyte.zig
     "musl/src/network/accept4.c",
     "musl/src/network/accept.c",
     "musl/src/network/bind.c",

@@ -16,6 +16,10 @@ const VaList = switch (builtin.cpu.arch) {
     .aarch64, .aarch64_be => std.builtin.VaListAarch64,
     else => std.builtin.VaList,
 };
+const can_compile_c_va_start = switch (builtin.cpu.arch) {
+    .aarch64, .aarch64_be => false,
+    else => true,
+};
 extern "c" var stderr: *anyopaque;
 extern "c" var __progname: [*:0]const u8;
 extern "c" fn fprintf(stream: *anyopaque, fmt: [*:0]const u8, ...) c_int;
@@ -104,6 +108,12 @@ comptime {
         symbol(&vwarnx, "vwarnx");
         symbol(&verr, "verr");
         symbol(&verrx, "verrx");
+        if (can_compile_c_va_start) {
+            symbol(&warn_fn, "warn");
+            symbol(&warnx_fn, "warnx");
+            symbol(&err_fn, "err");
+            symbol(&errx_fn, "errx");
+        }
         symbol(&endusershell, "endusershell");
         symbol(&setusershell, "setusershell");
         symbol(&getusershell, "getusershell");
