@@ -155,7 +155,6 @@ comptime {
     }
     if (builtin.target.isWasiLibC()) {
         _ = @import("c/fenv.zig");
-        _ = @import("c/multibyte.zig");
         _ = @import("c/search.zig");
         _ = @import("c/time.zig");
         _ = @import("c/unistd.zig");
