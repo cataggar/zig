@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: gh-release
+          ref: mirror
       - uses: astral-sh/setup-uv@v5
 
       - name: Download Zig assets
