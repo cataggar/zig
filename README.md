@@ -14,7 +14,7 @@ A personal mirror and build of the [Zig](https://ziglang.org) compiler.
 
 Releases here include two kinds of binaries, each signed with a **different
 [minisign](https://jedisct1.github.io/minisign/) public key**. Install either
-with [`ghr`](https://github.com/cataggar/ghr) (`pipx install ghr-bin`), passing
+with [`ghr`](https://github.com/cataggar/ghr), passing
 the matching public key so the download is signature-verified.
 
 ### Official Zig binaries (mirrored from ziglang.org)
