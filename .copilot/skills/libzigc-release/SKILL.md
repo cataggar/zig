@@ -56,9 +56,9 @@ The Zig compiler (stage4) is itself linked against `lib/c` AND runs multithreade
 1. Tag the merged tip: `git tag -a <zig-ver>.libc.N <sha> -m "..."` then `git push origin <tag>`.
 2. **Ensure `build-release.yml` is on the default branch `mirror`** (else `workflow_dispatch` 404s). Register via API if missing: `gh api --method PUT repos/cataggar/zig/contents/.github/workflows/build-release.yml -f message=... -f content=<b64> -f branch=mirror`.
 3. Dispatch: `gh workflow run build-release.yml --repo cataggar/zig --ref libc17-704 -f tag=<tag>`. It builds stage4 for x86_64-linux (tar.xz), aarch64-macos (tar.xz), x86_64-windows (zip) on GitHub-hosted runners, then signs and uploads.
-4. **Signing needs repo secrets `MINISIGN_SECRET_KEY` + `MINISIGN_PASSWORD`** (minisign, via `scripts/sign-asset.exp`). If absent the `attach assets to release` job fails with `minisign exited before prompting for a password`. Only a human with the private key can set them: `gh secret set MINISIGN_SECRET_KEY --repo cataggar/zig`. Public key: `RWSBnHWjwk/kkqdYc74cGupHMNVobpmF3lPc7b8RIllYMmYBr5G2EyF0`.
+4. **Signing needs repo secrets `MINISIGN_SECRET_KEY` + `MINISIGN_PASSWORD`** (minisign, via `scripts/sign-asset.exp`). If absent the `attach assets to release` job fails with `minisign exited before prompting for a password`. Only a human with the private key can set them: `gh secret set MINISIGN_SECRET_KEY --repo cataggar/zig`. Public key: `RWQhfv+qEYWFiUiUqTeTGnyN3KQlTSVNpqhCST5HbBKZRi6SfCJhnVF4`.
 5. The workflow auto-creates the prerelease and uploads `.tar.xz`/`.zip`/`.minisig` only — **NO `.sha256`** sidecars.
-6. Verify assets, then confirm `ghr install cataggar/zig@<tag> RWSBnHWjwk/kkqdYc74cGupHMNVobpmF3lPc7b8RIllYMmYBr5G2EyF0`.
+6. Verify assets, then confirm `ghr install cataggar/zig@<tag> RWQhfv+qEYWFiUiUqTeTGnyN3KQlTSVNpqhCST5HbBKZRi6SfCJhnVF4`.
 
 ## Parity audit (vs fork)
 `git show origin/libc17-704:src/libs/musl.zig | grep '"musl/' | grep -v '//' | sort -u` vs the same on `origin/libc/0.16.x`; `comm`/per-dir net counts show which `.c` files the fork migrated that the port still keeps as musl C. Hard residuals (va_list aarch64/s390x, futex/cancel thread core, some ld80 transcendentals, locale) may be accepted documented gaps.
