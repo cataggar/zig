@@ -962,7 +962,10 @@ fn uavRefExe(wasm: *Wasm, code: *ArrayList(u8), value: InternPool.Index, offset:
     code.appendAssumeCapacity(@intFromEnum(opcode));
 
     const addr = wasm.uavAddr(value);
-    writeUleb128(code, @as(u32, @intCast(@as(i64, addr) + offset)));
+    const final: u32 = @intCast(@as(i64, addr) + offset);
+    // i32.const/i64.const initializers use signed LEB128; emitting the address as
+    // unsigned LEB128 sign-extends it to a negative pointer at runtime. See cataggar/wamr#843.
+    if (is_wasm32) writeSleb128(code, @as(i32, @bitCast(final))) else writeSleb128(code, @as(i64, final));
 }
 
 fn navRefOff(wasm: *Wasm, code: *ArrayList(u8), data: Mir.NavRefOff, is_wasm32: bool) !void {
@@ -988,7 +991,9 @@ fn navRefOff(wasm: *Wasm, code: *ArrayList(u8), data: Mir.NavRefOff, is_wasm32: 
         code.appendNTimesAssumeCapacity(0, if (is_wasm32) 5 else 10);
     } else {
         const addr = wasm.navAddr(data.nav_index);
-        writeUleb128(code, @as(u32, @intCast(@as(i64, addr) + data.offset)));
+        const final: u32 = @intCast(@as(i64, addr) + data.offset);
+        // See uavRefExe: i32.const/i64.const addresses must be signed LEB128.
+        if (is_wasm32) writeSleb128(code, @as(i32, @bitCast(final))) else writeSleb128(code, @as(i64, final));
     }
 }
 

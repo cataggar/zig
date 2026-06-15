@@ -2042,8 +2042,11 @@ fn appendGlobal(gpa: Allocator, bytes: *ArrayList(u8), mutable: u8, val: u32) Al
     try bytes.ensureUnusedCapacity(gpa, 9);
     bytes.appendAssumeCapacity(@intFromEnum(std.wasm.Valtype.i32));
     bytes.appendAssumeCapacity(mutable);
-    bytes.appendAssumeCapacity(@intFromEnum(std.wasm.Opcode.i32_const));
-    appendReservedUleb32(bytes, val);
+    // The i32.const initializer is a *signed* LEB128. Encoding `val` as unsigned
+    // LEB128 sign-extends to a negative i32 whenever the final 7-bit group has bit
+    // 0x40 set (e.g. the default 1 MiB stack pointer 0x100000), which then traps at
+    // runtime as an out-of-bounds address. See issue cataggar/wamr#843.
+    appendReservedI32Const(bytes, val);
     bytes.appendAssumeCapacity(@intFromEnum(std.wasm.Opcode.end));
 }
 
@@ -2061,4 +2064,27 @@ fn appendReservedLeb128(bytes: *ArrayList(u8), value: anytype) void {
     return w.writeLeb128(value) catch |err| switch (err) {
         error.WriteFailed => unreachable,
     };
+}
+
+test appendGlobal {
+    const gpa = std.testing.allocator;
+    // Each `val` is a linear-memory address synthesized by the linker (stack
+    // pointer, heap base, etc.). A wasm runtime reads the i32.const initializer as
+    // a *signed* LEB128, so the emitted bytes must round-trip back to `val`.
+    // 0x100000 is Zig's default 1 MiB wasm stack pointer and regression-tests
+    // cataggar/wamr#843, where unsigned LEB128 encoding sign-extended it to
+    // 0xFFF00000 and trapped at runtime.
+    const cases = [_]u32{
+        0,        0x3f,       0x40,       0x100000,
+        0x120000, 0x7fffffff, 0x80000000, 0xffffffff,
+    };
+    for (cases) |val| {
+        var bytes: ArrayList(u8) = .empty;
+        defer bytes.deinit(gpa);
+        try appendGlobal(gpa, &bytes, 1, val);
+        // Skip valtype, mutability, and the i32.const opcode; decode the signed init value.
+        var r: std.Io.Reader = .fixed(bytes.items[3..]);
+        const decoded = try r.takeLeb128(i32);
+        try std.testing.expectEqual(val, @as(u32, @bitCast(decoded)));
+    }
 }
