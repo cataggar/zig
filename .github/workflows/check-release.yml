@@ -50,4 +50,4 @@ jobs:
           tag=$(echo "${NEW_VERSIONS}" | jq -r '.[0]')
           version="${tag#v}"
           echo "Triggering publish for ${version}"
-          gh workflow run publish.yml --ref ai -f version="${version}"
+          gh workflow run publish.yml --ref mirror -f version="${version}"
