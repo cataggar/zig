@@ -62,42 +62,41 @@ def main() -> None:
     log.info("Checking for new Zig releases...")
 
     index = fetch_index()
-    new_versions: list[str] = []
 
-    for key, release in index.items():
-        version = release.get("version", "")
-        if not version:
-            # Older releases use the key as the version
-            version = key
-
-        # Skip if it looks like "master" and has no real version
-        if version == "master":
-            continue
-
-        # For stable releases, tag as "v0.15.2"; for dev builds, "v0.16.0-dev.2962+08416b44f"
-        tag_name = f"v{version}"
-
-        if tag_exists(our_repo, tag_name):
-            log.info("Tag %s already exists — skipping", tag_name)
-            continue
-
-        # Check that the release has at least some platform tarballs
-        platform_count = sum(1 for k in release if k not in ("version", "date", "docs", "stdDocs", "src", "bootstrap", "notes"))
-        if platform_count < 3:
-            log.warning("Release %s has only %d platforms — skipping", version, platform_count)
-            continue
-
-        log.info("New release found: %s (%d platforms)", version, platform_count)
-        new_versions.append(tag_name)
-
-    if not new_versions:
-        log.info("No new releases found")
+    # Only ever mirror the single latest Zig version (the "master" dev build).
+    # We never backfill older releases.
+    release = index.get("master")
+    if not release:
+        log.warning("No 'master' entry found in the download index")
         set_github_output("new_versions", "")
         return
 
-    # Output as JSON array for matrix strategy
-    versions_json = json.dumps(new_versions)
-    log.info("New versions to publish: %s", versions_json)
+    version = release.get("version", "")
+    if not version:
+        log.warning("'master' entry has no version field")
+        set_github_output("new_versions", "")
+        return
+
+    # For dev builds the tag looks like "v0.16.0-dev.2962+08416b44f".
+    tag_name = f"v{version}"
+
+    if tag_exists(our_repo, tag_name):
+        log.info("Latest version %s already mirrored — nothing to do", tag_name)
+        set_github_output("new_versions", "")
+        return
+
+    # Check that the release has at least some platform tarballs
+    platform_count = sum(1 for k in release if k not in ("version", "date", "docs", "stdDocs", "src", "bootstrap", "notes"))
+    if platform_count < 3:
+        log.warning("Release %s has only %d platforms — skipping", version, platform_count)
+        set_github_output("new_versions", "")
+        return
+
+    log.info("New latest release found: %s (%d platforms)", version, platform_count)
+
+    # Output as a single-element JSON array; the workflow publishes the first entry.
+    versions_json = json.dumps([tag_name])
+    log.info("New version to publish: %s", versions_json)
     set_github_output("new_versions", versions_json)
 
 

@@ -32,7 +32,7 @@ jobs:
         env:
           NEW_VERSIONS: ${{ steps.check.outputs.new_versions }}
         run: |
-          # Only publish the latest version (first entry; index is ordered newest-first)
+          # The check script outputs only the single latest version.
           tag=$(echo "${NEW_VERSIONS}" | jq -r '.[0]')
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -46,7 +46,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEW_VERSIONS: ${{ steps.check.outputs.new_versions }}
         run: |
-          # Only publish the latest version (first entry; index is ordered newest-first)
+          # The check script outputs only the single latest version.
           tag=$(echo "${NEW_VERSIONS}" | jq -r '.[0]')
           version="${tag#v}"
           echo "Triggering publish for ${version}"
