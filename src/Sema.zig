@@ -26664,6 +26664,34 @@ fn namespaceLookupVal(
 }
 
 /// Asserts that the layout of `struct_ty` is already resolved.
+fn fieldNameIsPrivate(field_name: []const u8) bool {
+    return field_name.len > 0 and field_name[0] == '#';
+}
+
+/// Enforces `#`-prefixed private field visibility: a private field may only be
+/// accessed from within the file that defines its struct. (Bun fork extension.)
+fn ensureFieldVisible(
+    sema: *Sema,
+    block: *Block,
+    field_name: InternPool.NullTerminatedString,
+    field_name_src: LazySrcLoc,
+    struct_ty: Type,
+) CompileError!void {
+    const pt = sema.pt;
+    const zcu = pt.zcu;
+    const ip = &zcu.intern_pool;
+
+    if (!fieldNameIsPrivate(field_name.toSlice(ip))) return;
+
+    const struct_namespace = struct_ty.getNamespace(zcu).unwrap() orelse return;
+    const struct_file_scope = zcu.namespacePtr(struct_namespace).file_scope;
+    const current_file_scope = block.getFileScopeIndex(zcu);
+
+    if (struct_file_scope != current_file_scope) {
+        return sema.fail(block, field_name_src, "field '{f}' is private and cannot be accessed outside its defining file", .{field_name.fmt(ip)});
+    }
+}
+
 fn structFieldPtr(
     sema: *Sema,
     block: *Block,
@@ -26688,9 +26716,11 @@ fn structFieldPtr(
         break :field_index try sema.tupleFieldIndex(block, struct_ty, field_name, field_name_src);
     } else field_index: {
         const struct_type = zcu.typeToStruct(struct_ty).?;
-        break :field_index struct_type.nameIndex(ip, field_name) orelse {
+        const field_index = struct_type.nameIndex(ip, field_name) orelse {
             return sema.failWithBadStructFieldAccess(block, struct_ty, struct_type, field_name_src, field_name);
         };
+        try ensureFieldVisible(sema, block, field_name, field_name_src, struct_ty);
+        break :field_index field_index;
     };
 
     return sema.structFieldPtrByIndex(block, src, struct_ptr, field_index, struct_ty);
@@ -26749,6 +26779,7 @@ fn structFieldVal(
 
             const field_index = struct_type.nameIndex(ip, field_name) orelse
                 return sema.failWithBadStructFieldAccess(block, struct_ty, struct_type, field_name_src, field_name);
+            try ensureFieldVisible(sema, block, field_name, field_name_src, struct_ty);
             if (struct_type.field_is_comptime_bits.get(ip, field_index)) {
                 return .fromIntern(struct_type.field_defaults.get(ip)[field_index]);
             }
