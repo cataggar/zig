@@ -1442,6 +1442,40 @@ pub const ConnectTcpOptions = struct {
     timeout: Io.Timeout = .none,
 };
 
+fn addTlsConnection(
+    client: *Client,
+    remote_host: HostName,
+    port: u16,
+    stream: Io.net.Stream,
+) ConnectTcpError!*Connection {
+    if (disable_tls) return error.TlsInitializationFailed;
+    const tc = Connection.Tls.create(client, remote_host, port, stream) catch |err| switch (err) {
+        error.OutOfMemory => |e| return e,
+        error.Unexpected => |e| return e,
+        error.Canceled => |e| return e,
+        else => return error.TlsInitializationFailed,
+    };
+    errdefer tc.destroy();
+    try client.connection_pool.addUsed(client.io, &tc.connection);
+    return &tc.connection;
+}
+
+fn connectPlainUnpooled(
+    client: *Client,
+    host: HostName,
+    port: u16,
+    connection_host: HostName,
+    connection_port: u16,
+) ConnectTcpError!*Connection {
+    const io = client.io;
+    var stream = try host.connect(io, port, .{ .mode = .stream });
+    errdefer stream.close(io);
+    const pc = try Connection.Plain.create(client, connection_host, connection_port, stream);
+    errdefer pc.destroy();
+    try client.connection_pool.addUsed(io, &pc.connection);
+    return &pc.connection;
+}
+
 pub fn connectTcpOptions(client: *Client, options: ConnectTcpOptions) ConnectTcpError!*Connection {
     const io = client.io;
     const host = options.host;
@@ -1450,6 +1484,8 @@ pub fn connectTcpOptions(client: *Client, options: ConnectTcpOptions) ConnectTcp
 
     const proxied_host = options.proxied_host orelse host;
     const proxied_port = options.proxied_port orelse port;
+
+    if (protocol == .tls and disable_tls) return error.TlsInitializationFailed;
 
     if (try client.connection_pool.findConnection(io, .{
         .host = proxied_host,
@@ -1462,16 +1498,7 @@ pub fn connectTcpOptions(client: *Client, options: ConnectTcpOptions) ConnectTcp
 
     switch (protocol) {
         .tls => {
-            if (disable_tls) return error.TlsInitializationFailed;
-            const tc = Connection.Tls.create(client, proxied_host, proxied_port, stream) catch |err| switch (err) {
-                error.OutOfMemory => |e| return e,
-                error.Unexpected => |e| return e,
-                error.Canceled => |e| return e,
-                else => return error.TlsInitializationFailed,
-            };
-            errdefer tc.destroy();
-            try client.connection_pool.addUsed(io, &tc.connection);
-            return &tc.connection;
+            return client.addTlsConnection(proxied_host, proxied_port, stream);
         },
         .plain => {
             const pc = try Connection.Plain.create(client, proxied_host, proxied_port, stream);
@@ -1528,28 +1555,43 @@ pub fn connectProxied(
     proxy: *Proxy,
     proxied_host: HostName,
     proxied_port: u16,
+    protocol: Protocol,
 ) !*Connection {
     const io = client.io;
     if (!proxy.supports_connect) return error.TunnelNotSupported;
 
+    // CONNECT over an HTTPS proxy needs the proxy TLS connection to remain
+    // alive while HTTP or another TLS session flows through it. Connection
+    // cannot currently represent that layering. Returning TunnelNotSupported
+    // lets plain HTTP use normal proxy mode, while connect() below fails
+    // closed for HTTPS origins.
+    if (proxy.protocol == .tls) return error.TunnelNotSupported;
+
+    if (protocol == .tls) {
+        if (disable_tls) return error.TlsInitializationFailed;
+    }
+
     if (try client.connection_pool.findConnection(io, .{
         .host = proxied_host,
         .port = proxied_port,
-        .protocol = proxy.protocol,
+        .protocol = protocol,
     })) |node| return node;
 
     var maybe_valid = false;
-    (tunnel: {
-        const connection = try client.connectTcpOptions(.{
-            .host = proxy.host,
-            .port = proxy.port,
-            .protocol = proxy.protocol,
-            .proxied_host = proxied_host,
-            .proxied_port = proxied_port,
-        });
+    const connection = (tunnel: {
+        // Do not obtain the carrier from the connection pool. A pooled
+        // connection keyed by the origin is already a completed tunnel; using
+        // it here would send a second CONNECT request through the first tunnel.
+        const carrier = try client.connectPlainUnpooled(
+            proxy.host,
+            proxy.port,
+            proxied_host,
+            proxied_port,
+        );
+
         errdefer {
-            connection.closing = true;
-            client.connection_pool.release(connection, io);
+            carrier.closing = true;
+            client.connection_pool.release(carrier, io);
         }
 
         var req = client.request(.CONNECT, .{
@@ -1558,7 +1600,7 @@ pub fn connectProxied(
             .port = proxied_port,
         }, .{
             .redirect_behavior = .unhandled,
-            .connection = connection,
+            .connection = carrier,
         }) catch |err| {
             break :tunnel err;
         };
@@ -1578,14 +1620,34 @@ pub fn connectProxied(
         // else, it will only be released when the client is de-initialized.
         req.connection = null;
 
-        connection.closing = false;
-
-        return connection;
+        carrier.closing = false;
+        break :tunnel carrier;
     }) catch {
-        // something went wrong with the tunnel
+        // CONNECT was rejected or failed before an encrypted origin channel
+        // existed. Only this phase may mark CONNECT as unsupported.
         proxy.supports_connect = maybe_valid;
         return error.TunnelNotSupported;
     };
+
+    if (protocol == .plain) return connection;
+
+    // The CONNECT exchange used a plain HTTP connection. Detach its socket,
+    // discard only the plain connection allocation, and build a TLS
+    // connection whose identity and pool key are the origin.
+    const stream = connection.getStream();
+    {
+        client.connection_pool.mutex.lockUncancelable(io);
+        defer client.connection_pool.mutex.unlock(io);
+        client.connection_pool.used.remove(&connection.pool_node);
+    }
+    const plain: *Connection.Plain = @alignCast(@fieldParentPtr("connection", connection));
+    plain.destroy();
+
+    // Ownership transferred out of the plain connection. Keep this errdefer
+    // active through both the TLS handshake and insertion into the pool so a
+    // cancellation cannot leak the socket.
+    errdefer stream.close(io);
+    return client.addTlsConnection(proxied_host, proxied_port, stream);
 }
 
 pub const ConnectError = ConnectTcpError || RequestError;
@@ -1614,11 +1676,19 @@ pub fn connect(
     }
 
     if (proxy.supports_connect) tunnel: {
-        return connectProxied(client, proxy, host, port) catch |err| switch (err) {
-            error.TunnelNotSupported => break :tunnel,
+        return connectProxied(client, proxy, host, port, protocol) catch |err| switch (err) {
+            error.TunnelNotSupported => {
+                // Sending an absolute-form HTTPS request to a normal proxy
+                // would put an HTTPS request on a non-origin-authenticated
+                // channel. HTTP may fall back; HTTPS must fail closed.
+                if (protocol == .tls) return error.TlsInitializationFailed;
+                break :tunnel;
+            },
             else => |e| return e,
         };
     }
+
+    if (protocol == .tls) return error.TlsInitializationFailed;
 
     // fall back to using the proxy as a normal http proxy
     const connection = try client.connectTcp(proxy.host, proxy.port, proxy.protocol);
