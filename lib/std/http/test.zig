@@ -1124,6 +1124,79 @@ fn echoTests(client: *http.Client, port: u16) !void {
     }
 }
 
+test "HTTPS proxy tunnel fails closed when origin TLS fails" {
+    if (builtin.os.tag == .openbsd) return error.SkipZigTest; // https://codeberg.org/ziglang/zig/issues/30806
+
+    const io = std.testing.io;
+    const test_server = try createTestServer(io, struct {
+        fn run(test_server: *TestServer) anyerror!void {
+            var recv_buffer: [1024]u8 = undefined;
+            var send_buffer: [1024]u8 = undefined;
+            var stream = try test_server.net_server.accept(test_server.io);
+            defer stream.close(test_server.io);
+
+            var connection_br = stream.reader(test_server.io, &recv_buffer);
+            var connection_bw = stream.writer(test_server.io, &send_buffer);
+            var server = http.Server.init(&connection_br.interface, &connection_bw.interface);
+            var request = try server.receiveHead();
+            try expectEqual(.CONNECT, request.head.method);
+            try expectEqualStrings("example.com:443", request.head.target);
+
+            // Closing immediately after accepting CONNECT makes the origin TLS
+            // handshake fail. The client must report that failure instead of
+            // opening a second connection and sending an absolute HTTPS URI.
+            try request.respond("", .{ .status = .ok, .keep_alive = true });
+        }
+    });
+    defer test_server.destroy();
+
+    var proxy: http.Client.Proxy = .{
+        .protocol = .plain,
+        .host = try .init("127.0.0.1"),
+        .port = test_server.port(),
+        .authorization = null,
+        .supports_connect = true,
+    };
+    var client: http.Client = .{
+        .allocator = std.testing.allocator,
+        .io = io,
+        .https_proxy = &proxy,
+    };
+    defer client.deinit();
+
+    try expectError(
+        error.TlsInitializationFailed,
+        client.request(.GET, try .parse("https://example.com/private"), .{}),
+    );
+    try expect(proxy.supports_connect);
+    try expectEqual(@as(usize, 0), client.connection_pool.free_len);
+    try expect(client.connection_pool.used.first == null);
+}
+
+test "HTTPS origin through HTTPS proxy fails closed" {
+    const io = std.testing.io;
+    var proxy: http.Client.Proxy = .{
+        .protocol = .tls,
+        .host = try .init("127.0.0.1"),
+        .port = 1,
+        .authorization = null,
+        .supports_connect = true,
+    };
+    var client: http.Client = .{
+        .allocator = std.testing.allocator,
+        .io = io,
+        .https_proxy = &proxy,
+    };
+    defer client.deinit();
+
+    // Supporting this combination requires nested TLS. Until Connection can
+    // model both layers, reject it before opening a socket.
+    try expectError(
+        error.TlsInitializationFailed,
+        client.connect(try .init("example.com"), 443, .tls),
+    );
+}
+
 const TestServer = struct {
     io: Io,
     shutting_down: bool,
