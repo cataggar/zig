@@ -1,0 +1,31 @@
+name: Sync master from Codeberg
+
+on:
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: sync-master-from-codeberg
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Sync master
+        run: |
+          set -euo pipefail
+          previous=$(git rev-parse origin/master)
+          git remote add upstream https://codeberg.org/ziglang/zig.git
+          git fetch --no-tags upstream refs/heads/master
+          git push \
+            --force-with-lease="refs/heads/master:${previous}" \
+            origin FETCH_HEAD:refs/heads/master
