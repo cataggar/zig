@@ -2722,13 +2722,13 @@ pub const FunctionImportId = enum(u32) {
         return switch (unpack(id, wasm)) {
             .object_function_import => |i| {
                 const import = i.value(wasm);
-                return import.flags.binding == .strong and import.module_name != .none;
+                return import.flags.binding == .strong;
             },
             .zcu_import => |i| {
                 const zcu = wasm.base.comp.zcu.?;
                 const ip = &zcu.intern_pool;
                 const ext = ip.indexToKey(ip.getNav(i.ptr(wasm).*).resolved.?.value).@"extern";
-                return ext.linkage != .weak and ext.lib_name != .none;
+                return ext.linkage == .strong;
             },
         };
     }
