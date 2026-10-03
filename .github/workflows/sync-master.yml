@@ -1,6 +1,9 @@
 name: Sync master from Codeberg
 
 on:
+  schedule:
+    - cron: "15 5 * * *"
+      timezone: "America/Chicago"
   workflow_dispatch: {}
 
 permissions: {}

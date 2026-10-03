@@ -6,7 +6,8 @@ A personal mirror and build of the [Zig](https://ziglang.org) compiler.
 
 - **`master`** — a mirror of the upstream Zig source from
   [codeberg.org/ziglang/zig](https://codeberg.org/ziglang/zig) (the Zig project
-  migrated from GitHub to Codeberg). Updated occasionally.
+  migrated from GitHub to Codeberg). Synced daily at 5:15 AM Central Time
+  (`America/Chicago`), automatically adjusting for daylight saving time.
 - **`mirror`** (default) — release and CI tooling: the workflows that mirror
   official Zig releases and build the development binaries.
 
