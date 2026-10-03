@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check for new Zig releases and signal when a new tag should be created."""
+"""Check for new stable Zig releases and signal when a new tag should be created."""
 
 # /// script
 # requires-python = ">=3.12"
@@ -9,6 +9,7 @@
 import json
 import logging
 import os
+import re
 import sys
 
 import requests  # type: ignore[import-untyped]
@@ -59,25 +60,20 @@ def fetch_index() -> dict:
 
 def main() -> None:
     our_repo = os.environ.get("GITHUB_REPOSITORY", "cataggar/zig")
-    log.info("Checking for new Zig releases...")
+    log.info("Checking for new stable Zig releases...")
 
     index = fetch_index()
 
-    # Only ever mirror the single latest Zig version (the "master" dev build).
-    # We never backfill older releases.
-    release = index.get("master")
-    if not release:
-        log.warning("No 'master' entry found in the download index")
+    # Only mirror the latest stable version; never backfill older releases.
+    stable_versions = [version for version in index if re.fullmatch(r"\d+\.\d+\.\d+", version)]
+    if not stable_versions:
+        log.warning("No stable releases found in the download index")
         set_github_output("new_versions", "")
         return
 
-    version = release.get("version", "")
-    if not version:
-        log.warning("'master' entry has no version field")
-        set_github_output("new_versions", "")
-        return
+    version = max(stable_versions, key=lambda v: tuple(int(part) for part in v.split(".")))
+    release = index[version]
 
-    # For dev builds the tag looks like "v0.16.0-dev.2962+08416b44f".
     tag_name = f"v{version}"
 
     if tag_exists(our_repo, tag_name):

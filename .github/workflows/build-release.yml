@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 env:
-  ZIG_VERSION: "0.17.0-dev.704+b8cb78023"
+  ZIG_VERSION: "0.17.0"
   LLVM_VERSION: "22.1.2"
 
 jobs:

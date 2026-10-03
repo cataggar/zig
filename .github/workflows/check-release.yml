@@ -32,7 +32,7 @@ jobs:
         env:
           NEW_VERSIONS: ${{ steps.check.outputs.new_versions }}
         run: |
-          # The check script outputs only the single latest version.
+          # Only the latest stable version is published; older releases are not backfilled.
           tag=$(echo "${NEW_VERSIONS}" | jq -r '.[0]')
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
