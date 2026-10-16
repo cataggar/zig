@@ -2589,17 +2589,11 @@ const IntType = struct {
                 .one, .many, .c => .{ .is_signed = false, .bits = cg.target.ptrBitWidth() },
                 .slice => unreachable,
             },
-            .opt_type => |opt_child| return if (!Type.fromInterned(opt_child).hasRuntimeBits(zcu))
-                .{ .is_signed = false, .bits = 1 }
-            else switch (ip.indexToKey(opt_child)) {
-                .ptr_type => |ptr_type| switch (ptr_type.flags.size) {
-                    .one, .many => switch (ptr_type.flags.is_allowzero) {
-                        false => .{ .is_signed = false, .bits = cg.target.ptrBitWidth() },
-                        true => unreachable,
-                    },
-                    .slice, .c => unreachable,
-                },
-                else => unreachable,
+            .opt_type => |opt_child| {
+                if (!Type.fromInterned(opt_child).hasRuntimeBits(zcu))
+                    return .{ .is_signed = false, .bits = 1 };
+                assert(Type.fromInterned(ty_index).optionalReprIsPayload(zcu));
+                ty_index = opt_child;
             },
             .error_union_type => |error_union_type| return if (!Type.fromInterned(error_union_type.payload_type)
                 .hasRuntimeBits(zcu)) .{ .is_signed = false, .bits = zcu.errorSetBits() } else unreachable,
@@ -6012,6 +6006,13 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
 
     if (use_br_table) {
         const width = width_maybe.?;
+
+        if (int_ty.bits > 32) {
+            _ = try cg.intCmp(int_ty, .lt, target, try cg.resolveValue(min.?));
+            try cg.addLabel(.br_if, branch_count - 1);
+            _ = try cg.intCmp(int_ty, .gt, target, try cg.resolveValue(max.?));
+            try cg.addLabel(.br_if, branch_count - 1);
+        }
 
         const br_value_original = try cg.intSub(int_ty, target, try cg.resolveValue(min.?));
         _ = try cg.intCast(.u32, int_ty, br_value_original);
