@@ -3397,7 +3397,7 @@ pub fn createEmpty(
         .truncate = true,
         .read = true,
         .permissions = if (Io.File.Permissions.has_executable_bit)
-            if (target.os.tag == .wasi and output_mode == .Exe)
+            if (target.os.tag.isWasi() and output_mode == .Exe)
                 .executable_file
             else
                 .default_file

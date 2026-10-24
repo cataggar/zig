@@ -1320,7 +1320,7 @@ pub fn toLLVMTriple(target: *const Target, buf: []u8) []const u8 {
         .uefi => "windows",
         .visionos => "xros",
         .vulkan => "vulkan",
-        .wasi => "wasi",
+        .wasi, .wasip2 => "wasi",
         .watchos => "watchos",
         .windows => "windows",
 

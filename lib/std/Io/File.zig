@@ -370,7 +370,7 @@ pub const Permissions = std.Options.FilePermissions orelse if (is_windows) enum(
     default_dir = 0o777,
     _,
 
-    pub const has_executable_bit = native_os != .wasi;
+    pub const has_executable_bit = !native_os.isWasi();
 
     pub const executable_file: @This() = .default_dir;
 

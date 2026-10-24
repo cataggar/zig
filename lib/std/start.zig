@@ -59,7 +59,7 @@ comptime {
             .uefi => {
                 if (!@hasDecl(root, "EfiMain")) @export(&EfiMain, .{ .name = "EfiMain" });
             },
-            .wasi => {
+            .wasi, .wasip2 => {
                 const wasm_start_sym = switch (builtin.wasi_exec_model) {
                     .reactor => "_initialize",
                     .command => "_start",

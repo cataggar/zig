@@ -25,7 +25,7 @@ pub const empty: Environ = .{ .block = .empty };
 pub const Block = switch (native_os) {
     .windows => GlobalBlock,
     .emscripten => if (builtin.link_libc) PosixBlock else GlobalBlock,
-    .wasi, .freestanding, .other => GlobalBlock,
+    .wasi, .wasip2, .freestanding, .other => GlobalBlock,
     else => PosixBlock,
 };
 
@@ -510,7 +510,7 @@ pub fn createMap(env: Environ, allocator: Allocator) CreateMapError!Map {
         assert(std.os.windows.ntdll.RtlEnterCriticalSection(peb.FastPebLock) == .SUCCESS);
         defer assert(std.os.windows.ntdll.RtlLeaveCriticalSection(peb.FastPebLock) == .SUCCESS);
         try map.putWindowsBlock(.{ .ptr = peb.ProcessParameters.Environment });
-    } else if (native_os == .wasi) empty: {
+    } else if (native_os.isWasi()) empty: {
         if (!env.block.use_global) break :empty;
 
         var environ_count: usize = undefined;
@@ -948,7 +948,7 @@ test Map {
 
 test "convert from Environ to Map and back again" {
     if (native_os == .windows) return;
-    if (native_os == .wasi) return;
+    if (native_os.isWasi()) return;
 
     const gpa = testing.allocator;
 

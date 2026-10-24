@@ -46,7 +46,7 @@ pub const std_options: std.Options = .{
         inline else => |log_level| @field(std.log.Level, @tagName(log_level)),
     },
 };
-pub const std_options_cwd = if (native_os == .wasi) wasi_cwd else null;
+pub const std_options_cwd = if (native_os.isWasi()) wasi_cwd else null;
 
 pub const panic = crash_report.panic;
 pub const debug = crash_report.debug;
@@ -152,7 +152,7 @@ pub fn log(
 }
 
 const use_safe_allocator = build_options.debug_gpa or
-    (native_os != .wasi and !builtin.link_libc and switch (builtin.mode) {
+    (!native_os.isWasi() and !builtin.link_libc and switch (builtin.mode) {
         .debug, .safe => true,
         .fast, .small => false,
     });
@@ -164,7 +164,7 @@ var safe_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{
 pub fn main(init: std.process.Init.Minimal) anyerror!void {
     const root_gpa = if (use_safe_allocator)
         safe_allocator.allocator()
-    else if (native_os == .wasi)
+    else if (native_os.isWasi())
         std.heap.wasm_allocator
     else if (builtin.link_libc)
         std.heap.c_allocator
@@ -215,7 +215,7 @@ pub fn main(init: std.process.Init.Minimal) anyerror!void {
         return mainArgs(tracy_allocator.interface(), arena, io, args, &environ_map);
     }
 
-    if (native_os == .wasi) {
+    if (native_os.isWasi()) {
         preopens = try .init(arena);
     }
 
@@ -416,7 +416,7 @@ fn mainArgs(
         .targets => {
             dev.check(.targets_command);
             const self_exe_path = switch (native_os) {
-                .wasi => {},
+                .wasi, .wasip2 => {},
                 else => process.executablePathAlloc(io, arena) catch |err| fatal("unable to find zig self exe path: {t}", .{err}),
             };
             var dirs: std.zig.Directories = .init(arena, io, .{
@@ -450,7 +450,7 @@ fn mainArgs(
         .env => {
             dev.check(.env_command);
             const self_exe_path = switch (native_os) {
-                .wasi => args[0],
+                .wasi, .wasip2 => args[0],
                 else => process.executablePathAlloc(io, arena) catch |err| fatal("unable to find zig self exe path: {t}", .{err}),
             };
             var dirs: std.zig.Directories = .init(arena, io, .{
@@ -459,7 +459,7 @@ fn mainArgs(
                 .build_root = null,
                 .local_cache_strat = .global,
                 .preopens = preopens,
-                .self_exe_path = if (native_os != .wasi) self_exe_path,
+                .self_exe_path = if (!native_os.isWasi()) self_exe_path,
                 .environ_map = environ_map,
                 .cwd = try std.zig.getResolvedCwd(io, arena),
             });
@@ -926,9 +926,9 @@ fn buildOutputType(
     var listen: Listen = .none;
     var debug_compile_errors = false;
     var debug_incremental = false;
-    var verbose_cc = (native_os != .wasi or builtin.link_libc) and
+    var verbose_cc = (!native_os.isWasi() or builtin.link_libc) and
         EnvVar.ZIG_VERBOSE_CC.isSet(environ_map);
-    var verbose_link = (native_os != .wasi or builtin.link_libc) and
+    var verbose_link = (!native_os.isWasi() or builtin.link_libc) and
         EnvVar.ZIG_VERBOSE_LINK.isSet(environ_map);
     var link_depfile: ?[]const u8 = null;
     var time_report = false;
@@ -3281,7 +3281,7 @@ fn buildOutputType(
     }
 
     const self_exe_path = switch (native_os) {
-        .wasi => {},
+        .wasi, .wasip2 => {},
         else => process.executablePathAlloc(io, arena) catch |err| fatal("unable to find zig self exe path: {t}", .{err}),
     };
 
@@ -3616,7 +3616,7 @@ fn buildOutputType(
         .dirs = dirs,
         .thread_limit = thread_limit,
         .self_exe_path = switch (native_os) {
-            .wasi => null,
+            .wasi, .wasip2 => null,
             else => self_exe_path,
         },
         .config = create_module.resolved_options,
@@ -3848,7 +3848,7 @@ fn buildOutputType(
         dev.checkAny(&.{ .run_command, .test_command });
 
         const self_exe_path_or_argv0 = switch (native_os) {
-            .wasi => all_args[0], // Will error because of `!process.can_spawn`
+            .wasi, .wasip2 => all_args[0], // Will error because of `!process.can_spawn`
             else => self_exe_path,
         };
 
@@ -4361,7 +4361,7 @@ fn serve(
     out: *Io.Writer,
     test_exec_args: []const ?[]const u8,
     self_exe_path: switch (native_os) {
-        .wasi => void,
+        .wasi, .wasip2 => void,
         else => []const u8,
     },
     arg_mode: ArgMode,
@@ -4749,7 +4749,7 @@ fn runOrTestHotSwap(
     gpa: Allocator,
     test_exec_args: []const ?[]const u8,
     self_exe_path: switch (native_os) {
-        .wasi => void,
+        .wasi, .wasip2 => void,
         else => []const u8,
     },
     arg_mode: ArgMode,
@@ -4760,7 +4760,7 @@ fn runOrTestHotSwap(
     const lf = comp.bin_file.?;
 
     const self_exe_path_or_argv0 = switch (native_os) {
-        .wasi => all_args[0], // Will error because of `!process.can_spawn`
+        .wasi, .wasip2 => all_args[0], // Will error because of `!process.can_spawn`
         else => self_exe_path,
     };
 

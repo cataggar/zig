@@ -467,7 +467,7 @@ pub const Path = struct {
     /// the (absolute) path to a cwd-relative path. Otherwise, returns the absolute path
     /// unmodified. The returned string is never "."; empty string will be returned instead.
     fn absToCwdRelative(sub_path: []const u8, cwd_path: []const u8) []const u8 {
-        if (builtin.target.os.tag == .wasi) {
+        if (builtin.target.os.tag.isWasi()) {
             if (sub_path.len == 0) return "";
             assert(!fs.path.isAbsolute(sub_path));
             return sub_path;
@@ -535,7 +535,7 @@ pub const Path = struct {
 
         // We're not relative to any root, so we will use an absolute path (on targets where they are available).
 
-        if (builtin.target.os.tag == .wasi or fs.path.isAbsolute(resolved)) {
+        if (builtin.target.os.tag.isWasi() or fs.path.isAbsolute(resolved)) {
             // `resolved` is already absolute (or we're on WASI, where absolute paths don't really exist).
             return .{ .root = .none, .sub_path = resolved };
         }

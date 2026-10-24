@@ -310,7 +310,7 @@ test "File.stat on a File that is a named pipe returns Kind.named_pipe" {
     var read_end: Io.File = undefined;
     var write_end: Io.File = undefined;
     switch (builtin.target.os.tag) {
-        .wasi => return error.SkipZigTest,
+        .wasi, .wasip2 => return error.SkipZigTest,
         .windows => {
             const pipe = try threaded.windowsCreatePipe(.{
                 .server = .{ .mode = .{ .IO = .SYNCHRONOUS_NONALERT } },
@@ -452,7 +452,7 @@ test "openDir cwd parent '..'" {
     const io = testing.io;
 
     var dir = Dir.cwd().openDir(io, "..", .{}) catch |err| {
-        if (native_os == .wasi and err == error.PermissionDenied) {
+        if (native_os.isWasi() and err == error.PermissionDenied) {
             return; // This is okay. WASI disallows escaping from the fs sandbox
         }
         return err;
@@ -462,7 +462,7 @@ test "openDir cwd parent '..'" {
 
 test "openDir non-cwd parent '..'" {
     switch (native_os) {
-        .wasi, .netbsd, .openbsd => return error.SkipZigTest,
+        .wasi, .wasip2, .netbsd, .openbsd => return error.SkipZigTest,
         else => {},
     }
 
@@ -1264,7 +1264,7 @@ test "renameAbsolute" {
 }
 
 test "openExecutable" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os.isWasi()) return error.SkipZigTest;
     if (native_os == .openbsd) return error.SkipZigTest;
 
     const io = testing.io;
@@ -1274,7 +1274,7 @@ test "openExecutable" {
 }
 
 test "executablePath" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os.isWasi()) return error.SkipZigTest;
     if (native_os == .openbsd) return error.SkipZigTest;
 
     const io = testing.io;
@@ -1570,7 +1570,7 @@ test "max file name component lengths" {
         const buf2: [windows.NAME_MAX][codepoint2.len]u8 = @splat(codepoint2);
         const maxed_windows_filename2: []const u8 = @ptrCast(&buf2);
         try testFilenameLimits(io, tmp.dir, maxed_windows_filename1, maxed_windows_filename2);
-    } else if (native_os == .wasi) {
+    } else if (native_os.isWasi()) {
         // On WASI, the maxed filename depends on the host OS, so in order for this test to
         // work on any host, we need to use a length that will work for all platforms
         // (i.e. the minimum max_name_bytes of all supported platforms).
@@ -1823,7 +1823,7 @@ test "AtomicFile" {
 }
 
 test "open file with exclusive nonblocking lock twice" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os.isWasi()) return error.SkipZigTest;
 
     try testWithAllSupportedPathTypes(struct {
         fn impl(ctx: *TestContext) !void {
@@ -1840,7 +1840,7 @@ test "open file with exclusive nonblocking lock twice" {
 }
 
 test "open file with shared and exclusive nonblocking lock" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os.isWasi()) return error.SkipZigTest;
 
     try testWithAllSupportedPathTypes(struct {
         fn impl(ctx: *TestContext) !void {
@@ -1857,7 +1857,7 @@ test "open file with shared and exclusive nonblocking lock" {
 }
 
 test "open file with exclusive and shared nonblocking lock" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os.isWasi()) return error.SkipZigTest;
 
     try testWithAllSupportedPathTypes(struct {
         fn impl(ctx: *TestContext) !void {
@@ -1918,7 +1918,7 @@ test "open file with exclusive lock twice, make sure second lock waits" {
 }
 
 test "open file with exclusive nonblocking lock twice (absolute paths)" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os.isWasi()) return error.SkipZigTest;
 
     const io = testing.io;
 
@@ -1986,7 +1986,7 @@ test "read from locked file" {
 }
 
 test "use Lock.none to unlock files" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os.isWasi()) return error.SkipZigTest;
 
     const io = testing.io;
 
@@ -2237,7 +2237,7 @@ test "'.' and '..' in absolute functions" {
 }
 
 test "chmod" {
-    if (native_os == .windows or native_os == .wasi) return error.SkipZigTest;
+    if (native_os == .windows or native_os.isWasi()) return error.SkipZigTest;
 
     const io = testing.io;
 
@@ -2260,7 +2260,7 @@ test "chmod" {
 }
 
 test "change ownership" {
-    if (native_os == .windows or native_os == .wasi) return error.SkipZigTest;
+    if (native_os == .windows or native_os.isWasi()) return error.SkipZigTest;
 
     const io = testing.io;
 
@@ -2280,7 +2280,7 @@ test "change ownership" {
 
 test "invalid UTF-8/WTF-8 paths" {
     const expected_err = switch (native_os) {
-        .wasi => error.BadPathName,
+        .wasi, .wasip2 => error.BadPathName,
         .windows => error.BadPathName,
         else => return error.SkipZigTest,
     };
@@ -2328,14 +2328,13 @@ test "invalid UTF-8/WTF-8 paths" {
 
             try expectError(expected_err, ctx.dir.statFile(io, invalid_path, .{}));
 
-            if (native_os != .wasi) {
+            if (!native_os.isWasi()) {
                 try expectError(expected_err, ctx.dir.realPathFile(io, invalid_path, &[_]u8{}));
                 try expectError(expected_err, ctx.dir.realPathFileAlloc(io, invalid_path, testing.allocator));
             }
-
             try expectError(expected_err, Dir.rename(ctx.dir, invalid_path, ctx.dir, invalid_path, io));
 
-            if (native_os != .wasi and ctx.path_type != .relative) {
+            if (!native_os.isWasi() and ctx.path_type != .relative) {
                 var buf: [Dir.max_path_bytes]u8 = undefined;
                 try expectError(expected_err, Dir.copyFileAbsolute(invalid_path, invalid_path, io, .{}));
                 try expectError(expected_err, Dir.createDirAbsolute(io, invalid_path, .default_dir));
@@ -2653,7 +2652,7 @@ test "write positional empty buffer" {
 }
 
 test "access smoke test" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os.isWasi()) return error.SkipZigTest;
     if (native_os == .windows) return error.SkipZigTest;
     if (native_os == .openbsd) return error.SkipZigTest;
 
@@ -2710,7 +2709,7 @@ test "write streaming a long vector" {
 }
 
 test "open smoke test" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os.isWasi()) return error.SkipZigTest;
     if (native_os == .windows) return error.SkipZigTest;
     if (native_os == .openbsd) return error.SkipZigTest;
 
@@ -2752,7 +2751,7 @@ test "open smoke test" {
 }
 
 test "hard link with different directories" {
-    if (native_os == .wasi or native_os == .windows) return error.SkipZigTest;
+    if (native_os.isWasi() or native_os == .windows) return error.SkipZigTest;
 
     const io = testing.io;
 
@@ -2795,7 +2794,7 @@ test "hard link with different directories" {
 }
 
 test "stat smoke test" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os.isWasi()) return error.SkipZigTest;
 
     const io = testing.io;
 
