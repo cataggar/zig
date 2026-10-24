@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to build and upload assets to (e.g. 0.17.0-dev.704.libc.1)'
+        description: 'Release tag to build and upload assets to (e.g. 0.17.0-libc.1)'
         required: false
-        default: '0.17.0-dev.704.libc.1'
+        default: '0.17.0-libc.1'
         type: string
 
 permissions:
@@ -14,7 +14,7 @@ permissions:
 
 env:
   ZIG_VERSION: "0.17.0"
-  LLVM_VERSION: "22.1.2"
+  LLVM_VERSION: "22.1.8-p1"
 
 jobs:
   build:
@@ -26,19 +26,19 @@ jobs:
           - target: x86_64-linux
             runs-on: ubuntu-latest
             host_asset: zig-x86_64-linux
-            llvm_asset: llvm-zig-22.1.2-x86_64-linux
+            llvm_asset: llvm-zig-22.1.8-p1-x86_64-linux
             zig_target: x86_64-linux-gnu
             archive_ext: tar.xz
           - target: aarch64-macos
             runs-on: macos-latest
             host_asset: zig-aarch64-macos
-            llvm_asset: llvm-zig-22.1.2-aarch64-macos
+            llvm_asset: llvm-zig-22.1.8-p1-aarch64-macos
             zig_target: aarch64-macos
             archive_ext: tar.xz
           - target: x86_64-windows
             runs-on: windows-latest
             host_asset: zig-x86_64-windows
-            llvm_asset: llvm-zig-22.1.2-x86_64-windows-msvc
+            llvm_asset: llvm-zig-22.1.8-p1-x86_64-windows-msvc
             zig_target: x86_64-windows-msvc
             archive_ext: zip
           # x86_64-macos intentionally excluded: the macos-latest runner
