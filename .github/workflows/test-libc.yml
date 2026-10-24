@@ -61,6 +61,7 @@ jobs:
             -DCMAKE_INSTALL_PREFIX="stage4" \
             -DCMAKE_PREFIX_PATH="$LLVM_PREFIX" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DZIG_RELEASE_SAFE=ON \
             -DZIG_TARGET_TRIPLE="$TARGET" \
             -DZIG_TARGET_MCPU="$MCPU" \
             -DZIG_STATIC=ON \

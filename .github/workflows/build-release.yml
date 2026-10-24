@@ -165,7 +165,8 @@ jobs:
             --maxrss 8000000000 \
             -Denable-llvm \
             -Dstatic-llvm \
-            -Doptimize=Debug \
+            -Doptimize=ReleaseSafe \
+            -Dstrip \
             -Dno-langref \
             $TARGET_FLAG \
             -Duse-zig-libcxx \
@@ -187,7 +188,8 @@ jobs:
             --maxrss 8000000000 `
             -Denable-llvm `
             -Dstatic-llvm `
-            -Doptimize=Debug `
+            -Doptimize=ReleaseSafe `
+            -Dstrip `
             -Dno-langref `
             -Dtarget=${{ matrix.zig_target }} `
             -Duse-zig-libcxx `
