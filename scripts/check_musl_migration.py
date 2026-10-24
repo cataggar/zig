@@ -32,6 +32,8 @@ EXCLUDED_FILES = {
     "wasi_sources.zig",
     "wasi_cloudlibc.zig",
     "wasi_thread_stub.zig",
+    "wasi_crt1_command.zig",
+    "wasi_crt1_reactor.zig",
 }
 EXCLUDED_DIRS = {"win32"}
 

@@ -245,13 +245,15 @@ const wctomb_fn = @extern(*const fn (?[*]u8, wchar_t) callconv(.c) c_int, .{ .na
 const ungetwc_fn = @extern(*const fn (wint_t, ?*FILE) callconv(.c) wint_t, .{ .name = "ungetwc" });
 
 comptime {
-    if (builtin.link_libc and builtin.target.isMuslLibC()) {
+    if (builtin.link_libc and (builtin.target.isMuslLibC() or builtin.target.isWasiLibC())) {
         symbol(&setbuf, "setbuf");
         symbol(&setbuffer, "setbuffer");
         symbol(&setlinebuf, "setlinebuf");
         symbol(&getline, "getline");
         symbol(&getwchar, "getwchar");
+        symbol(&getwchar, "getwchar_unlocked");
         symbol(&putwchar, "putwchar");
+        symbol(&putwchar, "putwchar_unlocked");
         symbol(&getwc, "getwc");
         symbol(&putwc, "putwc");
         symbol(&getw, "getw");
@@ -261,21 +263,27 @@ comptime {
         symbol(&getchar_unlocked, "getchar_unlocked");
         symbol(&putchar_unlocked, "putchar_unlocked");
         symbol(&feof_fn, "feof");
-        symbol(&flockfile_impl, "flockfile");
-        symbol(&ftrylockfile_impl, "ftrylockfile");
-        symbol(&funlockfile_impl, "funlockfile");
+        symbol(&feof_fn, "feof_unlocked");
+        symbol(&feof_fn, "_IO_feof_unlocked");
         symbol(&__fseeko, "fseeko");
+        symbol(&__fseeko, "fseeko64");
         symbol(&__ftello, "ftello");
+        symbol(&__ftello, "ftello64");
         symbol(&ferror_fn, "ferror");
+        symbol(&ferror_fn, "ferror_unlocked");
+        symbol(&ferror_fn, "_IO_ferror_unlocked");
         symbol(&clearerr, "clearerr");
+        symbol(&clearerr, "clearerr_unlocked");
         symbol(&fileno, "fileno");
+        symbol(&fileno, "fileno_unlocked");
         symbol(&rewind, "rewind");
         symbol(&fgetpos, "fgetpos");
+        symbol(&fgetpos, "fgetpos64");
         symbol(&fsetpos, "fsetpos");
+        symbol(&fsetpos, "fsetpos64");
         symbol(&fputs, "fputs");
         symbol(&fputs, "fputs_unlocked");
         symbol(&puts, "puts");
-        symbol(&gets, "gets");
         symbol(&ungetc, "ungetc");
         symbol(&setvbuf, "setvbuf");
         symbol(&__fseeko_unlocked, "__fseeko_unlocked");
@@ -288,7 +296,9 @@ comptime {
         symbol(&fwrite, "fwrite");
         symbol(&fwrite, "fwrite_unlocked");
         symbol(&fread, "fread");
+        symbol(&fread, "fread_unlocked");
         symbol(&fgets, "fgets");
+        symbol(&fgets, "fgets_unlocked");
         symbol(&_flushlbf, "_flushlbf");
         symbol(&__fsetlocking, "__fsetlocking");
         symbol(&__fwriting, "__fwriting");
@@ -304,14 +314,18 @@ comptime {
         symbol(&__freadptr, "__freadptr");
         symbol(&__freadptrinc, "__freadptrinc");
         symbol(&__fseterr, "__fseterr");
-        symbol(&remove_fn, "remove");
-        symbol(&rename_fn, "rename");
         symbol(&getc_unlocked_impl, "getc_unlocked");
+        symbol(&getc_unlocked_impl, "fgetc_unlocked");
+        symbol(&getc_unlocked_impl, "_IO_getc_unlocked");
         symbol(&putc_unlocked_impl, "putc_unlocked");
+        symbol(&putc_unlocked_impl, "fputc_unlocked");
+        symbol(&putc_unlocked_impl, "_IO_putc_unlocked");
         symbol(&fgetc_impl, "fgetc");
         symbol(&fgetc_impl, "getc");
         symbol(&fgetc_impl, "_IO_getc");
         symbol(&fputc_impl, "fputc");
+        symbol(&fputc_impl, "putc");
+        symbol(&fputc_impl, "_IO_putc");
         symbol(&toread_impl, "__toread");
         symbol(&towrite_impl, "__towrite");
         symbol(&uflow_impl, "__uflow");
@@ -332,6 +346,7 @@ comptime {
 
         // getdelim.c
         symbol(&getdelim_impl, "getdelim");
+        symbol(&getdelim_impl, "__getdelim");
 
         // v* printf/scanf family
         symbol(&vfprintf_impl, "vfprintf");
@@ -356,18 +371,106 @@ comptime {
         symbol(&vswscanf_impl, "vswscanf");
         symbol(&vswscanf_impl, "__isoc99_vswscanf");
 
-        // Locking (__lockfile.c, flockfile.c, funlockfile.c, ftrylockfile.c)
-        symbol(&lockfile_impl, "__lockfile");
-        symbol(&unlockfile_impl, "__unlockfile");
-        symbol(&do_orphaned_stdio_locks_impl, "__do_orphaned_stdio_locks");
-        symbol(&unlist_locked_file_impl, "__unlist_locked_file");
-        symbol(&register_locked_file_impl, "__register_locked_file");
-
         // Memory stream functions (fmemopen.c, open_memstream.c, open_wmemstream.c, fopencookie.c)
         symbol(&fmemopen_impl, "fmemopen");
         symbol(&open_memstream_impl, "open_memstream");
         symbol(&open_wmemstream_impl, "open_wmemstream");
         symbol(&fopencookie_impl, "fopencookie");
+
+        if (builtin.target.isMuslLibC()) {
+            symbol(&gets, "gets");
+            symbol(&remove_fn, "remove");
+            symbol(&rename_fn, "rename");
+
+            // Locking (__lockfile.c, flockfile.c, funlockfile.c, ftrylockfile.c)
+            symbol(&flockfile_impl, "flockfile");
+            symbol(&ftrylockfile_impl, "ftrylockfile");
+            symbol(&funlockfile_impl, "funlockfile");
+            symbol(&lockfile_impl, "__lockfile");
+            symbol(&unlockfile_impl, "__unlockfile");
+            symbol(&do_orphaned_stdio_locks_impl, "__do_orphaned_stdio_locks");
+            symbol(&unlist_locked_file_impl, "__unlist_locked_file");
+            symbol(&register_locked_file_impl, "__register_locked_file");
+        }
+
+        if (builtin.target.isWasiLibC()) {
+            // Internal scanners (shgetc.c, intscan.c, floatscan.c)
+            symbol(&shlim_impl, "__shlim");
+            symbol(&shgetc_impl, "__shgetc");
+            symbol(&intscan_impl, "__intscan");
+            symbol(&floatscan_impl, "__floatscan");
+
+            // Open file list (ofl.c, ofl_add.c)
+            symbol(&ofl_lock_impl, "__ofl_lock");
+            symbol(&ofl_unlock_impl, "__ofl_unlock");
+            symbol(&ofl_add_impl, "__ofl_add");
+
+            // Standard streams (stdin.c, stdout.c, stderr.c, __stdio_exit.c)
+            symbol(&__stdin_FILE, "__stdin_FILE");
+            symbol(@ptrCast(&stdin_var), "stdin");
+            symbol(@ptrCast(&stdin_var), "__stdin_used");
+            symbol(&__stdout_FILE, "__stdout_FILE");
+            symbol(@ptrCast(&stdout_var), "stdout");
+            symbol(@ptrCast(&stdout_var), "__stdout_used");
+            symbol(&__stderr_FILE, "__stderr_FILE");
+            symbol(@ptrCast(&stderr_var), "stderr");
+            symbol(@ptrCast(&stderr_var), "__stderr_used");
+            symbol(&stdio_exit_impl, "__stdio_exit");
+            symbol(&stdio_exit_impl, "__stdio_exit_needed");
+
+            // Stream lifecycle (fflush.c, fclose.c, __fdopen.c, fopen.c, freopen.c)
+            symbol(&fflush_impl, "fflush");
+            symbol(&fflush_impl, "fflush_unlocked");
+            symbol(&fclose_impl, "fclose");
+            symbol(&fclose_dummy, "__unlist_locked_file");
+            symbol(&fdopen_impl, "__fdopen");
+            symbol(&fdopen_impl, "fdopen");
+            symbol(&fopen_impl, "fopen");
+            symbol(&fopen_impl, "fopen64");
+            symbol(&freopen_impl, "freopen");
+            symbol(&freopen_impl, "freopen64");
+
+            // Wide character I/O (fwide.c, fgetwc.c, fgetws.c, fputwc.c, fputws.c, ungetwc.c)
+            symbol(&fwide_impl, "fwide");
+            symbol(&fgetwc_unlocked_impl, "__fgetwc_unlocked");
+            symbol(&fgetwc_unlocked_impl, "fgetwc_unlocked");
+            symbol(&fgetwc_unlocked_impl, "getwc_unlocked");
+            symbol(&fgetwc_impl, "fgetwc");
+            symbol(&fgetws_impl, "fgetws");
+            symbol(&fgetws_impl, "fgetws_unlocked");
+            symbol(&fputwc_unlocked_impl, "__fputwc_unlocked");
+            symbol(&fputwc_unlocked_impl, "fputwc_unlocked");
+            symbol(&fputwc_unlocked_impl, "putwc_unlocked");
+            symbol(&fputwc_impl, "fputwc");
+            symbol(&fputws_impl, "fputws");
+            symbol(&fputws_impl, "fputws_unlocked");
+            symbol(&ungetwc_impl, "ungetwc");
+
+            // Variadic printf/scanf wrappers
+            symbol(&printf_impl, "printf");
+            symbol(&printf_impl, "iprintf");
+            symbol(&printf_impl, "__small_printf");
+            symbol(&fprintf_impl, "fprintf");
+            symbol(&sprintf_impl, "sprintf");
+            symbol(&snprintf_impl, "snprintf");
+            symbol(&asprintf_impl, "asprintf");
+            symbol(&dprintf_impl, "dprintf");
+            symbol(&scanf_impl, "scanf");
+            symbol(&scanf_impl, "__isoc99_scanf");
+            symbol(&fscanf_impl, "fscanf");
+            symbol(&fscanf_impl, "__isoc99_fscanf");
+            symbol(&sscanf_impl, "sscanf");
+            symbol(&sscanf_impl, "__isoc99_sscanf");
+            symbol(&wprintf_impl, "wprintf");
+            symbol(&fwprintf_impl, "fwprintf");
+            symbol(&swprintf_impl, "swprintf");
+            symbol(&wscanf_impl, "wscanf");
+            symbol(&wscanf_impl, "__isoc99_wscanf");
+            symbol(&fwscanf_impl, "fwscanf");
+            symbol(&fwscanf_impl, "__isoc99_fwscanf");
+            symbol(&swscanf_impl, "swscanf");
+            symbol(&swscanf_impl, "__isoc99_swscanf");
+        }
     }
 }
 
@@ -445,11 +548,13 @@ fn putchar_unlocked(c: c_int) callconv(.c) c_int {
 
 /// Implements musl FLOCK(f) macro: ((f)->lock>=0 ? __lockfile((f)) : 0)
 inline fn flock(f: *FILE) c_int {
+    if (builtin.target.isWasiLibC()) return 0;
     return if (f.lock >= 0) lockfile_impl(f) else 0;
 }
 
 /// Implements musl FUNLOCK(f) macro
 inline fn funlock(f: *FILE, need_unlock: c_int) void {
+    if (builtin.target.isWasiLibC()) return;
     if (need_unlock != 0) unlockfile_impl(f);
 }
 
@@ -482,7 +587,7 @@ fn fileno(f: *FILE) callconv(.c) c_int {
     const fd = f.fd;
     funlock(f, need_unlock);
     if (fd < 0) {
-        std.c._errno().* = @backingInt(std.os.linux.E.BADF);
+        std.c._errno().* = @backingInt(std.c.E.BADF);
         return -1;
     }
     return fd;
@@ -601,7 +706,7 @@ fn __fseeko_unlocked(f: *FILE, off_arg: i64, whence: c_int) callconv(.c) c_int {
 
     // Fail immediately for invalid whence argument.
     if (whence != SEEK_CUR and whence != SEEK_SET and whence != SEEK_END) {
-        std.c._errno().* = @backingInt(std.os.linux.E.INVAL);
+        std.c._errno().* = @backingInt(std.c.E.INVAL);
         return -1;
     }
 
@@ -671,7 +776,7 @@ fn __ftello(f: *FILE) callconv(.c) i64 {
 fn ftell(f: *FILE) callconv(.c) c_long {
     const pos = __ftello(f);
     if (pos > std.math.maxInt(c_long)) {
-        std.c._errno().* = @backingInt(std.os.linux.E.OVERFLOW);
+        std.c._errno().* = @backingInt(std.c.E.OVERFLOW);
         return -1;
     }
     return @intCast(pos);
@@ -1030,8 +1135,6 @@ fn perror_impl(msg: ?[*:0]const u8) callconv(.c) void {
 /// __fmodeflags.c: int __fmodeflags(const char *mode)
 /// Parse fopen-style mode string to O_* flags.
 fn fmodeflags_impl(mode: [*:0]const u8) callconv(.c) c_int {
-    const O = std.os.linux.O;
-    var o = O{};
     // Check for '+', 'x', 'e' anywhere in the mode string
     var has_plus = false;
     var has_x = false;
@@ -1047,6 +1150,24 @@ fn fmodeflags_impl(mode: [*:0]const u8) callconv(.c) c_int {
             }
         }
     }
+    if (builtin.target.isWasiLibC()) {
+        var o = std.c.O{};
+        if (has_plus) {
+            o.read = true;
+            o.write = true;
+        } else if (mode[0] == 'r') {
+            o.read = true;
+        } else {
+            o.write = true;
+        }
+        if (has_x) o.EXCL = true;
+        if (mode[0] != 'r') o.CREAT = true;
+        if (mode[0] == 'w') o.TRUNC = true;
+        if (mode[0] == 'a') o.APPEND = true;
+        return @bitCast(@as(u32, @bitCast(o)));
+    }
+    const O = std.os.linux.O;
+    var o = O{};
     if (has_plus)
         o.ACCMODE = .RDWR
     else if (mode[0] == 'r')
@@ -1073,14 +1194,23 @@ const F_PERM: c_uint = 1;
 /// __fopen_rb_ca.c: FILE *__fopen_rb_ca(const char *filename, FILE *f, unsigned char *buf, size_t len)
 fn fopen_rb_ca_impl(filename: [*:0]const u8, f: *FILE, buf: [*]u8, len: usize) callconv(.c) ?*FILE {
     f.* = std.mem.zeroes(FILE);
-    const O = linux.O;
-    var o = O{};
-    o.ACCMODE = .RDONLY;
-    o.CLOEXEC = true;
-    const fd_raw: isize = @bitCast(linux.openat(linux.AT.FDCWD, @ptrCast(filename), o, 0));
-    if (fd_raw < 0) return null;
-    const fd: c_int = @intCast(fd_raw);
-    _ = linux.fcntl(fd, linux.F.SETFD, @as(usize, linux.FD_CLOEXEC));
+    const fd: c_int = if (builtin.target.isWasiLibC()) blk: {
+        const o_rdonly: c_int = @bitCast(@as(u32, @bitCast(std.c.O{ .read = true })));
+        const fd_wasi = wasilibc_open_nomode_fn(filename, o_rdonly);
+        if (fd_wasi < 0) return null;
+        _ = fcntl_fn(fd_wasi, std.c.F.SETFD, @as(c_int, 1)); // FD_CLOEXEC = 1
+        break :blk fd_wasi;
+    } else blk: {
+        const O = linux.O;
+        var o = O{};
+        o.ACCMODE = .RDONLY;
+        o.CLOEXEC = true;
+        const fd_raw: isize = @bitCast(linux.openat(linux.AT.FDCWD, @ptrCast(filename), o, 0));
+        if (fd_raw < 0) return null;
+        const fd_linux: c_int = @intCast(fd_raw);
+        _ = linux.fcntl(fd_linux, linux.F.SETFD, @as(usize, linux.FD_CLOEXEC));
+        break :blk fd_linux;
+    };
     f.flags = F_NOWR | F_PERM;
     f.buf = buf + UNGET;
     f.buf_size = len - UNGET;
@@ -1130,6 +1260,9 @@ fn stdio_seek_impl(f: *FILE, off: i64, whence: c_int) callconv(.c) i64 {
 
 /// __stdio_close.c: int __stdio_close(FILE *f)
 fn stdio_close_impl(f: *FILE) callconv(.c) c_int {
+    if (builtin.target.isWasiLibC()) {
+        return posix_close_fn(f.fd);
+    }
     const fd = aio_close_fn(f.fd);
     return c_errno(linux.close(@bitCast(fd)));
 }
@@ -1143,11 +1276,18 @@ fn stdio_read_impl(f: *FILE, buf: [*]u8, len: usize) callconv(.c) usize {
         .{ .base = buf, .len = len -| has_buf },
         .{ .base = f.buf orelse buf, .len = f.buf_size },
     };
-    const cnt_raw = if (iov[0].len != 0)
-        linux.readv(@bitCast(f.fd), &iov, 2)
-    else
-        linux.read(@bitCast(f.fd), iov[1].base, iov[1].len);
-    const cnt: isize = @bitCast(cnt_raw);
+    const cnt: isize = if (builtin.target.isWasiLibC()) blk: {
+        break :blk if (iov[0].len != 0)
+            readv_fn(f.fd, &iov, 2)
+        else
+            posix_read_fn(f.fd, iov[1].base, iov[1].len);
+    } else blk: {
+        const cnt_raw = if (iov[0].len != 0)
+            linux.readv(@bitCast(f.fd), &iov, 2)
+        else
+            linux.read(@bitCast(f.fd), iov[1].base, iov[1].len);
+        break :blk @bitCast(cnt_raw);
+    };
     if (cnt <= 0) {
         f.flags |= if (cnt != 0) F_ERR else F_EOF;
         return 0;
@@ -1179,8 +1319,10 @@ fn stdio_write_impl(f: *FILE, buf: [*]const u8, len: usize) callconv(.c) usize {
     while (true) {
         const iov_slice: [*]const std.posix.iovec_const = @ptrCast(&iovs[iov_idx]);
         const iovcnt: u32 = @intCast(2 - iov_idx);
-        const cnt_raw = linux.writev(@bitCast(f.fd), iov_slice, iovcnt);
-        const cnt: isize = @bitCast(cnt_raw);
+        const cnt: isize = if (builtin.target.isWasiLibC())
+            writev_fn(f.fd, iov_slice, @intCast(iovcnt))
+        else
+            @bitCast(linux.writev(@bitCast(f.fd), iov_slice, iovcnt));
         if (cnt == @as(isize, @intCast(rem))) {
             f.wend = f.buf.? + f.buf_size;
             f.wpos = f.buf;
@@ -1216,9 +1358,13 @@ const TIOCGWINSZ: u32 = 0x5413;
 fn stdout_write_impl(f: *FILE, buf: [*]const u8, len: usize) callconv(.c) usize {
     f.write_fn = &stdio_write_impl;
     if (f.flags & F_SVB == 0) {
-        var wsz: [4]u16 = undefined; // struct winsize placeholder
-        const r: isize = @bitCast(linux.ioctl(@bitCast(f.fd), TIOCGWINSZ, @intFromPtr(&wsz)));
-        if (r != 0) f.lbf = -1;
+        if (builtin.target.isWasiLibC()) {
+            if (isatty_fn(f.fd) == 0) f.lbf = -1;
+        } else {
+            var wsz: [4]u16 = undefined; // struct winsize placeholder
+            const r: isize = @bitCast(linux.ioctl(@bitCast(f.fd), TIOCGWINSZ, @intFromPtr(&wsz)));
+            if (r != 0) f.lbf = -1;
+        }
     }
     return stdio_write_impl(f, buf, len);
 }
@@ -1352,7 +1498,7 @@ fn setModeErr(f: *FILE) void {
     f.flags |= F_ERR;
 }
 
-fn setErrno(e: std.os.linux.E) void {
+fn setErrno(e: std.c.E) void {
     std.c._errno().* = @intCast(@backingInt(e));
 }
 
@@ -4095,7 +4241,7 @@ fn fmemopen_impl(user_buf: ?[*]u8, size: usize, mode: [*:0]const u8) callconv(.c
     mf.f.seek_fn = &mseek_impl;
     mf.f.close_fn = &mclose_impl;
 
-    if (libc_ptr.threaded == 0) mf.f.lock = -1;
+    if (builtin.target.isWasiLibC() or libc_ptr.threaded == 0) mf.f.lock = -1;
 
     return ofl_add_fn(&mf.f);
 }
@@ -4200,7 +4346,7 @@ fn open_memstream_impl(bufp: *?[*]u8, sizep: *usize) callconv(.c) ?*FILE {
     ms.f.close_fn = &ms_close_impl;
     ms.f.mode = -1;
 
-    if (libc_ptr.threaded == 0) ms.f.lock = -1;
+    if (builtin.target.isWasiLibC() or libc_ptr.threaded == 0) ms.f.lock = -1;
 
     return ofl_add_fn(&ms.f);
 }
@@ -4312,7 +4458,7 @@ fn open_wmemstream_impl(bufp: *?[*]wchar_t, sizep: *usize) callconv(.c) ?*FILE {
     wms.f.seek_fn = &wms_seek_impl;
     wms.f.close_fn = &wms_close_impl;
 
-    if (libc_ptr.threaded == 0) wms.f.lock = -1;
+    if (builtin.target.isWasiLibC() or libc_ptr.threaded == 0) wms.f.lock = -1;
 
     _ = fwide_fn(&wms.f, 1);
 
@@ -4477,3 +4623,1320 @@ const ofl_add_fn = @extern(*const fn (*FILE) callconv(.c) ?*FILE, .{ .name = "__
 const libc_ptr = @extern(*const Libc, .{ .name = "__libc" });
 const fwide_fn = @extern(*const fn (*FILE, c_int) callconv(.c) c_int, .{ .name = "fwide" });
 const mbsnrtowcs_fn = @extern(*const fn (?[*]wchar_t, *?[*]const u8, usize, usize, *mbstate_t) callconv(.c) usize, .{ .name = "mbsnrtowcs" });
+const fcntl_fn = @extern(*const fn (c_int, c_int, ...) callconv(.c) c_int, .{ .name = "fcntl" });
+const posix_close_fn = @extern(*const fn (c_int) callconv(.c) c_int, .{ .name = "close" });
+const posix_read_fn = @extern(*const fn (c_int, [*]u8, usize) callconv(.c) isize, .{ .name = "read" });
+const readv_fn = @extern(*const fn (c_int, [*]const std.posix.iovec, c_int) callconv(.c) isize, .{ .name = "readv" });
+const writev_fn = @extern(*const fn (c_int, [*]const std.posix.iovec_const, c_int) callconv(.c) isize, .{ .name = "writev" });
+const isatty_fn = @extern(*const fn (c_int) callconv(.c) c_int, .{ .name = "__isatty" });
+const wasilibc_open_nomode_fn = @extern(*const fn ([*:0]const u8, c_int) callconv(.c) c_int, .{ .name = "__wasilibc_open_nomode" });
+const wasilibc_fd_renumber_fn = @extern(*const fn (c_int, c_int) callconv(.c) c_int, .{ .name = "__wasilibc_fd_renumber" });
+
+// ===========================================================================
+// Internal scanners: shgetc.c, intscan.c, floatscan.c
+// ===========================================================================
+
+inline fn shcnt_fn(f: *FILE) i64 {
+    return f.shcnt + @as(i64, @as(isize, @bitCast(@intFromPtr(f.rpos) -% @intFromPtr(f.buf))));
+}
+
+inline fn shgetc_macro(f: *FILE) c_int {
+    if (@intFromPtr(f.rpos) != @intFromPtr(f.shend)) {
+        const rpos = f.rpos.?;
+        const c = rpos[0];
+        f.rpos = rpos + 1;
+        return c;
+    }
+    return shgetc_impl(f);
+}
+
+inline fn shunget_macro(f: *FILE) void {
+    if (f.shlim >= 0) {
+        f.rpos = f.rpos.? - 1;
+    }
+}
+
+/// shgetc.c: void __shlim(FILE *f, off_t lim)
+fn shlim_impl(f: *FILE, lim: i64) callconv(.c) void {
+    f.shlim = lim;
+    f.shcnt = @as(i64, @as(isize, @bitCast(@intFromPtr(f.buf) -% @intFromPtr(f.rpos))));
+    if (lim != 0 and @as(i64, @as(isize, @bitCast(@intFromPtr(f.rend) -% @intFromPtr(f.rpos)))) > lim) {
+        f.shend = f.rpos.? + @as(usize, @intCast(lim));
+    } else {
+        f.shend = f.rend;
+    }
+}
+
+/// shgetc.c: int __shgetc(FILE *f)
+fn shgetc_impl(f: *FILE) callconv(.c) c_int {
+    var cnt: i64 = shcnt_fn(f);
+    var c: c_int = undefined;
+    if ((f.shlim != 0 and cnt >= f.shlim) or blk: {
+        c = uflow_fn(f);
+        break :blk c < 0;
+    }) {
+        f.shcnt = @as(i64, @as(isize, @bitCast(@intFromPtr(f.buf) -% @intFromPtr(f.rpos)))) + cnt;
+        f.shend = f.rpos;
+        f.shlim = -1;
+        return EOF;
+    }
+    cnt += 1;
+    if (f.shlim != 0 and @as(i64, @as(isize, @bitCast(@intFromPtr(f.rend) -% @intFromPtr(f.rpos)))) > f.shlim - cnt) {
+        f.shend = f.rpos.? + @as(usize, @intCast(f.shlim - cnt));
+    } else {
+        f.shend = f.rend;
+    }
+    f.shcnt = @as(i64, @as(isize, @bitCast(@intFromPtr(f.buf) -% @intFromPtr(f.rpos)))) + cnt;
+    if (@intFromPtr(f.rpos) <= @intFromPtr(f.buf)) {
+        (f.rpos.? - 1)[0] = @truncate(@as(c_uint, @bitCast(c)));
+    }
+    return c;
+}
+
+const intscan_table = [257]u8{
+    255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    0,   1,   2,   3,   4,   5,   6,   7,   8,   9,   255, 255, 255, 255, 255, 255,
+    255, 10,  11,  12,  13,  14,  15,  16,  17,  18,  19,  20,  21,  22,  23,  24,
+    25,  26,  27,  28,  29,  30,  31,  32,  33,  34,  35,  255, 255, 255, 255, 255,
+    255, 10,  11,  12,  13,  14,  15,  16,  17,  18,  19,  20,  21,  22,  23,  24,
+    25,  26,  27,  28,  29,  30,  31,  32,  33,  34,  35,  255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+};
+
+inline fn intscanVal(c: c_int) u8 {
+    return intscan_table[@intCast(c + 1)];
+}
+
+fn intscanDone(f: *FILE, y: c_ulonglong, neg: c_int, lim: c_ulonglong) c_ulonglong {
+    shunget_macro(f);
+    if (y >= lim) {
+        if ((lim & 1) == 0 and neg == 0) {
+            setErrno(.RANGE);
+            return lim -% 1;
+        } else if (y > lim) {
+            setErrno(.RANGE);
+            return lim;
+        }
+    }
+    const neg_mask: c_ulonglong = @bitCast(@as(c_longlong, neg));
+    return (y ^ neg_mask) -% neg_mask;
+}
+
+/// intscan.c: unsigned long long __intscan(FILE *f, unsigned base, int pok, unsigned long long lim)
+fn intscan_impl(f: *FILE, base_arg: c_uint, pok: c_int, lim: c_ulonglong) callconv(.c) c_ulonglong {
+    var base = base_arg;
+    var c: c_int = shgetc_macro(f);
+    var neg: c_int = 0;
+    var x: usize = 0;
+    var y: c_ulonglong = undefined;
+    if (base > 36 or base == 1) {
+        setErrno(.INVAL);
+        return 0;
+    }
+    while (c >= 0 and std.ascii.isWhitespace(@truncate(@as(c_uint, @bitCast(c))))) {
+        c = shgetc_macro(f);
+    }
+    if (c == '+' or c == '-') {
+        neg = -@as(c_int, @intFromBool(c == '-'));
+        c = shgetc_macro(f);
+    }
+    if ((base == 0 or base == 16) and c == '0') {
+        c = shgetc_macro(f);
+        if ((c | 32) == 'x') {
+            c = shgetc_macro(f);
+            if (intscanVal(c) >= 16) {
+                shunget_macro(f);
+                if (pok != 0) {
+                    shunget_macro(f);
+                } else {
+                    shlim_impl(f, 0);
+                }
+                return 0;
+            }
+            base = 16;
+        } else if (base == 0) {
+            base = 8;
+        }
+    } else {
+        if (base == 0) base = 10;
+        if (intscanVal(c) >= base) {
+            shunget_macro(f);
+            shlim_impl(f, 0);
+            setErrno(.INVAL);
+            return 0;
+        }
+    }
+    if (base == 10) {
+        while (intscanVal(c) < 10 and x <= std.math.maxInt(usize) / 10 - 1) : (c = shgetc_macro(f)) {
+            x = x * 10 + intscanVal(c);
+        }
+        y = x;
+        while (intscanVal(c) < 10 and y <= std.math.maxInt(c_ulonglong) / 10 and 10 * y <= @as(c_ulonglong, std.math.maxInt(c_ulonglong)) - intscanVal(c)) : (c = shgetc_macro(f)) {
+            y = y * 10 + intscanVal(c);
+        }
+        if (intscanVal(c) >= 10) return intscanDone(f, y, neg, lim);
+    } else if ((base & (base - 1)) == 0) {
+        const bs: std.math.Log2Int(c_ulonglong) = @intCast(("\x00\x01\x02\x04\x07\x03\x06\x05")[(@as(usize, 0x17 *% base) >> 5) & 7]);
+        const bs_usize: std.math.Log2Int(usize) = @intCast(bs);
+        while (intscanVal(c) < base and x <= (@as(usize, std.math.maxInt(usize)) >> bs_usize)) : (c = shgetc_macro(f)) {
+            x = (x << bs_usize) | intscanVal(c);
+        }
+        y = x;
+        while (intscanVal(c) < base and y <= (@as(c_ulonglong, std.math.maxInt(c_ulonglong)) >> bs)) : (c = shgetc_macro(f)) {
+            y = (y << bs) | intscanVal(c);
+        }
+        if (intscanVal(c) >= base) return intscanDone(f, y, neg, lim);
+    } else {
+        while (intscanVal(c) < base and x <= @as(usize, std.math.maxInt(usize)) / base - 1) : (c = shgetc_macro(f)) {
+            x = x * base + intscanVal(c);
+        }
+        y = x;
+        while (intscanVal(c) < base and y <= @as(c_ulonglong, std.math.maxInt(c_ulonglong)) / base and base * y <= @as(c_ulonglong, std.math.maxInt(c_ulonglong)) - intscanVal(c)) : (c = shgetc_macro(f)) {
+            y = y * base + intscanVal(c);
+        }
+        if (intscanVal(c) >= base) return intscanDone(f, y, neg, lim);
+    }
+    while (intscanVal(c) < base) : (c = shgetc_macro(f)) {}
+    setErrno(.RANGE);
+    y = lim;
+    if ((lim & 1) != 0) neg = 0;
+    return intscanDone(f, y, neg, lim);
+}
+
+const FS_LDBL_MANT_DIG: c_int = switch (@bitSizeOf(c_longdouble)) {
+    64 => 53,
+    80 => 64,
+    128 => 113,
+    else => @compileError("unsupported c_longdouble bit size"),
+};
+const FS_LDBL_MAX_EXP: c_int = switch (FS_LDBL_MANT_DIG) {
+    53 => 1024,
+    64, 113 => 16384,
+    else => unreachable,
+};
+const FS_LDBL_MIN_EXP: c_int = 2 - FS_LDBL_MAX_EXP;
+const FS_LD_B1B_DIG: usize = switch (FS_LDBL_MANT_DIG) {
+    53 => 2,
+    64 => 3,
+    113 => 4,
+    else => unreachable,
+};
+const FS_LD_B1B_MAX: [FS_LD_B1B_DIG]u32 = switch (FS_LDBL_MANT_DIG) {
+    53 => .{ 9007199, 254740991 },
+    64 => .{ 18, 446744073, 709551615 },
+    113 => .{ 10384593, 717069655, 257060992, 658440191 },
+    else => unreachable,
+};
+const FS_KMAX: usize = switch (FS_LDBL_MANT_DIG) {
+    53 => 128,
+    64, 113 => 2048,
+    else => unreachable,
+};
+const FS_MASK: usize = FS_KMAX - 1;
+
+fn scanexp(f: *FILE, pok: c_int) c_longlong {
+    var c: c_int = shgetc_macro(f);
+    var x: u32 = 0;
+    var y: c_longlong = 0;
+    var neg: c_int = 0;
+
+    if (c == '+' or c == '-') {
+        neg = @intFromBool(c == '-');
+        c = shgetc_macro(f);
+        if (@as(c_uint, @bitCast(c)) -% '0' >= 10 and pok != 0) shunget_macro(f);
+    }
+    if (@as(c_uint, @bitCast(c)) -% '0' >= 10) {
+        shunget_macro(f);
+        return std.math.minInt(c_longlong);
+    }
+    while (@as(c_uint, @bitCast(c)) -% '0' < 10 and x < std.math.maxInt(u32) / 10) : (c = shgetc_macro(f)) {
+        x = 10 * x + (@as(u32, @bitCast(c)) - '0');
+    }
+    y = x;
+    while (@as(c_uint, @bitCast(c)) -% '0' < 10 and y < @divTrunc(std.math.maxInt(c_longlong), 100)) : (c = shgetc_macro(f)) {
+        y = 10 * y + (@as(c_longlong, c) - '0');
+    }
+    while (@as(c_uint, @bitCast(c)) -% '0' < 10) : (c = shgetc_macro(f)) {}
+    shunget_macro(f);
+    return if (neg != 0) -y else y;
+}
+
+fn decfloat(f: *FILE, c_arg: c_int, bits_arg: c_int, emin: c_int, sign: c_int, pok: c_int) c_longdouble {
+    var x: [FS_KMAX]u32 = undefined;
+    const th = FS_LD_B1B_MAX;
+    var c: c_int = c_arg;
+    var bits: c_int = bits_arg;
+    var j: usize = 0;
+    var k: usize = 0;
+    var a: usize = 0;
+    var z: usize = 0;
+    var lrp: c_longlong = 0;
+    var dc: c_longlong = 0;
+    var e10: c_longlong = 0;
+    var lnz: c_longlong = 0;
+    var gotdig: bool = false;
+    var gotrad: bool = false;
+    var rp: c_int = 0;
+    var e2: c_int = 0;
+    const emax: c_int = -emin - bits + 3;
+    var denormal: bool = false;
+    var y: c_longdouble = 0;
+    var frac: c_longdouble = 0;
+    var bias: c_longdouble = 0;
+    const sign_ld: c_longdouble = @floatFromInt(sign);
+    const p10s = [8]u32{ 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000 };
+
+    while (c == '0') : (c = shgetc_macro(f)) {
+        gotdig = true;
+    }
+    if (c == '.') {
+        gotrad = true;
+        c = shgetc_macro(f);
+        while (c == '0') : (c = shgetc_macro(f)) {
+            gotdig = true;
+            lrp -= 1;
+        }
+    }
+
+    x[0] = 0;
+    while (@as(c_uint, @bitCast(c)) -% '0' < 10 or c == '.') : (c = shgetc_macro(f)) {
+        if (c == '.') {
+            if (gotrad) break;
+            gotrad = true;
+            lrp = dc;
+        } else if (k < FS_KMAX - 3) {
+            dc += 1;
+            if (c != '0') lnz = dc;
+            const d: u32 = @intCast(c - '0');
+            if (j != 0) {
+                x[k] = x[k] * 10 + d;
+            } else {
+                x[k] = d;
+            }
+            j += 1;
+            if (j == 9) {
+                k += 1;
+                j = 0;
+            }
+            gotdig = true;
+        } else {
+            dc += 1;
+            if (c != '0') {
+                lnz = @intCast((FS_KMAX - 4) * 9);
+                x[FS_KMAX - 4] |= 1;
+            }
+        }
+    }
+    if (!gotrad) lrp = dc;
+
+    if (gotdig and (c | 32) == 'e') {
+        e10 = scanexp(f, pok);
+        if (e10 == std.math.minInt(c_longlong)) {
+            if (pok != 0) {
+                shunget_macro(f);
+            } else {
+                shlim_impl(f, 0);
+                return 0;
+            }
+            e10 = 0;
+        }
+        lrp += e10;
+    } else if (c >= 0) {
+        shunget_macro(f);
+    }
+    if (!gotdig) {
+        setErrno(.INVAL);
+        shlim_impl(f, 0);
+        return 0;
+    }
+
+    if (x[0] == 0) return sign_ld * 0.0;
+
+    if (lrp == dc and dc < 10 and (bits > 30 or (x[0] >> @intCast(bits)) == 0)) {
+        return sign_ld * @as(c_longdouble, @floatFromInt(x[0]));
+    }
+    if (lrp > @divTrunc(-emin, 2)) {
+        setErrno(.RANGE);
+        return sign_ld * std.math.floatMax(c_longdouble) * std.math.floatMax(c_longdouble);
+    }
+    if (lrp < emin - 2 * FS_LDBL_MANT_DIG) {
+        setErrno(.RANGE);
+        return sign_ld * std.math.floatMin(c_longdouble) * std.math.floatMin(c_longdouble);
+    }
+
+    if (j != 0) {
+        while (j < 9) : (j += 1) {
+            x[k] *= 10;
+        }
+        k += 1;
+        j = 0;
+    }
+
+    a = 0;
+    z = k;
+    e2 = 0;
+    rp = @intCast(lrp);
+
+    if (lnz < 9 and lnz <= rp and rp < 18) {
+        if (rp == 9) return sign_ld * @as(c_longdouble, @floatFromInt(x[0]));
+        if (rp < 9) return sign_ld * @as(c_longdouble, @floatFromInt(x[0])) / @as(c_longdouble, @floatFromInt(p10s[@intCast(8 - rp)]));
+        const bitlim: c_int = bits - 3 * (rp - 9);
+        if (bitlim > 30 or (x[0] >> @intCast(bitlim)) == 0) {
+            return sign_ld * @as(c_longdouble, @floatFromInt(x[0])) * @as(c_longdouble, @floatFromInt(p10s[@intCast(rp - 10)]));
+        }
+    }
+
+    while (x[z - 1] == 0) : (z -= 1) {}
+
+    if (@rem(rp, 9) != 0) {
+        const rpm9: c_int = if (rp >= 0) @rem(rp, 9) else @rem(rp, 9) + 9;
+        const p10: u32 = p10s[@intCast(8 - rpm9)];
+        var carry: u32 = 0;
+        k = a;
+        while (k != z) : (k += 1) {
+            const tmp: u32 = x[k] % p10;
+            x[k] = x[k] / p10 + carry;
+            carry = (1000000000 / p10) * tmp;
+            if (k == a and x[k] == 0) {
+                a = (a + 1) & FS_MASK;
+                rp -= 9;
+            }
+        }
+        if (carry != 0) {
+            x[z] = carry;
+            z += 1;
+        }
+        rp += 9 - rpm9;
+    }
+
+    const target_rp: c_int = @intCast(9 * FS_LD_B1B_DIG);
+    while (rp < target_rp or (rp == target_rp and x[a] < th[0])) {
+        var carry: u32 = 0;
+        e2 -= 29;
+        k = (z -% 1) & FS_MASK;
+        while (true) : (k = (k -% 1) & FS_MASK) {
+            const tmp: u64 = (@as(u64, x[k]) << 29) + carry;
+            if (tmp > 1000000000) {
+                carry = @intCast(tmp / 1000000000);
+                x[k] = @intCast(tmp % 1000000000);
+            } else {
+                carry = 0;
+                x[k] = @intCast(tmp);
+            }
+            if (k == ((z -% 1) & FS_MASK) and k != a and x[k] == 0) z = k;
+            if (k == a) break;
+        }
+        if (carry != 0) {
+            rp += 9;
+            a = (a -% 1) & FS_MASK;
+            if (a == z) {
+                z = (z -% 1) & FS_MASK;
+                x[(z -% 1) & FS_MASK] |= x[z];
+            }
+            x[a] = carry;
+        }
+    }
+
+    var i: usize = 0;
+    while (true) {
+        var carry: u32 = 0;
+        var sh: u5 = 1;
+        i = 0;
+        while (i < FS_LD_B1B_DIG) : (i += 1) {
+            k = (a + i) & FS_MASK;
+            if (k == z or x[k] < th[i]) {
+                i = FS_LD_B1B_DIG;
+                break;
+            }
+            if (x[(a + i) & FS_MASK] > th[i]) break;
+        }
+        if (i == FS_LD_B1B_DIG and rp == target_rp) break;
+        if (rp > 9 + target_rp) sh = 9;
+        e2 += sh;
+        k = a;
+        while (k != z) : (k = (k + 1) & FS_MASK) {
+            const mask_sh: u32 = (@as(u32, 1) << sh) - 1;
+            const tmp: u32 = x[k] & mask_sh;
+            x[k] = (x[k] >> sh) + carry;
+            carry = (@as(u32, 1000000000) >> sh) * tmp;
+            if (k == a and x[k] == 0) {
+                a = (a + 1) & FS_MASK;
+                i -%= 1;
+                rp -= 9;
+            }
+        }
+        if (carry != 0) {
+            if (((z + 1) & FS_MASK) != a) {
+                x[z] = carry;
+                z = (z + 1) & FS_MASK;
+            } else {
+                x[(z -% 1) & FS_MASK] |= 1;
+            }
+        }
+    }
+
+    y = 0;
+    i = 0;
+    while (i < FS_LD_B1B_DIG) : (i += 1) {
+        if (((a + i) & FS_MASK) == z) {
+            const old_z = z;
+            z = (z + 1) & FS_MASK;
+            x[old_z] = 0;
+        }
+        y = 1000000000.0 * y + @as(c_longdouble, @floatFromInt(x[(a + i) & FS_MASK]));
+    }
+
+    y *= sign_ld;
+
+    if (bits > FS_LDBL_MANT_DIG + e2 - emin) {
+        bits = FS_LDBL_MANT_DIG + e2 - emin;
+        if (bits < 0) bits = 0;
+        denormal = true;
+    }
+
+    if (bits < FS_LDBL_MANT_DIG) {
+        bias = std.math.copysign(std.math.scalbn(@as(c_longdouble, 1.0), 2 * FS_LDBL_MANT_DIG - bits - 1), y);
+        frac = @rem(y, std.math.scalbn(@as(c_longdouble, 1.0), FS_LDBL_MANT_DIG - bits));
+        y -= frac;
+        y += bias;
+    }
+
+    if (((a + i) & FS_MASK) != z) {
+        const t: u32 = x[(a + i) & FS_MASK];
+        if (t < 500000000 and (t != 0 or ((a + i + 1) & FS_MASK) != z)) {
+            frac += 0.25 * sign_ld;
+        } else if (t > 500000000) {
+            frac += 0.75 * sign_ld;
+        } else if (t == 500000000) {
+            if (((a + i + 1) & FS_MASK) == z) {
+                frac += 0.5 * sign_ld;
+            } else {
+                frac += 0.75 * sign_ld;
+            }
+        }
+        if (FS_LDBL_MANT_DIG - bits >= 2 and @rem(frac, 1.0) == 0.0) {
+            frac += 1.0;
+        }
+    }
+
+    y += frac;
+    y -= bias;
+
+    if (((e2 + FS_LDBL_MANT_DIG) & std.math.maxInt(c_int)) > emax - 5) {
+        if (@abs(y) >= 2.0 / std.math.floatEps(c_longdouble)) {
+            if (denormal and bits == FS_LDBL_MANT_DIG + e2 - emin) {
+                denormal = false;
+            }
+            y *= 0.5;
+            e2 += 1;
+        }
+        if (e2 + FS_LDBL_MANT_DIG > emax or (denormal and frac != 0.0)) {
+            setErrno(.RANGE);
+        }
+    }
+
+    return std.math.scalbn(y, e2);
+}
+
+fn hexfloat(f: *FILE, bits_arg: c_int, emin: c_int, sign: c_int, pok: c_int) c_longdouble {
+    var x: u32 = 0;
+    var y: c_longdouble = 0;
+    var scale: c_longdouble = 1;
+    var bias: c_longdouble = 0;
+    var gottail: bool = false;
+    var gotrad: bool = false;
+    var gotdig: bool = false;
+    var rp: c_longlong = 0;
+    var dc: c_longlong = 0;
+    var e2: c_longlong = 0;
+    var bits: c_int = bits_arg;
+    const sign_ld: c_longdouble = @floatFromInt(sign);
+
+    var c: c_int = shgetc_macro(f);
+
+    while (c == '0') : (c = shgetc_macro(f)) {
+        gotdig = true;
+    }
+
+    if (c == '.') {
+        gotrad = true;
+        c = shgetc_macro(f);
+        rp = 0;
+        while (c == '0') : ({
+            c = shgetc_macro(f);
+            rp -= 1;
+        }) {
+            gotdig = true;
+        }
+    }
+
+    while (@as(c_uint, @bitCast(c)) -% '0' < 10 or (@as(c_uint, @bitCast(c | 32)) -% 'a') < 6 or c == '.') : (c = shgetc_macro(f)) {
+        if (c == '.') {
+            if (gotrad) break;
+            rp = dc;
+            gotrad = true;
+        } else {
+            gotdig = true;
+            const d: u32 = if (c > '9') @intCast((c | 32) + 10 - 'a') else @intCast(c - '0');
+            if (dc < 8) {
+                x = x * 16 + d;
+            } else if (dc < @divTrunc(FS_LDBL_MANT_DIG + 3, 4) + 1) {
+                scale /= 16.0;
+                y += @as(c_longdouble, @floatFromInt(d)) * scale;
+            } else if (d != 0 and !gottail) {
+                y += 0.5 * scale;
+                gottail = true;
+            }
+            dc += 1;
+        }
+    }
+    if (!gotdig) {
+        shunget_macro(f);
+        if (pok != 0) {
+            shunget_macro(f);
+            if (gotrad) shunget_macro(f);
+        } else {
+            shlim_impl(f, 0);
+        }
+        return sign_ld * 0.0;
+    }
+    if (!gotrad) rp = dc;
+    while (dc < 8) : (dc += 1) {
+        x *= 16;
+    }
+    if ((c | 32) == 'p') {
+        e2 = scanexp(f, pok);
+        if (e2 == std.math.minInt(c_longlong)) {
+            if (pok != 0) {
+                shunget_macro(f);
+            } else {
+                shlim_impl(f, 0);
+                return 0;
+            }
+            e2 = 0;
+        }
+    } else {
+        shunget_macro(f);
+    }
+    e2 += 4 * rp - 32;
+
+    if (x == 0) return sign_ld * 0.0;
+    if (e2 > -emin) {
+        setErrno(.RANGE);
+        return sign_ld * std.math.floatMax(c_longdouble) * std.math.floatMax(c_longdouble);
+    }
+    if (e2 < emin - 2 * FS_LDBL_MANT_DIG) {
+        setErrno(.RANGE);
+        return sign_ld * std.math.floatMin(c_longdouble) * std.math.floatMin(c_longdouble);
+    }
+
+    while (x < 0x80000000) {
+        if (y >= 0.5) {
+            x = x + x + 1;
+            y = y + y - 1.0;
+        } else {
+            x = x + x;
+            y = y + y;
+        }
+        e2 -= 1;
+    }
+
+    const e2_i32: c_int = @intCast(e2);
+    if (bits > 32 + e2_i32 - emin) {
+        bits = 32 + e2_i32 - emin;
+        if (bits < 0) bits = 0;
+    }
+
+    if (bits < FS_LDBL_MANT_DIG) {
+        bias = std.math.copysign(std.math.scalbn(@as(c_longdouble, 1.0), 32 + FS_LDBL_MANT_DIG - bits - 1), sign_ld);
+    }
+
+    if (bits < 32 and y != 0.0 and (x & 1) == 0) {
+        x += 1;
+        y = 0.0;
+    }
+
+    y = bias + sign_ld * @as(c_longdouble, @floatFromInt(x)) + sign_ld * y;
+    y -= bias;
+
+    if (y == 0.0) setErrno(.RANGE);
+
+    return std.math.scalbn(y, e2_i32);
+}
+
+/// floatscan.c: long double __floatscan(FILE *f, int prec, int pok)
+fn floatscan_impl(f: *FILE, prec: c_int, pok: c_int) callconv(.c) c_longdouble {
+    var sign: c_int = 1;
+    var i: usize = 0;
+    var bits: c_int = undefined;
+    var emin: c_int = undefined;
+    var c: c_int = undefined;
+
+    switch (prec) {
+        0 => {
+            bits = 24; // FLT_MANT_DIG
+            emin = -125 - bits; // FLT_MIN_EXP - bits
+        },
+        1 => {
+            bits = 53; // DBL_MANT_DIG
+            emin = -1021 - bits; // DBL_MIN_EXP - bits
+        },
+        2 => {
+            bits = FS_LDBL_MANT_DIG;
+            emin = FS_LDBL_MIN_EXP - bits;
+        },
+        else => return 0,
+    }
+
+    c = shgetc_macro(f);
+    while (c >= 0 and std.ascii.isWhitespace(@truncate(@as(c_uint, @bitCast(c))))) {
+        c = shgetc_macro(f);
+    }
+
+    if (c == '+' or c == '-') {
+        sign -= 2 * @as(c_int, @intFromBool(c == '-'));
+        c = shgetc_macro(f);
+    }
+
+    const inf_str = "infinity";
+    i = 0;
+    while (i < 8 and (c | 32) == inf_str[i]) : (i += 1) {
+        if (i < 7) c = shgetc_macro(f);
+    }
+    if (i == 3 or i == 8 or (i > 3 and pok != 0)) {
+        if (i != 8) {
+            shunget_macro(f);
+            if (pok != 0) {
+                while (i > 3) : (i -= 1) shunget_macro(f);
+            }
+        }
+        return @as(c_longdouble, @floatFromInt(sign)) * std.math.inf(c_longdouble);
+    }
+    if (i == 0) {
+        const nan_str = "nan";
+        while (i < 3 and (c | 32) == nan_str[i]) : (i += 1) {
+            if (i < 2) c = shgetc_macro(f);
+        }
+    }
+    if (i == 3) {
+        if (shgetc_macro(f) != '(') {
+            shunget_macro(f);
+            return std.math.nan(c_longdouble);
+        }
+        i = 1;
+        while (true) : (i += 1) {
+            c = shgetc_macro(f);
+            const cu: c_uint = @bitCast(c);
+            if (cu -% '0' < 10 or cu -% 'A' < 26 or cu -% 'a' < 26 or c == '_')
+                continue;
+            if (c == ')') return std.math.nan(c_longdouble);
+            shunget_macro(f);
+            if (pok == 0) {
+                setErrno(.INVAL);
+                shlim_impl(f, 0);
+                return 0;
+            }
+            while (i > 0) : (i -= 1) shunget_macro(f);
+            return std.math.nan(c_longdouble);
+        }
+    }
+
+    if (i != 0) {
+        shunget_macro(f);
+        setErrno(.INVAL);
+        shlim_impl(f, 0);
+        return 0;
+    }
+
+    if (c == '0') {
+        c = shgetc_macro(f);
+        if ((c | 32) == 'x') {
+            return hexfloat(f, bits, emin, sign, pok);
+        }
+        shunget_macro(f);
+        c = '0';
+    }
+
+    return decfloat(f, c, bits, emin, sign, pok);
+}
+
+// ===========================================================================
+// Open file list, standard streams, stream lifecycle, wide I/O, variadic I/O
+// ===========================================================================
+
+var ofl_head: ?*FILE = null;
+
+fn ofl_lock_impl() callconv(.c) *?*FILE {
+    return &ofl_head;
+}
+
+fn ofl_unlock_impl() callconv(.c) void {}
+
+fn ofl_add_impl(f: *FILE) callconv(.c) ?*FILE {
+    const head = ofl_lock_impl();
+    f.next = head.*;
+    if (head.*) |h| h.prev = f;
+    head.* = f;
+    ofl_unlock_impl();
+    return f;
+}
+
+var stdin_buf: [BUFSIZ + UNGET]u8 = undefined;
+var __stdin_FILE: FILE = .{
+    .flags = F_PERM | F_NOWR,
+    .rpos = null,
+    .rend = null,
+    .close_fn = &stdio_close_impl,
+    .wend = null,
+    .wpos = null,
+    .mustbezero_1 = null,
+    .wbase = null,
+    .read_fn = &stdio_read_impl,
+    .write_fn = null,
+    .seek_fn = &stdio_seek_impl,
+    .buf = stdin_buf[UNGET..].ptr,
+    .buf_size = BUFSIZ,
+    .prev = null,
+    .next = null,
+    .fd = 0,
+    .pipe_pid = 0,
+    .lockcount = 0,
+    .mode = 0,
+    .lock = -1,
+    .lbf = EOF,
+    .cookie = null,
+    .off = 0,
+    .getln_buf = null,
+    .mustbezero_2 = null,
+    .shend = null,
+    .shlim = 0,
+    .shcnt = 0,
+    .prev_locked = null,
+    .next_locked = null,
+    .locale = null,
+};
+var stdin_var: ?*FILE = &__stdin_FILE;
+
+var stdout_buf: [BUFSIZ + UNGET]u8 = undefined;
+var __stdout_FILE: FILE = .{
+    .flags = F_PERM | F_NORD,
+    .rpos = null,
+    .rend = null,
+    .close_fn = &stdio_close_impl,
+    .wend = null,
+    .wpos = null,
+    .mustbezero_1 = null,
+    .wbase = null,
+    .read_fn = null,
+    .write_fn = &stdout_write_impl,
+    .seek_fn = &stdio_seek_impl,
+    .buf = stdout_buf[UNGET..].ptr,
+    .buf_size = BUFSIZ,
+    .prev = null,
+    .next = null,
+    .fd = 1,
+    .pipe_pid = 0,
+    .lockcount = 0,
+    .mode = 0,
+    .lock = -1,
+    .lbf = '\n',
+    .cookie = null,
+    .off = 0,
+    .getln_buf = null,
+    .mustbezero_2 = null,
+    .shend = null,
+    .shlim = 0,
+    .shcnt = 0,
+    .prev_locked = null,
+    .next_locked = null,
+    .locale = null,
+};
+var stdout_var: ?*FILE = &__stdout_FILE;
+
+var stderr_buf: [UNGET]u8 = undefined;
+var __stderr_FILE: FILE = .{
+    .flags = F_PERM | F_NORD,
+    .rpos = null,
+    .rend = null,
+    .close_fn = &stdio_close_impl,
+    .wend = null,
+    .wpos = null,
+    .mustbezero_1 = null,
+    .wbase = null,
+    .read_fn = null,
+    .write_fn = &stdio_write_impl,
+    .seek_fn = &stdio_seek_impl,
+    .buf = stderr_buf[UNGET..].ptr,
+    .buf_size = 0,
+    .prev = null,
+    .next = null,
+    .fd = 2,
+    .pipe_pid = 0,
+    .lockcount = 0,
+    .mode = 0,
+    .lock = -1,
+    .lbf = -1,
+    .cookie = null,
+    .off = 0,
+    .getln_buf = null,
+    .mustbezero_2 = null,
+    .shend = null,
+    .shlim = 0,
+    .shcnt = 0,
+    .prev_locked = null,
+    .next_locked = null,
+    .locale = null,
+};
+var stderr_var: ?*FILE = &__stderr_FILE;
+
+fn close_file(f_opt: ?*FILE) void {
+    const f = f_opt orelse return;
+    _ = flock(f);
+    if (f.wpos != f.wbase) _ = f.write_fn.?(f, @ptrCast(&[0]u8{}), 0);
+    if (f.rpos != f.rend) _ = f.seek_fn.?(f, @as(i64, @as(isize, @bitCast(@intFromPtr(f.rpos) -% @intFromPtr(f.rend)))), SEEK_CUR);
+}
+
+/// __stdio_exit.c: void __stdio_exit(void)
+fn stdio_exit_impl() callconv(.c) void {
+    var f = ofl_lock_impl().*;
+    while (f) |cur| : (f = cur.next) {
+        close_file(cur);
+    }
+    close_file(stdin_ext.*);
+    close_file(stdout_ext.*);
+    close_file(stderr_ext.*);
+}
+
+/// fflush.c: int fflush(FILE *f)
+fn fflush_impl(f_opt: ?*FILE) callconv(.c) c_int {
+    if (f_opt == null) {
+        var r: c_int = 0;
+        if (stdout_ext.*) |out| r |= fflush_impl(out);
+        if (stderr_ext.*) |err| r |= fflush_impl(err);
+        var f = ofl_lock_impl().*;
+        while (f) |cur| : (f = cur.next) {
+            const need_unlock = flock(cur);
+            if (cur.wpos != cur.wbase) r |= fflush_impl(cur);
+            funlock(cur, need_unlock);
+        }
+        ofl_unlock_impl();
+        return r;
+    }
+    const f = f_opt.?;
+    const need_unlock = flock(f);
+    if (f.wpos != f.wbase) {
+        _ = f.write_fn.?(f, @ptrCast(&[0]u8{}), 0);
+        if (f.wpos == null) {
+            funlock(f, need_unlock);
+            return EOF;
+        }
+    }
+    if (f.rpos != f.rend) {
+        _ = f.seek_fn.?(f, @as(i64, @as(isize, @bitCast(@intFromPtr(f.rpos) -% @intFromPtr(f.rend)))), SEEK_CUR);
+    }
+    f.wpos = null;
+    f.wbase = null;
+    f.wend = null;
+    f.rpos = null;
+    f.rend = null;
+    funlock(f, need_unlock);
+    return 0;
+}
+
+fn fclose_dummy(_: *FILE) callconv(.c) void {}
+
+/// fclose.c: int fclose(FILE *f)
+fn fclose_impl(f: *FILE) callconv(.c) c_int {
+    _ = flock(f);
+    var r = fflush_fn(f);
+    r |= f.close_fn.?(f);
+    const head = ofl_lock_impl();
+    if (f.prev) |prev| prev.next = f.next;
+    if (f.next) |next| next.prev = f.prev;
+    if (head.* == f) head.* = f.next;
+    ofl_unlock_impl();
+    free_fn(f.getln_buf);
+    free_fn(f);
+    return r;
+}
+
+/// __fdopen.c: FILE *__fdopen(int fd, const char *mode)
+fn fdopen_impl(fd: c_int, mode: [*:0]const u8) callconv(.c) ?*FILE {
+    if (mode[0] != 'r' and mode[0] != 'w' and mode[0] != 'a') {
+        setErrno(.INVAL);
+        return null;
+    }
+    const raw = malloc_fn(@sizeOf(FILE) + UNGET + BUFSIZ) orelse return null;
+    const f: *FILE = @ptrCast(@alignCast(raw));
+    f.* = std.mem.zeroes(FILE);
+
+    const mode_span = std.mem.span(mode);
+    if (std.mem.indexOfScalar(u8, mode_span, '+') == null) {
+        f.flags = if (mode[0] == 'r') F_NOWR else F_NORD;
+    }
+    if (std.mem.indexOfScalar(u8, mode_span, 'e') != null) {
+        _ = fcntl_fn(fd, std.c.F.SETFD, @as(c_int, 1));
+    }
+    if (mode[0] == 'a') {
+        const flags = fcntl_fn(fd, std.c.F.GETFL);
+        const o_append: c_int = @bitCast(@as(u32, @bitCast(std.c.O{ .APPEND = true })));
+        if ((flags & o_append) == 0) {
+            _ = fcntl_fn(fd, std.c.F.SETFL, flags | o_append);
+        }
+        f.flags |= F_APP;
+    }
+    f.fd = fd;
+    f.buf = @as([*]u8, @ptrCast(raw)) + @sizeOf(FILE) + UNGET;
+    f.buf_size = BUFSIZ;
+    f.lbf = EOF;
+    if ((f.flags & F_NOWR) == 0 and isatty_fn(fd) != 0) {
+        f.lbf = '\n';
+    }
+    f.read_fn = &stdio_read_impl;
+    f.write_fn = &stdio_write_impl;
+    f.seek_fn = &stdio_seek_impl;
+    f.close_fn = &stdio_close_impl;
+    f.lock = -1;
+    return ofl_add_fn(f);
+}
+
+/// fopen.c: FILE *fopen(const char *restrict filename, const char *restrict mode)
+fn fopen_impl(filename: [*:0]const u8, mode: [*:0]const u8) callconv(.c) ?*FILE {
+    if (mode[0] != 'r' and mode[0] != 'w' and mode[0] != 'a') {
+        setErrno(.INVAL);
+        return null;
+    }
+    const flags = fmodeflags_impl(mode);
+    const fd = wasilibc_open_nomode_fn(filename, flags);
+    if (fd < 0) return null;
+    if (fdopen_impl(fd, mode)) |f| return f;
+    _ = posix_close_fn(fd);
+    return null;
+}
+
+/// freopen.c: FILE *freopen(const char *restrict filename, const char *restrict mode, FILE *restrict f)
+fn freopen_impl(filename_opt: ?[*:0]const u8, mode: [*:0]const u8, f: *FILE) callconv(.c) ?*FILE {
+    var fl = fmodeflags_impl(mode);
+    const need_unlock = flock(f);
+    _ = fflush_fn(f);
+    if (filename_opt == null) {
+        fl &= ~@as(c_int, @bitCast(@as(u32, @bitCast(std.c.O{ .CREAT = true, .TRUNC = true, .EXCL = true }))));
+        if (fcntl_fn(f.fd, std.c.F.SETFL, fl) < 0) {
+            funlock(f, need_unlock);
+            _ = fclose_impl(f);
+            return null;
+        }
+    } else {
+        const filename = filename_opt.?;
+        const f2 = fopen_impl(filename, mode) orelse {
+            funlock(f, need_unlock);
+            _ = fclose_impl(f);
+            return null;
+        };
+        if (f2.fd == f.fd) {
+            f2.fd = -1;
+        } else if (wasilibc_fd_renumber_fn(f2.fd, f.fd) < 0) {
+            _ = fclose_impl(f2);
+            funlock(f, need_unlock);
+            _ = fclose_impl(f);
+            return null;
+        }
+        f.flags = (f.flags & F_PERM) | f2.flags;
+        f.read_fn = f2.read_fn;
+        f.write_fn = f2.write_fn;
+        f.seek_fn = f2.seek_fn;
+        f.close_fn = f2.close_fn;
+        f2.fd = -1;
+        _ = fclose_impl(f2);
+    }
+    f.mode = 0;
+    f.locale = null;
+    funlock(f, need_unlock);
+    return f;
+}
+
+/// fwide.c: int fwide(FILE *f, int mode)
+fn fwide_impl(f: *FILE, mode: c_int) callconv(.c) c_int {
+    const need_unlock = flock(f);
+    if (mode != 0) {
+        if (f.mode == 0) f.mode = if (mode > 0) 1 else -1;
+    }
+    const ret = f.mode;
+    funlock(f, need_unlock);
+    return ret;
+}
+
+const WEOF: wint_t = @bitCast(@as(c_int, -1));
+
+fn fgetwc_unlocked_internal(f: *FILE) wint_t {
+    var wc: wchar_t = undefined;
+    var st: mbstate_t = std.mem.zeroes(mbstate_t);
+    var c: u8 = undefined;
+    var l: usize = @bitCast(@as(isize, -2));
+    var first: bool = true;
+    while (l == @as(usize, @bitCast(@as(isize, -2)))) {
+        if (f.rpos != f.rend) {
+            const rpos = f.rpos.?;
+            const avail = @intFromPtr(f.rend.?) - @intFromPtr(rpos);
+            l = mbrtowc_fn(&wc, rpos, avail, &st);
+            if (l +% 2 >= 2) {
+                f.rpos = rpos + (l + @intFromBool(l == 0));
+                return @bitCast(wc);
+            }
+            if (l == @as(usize, @bitCast(@as(isize, -1)))) {
+                f.rpos = rpos + 1;
+                return WEOF;
+            }
+            f.rpos = f.rend;
+        } else {
+            const b = getc_unlocked_impl(f);
+            if (b < 0) {
+                if (!first) {
+                    f.flags |= F_ERR;
+                    setErrno(.ILSEQ);
+                }
+                return WEOF;
+            }
+            c = @truncate(@as(c_uint, @bitCast(b)));
+            l = mbrtowc_fn(&wc, @ptrCast(&c), 1, &st);
+            if (l == @as(usize, @bitCast(@as(isize, -1)))) {
+                return WEOF;
+            }
+        }
+        first = false;
+    }
+    return @bitCast(wc);
+}
+
+/// fgetwc.c: wint_t __fgetwc_unlocked(FILE *f)
+fn fgetwc_unlocked_impl(f: *FILE) callconv(.c) wint_t {
+    if (f.mode <= 0) _ = fwide_fn(f, 1);
+    if (f.rpos != f.rend) {
+        const rpos = f.rpos.?;
+        const b = rpos[0];
+        if (b < 128) {
+            f.rpos = rpos + 1;
+            return b;
+        }
+    }
+    return fgetwc_unlocked_internal(f);
+}
+
+/// fgetwc.c: wint_t fgetwc(FILE *f)
+fn fgetwc_impl(f: *FILE) callconv(.c) wint_t {
+    const need_unlock = flock(f);
+    const c = fgetwc_unlocked_impl(f);
+    funlock(f, need_unlock);
+    return c;
+}
+
+/// fgetws.c: wchar_t *fgetws(wchar_t *restrict s, int n, FILE *restrict f)
+fn fgetws_impl(s_arg: [*]wchar_t, n_arg: c_int, f: *FILE) callconv(.c) ?[*]wchar_t {
+    var p = s_arg;
+    var n = n_arg;
+    if (n == 0) return s_arg;
+    const need_unlock = flock(f);
+    const prev_errno = std.c._errno().*;
+    std.c._errno().* = 0;
+    while (true) {
+        n -= 1;
+        if (n == 0) break;
+        const c = fgetwc_unlocked_impl(f);
+        if (c == WEOF) break;
+        p[0] = @bitCast(c);
+        p += 1;
+        if (c == '\n') break;
+    }
+    p[0] = 0;
+    if ((f.flags & F_ERR) != 0 or std.c._errno().* == @backingInt(std.c.E.ILSEQ)) {
+        p = s_arg;
+    } else {
+        std.c._errno().* = prev_errno;
+    }
+    funlock(f, need_unlock);
+    return if (p == s_arg) null else s_arg;
+}
+
+inline fn isascii_wchar(c: wchar_t) bool {
+    return (@as(u32, @bitCast(c)) & ~@as(u32, 0x7f)) == 0;
+}
+
+/// fputwc.c: wint_t __fputwc_unlocked(wchar_t c, FILE *f)
+fn fputwc_unlocked_impl(c: wchar_t, f: *FILE) callconv(.c) wint_t {
+    var mbc: [MB_LEN_MAX]u8 = undefined;
+    var l: c_int = undefined;
+    if (f.mode <= 0) _ = fwide_fn(f, 1);
+    if (isascii_wchar(c)) {
+        return @bitCast(putc_unlocked_impl(@bitCast(c), f));
+    } else if (f.wpos != null and f.wend != null and @intFromPtr(f.wpos.?) + MB_LEN_MAX < @intFromPtr(f.wend.?)) {
+        l = wctomb_fn(f.wpos, c);
+        if (l < 0) return WEOF;
+        f.wpos = f.wpos.? + @as(usize, @intCast(l));
+    } else {
+        l = wctomb_fn(&mbc, c);
+        if (l < 0 or __fwritex(&mbc, @intCast(l), f) < @as(usize, @intCast(l))) return WEOF;
+    }
+    if (c == '\n' and f.lbf >= 0) _ = f.write_fn.?(f, @ptrCast(&[0]u8{}), 0);
+    return @bitCast(c);
+}
+
+/// fputwc.c: wint_t fputwc(wchar_t c, FILE *f)
+fn fputwc_impl(c: wchar_t, f: *FILE) callconv(.c) wint_t {
+    const need_unlock = flock(f);
+    const r = fputwc_unlocked_impl(c, f);
+    funlock(f, need_unlock);
+    return r;
+}
+
+/// fputws.c: int fputws(const wchar_t *restrict ws, FILE *restrict f)
+fn fputws_impl(ws_arg: [*:0]const wchar_t, f: *FILE) callconv(.c) c_int {
+    var ws: ?[*:0]const wchar_t = ws_arg;
+    var buf: [BUFSIZ]u8 = undefined;
+    var l: usize = 0;
+    const need_unlock = flock(f);
+    _ = fwide_fn(f, 1);
+    while (ws != null) {
+        l = wcsrtombs_fn(&buf, &ws, buf.len, null);
+        if (l +% 1 == 0) break;
+        if (__fwritex(&buf, l, f) < l) {
+            funlock(f, need_unlock);
+            return -1;
+        }
+    }
+    funlock(f, need_unlock);
+    return @intCast(@as(isize, @bitCast(l)));
+}
+
+/// ungetwc.c: wint_t ungetwc(wint_t c, FILE *f)
+fn ungetwc_impl(c: wint_t, f: *FILE) callconv(.c) wint_t {
+    var mbc: [MB_LEN_MAX]u8 = undefined;
+    var l: c_int = 1;
+    const need_unlock = flock(f);
+    if (f.mode <= 0) _ = fwide_fn(f, 1);
+    if (c == WEOF) {
+        funlock(f, need_unlock);
+        return WEOF;
+    }
+    if (!isascii_wchar(@bitCast(c))) {
+        l = wctomb_fn(&mbc, @bitCast(c));
+        if (l < 0) {
+            funlock(f, need_unlock);
+            return WEOF;
+        }
+    } else {
+        mbc[0] = @truncate(@as(u32, @bitCast(c)));
+    }
+    if (f.rpos == null) _ = toread_fn(f);
+    if (f.rpos == null or @intFromPtr(f.rpos.?) < @intFromPtr(f.buf.?) -% UNGET + @as(usize, @intCast(l))) {
+        funlock(f, need_unlock);
+        return WEOF;
+    }
+    const ul: usize = @intCast(l);
+    const new_rpos = f.rpos.? - ul;
+    f.rpos = new_rpos;
+    @memcpy(new_rpos[0..ul], mbc[0..ul]);
+    f.flags &= ~F_EOF;
+    funlock(f, need_unlock);
+    return c;
+}
+
+/// printf.c: int printf(const char *restrict fmt, ...)
+fn printf_impl(fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vfprintf_impl(stdout_ext.*.?, fmt, passVaList(&ap));
+}
+
+/// sprintf.c: int sprintf(char *restrict s, const char *restrict fmt, ...)
+fn sprintf_impl(s: [*]u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vsprintf_impl(s, fmt, passVaList(&ap));
+}
+
+/// snprintf.c: int snprintf(char *restrict s, size_t n, const char *restrict fmt, ...)
+fn snprintf_impl(s: [*]u8, n: usize, fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vsnprintf_impl(s, n, fmt, passVaList(&ap));
+}
+
+/// asprintf.c: int asprintf(char **s, const char *fmt, ...)
+fn asprintf_impl(s: *?[*]u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vasprintf_impl(s, fmt, passVaList(&ap));
+}
+
+/// dprintf.c: int dprintf(int fd, const char *restrict fmt, ...)
+fn dprintf_impl(fd: c_int, fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vdprintf_impl(fd, fmt, passVaList(&ap));
+}
+
+/// scanf.c: int scanf(const char *restrict fmt, ...)
+fn scanf_impl(fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vscanf_impl(fmt, passVaList(&ap));
+}
+
+/// sscanf.c: int sscanf(const char *restrict s, const char *restrict fmt, ...)
+fn sscanf_impl(s: [*:0]const u8, fmt: [*:0]const u8, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vsscanf_impl(s, fmt, passVaList(&ap));
+}
+
+/// wprintf.c: int wprintf(const wchar_t *restrict fmt, ...)
+fn wprintf_impl(fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vwprintf_impl(fmt, passVaList(&ap));
+}
+
+/// fwprintf.c: int fwprintf(FILE *restrict f, const wchar_t *restrict fmt, ...)
+fn fwprintf_impl(f: *FILE, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vfwprintf_impl(f, fmt, passVaList(&ap));
+}
+
+/// swprintf.c: int swprintf(wchar_t *restrict s, size_t n, const wchar_t *restrict fmt, ...)
+fn swprintf_impl(s: [*]wchar_t, n: usize, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vswprintf_impl(s, n, fmt, passVaList(&ap));
+}
+
+/// wscanf.c: int wscanf(const wchar_t *restrict fmt, ...)
+fn wscanf_impl(fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vwscanf_impl(fmt, passVaList(&ap));
+}
+
+/// fwscanf.c: int fwscanf(FILE *restrict f, const wchar_t *restrict fmt, ...)
+fn fwscanf_impl(f: *FILE, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vfwscanf_impl(f, fmt, passVaList(&ap));
+}
+
+/// swscanf.c: int swscanf(const wchar_t *restrict s, const wchar_t *restrict fmt, ...)
+fn swscanf_impl(s: [*:0]const wchar_t, fmt: [*:0]const wchar_t, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    defer @cVaEnd(&ap);
+    return vswscanf_impl(s, fmt, passVaList(&ap));
+}

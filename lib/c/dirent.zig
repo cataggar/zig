@@ -44,6 +44,12 @@ comptime {
             symbol(&versionsort, "versionsort");
         }
     }
+    if (builtin.target.isWasiLibC() and builtin.link_libc) {
+        symbol(&alphasort, "alphasort");
+        symbol(&alphasort, "alphasort64");
+        symbol(&versionsort, "versionsort");
+        symbol(&versionsort, "versionsort64");
+    }
 }
 
 fn dirfd(dir: *DIR) callconv(.c) c_int {
@@ -215,10 +221,12 @@ fn scandir(
     return @intCast(cnt);
 }
 
-fn alphasort(a: *const *const dirent, b: *const *const dirent) callconv(.c) c_int {
-    return strcoll(@as([*:0]const u8, @ptrCast(&a.*.d_name)), @as([*:0]const u8, @ptrCast(&b.*.d_name)));
+const d_name_offset: usize = if (builtin.target.isWasiLibC()) 9 else @offsetOf(dirent, "d_name");
+
+fn alphasort(a: *const [*]const u8, b: *const [*]const u8) callconv(.c) c_int {
+    return strcoll(@as([*:0]const u8, @ptrCast(a.* + d_name_offset)), @as([*:0]const u8, @ptrCast(b.* + d_name_offset)));
 }
 
-fn versionsort(a: *const *const dirent, b: *const *const dirent) callconv(.c) c_int {
-    return strverscmp(@as([*:0]const u8, @ptrCast(&a.*.d_name)), @as([*:0]const u8, @ptrCast(&b.*.d_name)));
+fn versionsort(a: *const [*]const u8, b: *const [*]const u8) callconv(.c) c_int {
+    return strverscmp(@as([*:0]const u8, @ptrCast(a.* + d_name_offset)), @as([*:0]const u8, @ptrCast(b.* + d_name_offset)));
 }

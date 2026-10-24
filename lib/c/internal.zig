@@ -41,7 +41,12 @@ const libc_version: [5:0]u8 = "1.2.5".*;
 var sysinfo: usize = 0;
 
 // libc.c — libc struct initialization and globals
-const LibcStruct = extern struct {
+const LibcStruct = if (builtin.target.isWasiLibC()) extern struct {
+    global_locale: extern struct {
+        cat: [6]?*const anyopaque,
+    },
+    current_locale: ?*anyopaque,
+} else extern struct {
     can_do_threads: u8,
     threaded: u8,
     secure: u8,
@@ -69,8 +74,9 @@ comptime {
         c.symbol(&procfdnameLinux, "__procfdname");
 
         @export(&libc_version, .{ .name = "__libc_version", .linkage = .weak, .visibility = .hidden });
+    }
+    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         @export(&sysinfo, .{ .name = "__sysinfo", .linkage = .weak, .visibility = .hidden });
-
         @export(&libc_struct, .{ .name = "__libc", .linkage = .weak, .visibility = .hidden });
         @export(&hwcap, .{ .name = "__hwcap", .linkage = .weak, .visibility = .hidden });
         @export(&progname, .{ .name = "__progname", .linkage = .weak, .visibility = .default });

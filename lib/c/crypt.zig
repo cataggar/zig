@@ -3,18 +3,26 @@ const std = @import("std");
 const symbol = @import("../c.zig").symbol;
 
 comptime {
-    if (builtin.target.isMuslLibC()) {
+    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&cryptFunc, "crypt");
         symbol(&cryptRFunc, "__crypt_r");
+        symbol(&cryptRFunc, "crypt_r");
         symbol(&setkeyFunc, "setkey");
         symbol(&encryptFunc, "encrypt");
+        symbol(&cryptDes, "__crypt_des");
+        symbol(&cryptMd5, "__crypt_md5");
+        symbol(&cryptBlowfish, "__crypt_blowfish");
+        symbol(&cryptSha256, "__crypt_sha256");
+        symbol(&cryptSha512, "__crypt_sha512");
+        symbol(&desSetkeyC, "__des_setkey");
+        symbol(&doDes, "__do_des");
     }
 }
 
 var crypt_buf: [128]u8 = undefined;
 var encrypt_key: ExpandedKey = std.mem.zeroes(ExpandedKey);
 
-const ExpandedKey = struct { l: [16]u32, r: [16]u32 };
+const ExpandedKey = extern struct { l: [16]u32, r: [16]u32 };
 
 fn strnlen(s: [*:0]const u8, maxlen: usize) usize {
     var i: usize = 0;
@@ -121,7 +129,7 @@ fn md5crypt(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8) ?[*]u8 {
     return output;
 }
 
-fn cryptMd5(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8) ?[*:0]u8 {
+fn cryptMd5(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8) callconv(.c) ?[*:0]u8 {
     const testkey = "Xy01@#\x01\x02\x80\x7f\xff\r\n\x81\t !";
     const testsetting = "$1$abcd0123$";
     const testhash = "$1$abcd0123$9Qcg8DyviekV3tDGMZynJ1";
@@ -250,7 +258,7 @@ fn sha256crypt(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8) ?[*]u8
     return output;
 }
 
-fn cryptSha256(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8) ?[*:0]u8 {
+fn cryptSha256(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8) callconv(.c) ?[*:0]u8 {
     const testkey = "Xy01@#\x01\x02\x80\x7f\xff\r\n\x81\t !";
     const testsetting = "$5$rounds=1234$abc0123456789$";
     const testhash = "$5$rounds=1234$abc0123456789$3VfDjPt05VHFn47C/ojFZ6KRPYrOjj1lLbH.dkF3bZ6";
@@ -377,7 +385,7 @@ fn sha512crypt(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8) ?[*]u8
     return output;
 }
 
-fn cryptSha512(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8) ?[*:0]u8 {
+fn cryptSha512(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8) callconv(.c) ?[*:0]u8 {
     const testkey = "Xy01@#\x01\x02\x80\x7f\xff\r\n\x81\t !";
     const testsetting = "$6$rounds=1234$abc0123456789$";
     const testhash = "$6$rounds=1234$abc0123456789$BCpt8zLrc/RcyuXmCDOE1ALqMXB2MH6n1g891HhFj8.w7LxGv.FTkqq6Vxc/km3Y0jE0j24jY5PIv/oOu6reg1";
@@ -685,6 +693,10 @@ fn setup_salt(salt: u32) u32 {
     return saltbits;
 }
 
+fn desSetkeyC(key: [*]const u8, ekey: *ExpandedKey) callconv(.c) void {
+    desSetkey(key[0..8], ekey);
+}
+
 fn desSetkey(key: []const u8, ekey: *ExpandedKey) void {
     const rawkey0: u32 = (@as(u32, key[3])) |
         (@as(u32, key[2]) << 8) |
@@ -730,7 +742,7 @@ fn desSetkey(key: []const u8, ekey: *ExpandedKey) void {
     }
 }
 
-fn doDes(l_in: u32, r_in: u32, l_out: *u32, r_out: *u32, count: u32, saltbits: u32, ekey: *const ExpandedKey) void {
+fn doDes(l_in: u32, r_in: u32, l_out: *u32, r_out: *u32, count: u32, saltbits: u32, ekey: *const ExpandedKey) callconv(.c) void {
     var l: u32 = 0;
     var r: u32 = 0;
     if (l_in | r_in != 0) {
@@ -889,7 +901,7 @@ fn cryptExtendedRUut(key_z: [*:0]const u8, setting_z: [*:0]const u8, output: [*]
     return output;
 }
 
-fn cryptDes(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8) ?[*:0]u8 {
+fn cryptDes(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8) callconv(.c) ?[*:0]u8 {
     const test_key = "\x80\xff\x80\x01 \x7f\x81\x80\x80\x0d\x0a\xff\x7f \x81 test";
     var test_setting: [*:0]const u8 = "_0.../9Zz";
     var test_hash: []const u8 = "_0.../9ZzX7iSJNd21sU";
@@ -1468,7 +1480,7 @@ fn BF_crypt(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8, min_count
     return output;
 }
 
-fn cryptBlowfish(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8) ?[*:0]u8 {
+fn cryptBlowfish(key: [*:0]const u8, setting: [*:0]const u8, output: [*]u8) callconv(.c) ?[*:0]u8 {
     const test_key = "8b \xd0\xc1\xd2\xcf\xcc\xd8";
     const test_setting_base = "$2a$00$abcdefghijklmnopqrstuu";
     const test_hashes: [2][34]u8 = .{

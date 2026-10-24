@@ -33,7 +33,10 @@ const LocaleStruct = extern struct {
 const locale_t = ?*align(1) LocaleStruct;
 const LC_GLOBAL_LOCALE: locale_t = @ptrFromInt(std.math.maxInt(usize));
 
-const LibC = extern struct {
+const LibC = if (builtin.target.isWasiLibC()) extern struct {
+    global_locale: LocaleStruct,
+    current_locale: ?*LocaleStruct,
+} else extern struct {
     can_do_threads: u8,
     threaded: u8,
     secure: u8,
@@ -51,6 +54,12 @@ const LibC = extern struct {
 extern var __libc: LibC;
 extern "c" fn __lock(lock: *volatile c_int) callconv(.c) void;
 extern "c" fn __unlock(lock: *volatile c_int) callconv(.c) void;
+inline fn lock(l: *volatile c_int) void {
+    if (!builtin.target.isWasiLibC()) __lock(l);
+}
+inline fn unlock(l: *volatile c_int) void {
+    if (!builtin.target.isWasiLibC()) __unlock(l);
+}
 extern "c" fn pthread_self() callconv(.c) *anyopaque;
 extern "c" fn __map_file(pathname: [*:0]const u8, size: *usize) callconv(.c) ?[*]const u8;
 extern "c" fn munmap(addr: *anyopaque, len: usize) callconv(.c) c_int;
@@ -90,6 +99,12 @@ const map_base_off: usize = if (ptr_size == 8) 24 else 20;
 const off_locale = part1_size + map_base_off + 11 * ptr_size + 8;
 
 inline fn currentLocaleSlot() **LocaleStruct {
+    if (builtin.target.isWasiLibC()) {
+        if (__libc.current_locale == null) {
+            __libc.current_locale = &__libc.global_locale;
+        }
+        return @ptrCast(&__libc.current_locale);
+    }
     const self = @intFromPtr(pthread_self());
     return @ptrFromInt(self + off_locale);
 }
@@ -246,32 +261,34 @@ fn __get_locale(cat: c_int, val_in: [*:0]const u8) callconv(.c) ?*align(1) const
         if (strcmp(@ptrCast(&cur.name), val) == 0) return cur;
     }
 
-    if (__libc.secure == 0) path = getenv("MUSL_LOCPATH");
+    if (!builtin.target.isWasiLibC() and __libc.secure == 0) path = getenv("MUSL_LOCPATH");
 
-    if (path) |path_start| {
-        var cur_path: [*:0]const u8 = path_start;
-        while (cur_path[0] != 0) : (cur_path = z + @intFromBool(z[0] != 0)) {
-            z = __strchrnul(cur_path, ':');
-            l = @intFromPtr(z) - @intFromPtr(cur_path);
-            if (l >= @sizeOf(@TypeOf(buf)) - n - 2) continue;
-            @memcpy(buf[0..l], cur_path[0..l]);
-            buf[l] = '/';
-            @memcpy(buf[l + 1 ..][0..n], val[0..n]);
-            buf[l + 1 + n] = 0;
-            var map_size: usize = 0;
-            if (__map_file(@ptrCast(&buf), &map_size)) |map| {
-                new = @ptrCast(@alignCast(std.c.malloc(@sizeOf(LocaleMap))));
-                if (new == null) {
-                    _ = munmap(@ptrCast(@constCast(map)), map_size);
+    if (!builtin.target.isWasiLibC()) {
+        if (path) |path_start| {
+            var cur_path: [*:0]const u8 = path_start;
+            while (cur_path[0] != 0) : (cur_path = z + @intFromBool(z[0] != 0)) {
+                z = __strchrnul(cur_path, ':');
+                l = @intFromPtr(z) - @intFromPtr(cur_path);
+                if (l >= @sizeOf(@TypeOf(buf)) - n - 2) continue;
+                @memcpy(buf[0..l], cur_path[0..l]);
+                buf[l] = '/';
+                @memcpy(buf[l + 1 ..][0..n], val[0..n]);
+                buf[l + 1 + n] = 0;
+                var map_size: usize = 0;
+                if (__map_file(@ptrCast(&buf), &map_size)) |map| {
+                    new = @ptrCast(@alignCast(std.c.malloc(@sizeOf(LocaleMap))));
+                    if (new == null) {
+                        _ = munmap(@ptrCast(@constCast(map)), map_size);
+                        break;
+                    }
+                    new.?.map = @ptrCast(map);
+                    new.?.map_size = map_size;
+                    @memcpy(new.?.name[0..n], val[0..n]);
+                    new.?.name[n] = 0;
+                    new.?.next = loc_head;
+                    loc_head = new;
                     break;
                 }
-                new.?.map = @ptrCast(map);
-                new.?.map_size = map_size;
-                @memcpy(new.?.name[0..n], val[0..n]);
-                new.?.name[n] = 0;
-                new.?.next = loc_head;
-                loc_head = new;
-                break;
             }
         }
     }
@@ -302,7 +319,7 @@ var setlocale_buf: [6 * (LOCALE_NAME_MAX + 1)]u8 = undefined;
 fn setlocaleImpl(cat: c_int, name: ?[*:0]const u8) callconv(.c) ?[*:0]u8 {
     if (@as(c_uint, @bitCast(cat)) > @as(c_uint, LC_ALL)) return null;
 
-    __lock(&__locale_lock);
+    lock(&__locale_lock);
 
     if (cat == LC_ALL) {
         if (name) |nm| {
@@ -319,7 +336,7 @@ fn setlocaleImpl(cat: c_int, name: ?[*:0]const u8) callconv(.c) ?[*:0]u8 {
                 }
                 const lm = __get_locale(@intCast(i), @ptrCast(&part));
                 if (lm == LOC_MAP_FAILED) {
-                    __unlock(&__locale_lock);
+                    unlock(&__locale_lock);
                     return null;
                 }
                 tmp_locale.cat[i] = if (lm) |m| @alignCast(m) else null;
@@ -339,7 +356,7 @@ fn setlocaleImpl(cat: c_int, name: ?[*:0]const u8) callconv(.c) ?[*:0]u8 {
             s += l + 1;
         }
         (s - 1)[0] = 0;
-        __unlock(&__locale_lock);
+        unlock(&__locale_lock);
         return if (same == 6) @constCast(part) else @ptrCast(&setlocale_buf);
     }
 
@@ -347,7 +364,7 @@ fn setlocaleImpl(cat: c_int, name: ?[*:0]const u8) callconv(.c) ?[*:0]u8 {
     if (name) |nm| {
         const raw_lm = __get_locale(cat, nm);
         if (raw_lm == LOC_MAP_FAILED) {
-            __unlock(&__locale_lock);
+            unlock(&__locale_lock);
             return null;
         }
         lm = if (raw_lm) |m| @alignCast(m) else null;
@@ -357,7 +374,7 @@ fn setlocaleImpl(cat: c_int, name: ?[*:0]const u8) callconv(.c) ?[*:0]u8 {
     }
     const ret: [*:0]u8 = if (lm) |m| @ptrCast(@constCast(&m.name)) else @constCast("C");
 
-    __unlock(&__locale_lock);
+    unlock(&__locale_lock);
     return ret;
 }
 
@@ -422,9 +439,9 @@ fn do_newlocale(mask: c_int, name: [*:0]const u8, loc_in: locale_t) locale_t {
 
 fn __newlocale(mask: c_int, name: ?[*:0]const u8, loc_in: locale_t) callconv(.c) locale_t {
     const nm = name orelse return null;
-    __lock(&__locale_lock);
+    lock(&__locale_lock);
     const ret = do_newlocale(mask, nm, loc_in);
-    __unlock(&__locale_lock);
+    unlock(&__locale_lock);
     return ret;
 }
 
@@ -445,9 +462,19 @@ fn __freelocale(l: locale_t) callconv(.c) void {
 }
 
 fn __uselocale(new: locale_t) callconv(.c) locale_t {
+    const global = &__libc.global_locale;
+    if (builtin.target.isWasiLibC()) {
+        if (__libc.current_locale == null) {
+            __libc.current_locale = global;
+        }
+        const old = __libc.current_locale.?;
+        if (new) |n| {
+            __libc.current_locale = if (n == LC_GLOBAL_LOCALE) global else @alignCast(n);
+        }
+        return if (old == global) LC_GLOBAL_LOCALE else old;
+    }
     const loc_slot = currentLocaleSlot();
     const old = loc_slot.*;
-    const global = &__libc.global_locale;
     if (new) |n| {
         loc_slot.* = if (n == LC_GLOBAL_LOCALE) global else @alignCast(n);
     }
@@ -871,7 +898,7 @@ fn bindtextdomainImpl(domainname_in: ?[*:0]const u8, dirname_in: ?[*:0]const u8)
         return null;
     }
 
-    __lock(&gettext_lock);
+    lock(&gettext_lock);
 
     var p = bindings;
     while (p) |cur| : (p = cur.next) {
@@ -884,7 +911,7 @@ fn bindtextdomainImpl(domainname_in: ?[*:0]const u8, dirname_in: ?[*:0]const u8)
         const total = @sizeOf(Binding) + domlen + dirlen + 2;
         const raw_opt = std.c.malloc(total);
         if (raw_opt == null) {
-            __unlock(&gettext_lock);
+            unlock(&gettext_lock);
             return null;
         }
         const raw: [*]u8 = @ptrCast(raw_opt.?);
@@ -910,7 +937,7 @@ fn bindtextdomainImpl(domainname_in: ?[*:0]const u8, dirname_in: ?[*:0]const u8)
         }
     }
 
-    __unlock(&gettext_lock);
+    unlock(&gettext_lock);
     return p.?.dirname;
 }
 
@@ -991,6 +1018,10 @@ fn dcngettextImpl(
     }
 
     if (p == null) {
+        if (builtin.target.isWasiLibC()) {
+            std.c._errno().* = old_errno;
+            return @constCast(if (n == 1) msgid1 else (msgid2_in orelse msgid1));
+        }
         const dirname = binding.dirname;
         const locname: [*:0]const u8 = @ptrCast(&lm.name);
         const catname: [*:0]const u8 = &catnames[@intCast(category)];
@@ -1161,6 +1192,10 @@ fn do_catopen(name: [*:0]const u8) nl_catd {
 
 fn catopenImpl(name: [*:0]const u8, oflag: c_int) callconv(.c) nl_catd {
     const invalid: nl_catd = @ptrFromInt(std.math.maxInt(usize));
+    if (builtin.target.isWasiLibC()) {
+        std.c._errno().* = @backingInt(std.posix.E.OPNOTSUPP);
+        return invalid;
+    }
     if (strchr(name, '/') != null) return do_catopen(name);
 
     var buf: [PATH_MAX]u8 = undefined;
@@ -1246,6 +1281,7 @@ fn catCmp(a: *const anyopaque, b: *const anyopaque) callconv(.c) c_int {
 }
 
 fn catgetsImpl(catd: nl_catd, set_id: c_int, msg_id: c_int, s: [*:0]const u8) callconv(.c) [*:0]u8 {
+    if (builtin.target.isWasiLibC()) return @constCast(s);
     if (catd == null or catd == @as(nl_catd, @ptrFromInt(std.math.maxInt(usize)))) {
         std.c._errno().* = @backingInt(std.posix.E.BADF);
         return @constCast(s);
@@ -1276,6 +1312,7 @@ fn catgetsImpl(catd: nl_catd, set_id: c_int, msg_id: c_int, s: [*:0]const u8) ca
 }
 
 fn catcloseImpl(catd: nl_catd) callconv(.c) c_int {
+    if (builtin.target.isWasiLibC()) return 0;
     if (catd == null or catd == @as(nl_catd, @ptrFromInt(std.math.maxInt(usize)))) {
         std.c._errno().* = @backingInt(std.posix.E.BADF);
         return -1;
@@ -7462,7 +7499,7 @@ fn iconvImpl(
 }
 
 comptime {
-    if (builtin.target.isMuslLibC() and builtin.link_libc) {
+    if ((builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) and builtin.link_libc) {
         symbol(&__c_dot_utf8, "__c_dot_utf8");
         symbol(&__c_locale, "__c_locale");
         symbol(&__c_dot_utf8_locale, "__c_dot_utf8_locale");

@@ -18,7 +18,7 @@ const values = [21]c_short{
     _POSIX_MAX_INPUT, // _PC_MAX_INPUT = 2
     NAME_MAX, // _PC_NAME_MAX = 3
     PATH_MAX, // _PC_PATH_MAX = 4
-    PIPE_BUF, // _PC_PIPE_BUF = 5
+    if (builtin.target.isWasiLibC()) -1 else PIPE_BUF, // _PC_PIPE_BUF = 5
     1, // _PC_CHOWN_RESTRICTED = 6
     1, // _PC_NO_TRUNC = 7
     0, // _PC_VDISABLE = 8
@@ -72,27 +72,24 @@ const SYMLOOP_MAX: c_long = 40;
 const HOST_NAME_MAX: c_long = 255;
 
 comptime {
-    if (builtin.target.isMuslLibC()) {
+    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&fpathconf, "fpathconf");
         symbol(&pathconf, "pathconf");
-    }
-    if (builtin.target.isWasiLibC()) {}
-    if (builtin.link_libc) {
-        symbol(&get_nprocs_conf, "get_nprocs_conf");
-        symbol(&get_nprocs, "get_nprocs");
-        symbol(&get_phys_pages, "get_phys_pages");
-        symbol(&get_avphys_pages, "get_avphys_pages");
-        symbol(&sysconf, "sysconf");
-    }
-    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&confstr, "confstr");
+        if (builtin.link_libc) {
+            symbol(&get_nprocs_conf, "get_nprocs_conf");
+            symbol(&get_nprocs, "get_nprocs");
+            symbol(&get_phys_pages, "get_phys_pages");
+            symbol(&get_avphys_pages, "get_avphys_pages");
+            symbol(&sysconf, "sysconf");
+        }
     }
 }
 
 fn fpathconf(_: c_int, name: c_int) callconv(.c) c_long {
     if (name < 0 or name >= values.len) {
-        if (builtin.os.tag == .linux) {
-            std.c._errno().* = @backingInt(linux.E.INVAL);
+        if (builtin.link_libc) {
+            std.c._errno().* = @backingInt(std.posix.E.INVAL);
         }
         return -1;
     }
@@ -125,8 +122,8 @@ fn confstr(name: c_int, buf: ?[*]u8, len: usize) callconv(.c) usize {
     else if ((@as(c_uint, @bitCast(name)) & ~@as(c_uint, 4)) != 1 and
         @as(c_uint, @bitCast(name -% _CS_POSIX_V6_ILP32_OFF32_CFLAGS)) > 35)
     {
-        if (builtin.os.tag == .linux)
-            std.c._errno().* = @backingInt(linux.E.INVAL);
+        if (builtin.link_libc)
+            std.c._errno().* = @backingInt(std.posix.E.INVAL);
         return 0;
     } else "";
 
@@ -146,36 +143,38 @@ fn confstr(name: c_int, buf: ?[*]u8, len: usize) callconv(.c) usize {
 }
 
 fn sysconfValue(name: c_int) c_int {
+    const is_wasi = builtin.target.isWasiLibC();
     return switch (name) {
         0 => JT_ARG_MAX,
-        1 => RLIM_NPROC,
+        1 => if (is_wasi) -1 else RLIM_NPROC,
         2 => 100,
         3 => 32,
-        4 => RLIM_NOFILE,
-        5, 10, 13, 14, 23, 24, 27, 34, 35, 42, 43, 48, 49, 50, 51, 52, 76, 80, 81, 87, 88, 92, 95, 97, 98, 99, 100, 125, 128, 129, 130, 131, 160, 161, 165, 168, 169, 170, 171, 172, 175, 176, 179, 181, 182, 183, 184, 237, 240, 241, 242, 243, 244, 245, 247, 248 => -1,
+        4 => if (is_wasi) -1 else RLIM_NOFILE,
+        5, 10, 13, 14, 23, 24, 34, 35, 42, 43, 48, 49, 50, 51, 52, 76, 80, 81, 87, 88, 92, 95, 97, 98, 99, 100, 125, 128, 129, 130, 131, 160, 161, 165, 168, 169, 170, 171, 172, 175, 176, 179, 181, 182, 183, 184, 237, 240, 241, 242, 243, 244, 245, 247, 248 => -1,
+        27 => if (is_wasi) 0 else -1,
         6 => TZNAME_MAX,
         7, 8, 91, 93, 94, 155, 157 => 1,
         9, 11, 12, 15, 16, 17, 18, 19, 20, 21, 22, 29, 46, 47, 67, 68, 77, 78, 79, 82, 132, 133, 137, 138, 139, 149, 153, 154, 159, 164, 235, 236 => VER,
         25, 174, 246 => JT_ZERO,
         26 => JT_DELAYTIMER_MAX,
-        28 => JT_MQ_PRIO_MAX,
+        28 => if (is_wasi) 0 else JT_MQ_PRIO_MAX,
         30 => JT_PAGE_SIZE,
-        31 => linux.NSIG - 1 - 31 - 3,
-        32 => SEM_NSEMS_MAX,
-        33 => JT_SEM_VALUE_MAX,
-        36 => 99,
-        37 => 2048,
-        38 => 99,
-        39 => 1000,
+        31 => if (is_wasi) -1 else linux.NSIG - 1 - 31 - 3,
+        32 => if (is_wasi) -1 else SEM_NSEMS_MAX,
+        33 => if (is_wasi) -1 else JT_SEM_VALUE_MAX,
+        36 => if (is_wasi) -1 else 99,
+        37 => if (is_wasi) -1 else 2048,
+        38 => if (is_wasi) -1 else 99,
+        39 => if (is_wasi) -1 else 1000,
         40 => 2,
         44 => 255,
         60 => IOV_MAX,
         69, 70 => -1,
         71 => 256,
         72 => TTY_NAME_MAX,
-        73 => PTHREAD_DESTRUCTOR_ITERATIONS,
-        74 => PTHREAD_KEYS_MAX,
-        75 => PTHREAD_STACK_MIN,
+        73 => if (is_wasi) -1 else PTHREAD_DESTRUCTOR_ITERATIONS,
+        74 => if (is_wasi) -1 else PTHREAD_KEYS_MAX,
+        75 => if (is_wasi) -1 else PTHREAD_STACK_MIN,
         83 => JT_NPROCESSORS,
         84 => JT_NPROCESSORS,
         85 => JT_PHYS_PAGES,
@@ -195,12 +194,16 @@ fn sysconfValue(name: c_int) c_int {
 fn sysconf(name: c_int) callconv(.c) c_long {
     const v = sysconfValue(name);
     if (v == 0) {
-        std.c._errno().* = @backingInt(linux.E.INVAL);
+        std.c._errno().* = @backingInt(std.posix.E.INVAL);
         return -1;
     }
     if (v >= -1) return v;
 
     if (v < -256) {
+        if (builtin.target.isWasiLibC()) {
+            std.c._errno().* = @backingInt(std.posix.E.INVAL);
+            return -1;
+        }
         var rl: linux.rlimit = undefined;
         _ = linux.getrlimit(@fromBackingInt(@intCast(v & 0x3FFF)), &rl);
         if (rl.cur == std.math.maxInt(u64)) return -1;
@@ -215,6 +218,7 @@ fn sysconf(name: c_int) callconv(.c) c_long {
         4 => @intCast(std.heap.page_size_min),
         5 => 2147483647,
         6, 7 => blk: {
+            if (builtin.target.isWasiLibC()) break :blk 1;
             var set: [128]u8 = @splat(0);
             set[0] = 1;
             _ = linux.syscall3(.sched_getaffinity, 0, set.len, @intFromPtr(&set));
@@ -226,6 +230,7 @@ fn sysconf(name: c_int) callconv(.c) c_long {
             break :blk cnt;
         },
         8, 9 => blk: {
+            if (builtin.target.isWasiLibC()) break :blk v;
             var si: linux.Sysinfo = undefined;
             _ = linux.sysinfo(&si);
             const mem_unit: u64 = if (si.mem_unit == 0) 1 else si.mem_unit;
@@ -236,6 +241,7 @@ fn sysconf(name: c_int) callconv(.c) c_long {
         10 => 0,
         11 => 2147483647,
         12, 13 => blk: {
+            if (builtin.target.isWasiLibC()) break :blk v;
             const saved_errno = std.c._errno().*;
             var val: c_long = @bitCast(__getauxval(std.elf.AT.MINSIGSTKSZ));
             std.c._errno().* = saved_errno;

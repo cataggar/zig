@@ -45,14 +45,14 @@ extern "c" fn waitpid(pid: c_int, status: ?*c_int, options: c_int) c_int;
 extern "c" fn pipe2(fds: *[2]c_int, flags: c_int) c_int;
 extern "c" fn tcsetattr(fd: c_int, action: c_int, termios_p: *const anyopaque) c_int;
 extern "c" fn snprintf(buf: [*]u8, size: usize, fmt: [*:0]const u8, ...) c_int;
-const O_RDWR = 2;
+const O_RDWR: c_int = if (builtin.target.isWasiLibC()) 0x14000000 else 2;
 const O_NOCTTY = 0o400;
 const O_CLOEXEC = 0o2000000;
 const TCSANOW = 0;
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;
 extern "c" fn dprintf(fd: c_int, fmt: [*:0]const u8, ...) c_int;
 extern "c" fn strchr(s: [*:0]u8, c: c_int) ?[*:0]u8;
-const O_WRONLY = 1;
+const O_WRONLY: c_int = if (builtin.target.isWasiLibC()) 0x10000000 else 1;
 const MM_CONSOLE: c_long = 512;
 const MM_PRINT: c_long = 256;
 const MM_HALT: c_int = 1;
@@ -271,11 +271,12 @@ extern "c" fn fdopendir(fd: c_int) ?*DIR;
 extern "c" fn readdir(d: *DIR) ?*anyopaque; // returns struct dirent*
 extern "c" fn closedir(d: *DIR) c_int;
 extern "c" fn strcpy(dst: [*]u8, src: [*:0]const u8) [*]u8;
-const O_RDONLY = 0;
+extern "c" fn uname(uts: *std.c.utsname) c_int;
+const O_RDONLY: c_int = if (builtin.target.isWasiLibC()) 0x04000000 else 0;
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFLNK: u32 = 0o120000;
-// Offsets for st_dev, st_ino, st_mode in struct stat (Linux 64-bit musl)
+// Offsets for st_dev, st_ino, st_mode in struct stat (Linux 64-bit musl and WASI musl)
 const ST_DEV_OFF = 0;
 const ST_INO_OFF = 8;
 const ST_MODE_OFF = 24; // after dev(8) + ino(8) + nlink(8)
@@ -290,8 +291,10 @@ fn get_mode(st: *const stat_buf) u32 {
     return @as(*const u32, @ptrCast(@alignCast(&st.*[ST_MODE_OFF]))).*;
 }
 
-// dirent d_name offset: after d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) = 19
-const DIRENT_DNAME_OFF = 19;
+// dirent d_name offset:
+// WASI: after d_ino(8) + d_type(1) = 9
+// Linux: after d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) = 19
+const DIRENT_DNAME_OFF = if (builtin.target.isWasiLibC()) 9 else 19;
 const History = struct {
     chain: ?*const History,
     dev: u64,
@@ -307,7 +310,6 @@ comptime {
         symbol(&getresuidLinux, "getresuid");
         symbol(&getresgidLinux, "getresgid");
         symbol(&setdomainnameLinux, "setdomainname");
-        symbol(&gethostid, "gethostid");
         symbol(&getdomainnameLinux, "getdomainname");
         symbol(&getrlimitLinux, "getrlimit");
         symbol(&setrlimitLinux, "setrlimit");
@@ -321,49 +323,60 @@ comptime {
         symbol(&ioctlImpl, "ioctl");
         symbol(&syscall_fn, "syscall");
     }
-    if (builtin.target.isWasiLibC()) {}
+    if (builtin.target.isWasiLibC()) {
+        symbol(&getdomainnameWasi, "getdomainname");
+    }
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
+        symbol(&gethostid, "gethostid");
         symbol(&basename, "basename");
+        symbol(&basename, "__xpg_basename");
         symbol(&dirname, "dirname");
         symbol(&a64l, "a64l");
         symbol(&l64a, "l64a");
         symbol(&getsubopt, "getsubopt");
     }
     if (builtin.link_libc) {
-        symbol(&initgroups, "initgroups");
-        symbol(&lockf, "lockf");
-        symbol(&ptsname, "ptsname");
-        symbol(&openpty, "openpty");
-        symbol(&forkpty, "forkpty");
-        symbol(&fmtmsg, "fmtmsg");
-        symbol(&get_current_dir_name, "get_current_dir_name");
-        symbol(&setmntent, "setmntent");
-        symbol(&endmntent, "endmntent");
-        symbol(&getmntent, "getmntent");
-        symbol(&getmntent_r, "getmntent_r");
-        symbol(&addmntent, "addmntent");
-        symbol(&hasmntopt, "hasmntopt");
-        symbol(&realpath, "realpath");
-        @export(&optarg_val, .{ .name = "optarg", .linkage = .weak });
-        symbol(&optind_val, "optind");
-        symbol(&opterr_val, "opterr");
-        symbol(&optopt_val, "optopt");
-        symbol(&optpos_val, "__optpos");
-        symbol(&optreset_val, "__optreset");
-        symbol(&__getopt_msg, "__getopt_msg");
-        symbol(&getopt_fn, "getopt");
-        symbol(&getopt_long_fn, "getopt_long");
-        symbol(&getopt_long_only_fn, "getopt_long_only");
-        symbol(&setlogmask, "setlogmask");
-        symbol(&closelog, "closelog");
-        symbol(&openlog, "openlog");
-        symbol(&__vsyslog, "vsyslog");
-        symbol(&__vsyslog, "__vsyslog");
-        symbol(&syslog, "syslog");
-        symbol(&sl_lock, "__syslog_lockptr");
-        symbol(&wordexp_fn, "wordexp");
-        symbol(&wordfree_fn, "wordfree");
-        symbol(&nftw_fn, "nftw");
+        if (builtin.target.isMuslLibC()) {
+            symbol(&initgroups, "initgroups");
+            symbol(&lockf, "lockf");
+            symbol(&ptsname, "ptsname");
+            symbol(&openpty, "openpty");
+            symbol(&forkpty, "forkpty");
+            symbol(&get_current_dir_name, "get_current_dir_name");
+            symbol(&setmntent, "setmntent");
+            symbol(&endmntent, "endmntent");
+            symbol(&getmntent, "getmntent");
+            symbol(&getmntent_r, "getmntent_r");
+            symbol(&addmntent, "addmntent");
+            symbol(&hasmntopt, "hasmntopt");
+            symbol(&setlogmask, "setlogmask");
+            symbol(&closelog, "closelog");
+            symbol(&openlog, "openlog");
+            symbol(&__vsyslog, "vsyslog");
+            symbol(&__vsyslog, "__vsyslog");
+            symbol(&syslog, "syslog");
+            symbol(&sl_lock, "__syslog_lockptr");
+            symbol(&wordexp_fn, "wordexp");
+            symbol(&wordfree_fn, "wordfree");
+        }
+        if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
+            symbol(&fmtmsg, "fmtmsg");
+            symbol(&realpath, "realpath");
+            @export(&optarg_val, .{ .name = "optarg", .linkage = .weak });
+            symbol(&optind_val, "optind");
+            symbol(&opterr_val, "opterr");
+            symbol(&optopt_val, "optopt");
+            symbol(&optpos_val, "__optpos");
+            symbol(&optreset_val, "__optreset");
+            symbol(&optreset_val, "optreset");
+            symbol(&__getopt_msg, "__getopt_msg");
+            symbol(&getopt_fn, "getopt");
+            symbol(&getopt_fn, "__posix_getopt");
+            symbol(&getopt_long_fn, "getopt_long");
+            symbol(&getopt_long_only_fn, "getopt_long_only");
+            symbol(&nftw_fn, "nftw");
+            symbol(&nftw_fn, "nftw64");
+        }
     }
 }
 
@@ -404,6 +417,19 @@ fn getdomainnameLinux(name: [*]u8, len: usize) callconv(.c) c_int {
     const domain = std.mem.sliceTo(&uts.domainname, 0);
     if (len == 0 or domain.len >= len) {
         std.c._errno().* = @backingInt(linux.E.INVAL);
+        return -1;
+    }
+    @memcpy(name[0..domain.len], domain);
+    name[domain.len] = 0;
+    return 0;
+}
+
+fn getdomainnameWasi(name: [*]u8, len: usize) callconv(.c) c_int {
+    var uts: std.c.utsname = undefined;
+    _ = uname(&uts);
+    const domain = std.mem.sliceTo(&uts.domainname, 0);
+    if (len == 0 or domain.len >= len) {
+        std.c._errno().* = @backingInt(std.c.E.INVAL);
         return -1;
     }
     @memcpy(name[0..domain.len], domain);
@@ -978,16 +1004,16 @@ fn slash_len(s: []const u8) usize {
 
 fn realpath(filename: ?[*:0]const u8, resolved: ?[*]u8) callconv(.c) ?[*:0]u8 {
     const fname = filename orelse {
-        std.c._errno().* = @backingInt(linux.E.INVAL);
+        std.c._errno().* = @backingInt(std.c.E.INVAL);
         return null;
     };
     const l = strnlen(@ptrCast(fname), PATH_MAX + 1);
     if (l == 0) {
-        std.c._errno().* = @backingInt(linux.E.NOENT);
+        std.c._errno().* = @backingInt(std.c.E.NOENT);
         return null;
     }
     if (l >= PATH_MAX) {
-        std.c._errno().* = @backingInt(linux.E.NAMETOOLONG);
+        std.c._errno().* = @backingInt(std.c.E.NAMETOOLONG);
         return null;
     }
 
@@ -1030,7 +1056,7 @@ fn realpath(filename: ?[*:0]const u8, resolved: ?[*]u8) callconv(.c) ?[*:0]u8 {
 
             if (q > 0 and output[q - 1] != '/') {
                 if (p == 0) {
-                    std.c._errno().* = @backingInt(linux.E.NAMETOOLONG);
+                    std.c._errno().* = @backingInt(std.c.E.NAMETOOLONG);
                     return null;
                 }
                 p -= 1;
@@ -1038,7 +1064,7 @@ fn realpath(filename: ?[*:0]const u8, resolved: ?[*]u8) callconv(.c) ?[*:0]u8 {
                 comp_l += 1;
             }
             if (q + comp_l >= PATH_MAX) {
-                std.c._errno().* = @backingInt(linux.E.NAMETOOLONG);
+                std.c._errno().* = @backingInt(std.c.E.NAMETOOLONG);
                 return null;
             }
             _ = memcpy(@ptrCast(&output[q]), @as(*const anyopaque, @ptrCast(&stack[p])), comp_l);
@@ -1063,15 +1089,15 @@ fn realpath(filename: ?[*:0]const u8, resolved: ?[*]u8) callconv(.c) ?[*:0]u8 {
             }
             const k = readlink(@ptrCast(output[0 .. q + comp_l :0].ptr), &stack, p);
             if (k == @as(isize, @intCast(p))) {
-                std.c._errno().* = @backingInt(linux.E.NAMETOOLONG);
+                std.c._errno().* = @backingInt(std.c.E.NAMETOOLONG);
                 return null;
             }
             if (k == 0) {
-                std.c._errno().* = @backingInt(linux.E.NOENT);
+                std.c._errno().* = @backingInt(std.c.E.NOENT);
                 return null;
             }
             if (k < 0) {
-                if (std.c._errno().* != @backingInt(linux.E.INVAL)) return null;
+                if (std.c._errno().* != @backingInt(std.c.E.INVAL)) return null;
                 // Not a symlink — skip_readlink
                 check_dir = false;
                 if (up) {
@@ -1085,7 +1111,7 @@ fn realpath(filename: ?[*:0]const u8, resolved: ?[*]u8) callconv(.c) ?[*:0]u8 {
             }
             cnt += 1;
             if (cnt == SYMLOOP_MAX) {
-                std.c._errno().* = @backingInt(linux.E.LOOP);
+                std.c._errno().* = @backingInt(std.c.E.LOOP);
                 return null;
             }
             const uk: usize = @intCast(k);
@@ -1116,7 +1142,7 @@ fn realpath(filename: ?[*:0]const u8, resolved: ?[*]u8) callconv(.c) ?[*:0]u8 {
             gl += 1;
         }
         if (gl + (q - p) + 1 >= PATH_MAX) {
-            std.c._errno().* = @backingInt(linux.E.NAMETOOLONG);
+            std.c._errno().* = @backingInt(std.c.E.NAMETOOLONG);
             return null;
         }
         _ = memmove(@ptrCast(&output[gl]), @as(*const anyopaque, @ptrCast(&output[p])), q - p + 1);
@@ -1134,12 +1160,12 @@ fn realpath(filename: ?[*:0]const u8, resolved: ?[*]u8) callconv(.c) ?[*:0]u8 {
 
 fn __getopt_msg(a: [*:0]const u8, b: [*:0]const u8, c_ptr: [*]const u8, l: usize) callconv(.c) void {
     const f = stderr;
-    flockfile(f);
+    if (!builtin.target.isWasiLibC()) flockfile(f);
     _ = fputs(a, f);
     _ = fwrite(b, strlen(b), 1, f);
     _ = fwrite(c_ptr, 1, l, f);
     _ = putc('\n', f);
-    funlockfile(f);
+    if (!builtin.target.isWasiLibC()) funlockfile(f);
 }
 
 fn getopt_fn(
@@ -1707,9 +1733,9 @@ fn do_nftw(path: [*:0]u8, func: nftw_fn_t, fd_limit: c_int, flags: c_int, h: ?*c
     const stat_rc = if (flags & FTW_PHYS != 0) lstat(path, &st) else stat(path, &st);
     if (stat_rc < 0) {
         const e = std.c._errno().*;
-        if (flags & FTW_PHYS == 0 and e == @backingInt(linux.E.NOENT) and lstat(path, &st) == 0)
+        if (flags & FTW_PHYS == 0 and e == @backingInt(std.c.E.NOENT) and lstat(path, &st) == 0)
             ftw_type = FTW_SLN
-        else if (e != @backingInt(linux.E.ACCES))
+        else if (e != @backingInt(std.c.E.ACCES))
             return -1
         else
             ftw_type = FTW_NS;
@@ -1747,7 +1773,7 @@ fn do_nftw(path: [*:0]u8, func: nftw_fn_t, fd_limit: c_int, flags: c_int, h: ?*c
     if (ftw_type == FTW_D or ftw_type == FTW_DP) {
         dfd = open(path, O_RDONLY);
         err = std.c._errno().*;
-        if (dfd < 0 and err == @backingInt(linux.E.ACCES)) ftw_type = FTW_DNR;
+        if (dfd < 0 and err == @backingInt(std.c.E.ACCES)) ftw_type = FTW_DNR;
         if (fd_limit == 0) _ = close(dfd);
     }
 
@@ -1775,7 +1801,7 @@ fn do_nftw(path: [*:0]u8, func: nftw_fn_t, fd_limit: c_int, flags: c_int, h: ?*c
             const name = d_name(de);
             if (name[0] == '.' and (name[1] == 0 or (name[1] == '.' and name[2] == 0))) continue;
             if (strlen(name) >= PATH_MAX - l) {
-                std.c._errno().* = @backingInt(linux.E.NAMETOOLONG);
+                std.c._errno().* = @backingInt(std.c.E.NAMETOOLONG);
                 _ = closedir(d);
                 return -1;
             }
@@ -1802,14 +1828,18 @@ fn nftw_fn(path: [*:0]const u8, func: nftw_fn_t, fd_limit: c_int, flags: c_int) 
     if (fd_limit <= 0) return 0;
     const l = strlen(path);
     if (l > PATH_MAX) {
-        std.c._errno().* = @backingInt(linux.E.NAMETOOLONG);
+        std.c._errno().* = @backingInt(std.c.E.NAMETOOLONG);
         return -1;
     }
     var pathbuf: [PATH_MAX + 1]u8 = undefined;
     _ = memcpy(&pathbuf, path, l + 1);
-    var cs: c_int = undefined;
-    _ = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
-    const r = do_nftw(@ptrCast(pathbuf[0..l :0]), func, fd_limit, flags, null);
-    _ = pthread_setcancelstate(cs, null);
-    return r;
+    if (!builtin.target.isWasiLibC()) {
+        var cs: c_int = undefined;
+        _ = pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
+        const r = do_nftw(@ptrCast(pathbuf[0..l :0]), func, fd_limit, flags, null);
+        _ = pthread_setcancelstate(cs, null);
+        return r;
+    } else {
+        return do_nftw(@ptrCast(pathbuf[0..l :0]), func, fd_limit, flags, null);
+    }
 }

@@ -46,10 +46,9 @@ comptime {
 
         symbol(&bsearch, "bsearch");
 
-        if (builtin.target.isMuslLibC() and builtin.link_libc) {
+        if ((builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) and builtin.link_libc) {
             // These functions depend on musl internals (__floatscan, __intscan,
-            // sprintf) that are still compiled as C, so we can only export them
-            // when linking libc.
+            // sprintf) that are only available when linking libc.
 
             // strtod family
             symbol(&strtof_c, "strtof");
@@ -63,6 +62,9 @@ comptime {
             symbol(&wcstof_c, "wcstof");
             symbol(&wcstod_c, "wcstod");
             symbol(&wcstold_c, "wcstold");
+            symbol(&wcstof_c, "wcstof_l");
+            symbol(&wcstod_c, "wcstod_l");
+            symbol(&wcstold_c, "wcstold_l");
 
             // wcstol family
             symbol(&wcstol_c, "wcstol");
@@ -71,6 +73,12 @@ comptime {
             symbol(&wcstoull_c, "wcstoull");
             symbol(&wcstoimax_c, "wcstoimax");
             symbol(&wcstoumax_c, "wcstoumax");
+            symbol(&wcstol_c, "wcstol_l");
+            symbol(&wcstoll_c, "wcstoll_l");
+            symbol(&wcstoul_c, "wcstoul_l");
+            symbol(&wcstoull_c, "wcstoull_l");
+            symbol(&wcstoimax_c, "wcstoimax_l");
+            symbol(&wcstoumax_c, "wcstoumax_l");
 
             // ecvt/fcvt/gcvt
             symbol(&ecvt_c, "ecvt");

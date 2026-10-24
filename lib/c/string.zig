@@ -54,17 +54,17 @@ comptime {
         symbol(&__strcoll_l, "strcoll_l");
         symbol(&__strxfrm_l, "strxfrm_l");
 
-        if (builtin.target.isMuslLibC()) {
-            symbol(&strverscmp_fn, "strverscmp");
+        symbol(&strverscmp_fn, "strverscmp");
 
-            symbol(&wcscasecmp_fn, "wcscasecmp");
-            symbol(&wcsncasecmp_fn, "wcsncasecmp");
-            symbol(&wcscasecmp_l_fn, "wcscasecmp_l");
-            symbol(&wcsncasecmp_l_fn, "wcsncasecmp_l");
+        symbol(&wcscasecmp_fn, "wcscasecmp");
+        symbol(&wcsncasecmp_fn, "wcsncasecmp");
+        symbol(&wcscasecmp_l_fn, "wcscasecmp_l");
+        symbol(&wcsncasecmp_l_fn, "wcsncasecmp_l");
 
-            if (builtin.link_libc) {
-                symbol(&strerror_r_fn, "strerror_r");
-                symbol(&strerror_r_fn, "__xpg_strerror_r");
+        if (builtin.link_libc) {
+            symbol(&strerror_r_fn, "strerror_r");
+            symbol(&strerror_r_fn, "__xpg_strerror_r");
+            if (builtin.target.isMuslLibC()) {
                 symbol(&strsignal_fn, "strsignal");
             }
         }

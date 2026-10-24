@@ -15,7 +15,18 @@ extern "c" fn __strchrnul(s: [*:0]const u8, c: c_int) [*:0]const u8;
 fn issetugidImpl() callconv(.c) c_int {
     return 0; // Linux does not have issetugid; always return 0
 }
+extern "c" fn __wasilibc_ensure_environ() void;
+extern "c" var __wasilibc_environ: ?[*:null]?[*:0]u8;
 extern "c" var __environ: ?[*:null]?[*:0]u8;
+
+inline fn environPtr() *?[*:null]?[*:0]u8 {
+    if (builtin.target.isWasiLibC()) {
+        __wasilibc_ensure_environ();
+        return &__wasilibc_environ;
+    }
+    return &__environ;
+}
+
 var env_alloced: ?[*]?[*:0]u8 = null;
 var env_alloced_n: usize = 0;
 var oldenv: ?[*:null]?[*:0]u8 = null;
@@ -431,9 +442,6 @@ comptime {
         @export(&environ_var, .{ .name = "___environ", .linkage = .weak, .visibility = .hidden });
         @export(&environ_var, .{ .name = "_environ", .linkage = .weak, .visibility = .hidden });
         @export(&environ_var, .{ .name = "environ", .linkage = .weak, .visibility = .hidden });
-        symbol(&__stack_chk_guard, "__stack_chk_guard");
-        symbol(&__init_ssp, "__init_ssp");
-        symbol(&__stack_chk_fail, "__stack_chk_fail");
         symbol(&issetugidImpl, "issetugid");
         symbol(&__reset_tls_fn, "__reset_tls");
         symbol(&__init_tp_fn, "__init_tp");
@@ -444,6 +452,11 @@ comptime {
         symbol(&libc_start_init_fn, "__libc_start_init");
         symbol(&__init_libc_fn, "__init_libc");
         symbol(&__libc_start_main_fn, "__libc_start_main");
+    }
+    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
+        symbol(&__stack_chk_guard, "__stack_chk_guard");
+        symbol(&__init_ssp, "__init_ssp");
+        symbol(&__stack_chk_fail, "__stack_chk_fail");
     }
     if (builtin.link_libc) {
         symbol(&__env_rm_add, "__env_rm_add");
@@ -479,7 +492,8 @@ fn __env_rm_add(old: ?[*:0]u8, new_val: ?[*:0]u8) callconv(.c) void {
 
 fn __putenv(s: [*:0]u8, l: usize, r: ?[*:0]u8) callconv(.c) c_int {
     var i: usize = 0;
-    if (__environ) |env| {
+    const env_slot = environPtr();
+    if (env_slot.*) |env| {
         var e = env;
         while (e[0]) |entry| : ({
             e = @ptrCast(@as([*]?[*:0]u8, @ptrCast(e)) + 1);
@@ -495,7 +509,7 @@ fn __putenv(s: [*:0]u8, l: usize, r: ?[*:0]u8) callconv(.c) c_int {
     }
     const ptr_size = @sizeOf(?[*:0]u8);
     var newenv: ?[*:null]?[*:0]u8 = undefined;
-    if (__environ == oldenv) {
+    if (env_slot.* == oldenv) {
         newenv = @ptrCast(@alignCast(realloc(@ptrCast(oldenv), ptr_size * (i + 2))));
         if (newenv == null) {
             free(r);
@@ -507,13 +521,13 @@ fn __putenv(s: [*:0]u8, l: usize, r: ?[*:0]u8) callconv(.c) c_int {
             free(r);
             return -1;
         }
-        if (i > 0) _ = memcpy(@ptrCast(newenv.?), @as(*const anyopaque, @ptrCast(__environ.?)), ptr_size * i);
+        if (i > 0) _ = memcpy(@ptrCast(newenv.?), @as(*const anyopaque, @ptrCast(env_slot.*.?)), ptr_size * i);
         free(@ptrCast(oldenv));
     }
     const nv = newenv.?;
     @as([*]?[*:0]u8, @ptrCast(nv))[i] = s;
     @as([*]?[*:0]u8, @ptrCast(nv))[i + 1] = null;
-    __environ = nv;
+    env_slot.* = nv;
     oldenv = nv;
     if (r) |rv| __env_rm_add(null, rv);
     return 0;
@@ -522,7 +536,7 @@ fn __putenv(s: [*:0]u8, l: usize, r: ?[*:0]u8) callconv(.c) c_int {
 fn getenv(name: [*:0]const u8) callconv(.c) ?[*:0]u8 {
     const l = @intFromPtr(__strchrnul(name, '=')) - @intFromPtr(name);
     if (l != 0 and name[l] == 0) {
-        if (__environ) |env| {
+        if (environPtr().*) |env| {
             var e: [*]?[*:0]u8 = @ptrCast(env);
             while (e[0]) |entry| : (e += 1) {
                 if (strncmp(name, entry, l) == 0 and entry[l] == '=')
@@ -536,7 +550,7 @@ fn getenv(name: [*:0]const u8) callconv(.c) ?[*:0]u8 {
 fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) callconv(.c) c_int {
     const l1 = @intFromPtr(__strchrnul(name, '=')) - @intFromPtr(name);
     if (l1 == 0 or name[l1] != 0) {
-        std.c._errno().* = @backingInt(linux.E.INVAL);
+        std.c._errno().* = @backingInt(std.posix.E.INVAL);
         return -1;
     }
     if (overwrite == 0 and getenv(name) != null) return 0;
@@ -559,10 +573,10 @@ fn putenv(s: [*:0]u8) callconv(.c) c_int {
 fn unsetenv(name: [*:0]const u8) callconv(.c) c_int {
     const l = @intFromPtr(__strchrnul(name, '=')) - @intFromPtr(name);
     if (l == 0 or name[l] != 0) {
-        std.c._errno().* = @backingInt(linux.E.INVAL);
+        std.c._errno().* = @backingInt(std.posix.E.INVAL);
         return -1;
     }
-    if (__environ) |env| {
+    if (environPtr().*) |env| {
         var e: [*]?[*:0]u8 = @ptrCast(env);
         var eo: [*]?[*:0]u8 = e;
         while (e[0]) |entry| : (e += 1) {
@@ -579,14 +593,15 @@ fn unsetenv(name: [*:0]const u8) callconv(.c) c_int {
 }
 
 fn clearenv() callconv(.c) c_int {
-    if (__environ) |env| {
+    const env_slot = environPtr();
+    if (env_slot.*) |env| {
         var e: [*]?[*:0]u8 = @ptrCast(env);
-        __environ = null;
+        env_slot.* = null;
         while (e[0]) |entry| : (e += 1) {
             __env_rm_add(entry, null);
         }
     } else {
-        __environ = null;
+        env_slot.* = null;
     }
     return 0;
 }

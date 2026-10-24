@@ -1574,7 +1574,6 @@ fn wasmLink(lld: *Lld, arena: Allocator) !void {
                     arena,
                     wasi_libc.execModelCrtFileFullName(comp.config.wasi_exec_model),
                 ));
-                try argv.append(try comp.crtFileAsString(arena, "libc.a"));
             }
 
             if (comp.zigc_static_lib) |zigc| {
