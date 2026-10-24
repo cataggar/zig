@@ -237,9 +237,6 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout (for scripts/sign-asset.exp)
-        uses: actions/checkout@v4
-
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -249,40 +246,25 @@ jobs:
       - name: List assets
         run: ls -lh dist/
 
-      - name: Sign archives with minisign (per-asset .minisig sidecars)
-        env:
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-          MINISIGN_PASSWORD:   ${{ secrets.MINISIGN_PASSWORD }}
-          TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -qq -y minisign expect
-          # Write secret key file with 0600. The runner workspace is
-          # ephemeral; the trap removes it before the step exits.
-          umask 077
-          printf '%s\n' "$MINISIGN_SECRET_KEY" > dist/minisign.key
-          trap 'rm -f dist/minisign.key' EXIT
-          cd dist
-          shopt -s nullglob
-          for asset in zig-*.tar.xz zig-*.zip; do
-            comment="timestamp:$(date +%s) file:${asset} commit:${GITHUB_SHA} tag:${TAG}"
-            echo "signing ${asset} (trusted comment: ${comment})"
-            expect ../scripts/sign-asset.exp "$asset" "$comment"
-          done
-          ls -la *.minisig
-
-      - name: Ensure release exists (create as draft if missing)
+      - name: Ensure release exists
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
+          NOTES="Experimental build of Zig at tag \`${TAG}\` with \`libc\` migrated to Zig (\`lib/c\`).
+
+          Install using [ghr](https://github.com/cataggar/ghr):
+
+          \`\`\`sh
+          ghr install ${GITHUB_REPOSITORY}@${TAG}
+          \`\`\`"
+
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "$TAG" \
+              --title "Zig $TAG" \
               --prerelease \
-              --notes "libzigc build of Zig at tag \`$TAG\`. Verify with minisign — see project README for the public key."
+              --notes "$NOTES"
           fi
 
       - name: Upload to release
@@ -290,6 +272,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
-          gh release upload "$TAG" dist/zig-*.tar.xz dist/zig-*.zip dist/zig-*.minisig \
+          gh release upload "$TAG" dist/zig-*.tar.xz dist/zig-*.zip \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
