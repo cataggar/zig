@@ -22,63 +22,127 @@ comptime {
 pub const iovec_t = std.posix.iovec;
 pub const ciovec_t = std.posix.iovec_const;
 
-pub extern "wasi_snapshot_preview1" fn args_get(argv: [*][*:0]u8, argv_buf: [*]u8) errno_t;
-pub extern "wasi_snapshot_preview1" fn args_sizes_get(argc: *usize, argv_buf_size: *usize) errno_t;
+pub const p2 = @import("wasi/p2.zig");
 
-pub extern "wasi_snapshot_preview1" fn clock_res_get(clock_id: clockid_t, resolution: *timestamp_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn clock_time_get(clock_id: clockid_t, precision: timestamp_t, timestamp: *timestamp_t) errno_t;
+const use_p2 = builtin.os.tag == .wasip2 and !builtin.link_libc;
 
-pub extern "wasi_snapshot_preview1" fn environ_get(environ: [*][*:0]u8, environ_buf: [*]u8) errno_t;
-pub extern "wasi_snapshot_preview1" fn environ_sizes_get(environ_count: *usize, environ_buf_size: *usize) errno_t;
+const preview1 = struct {
+    pub extern "wasi_snapshot_preview1" fn args_get(argv: [*][*:0]u8, argv_buf: [*]u8) errno_t;
+    pub extern "wasi_snapshot_preview1" fn args_sizes_get(argc: *usize, argv_buf_size: *usize) errno_t;
 
-pub extern "wasi_snapshot_preview1" fn fd_advise(fd: fd_t, offset: filesize_t, len: filesize_t, advice: advice_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_allocate(fd: fd_t, offset: filesize_t, len: filesize_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_close(fd: fd_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_datasync(fd: fd_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_pread(fd: fd_t, iovs: [*]const iovec_t, iovs_len: usize, offset: filesize_t, nread: *usize) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_pwrite(fd: fd_t, iovs: [*]const ciovec_t, iovs_len: usize, offset: filesize_t, nwritten: *usize) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_read(fd: fd_t, iovs: [*]const iovec_t, iovs_len: usize, nread: *usize) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_readdir(fd: fd_t, buf: [*]u8, buf_len: usize, cookie: dircookie_t, bufused: *usize) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_renumber(from: fd_t, to: fd_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_seek(fd: fd_t, offset: filedelta_t, whence: whence_t, newoffset: *filesize_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_sync(fd: fd_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_tell(fd: fd_t, newoffset: *filesize_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_write(fd: fd_t, iovs: [*]const ciovec_t, iovs_len: usize, nwritten: *usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn clock_res_get(clock_id: clockid_t, resolution: *timestamp_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn clock_time_get(clock_id: clockid_t, precision: timestamp_t, timestamp: *timestamp_t) errno_t;
 
-pub extern "wasi_snapshot_preview1" fn fd_fdstat_get(fd: fd_t, buf: *fdstat_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_fdstat_set_flags(fd: fd_t, flags: fdflags_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_fdstat_set_rights(fd: fd_t, fs_rights_base: rights_t, fs_rights_inheriting: rights_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn environ_get(environ: [*][*:0]u8, environ_buf: [*]u8) errno_t;
+    pub extern "wasi_snapshot_preview1" fn environ_sizes_get(environ_count: *usize, environ_buf_size: *usize) errno_t;
 
-pub extern "wasi_snapshot_preview1" fn fd_filestat_get(fd: fd_t, buf: *filestat_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_filestat_set_size(fd: fd_t, st_size: filesize_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_filestat_set_times(fd: fd_t, st_atim: timestamp_t, st_mtim: timestamp_t, fstflags: fstflags_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_advise(fd: fd_t, offset: filesize_t, len: filesize_t, advice: advice_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_allocate(fd: fd_t, offset: filesize_t, len: filesize_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_close(fd: fd_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_datasync(fd: fd_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_pread(fd: fd_t, iovs: [*]const iovec_t, iovs_len: usize, offset: filesize_t, nread: *usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_pwrite(fd: fd_t, iovs: [*]const ciovec_t, iovs_len: usize, offset: filesize_t, nwritten: *usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_read(fd: fd_t, iovs: [*]const iovec_t, iovs_len: usize, nread: *usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_readdir(fd: fd_t, buf: [*]u8, buf_len: usize, cookie: dircookie_t, bufused: *usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_renumber(from: fd_t, to: fd_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_seek(fd: fd_t, offset: filedelta_t, whence: whence_t, newoffset: *filesize_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_sync(fd: fd_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_tell(fd: fd_t, newoffset: *filesize_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_write(fd: fd_t, iovs: [*]const ciovec_t, iovs_len: usize, nwritten: *usize) errno_t;
 
-pub extern "wasi_snapshot_preview1" fn fd_prestat_get(fd: fd_t, buf: *prestat_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn fd_prestat_dir_name(fd: fd_t, path: [*]u8, path_len: usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_fdstat_get(fd: fd_t, buf: *fdstat_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_fdstat_set_flags(fd: fd_t, flags: fdflags_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_fdstat_set_rights(fd: fd_t, fs_rights_base: rights_t, fs_rights_inheriting: rights_t) errno_t;
 
-pub extern "wasi_snapshot_preview1" fn path_create_directory(fd: fd_t, path: [*]const u8, path_len: usize) errno_t;
-pub extern "wasi_snapshot_preview1" fn path_filestat_get(fd: fd_t, flags: lookupflags_t, path: [*]const u8, path_len: usize, buf: *filestat_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn path_filestat_set_times(fd: fd_t, flags: lookupflags_t, path: [*]const u8, path_len: usize, st_atim: timestamp_t, st_mtim: timestamp_t, fstflags: fstflags_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn path_link(old_fd: fd_t, old_flags: lookupflags_t, old_path: [*]const u8, old_path_len: usize, new_fd: fd_t, new_path: [*]const u8, new_path_len: usize) errno_t;
-pub extern "wasi_snapshot_preview1" fn path_open(dirfd: fd_t, dirflags: lookupflags_t, path: [*]const u8, path_len: usize, oflags: oflags_t, fs_rights_base: rights_t, fs_rights_inheriting: rights_t, fs_flags: fdflags_t, fd: *fd_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn path_readlink(fd: fd_t, path: [*]const u8, path_len: usize, buf: [*]u8, buf_len: usize, bufused: *usize) errno_t;
-pub extern "wasi_snapshot_preview1" fn path_remove_directory(fd: fd_t, path: [*]const u8, path_len: usize) errno_t;
-pub extern "wasi_snapshot_preview1" fn path_rename(old_fd: fd_t, old_path: [*]const u8, old_path_len: usize, new_fd: fd_t, new_path: [*]const u8, new_path_len: usize) errno_t;
-pub extern "wasi_snapshot_preview1" fn path_symlink(old_path: [*]const u8, old_path_len: usize, fd: fd_t, new_path: [*]const u8, new_path_len: usize) errno_t;
-pub extern "wasi_snapshot_preview1" fn path_unlink_file(fd: fd_t, path: [*]const u8, path_len: usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_filestat_get(fd: fd_t, buf: *filestat_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_filestat_set_size(fd: fd_t, st_size: filesize_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_filestat_set_times(fd: fd_t, st_atim: timestamp_t, st_mtim: timestamp_t, fstflags: fstflags_t) errno_t;
 
-pub extern "wasi_snapshot_preview1" fn poll_oneoff(in: *const subscription_t, out: *event_t, nsubscriptions: usize, nevents: *usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_prestat_get(fd: fd_t, buf: *prestat_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn fd_prestat_dir_name(fd: fd_t, path: [*]u8, path_len: usize) errno_t;
 
-pub extern "wasi_snapshot_preview1" fn proc_exit(rval: exitcode_t) noreturn;
+    pub extern "wasi_snapshot_preview1" fn path_create_directory(fd: fd_t, path: [*]const u8, path_len: usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn path_filestat_get(fd: fd_t, flags: lookupflags_t, path: [*]const u8, path_len: usize, buf: *filestat_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn path_filestat_set_times(fd: fd_t, flags: lookupflags_t, path: [*]const u8, path_len: usize, st_atim: timestamp_t, st_mtim: timestamp_t, fstflags: fstflags_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn path_link(old_fd: fd_t, old_flags: lookupflags_t, old_path: [*]const u8, old_path_len: usize, new_fd: fd_t, new_path: [*]const u8, new_path_len: usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn path_open(dirfd: fd_t, dirflags: lookupflags_t, path: [*]const u8, path_len: usize, oflags: oflags_t, fs_rights_base: rights_t, fs_rights_inheriting: rights_t, fs_flags: fdflags_t, fd: *fd_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn path_readlink(fd: fd_t, path: [*]const u8, path_len: usize, buf: [*]u8, buf_len: usize, bufused: *usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn path_remove_directory(fd: fd_t, path: [*]const u8, path_len: usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn path_rename(old_fd: fd_t, old_path: [*]const u8, old_path_len: usize, new_fd: fd_t, new_path: [*]const u8, new_path_len: usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn path_symlink(old_path: [*]const u8, old_path_len: usize, fd: fd_t, new_path: [*]const u8, new_path_len: usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn path_unlink_file(fd: fd_t, path: [*]const u8, path_len: usize) errno_t;
 
-pub extern "wasi_snapshot_preview1" fn random_get(buf: [*]u8, buf_len: usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn poll_oneoff(in: *const subscription_t, out: *event_t, nsubscriptions: usize, nevents: *usize) errno_t;
 
-pub extern "wasi_snapshot_preview1" fn sched_yield() errno_t;
+    pub extern "wasi_snapshot_preview1" fn proc_exit(rval: exitcode_t) noreturn;
 
-pub extern "wasi_snapshot_preview1" fn sock_accept(sock: fd_t, flags: fdflags_t, result_fd: *fd_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn sock_recv(sock: fd_t, ri_data: [*]iovec_t, ri_data_len: usize, ri_flags: riflags_t, ro_datalen: *usize, ro_flags: *roflags_t) errno_t;
-pub extern "wasi_snapshot_preview1" fn sock_send(sock: fd_t, si_data: [*]const ciovec_t, si_data_len: usize, si_flags: siflags_t, so_datalen: *usize) errno_t;
-pub extern "wasi_snapshot_preview1" fn sock_shutdown(sock: fd_t, how: sdflags_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn random_get(buf: [*]u8, buf_len: usize) errno_t;
+
+    pub extern "wasi_snapshot_preview1" fn sched_yield() errno_t;
+
+    pub extern "wasi_snapshot_preview1" fn sock_accept(sock: fd_t, flags: fdflags_t, result_fd: *fd_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn sock_recv(sock: fd_t, ri_data: [*]iovec_t, ri_data_len: usize, ri_flags: riflags_t, ro_datalen: *usize, ro_flags: *roflags_t) errno_t;
+    pub extern "wasi_snapshot_preview1" fn sock_send(sock: fd_t, si_data: [*]const ciovec_t, si_data_len: usize, si_flags: siflags_t, so_datalen: *usize) errno_t;
+    pub extern "wasi_snapshot_preview1" fn sock_shutdown(sock: fd_t, how: sdflags_t) errno_t;
+};
+
+pub const args_get = if (use_p2) p2.args_get else preview1.args_get;
+pub const args_sizes_get = if (use_p2) p2.args_sizes_get else preview1.args_sizes_get;
+
+pub const clock_res_get = if (use_p2) p2.clock_res_get else preview1.clock_res_get;
+pub const clock_time_get = if (use_p2) p2.clock_time_get else preview1.clock_time_get;
+
+pub const environ_get = if (use_p2) p2.environ_get else preview1.environ_get;
+pub const environ_sizes_get = if (use_p2) p2.environ_sizes_get else preview1.environ_sizes_get;
+
+pub const fd_advise = if (use_p2) p2.fd_advise else preview1.fd_advise;
+pub const fd_allocate = if (use_p2) p2.fd_allocate else preview1.fd_allocate;
+pub const fd_close = if (use_p2) p2.fd_close else preview1.fd_close;
+pub const fd_datasync = if (use_p2) p2.fd_datasync else preview1.fd_datasync;
+pub const fd_pread = if (use_p2) p2.fd_pread else preview1.fd_pread;
+pub const fd_pwrite = if (use_p2) p2.fd_pwrite else preview1.fd_pwrite;
+pub const fd_read = if (use_p2) p2.fd_read else preview1.fd_read;
+pub const fd_readdir = if (use_p2) p2.fd_readdir else preview1.fd_readdir;
+pub const fd_renumber = if (use_p2) p2.fd_renumber else preview1.fd_renumber;
+pub const fd_seek = if (use_p2) p2.fd_seek else preview1.fd_seek;
+pub const fd_sync = if (use_p2) p2.fd_sync else preview1.fd_sync;
+pub const fd_tell = if (use_p2) p2.fd_tell else preview1.fd_tell;
+pub const fd_write = if (use_p2) p2.fd_write else preview1.fd_write;
+
+pub const fd_fdstat_get = if (use_p2) p2.fd_fdstat_get else preview1.fd_fdstat_get;
+pub const fd_fdstat_set_flags = if (use_p2) p2.fd_fdstat_set_flags else preview1.fd_fdstat_set_flags;
+pub const fd_fdstat_set_rights = if (use_p2) p2.fd_fdstat_set_rights else preview1.fd_fdstat_set_rights;
+
+pub const fd_filestat_get = if (use_p2) p2.fd_filestat_get else preview1.fd_filestat_get;
+pub const fd_filestat_set_size = if (use_p2) p2.fd_filestat_set_size else preview1.fd_filestat_set_size;
+pub const fd_filestat_set_times = if (use_p2) p2.fd_filestat_set_times else preview1.fd_filestat_set_times;
+
+pub const fd_prestat_get = if (use_p2) p2.fd_prestat_get else preview1.fd_prestat_get;
+pub const fd_prestat_dir_name = if (use_p2) p2.fd_prestat_dir_name else preview1.fd_prestat_dir_name;
+
+pub const path_create_directory = if (use_p2) p2.path_create_directory else preview1.path_create_directory;
+pub const path_filestat_get = if (use_p2) p2.path_filestat_get else preview1.path_filestat_get;
+pub const path_filestat_set_times = if (use_p2) p2.path_filestat_set_times else preview1.path_filestat_set_times;
+pub const path_link = if (use_p2) p2.path_link else preview1.path_link;
+pub const path_open = if (use_p2) p2.path_open else preview1.path_open;
+pub const path_readlink = if (use_p2) p2.path_readlink else preview1.path_readlink;
+pub const path_remove_directory = if (use_p2) p2.path_remove_directory else preview1.path_remove_directory;
+pub const path_rename = if (use_p2) p2.path_rename else preview1.path_rename;
+pub const path_symlink = if (use_p2) p2.path_symlink else preview1.path_symlink;
+pub const path_unlink_file = if (use_p2) p2.path_unlink_file else preview1.path_unlink_file;
+
+pub const poll_oneoff = if (use_p2) p2.poll_oneoff else preview1.poll_oneoff;
+
+pub const proc_exit = if (use_p2) p2.proc_exit else preview1.proc_exit;
+
+pub const random_get = if (use_p2) p2.random_get else preview1.random_get;
+
+pub const sched_yield = if (use_p2) p2.sched_yield else preview1.sched_yield;
+
+pub const sock_accept = if (use_p2) p2.sock_accept else preview1.sock_accept;
+pub const sock_recv = if (use_p2) p2.sock_recv else preview1.sock_recv;
+pub const sock_send = if (use_p2) p2.sock_send else preview1.sock_send;
+pub const sock_shutdown = if (use_p2) p2.sock_shutdown else preview1.sock_shutdown;
 
 // As defined in the wasi_snapshot_preview1 spec file:
 // https://github.com/WebAssembly/WASI/blob/master/phases/snapshot/witx/typenames.witx
@@ -469,3 +533,7 @@ pub const timestamp_t = u64;
 pub const userdata_t = u64;
 
 pub const whence_t = enum(u8) { SET, CUR, END };
+
+test {
+    _ = p2;
+}
