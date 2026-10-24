@@ -116,14 +116,61 @@ var opterr_val: c_int = 1;
 var optopt_val: c_int = 0;
 var optpos_val: c_int = 0;
 var optreset_val: c_int = 0;
-const VaList = switch (builtin.cpu.arch) {
-    .aarch64, .aarch64_be => std.builtin.VaListAarch64,
-    else => std.builtin.VaList,
-};
-const can_compile_c_va_start = switch (builtin.cpu.arch) {
-    .aarch64, .aarch64_be => false,
-    else => true,
-};
+const VaList = std.builtin.VaList;
+
+inline fn cVaArg(ap: *VaList, comptime T: type) T {
+    if ((builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .aarch64_be) and
+        builtin.os.tag != .macos and builtin.os.tag != .ios and
+        builtin.os.tag != .tvos and builtin.os.tag != .watchos and
+        builtin.os.tag != .visionos and builtin.os.tag != .windows)
+    {
+        const is_be = builtin.cpu.arch == .aarch64_be;
+        const align_bytes: usize = @max(@alignOf(T), 8);
+        const size_bytes: usize = @sizeOf(T);
+        const offs = ap.__gr_offs;
+        if (offs < 0) {
+            const aligned_offs: c_int = if (align_bytes > 8)
+                (offs + @as(c_int, @intCast(align_bytes - 1))) & -@as(c_int, @intCast(align_bytes))
+            else
+                offs;
+            const reg_size: c_int = @intCast((size_bytes + 7) & ~@as(usize, 7));
+            const new_offs = aligned_offs + reg_size;
+            ap.__gr_offs = new_offs;
+            if (new_offs <= 0) {
+                const top: usize = @intFromPtr(ap.__gr_top);
+                const base_addr: usize = @bitCast(@as(isize, @bitCast(top)) + @as(isize, aligned_offs));
+                const be_delta: usize = if (is_be and size_bytes < 8) 8 - size_bytes else 0;
+                return @as(*align(1) const T, @ptrFromInt(base_addr + be_delta)).*;
+            }
+        }
+        const stack_addr: usize = @intFromPtr(ap.__stack);
+        const aligned_stack: usize = (stack_addr + (align_bytes - 1)) & ~(align_bytes - 1);
+        const stack_size: usize = (size_bytes + 7) & ~@as(usize, 7);
+        ap.__stack = @ptrFromInt(aligned_stack + stack_size);
+        const be_delta: usize = if (is_be and size_bytes < 8) 8 - size_bytes else 0;
+        return @as(*align(1) const T, @ptrFromInt(aligned_stack + be_delta)).*;
+    }
+    if (builtin.cpu.arch == .s390x) {
+        const padded_size: usize = 8;
+        const padding: usize = padded_size - @sizeOf(T);
+        const addr: usize = if (ap.__gpr < 5) blk: {
+            const count: usize = @intCast(ap.__gpr);
+            ap.__gpr += 1;
+            break :blk @intFromPtr(ap.__reg_save_area) + (2 + count) * padded_size + padding;
+        } else blk: {
+            const ovf: usize = @intFromPtr(ap.__overflow_arg_area);
+            ap.__overflow_arg_area = @ptrFromInt(ovf + padded_size);
+            break :blk ovf + padding;
+        };
+        return @as(*align(1) const T, @ptrFromInt(addr)).*;
+    }
+    if (builtin.cpu.arch == .x86_64 and (builtin.os.tag == .windows or builtin.os.tag == .uefi)) {
+        const cur: usize = @intFromPtr(ap.*);
+        ap.* = @ptrFromInt(cur + 8);
+        return @as(*align(1) const T, @ptrFromInt(cur)).*;
+    }
+    return @cVaArg(ap, T);
+}
 extern "c" fn __lock(lock: *c_int) void;
 extern "c" fn __unlock(lock: *c_int) void;
 extern "c" fn socket(domain: c_int, sock_type: c_int, protocol: c_int) c_int;
@@ -132,7 +179,18 @@ extern "c" fn send(fd: c_int, buf: *const anyopaque, len: usize, flags: c_int) i
 extern "c" fn time(tloc: ?*i64) i64;
 extern "c" fn gmtime_r(timep: *const i64, result: *anyopaque) ?*anyopaque;
 extern "c" fn strftime(s: [*]u8, max: usize, fmt: [*:0]const u8, tm: *const anyopaque) usize;
-extern "c" fn vsnprintf(buf: [*]u8, size: usize, fmt: [*:0]const u8, ap: VaList) c_int;
+const CVaList = switch (builtin.cpu.arch) {
+    .x86_64 => switch (builtin.os.tag) {
+        .uefi, .windows => VaList,
+        else => *VaList,
+    },
+    .powerpc, .powerpcle, .s390x => *VaList,
+    else => VaList,
+};
+inline fn passVaList(ap: *VaList) CVaList {
+    return if (CVaList == *VaList) ap else ap.*;
+}
+extern "c" fn vsnprintf(buf: [*]u8, size: usize, fmt: [*:0]const u8, ap: CVaList) c_int;
 const AF_UNIX = 1;
 const SOCK_DGRAM = 2;
 const SOCK_CLOEXEC = 0o2000000;
@@ -307,7 +365,8 @@ comptime {
         symbol(&closelog, "closelog");
         symbol(&openlog, "openlog");
         symbol(&__vsyslog, "vsyslog");
-        if (can_compile_c_va_start) symbol(&syslog, "syslog");
+        symbol(&__vsyslog, "__vsyslog");
+        symbol(&syslog, "syslog");
         symbol(&sl_lock, "__syslog_lockptr");
         symbol(&wordexp_fn, "wordexp");
         symbol(&wordfree_fn, "wordfree");
@@ -1192,7 +1251,7 @@ fn is_lost_conn(e: c_int) bool {
     return e == 111 or e == 104 or e == 107 or e == 32; // ECONNREFUSED, ECONNRESET, ENOTCONN, EPIPE
 }
 
-fn _vsyslog(priority: c_int, message: [*:0]const u8, ap: VaList) void {
+fn _vsyslog(priority: c_int, message: [*:0]const u8, ap: CVaList) void {
     var timebuf: [16]u8 = undefined;
     var buf: [1024]u8 = undefined;
     const errno_save = std.c._errno().*;
@@ -1270,7 +1329,7 @@ fn openlog(ident: ?[*:0]const u8, opt: c_int, facility: c_int) callconv(.c) void
     __unlock(&sl_lock);
 }
 
-fn __vsyslog(priority: c_int, message: [*:0]const u8, ap: VaList) callconv(.c) void {
+fn __vsyslog(priority: c_int, message: [*:0]const u8, ap: CVaList) callconv(.c) void {
     if (log_mask_val & LOG_MASK_FN.mask(priority & 7) == 0 or priority & ~@as(c_int, 0x3ff) != 0) return;
     __lock(&sl_lock);
     _vsyslog(priority, message, ap);
@@ -1280,7 +1339,7 @@ fn __vsyslog(priority: c_int, message: [*:0]const u8, ap: VaList) callconv(.c) v
 fn syslog(priority: c_int, message: [*:0]const u8, ...) callconv(.c) void {
     var ap = @cVaStart();
     defer @cVaEnd(&ap);
-    __vsyslog(priority, message, ap);
+    __vsyslog(priority, message, passVaList(&ap));
 }
 
 fn permute(argv: [*]const ?[*:0]u8, dest: c_int, src: c_int) void {
@@ -1442,8 +1501,11 @@ fn getopt_long_only_fn(argc: c_int, argv: [*]const ?[*:0]u8, optstring: [*:0]con
     return getopt_long_impl(argc, argv, optstring, longopts, idx, 1);
 }
 
-fn ioctlImpl(fd: c_int, req: c_ulong, arg: usize) callconv(.c) c_int {
-    const rc: isize = @bitCast(linux.ioctl(@intCast(fd), @intCast(req), arg));
+fn ioctlImpl(fd: c_int, req: c_int, ...) callconv(.c) c_int {
+    var ap = @cVaStart();
+    const arg: usize = @intFromPtr(cVaArg(&ap, ?*anyopaque));
+    @cVaEnd(&ap);
+    const rc: isize = @bitCast(linux.ioctl(@intCast(fd), @bitCast(req), arg));
     if (rc >= 0) return @intCast(rc);
 
     // On 64-bit, time_t == long, so no ioctl compat conversion is needed.
@@ -1610,7 +1672,15 @@ fn wordfree_fn(we: *wordexp_t) callconv(.c) void {
     we.we_wordc = 0;
 }
 
-fn syscall_fn(n: c_long, a: usize, b: usize, c_arg: usize, d: usize, e: usize, f: usize) callconv(.c) c_long {
+fn syscall_fn(n: c_long, ...) callconv(.c) c_long {
+    var ap = @cVaStart();
+    const a: usize = @bitCast(cVaArg(&ap, c_long));
+    const b: usize = @bitCast(cVaArg(&ap, c_long));
+    const c_arg: usize = @bitCast(cVaArg(&ap, c_long));
+    const d: usize = @bitCast(cVaArg(&ap, c_long));
+    const e: usize = @bitCast(cVaArg(&ap, c_long));
+    const f: usize = @bitCast(cVaArg(&ap, c_long));
+    @cVaEnd(&ap);
     const rc = linux.syscall6(
         @fromBackingInt(@intCast(@as(usize, @bitCast(@as(isize, n))))),
         @import("../c.zig").syscallArg(a),
