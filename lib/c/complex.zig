@@ -100,6 +100,55 @@ fn cprojlC(z: CFLD) callconv(.c) CFLD {
 
 // --- Exponential ---
 
+fn frexp_exp64(x: f64, expt: *c_int) f64 {
+    const k = 1799;
+    const kln2 = 1246.97177782734161156;
+    const exp_x = @exp(x - kln2);
+    const fx: u64 = @bitCast(exp_x);
+    const hx: u32 = @intCast(fx >> 32);
+    const lx: u32 = @truncate(fx);
+    expt.* = @as(c_int, @intCast(hx >> 20)) - (0x3ff + 1023) + k;
+    const high_word = (hx & 0xfffff) | ((0x3ff + 1023) << 20);
+    return @bitCast((@as(u64, high_word) << 32) | lx);
+}
+
+fn ldexp_cexpC(z: CF64, expt: c_int) callconv(.c) CF64 {
+    var ex_expt: c_int = undefined;
+    const exp_x = frexp_exp64(z.re, &ex_expt);
+    const exptf: i64 = @as(i64, expt) + ex_expt;
+    const half_expt1 = @divTrunc(exptf, 2);
+    const scale1: f64 = @bitCast(@as(u64, @bitCast(0x3ff + half_expt1)) << 52);
+    const half_expt2 = exptf - half_expt1;
+    const scale2: f64 = @bitCast(@as(u64, @bitCast(0x3ff + half_expt2)) << 52);
+    return .{
+        .re = @cos(z.im) * exp_x * scale1 * scale2,
+        .im = @sin(z.im) * exp_x * scale1 * scale2,
+    };
+}
+
+fn frexp_exp32(x: f32, expt: *c_int) f32 {
+    const k = 235;
+    const kln2 = 162.88958740;
+    const exp_x = @exp(x - kln2);
+    const hx: u32 = @bitCast(exp_x);
+    expt.* = @as(c_int, @intCast(hx >> 23)) - (0x7f + 127) + k;
+    return @bitCast((hx & 0x7fffff) | ((0x7f + 127) << 23));
+}
+
+fn ldexp_cexpfC(z: CF32, expt: c_int) callconv(.c) CF32 {
+    var ex_expt: c_int = undefined;
+    const exp_x = frexp_exp32(z.re, &ex_expt);
+    const exptf: i32 = expt + ex_expt;
+    const half_expt1 = @divTrunc(exptf, 2);
+    const scale1: f32 = @bitCast(@as(u32, @bitCast(0x7f + half_expt1)) << 23);
+    const half_expt2 = exptf - half_expt1;
+    const scale2: f32 = @bitCast(@as(u32, @bitCast(0x7f + half_expt2)) << 23);
+    return .{
+        .re = @cos(z.im) * exp_x * scale1 * scale2,
+        .im = @sin(z.im) * exp_x * scale1 * scale2,
+    };
+}
+
 fn cexpC(z: CF64) callconv(.c) CF64 {
     return fromZ64(mc.exp(toZ64(z)));
 }
@@ -364,5 +413,7 @@ comptime {
         symbol(&cimagC, "cimag");
         symbol(&cimagfC, "cimagf");
         symbol(&cimaglC, "cimagl");
+        symbol(&ldexp_cexpC, "__ldexp_cexp");
+        symbol(&ldexp_cexpfC, "__ldexp_cexpf");
     }
 }

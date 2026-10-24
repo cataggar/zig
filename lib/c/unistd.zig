@@ -82,6 +82,16 @@ comptime {
 
         symbol(&execveLinux, "execve");
         symbol(&fexecveLinux, "fexecve");
+        symbol(&niceLinux, "nice");
+        symbol(&tcgetpgrpLinux, "tcgetpgrp");
+        symbol(&tcsetpgrpLinux, "tcsetpgrp");
+        symbol(&truncateLinux, "truncate");
+        symbol(&ttynameLinux, "ttyname");
+        symbol(&ttyname_rLinux, "ttyname_r");
+        if (builtin.link_libc) {
+            symbol(&getloginLinux, "getlogin");
+            symbol(&getlogin_rLinux, "getlogin_r");
+        }
     }
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&swab, "swab");
@@ -289,18 +299,9 @@ fn syscallArg(val: anytype) linux.syscall_arg_t {
 }
 
 fn lseekLinux(fd: c_int, offset: linux.off_t, whence: c_int) callconv(.c) linux.off_t {
-    const whence_u32: u32 = @intCast(@as(c_uint, @bitCast(whence)));
-    if (@hasField(linux.SYS, "llseek")) {
+    if (@sizeOf(linux.syscall_arg_t) == 4) {
         var result: linux.off_t = undefined;
-        const offset_u: u64 = @bitCast(offset);
-        const signed: isize = @bitCast(linux.syscall5(
-            .llseek,
-            syscallArg(fd),
-            @truncate(offset_u >> 32),
-            @truncate(offset_u),
-            syscallArg(&result),
-            syscallArg(whence_u32),
-        ));
+        const signed: i32 = @bitCast(linux.llseek(fd, offset, &result, @bitCast(whence)));
         if (signed < 0) {
             @branchHint(.unlikely);
             std.c._errno().* = @intCast(-signed);
@@ -308,18 +309,13 @@ fn lseekLinux(fd: c_int, offset: linux.off_t, whence: c_int) callconv(.c) linux.
         }
         return result;
     } else {
-        const signed: isize = @bitCast(linux.syscall3(
-            .lseek,
-            syscallArg(fd),
-            syscallArg(offset),
-            syscallArg(whence_u32),
-        ));
-        if (signed < 0) {
+        const signed: i64 = @bitCast(linux.lseek(fd, offset, @bitCast(whence)));
+        if (signed < 0 and signed > -4096) {
             @branchHint(.unlikely);
             std.c._errno().* = @intCast(-signed);
             return -1;
         }
-        return @intCast(signed);
+        return signed;
     }
 }
 
@@ -429,7 +425,7 @@ fn niceLinux(inc: c_int) callconv(.c) c_int {
         .setpriority,
         0,
         0,
-        @as(usize, @bitCast(@as(isize, prio))),
+        syscallArg(prio),
     ));
     if (sp < 0) {
         const err: c_int = @intCast(-sp);
@@ -470,7 +466,80 @@ fn tcsetpgrpLinux(fd: c_int, pgrp: linux.pid_t) callconv(.c) c_int {
 }
 
 fn truncateLinux(path: [*:0]const c_char, length: linux.off_t) callconv(.c) c_int {
-    return errno(linux.syscall2(.truncate, @intFromPtr(path), @as(usize, @bitCast(length))));
+    if (@sizeOf(linux.syscall_arg_t) < @sizeOf(u64)) {
+        const length_u: u64 = @bitCast(length);
+        const low: u32 = @truncate(length_u);
+        const high: u32 = @truncate(length_u >> 32);
+        const first: u32, const second: u32 = switch (builtin.cpu.arch.endian()) {
+            .little => .{ low, high },
+            .big => .{ high, low },
+        };
+        const sys: linux.SYS = if (@hasField(linux.SYS, "truncate64")) .truncate64 else .truncate;
+        const require_aligned_register_pair = switch (builtin.cpu.arch) {
+            .arm, .armeb, .thumb, .thumbeb, .csky, .hexagon, .xtensa => true,
+            else => builtin.cpu.arch.isMIPS32() or builtin.cpu.arch.isPowerPC32(),
+        };
+        if (require_aligned_register_pair) {
+            return errno(linux.syscall4(sys, @intFromPtr(path), 0, first, second));
+        } else {
+            return errno(linux.syscall3(sys, @intFromPtr(path), first, second));
+        }
+    } else {
+        return errno(linux.syscall2(.truncate, @intFromPtr(path), @as(u64, @bitCast(length))));
+    }
+}
+
+extern "c" fn getenv(name: [*:0]const u8) callconv(.c) ?[*:0]u8;
+
+fn getloginLinux() callconv(.c) ?[*:0]u8 {
+    return getenv("LOGNAME");
+}
+
+fn getlogin_rLinux(name: [*]u8, size: usize) callconv(.c) c_int {
+    const logname = getloginLinux() orelse return @backingInt(linux.E.NXIO);
+    const len = std.mem.len(logname);
+    if (len >= size) return @backingInt(linux.E.RANGE);
+    @memcpy(name[0 .. len + 1], logname[0 .. len + 1]);
+    return 0;
+}
+
+var ttyname_buf: [32]u8 = undefined;
+
+fn ttynameLinux(fd: c_int) callconv(.c) ?[*:0]u8 {
+    const result = ttyname_rLinux(fd, &ttyname_buf, ttyname_buf.len);
+    if (result != 0) {
+        std.c._errno().* = result;
+        return null;
+    }
+    return @ptrCast(&ttyname_buf);
+}
+
+fn ttyname_rLinux(fd: c_int, name: [*]u8, size: usize) callconv(.c) c_int {
+    if (isattyLinux(fd) == 0) return std.c._errno().*;
+
+    var procname: ["/proc/self/fd/".len + 11]u8 = undefined;
+    const proc_path = std.fmt.bufPrintSentinel(&procname, "/proc/self/fd/{d}", .{fd}, 0) catch unreachable;
+    const l = readlinkLinux(@ptrCast(proc_path.ptr), name, size);
+
+    if (l < 0) return std.c._errno().*;
+    const ulen: usize = @intCast(l);
+    if (ulen == size) return @backingInt(linux.E.RANGE);
+
+    name[ulen] = 0;
+
+    var st1: linux.Statx = undefined;
+    var st2: linux.Statx = undefined;
+    const mask: linux.STATX = .{ .INO = true };
+    const rc1: isize = @bitCast(linux.statx(linux.AT.FDCWD, @ptrCast(name), 0, mask, &st1));
+    if (rc1 < 0) return @intCast(-rc1);
+    const rc2: isize = @bitCast(linux.statx(fd, "", linux.AT.EMPTY_PATH, mask, &st2));
+    if (rc2 < 0) return @intCast(-rc2);
+
+    if (st1.dev_major != st2.dev_major or st1.dev_minor != st2.dev_minor or st1.ino != st2.ino) {
+        return @backingInt(linux.E.NODEV);
+    }
+
+    return 0;
 }
 
 fn ualarmLinux(value: c_uint, interval: c_uint) callconv(.c) c_uint {

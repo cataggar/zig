@@ -2,8 +2,17 @@ const builtin = @import("builtin");
 const std = @import("std");
 const linux = std.os.linux;
 const c = @import("../c.zig");
-const mq_timedsend_sys = if (@hasField(linux.SYS, "mq_timedsend")) linux.SYS.mq_timedsend else linux.SYS.mq_timedsend_time64;
-const mq_timedreceive_sys = if (@hasField(linux.SYS, "mq_timedreceive")) linux.SYS.mq_timedreceive else linux.SYS.mq_timedreceive_time64;
+const Timespec = if (@sizeOf(c_long) >= 8)
+    extern struct { sec: i64, nsec: c_long }
+else if (builtin.cpu.arch.endian() == .little)
+    extern struct { sec: i64, nsec: c_long, _pad: c_long = 0 }
+else
+    extern struct { sec: i64, _pad: c_long = 0, nsec: c_long };
+
+const Timespec32 = extern struct {
+    sec: c_long,
+    nsec: c_long,
+};
 
 comptime {
     if (builtin.target.isMuslLibC()) {
@@ -14,7 +23,13 @@ comptime {
         c.symbol(&mq_sendLinux, "mq_send");
         c.symbol(&mq_setattrLinux, "mq_setattr");
         c.symbol(&mq_timedreceiveLinux, "mq_timedreceive");
+        c.symbol(&mq_timedreceiveLinux, "__mq_timedreceive_time64");
         c.symbol(&mq_timedsendLinux, "mq_timedsend");
+        c.symbol(&mq_timedsendLinux, "__mq_timedsend_time64");
+        if (@sizeOf(c_long) == 4) {
+            c.symbol(&mq_timedreceive_time32, "__mq_timedreceive_time32");
+            c.symbol(&mq_timedsend_time32, "__mq_timedsend_time32");
+        }
         c.symbol(&mq_unlinkLinux, "mq_unlink");
     }
     if (builtin.link_libc) {
@@ -55,33 +70,101 @@ fn mq_receiveLinux(mqdes: c_int, msg: [*]u8, len: usize, prio: ?*c_uint) callcon
     return mq_timedreceiveLinux(mqdes, msg, len, prio, null);
 }
 
-fn mq_timedsendLinux(mqdes: c_int, msg: [*]const u8, len: usize, prio: c_uint, at: ?*const linux.timespec) callconv(.c) c_int {
-    return c.errno(linux.syscall5(
-        mq_timedsend_sys,
-        iarg(mqdes),
-        @intFromPtr(msg),
-        len,
-        @as(usize, prio),
-        @intFromPtr(at),
-    ));
+fn mq_timedsendLinux(mqdes: c_int, msg: [*]const u8, len: usize, prio: c_uint, at: ?*const Timespec) callconv(.c) c_int {
+    if (@hasField(linux.SYS, "mq_timedsend_time64")) {
+        const kts: [2]i64 = if (at) |t| .{ t.sec, t.nsec } else .{ 0, 0 };
+        const ret = linux.syscall5(
+            .mq_timedsend_time64,
+            iarg(mqdes),
+            @intFromPtr(msg),
+            len,
+            @as(usize, prio),
+            if (at != null) @intFromPtr(&kts) else 0,
+        );
+        if (@hasField(linux.SYS, "mq_timedsend") and linux.SYS.mq_timedsend != linux.SYS.mq_timedsend_time64) {
+            if (@as(isize, @bitCast(ret)) == -@as(isize, @backingInt(linux.E.NOSYS))) {
+                const ts32: [2]c_long = if (at) |t| .{
+                    @intCast(std.math.clamp(t.sec, std.math.minInt(c_long), std.math.maxInt(c_long))),
+                    t.nsec,
+                } else .{ 0, 0 };
+                return c.errno(linux.syscall5(
+                    .mq_timedsend,
+                    iarg(mqdes),
+                    @intFromPtr(msg),
+                    len,
+                    @as(usize, prio),
+                    if (at != null) @intFromPtr(&ts32) else 0,
+                ));
+            }
+        }
+        return c.errno(ret);
+    } else {
+        return c.errno(linux.syscall5(
+            .mq_timedsend,
+            iarg(mqdes),
+            @intFromPtr(msg),
+            len,
+            @as(usize, prio),
+            @intFromPtr(at),
+        ));
+    }
 }
 
-fn mq_timedreceiveLinux(mqdes: c_int, msg: [*]u8, len: usize, prio: ?*c_uint, at: ?*const linux.timespec) callconv(.c) isize {
-    const ret = linux.syscall5(
-        mq_timedreceive_sys,
-        iarg(mqdes),
-        @intFromPtr(msg),
-        len,
-        @intFromPtr(prio),
-        @intFromPtr(at),
-    );
-    const signed: isize = @bitCast(ret);
-    if (signed > -4096 and signed < 0) {
-        @branchHint(.unlikely);
-        std.c._errno().* = @intCast(-signed);
-        return -1;
+fn mq_timedreceiveLinux(mqdes: c_int, msg: [*]u8, len: usize, prio: ?*c_uint, at: ?*const Timespec) callconv(.c) isize {
+    if (@hasField(linux.SYS, "mq_timedreceive_time64")) {
+        const kts: [2]i64 = if (at) |t| .{ t.sec, t.nsec } else .{ 0, 0 };
+        var ret = linux.syscall5(
+            .mq_timedreceive_time64,
+            iarg(mqdes),
+            @intFromPtr(msg),
+            len,
+            @intFromPtr(prio),
+            if (at != null) @intFromPtr(&kts) else 0,
+        );
+        if (@hasField(linux.SYS, "mq_timedreceive") and linux.SYS.mq_timedreceive != linux.SYS.mq_timedreceive_time64) {
+            if (@as(isize, @bitCast(ret)) == -@as(isize, @backingInt(linux.E.NOSYS))) {
+                const ts32: [2]c_long = if (at) |t| .{
+                    @intCast(std.math.clamp(t.sec, std.math.minInt(c_long), std.math.maxInt(c_long))),
+                    t.nsec,
+                } else .{ 0, 0 };
+                ret = linux.syscall5(
+                    .mq_timedreceive,
+                    iarg(mqdes),
+                    @intFromPtr(msg),
+                    len,
+                    @intFromPtr(prio),
+                    if (at != null) @intFromPtr(&ts32) else 0,
+                );
+            }
+        }
+        return c.errnoSize(ret);
+    } else {
+        const ret = linux.syscall5(
+            .mq_timedreceive,
+            iarg(mqdes),
+            @intFromPtr(msg),
+            len,
+            @intFromPtr(prio),
+            @intFromPtr(at),
+        );
+        return c.errnoSize(ret);
     }
-    return signed;
+}
+
+fn mq_timedsend_time32(mqdes: c_int, msg: [*]const u8, len: usize, prio: c_uint, ts32: ?*const Timespec32) callconv(.c) c_int {
+    if (ts32) |t| {
+        const ts: Timespec = .{ .sec = t.sec, .nsec = t.nsec };
+        return mq_timedsendLinux(mqdes, msg, len, prio, &ts);
+    }
+    return mq_timedsendLinux(mqdes, msg, len, prio, null);
+}
+
+fn mq_timedreceive_time32(mqdes: c_int, msg: [*]u8, len: usize, prio: ?*c_uint, ts32: ?*const Timespec32) callconv(.c) isize {
+    if (ts32) |t| {
+        const ts: Timespec = .{ .sec = t.sec, .nsec = t.nsec };
+        return mq_timedreceiveLinux(mqdes, msg, len, prio, &ts);
+    }
+    return mq_timedreceiveLinux(mqdes, msg, len, prio, null);
 }
 
 fn mq_unlinkLinux(raw_name: [*:0]const u8) callconv(.c) c_int {

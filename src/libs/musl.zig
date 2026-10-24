@@ -473,9 +473,9 @@ const src_files = [_][]const u8{
     //"musl/src/complex/ccoshf.c", // migrated to lib/c/complex.zig
     //"musl/src/complex/ccoshl.c", // migrated to lib/c/complex.zig
     //"musl/src/complex/ccosl.c", // migrated to lib/c/complex.zig
-    "musl/src/complex/__cexp.c",
+    // "musl/src/complex/__cexp.c", // migrated to lib/c/complex.zig; exports: __ldexp_cexp
     //"musl/src/complex/cexp.c", // migrated to lib/c/complex.zig
-    "musl/src/complex/__cexpf.c",
+    // "musl/src/complex/__cexpf.c", // migrated to lib/c/complex.zig; exports: __ldexp_cexpf
     //"musl/src/complex/cexpf.c", // migrated to lib/c/complex.zig
     //"musl/src/complex/cexpl.c", // migrated to lib/c/complex.zig
     //"musl/src/complex/cimag.c", // migrated to lib/c/complex.zig
@@ -513,7 +513,7 @@ const src_files = [_][]const u8{
     //"musl/src/complex/ctanl.c", // migrated to lib/c/complex.zig
     // "musl/src/conf/confstr.c", // migrated to lib/c/conf.zig
     // "musl/src/conf/fpathconf.c", // migrated to lib/c/conf.zig
-    "musl/src/conf/legacy.c",
+    // "musl/src/conf/legacy.c", // migrated to lib/c/conf.zig; exports: get_nprocs_conf,get_nprocs,get_phys_pages,get_avphys_pages
     // "musl/src/conf/pathconf.c", // migrated to lib/c/conf.zig
     // "musl/src/conf/sysconf.c", // migrated to lib/c/conf.zig
     // "musl/src/crypt/crypt_blowfish.c",
@@ -646,9 +646,9 @@ const src_files = [_][]const u8{
     "musl/src/ldso/arm/tlsdesc.S",
     // "musl/src/ldso/dladdr.c", // migrated to lib/c/ldso.zig
     // "musl/src/ldso/dlclose.c", // migrated to lib/c/ldso.zig
-    "musl/src/ldso/dlerror.c",
-    "musl/src/ldso/dlinfo.c",
-    "musl/src/ldso/dl_iterate_phdr.c",
+    // "musl/src/ldso/dlerror.c", // migrated to lib/c/ldso.zig
+    // "musl/src/ldso/dlinfo.c", // migrated to lib/c/ldso.zig
+    // "musl/src/ldso/dl_iterate_phdr.c", // migrated to lib/c/ldso.zig
     // "musl/src/ldso/dlopen.c", // migrated to lib/c/ldso.zig
     // "musl/src/ldso/__dlsym.c", // migrated to lib/c/ldso.zig
     // "musl/src/ldso/dlsym.c", // migrated to lib/c/ldso.zig
@@ -1024,7 +1024,7 @@ const src_files = [_][]const u8{
     // "musl/src/misc/getsubopt.c",
     // "musl/src/misc/initgroups.c",
     // "musl/src/misc/ioctl.c", // migrated to lib/c/misc.zig
-    "musl/src/misc/issetugid.c",
+    // "musl/src/misc/issetugid.c", // migrated to lib/c/env.zig
     // "musl/src/misc/lockf.c",
     // "musl/src/misc/login_tty.c",
     // "musl/src/misc/mntent.c",
@@ -1043,7 +1043,7 @@ const src_files = [_][]const u8{
     "musl/src/mman/mremap.c",
     // "musl/src/mman/msync.c",
     // "musl/src/mman/munmap.c",
-    "musl/src/mman/shm_open.c",
+    // "musl/src/mman/shm_open.c", // migrated to lib/c/sys/mman.zig; exports: __shm_mapname,shm_open,shm_unlink
     // "musl/src/mq/mq_close.c", // migrated to lib/c/mq.zig
     // "musl/src/mq/mq_getattr.c", // migrated to lib/c/mq.zig
     // "musl/src/mq/mq_notify.c", // migrated to lib/c/mq.zig
@@ -1743,12 +1743,12 @@ const src_files = [_][]const u8{
     // "musl/src/unistd/ftruncate.c",
     // "musl/src/unistd/getcwd.c",
     // "musl/src/unistd/gethostname.c",
-    "musl/src/unistd/getlogin.c",
-    "musl/src/unistd/getlogin_r.c",
+    // "musl/src/unistd/getlogin.c", // migrated to lib/c/unistd.zig
+    // "musl/src/unistd/getlogin_r.c", // migrated to lib/c/unistd.zig
     // "musl/src/unistd/isatty.c",
     // "musl/src/unistd/lseek.c",
-    "musl/src/unistd/mipsn32/lseek.c",
-    "musl/src/unistd/nice.c",
+    // "musl/src/unistd/mipsn32/lseek.c", // migrated to lib/c/unistd.zig
+    // "musl/src/unistd/nice.c", // migrated to lib/c/unistd.zig
     "musl/src/unistd/pause.c",
     // "musl/src/unistd/pipe2.c",
     // "musl/src/unistd/pread.c",
@@ -1770,22 +1770,22 @@ const src_files = [_][]const u8{
     "musl/src/unistd/setuid.c",
     "musl/src/unistd/setxid.c",
     "musl/src/unistd/sleep.c",
-    "musl/src/unistd/tcgetpgrp.c",
-    "musl/src/unistd/tcsetpgrp.c",
-    "musl/src/unistd/truncate.c",
-    "musl/src/unistd/ttyname.c",
-    "musl/src/unistd/ttyname_r.c",
+    // "musl/src/unistd/tcgetpgrp.c", // migrated to lib/c/unistd.zig
+    // "musl/src/unistd/tcsetpgrp.c", // migrated to lib/c/unistd.zig
+    // "musl/src/unistd/truncate.c", // migrated to lib/c/unistd.zig
+    // "musl/src/unistd/ttyname.c", // migrated to lib/c/unistd.zig
+    // "musl/src/unistd/ttyname_r.c", // migrated to lib/c/unistd.zig
     // "musl/src/unistd/ualarm.c", // migrated to lib/c/unistd.zig
     "musl/src/unistd/usleep.c",
     // "musl/src/unistd/write.c",
     // "musl/src/unistd/writev.c",
-    "musl/src/unistd/x32/lseek.c",
+    // "musl/src/unistd/x32/lseek.c", // migrated to lib/c/unistd.zig
 };
 
 const compat_time32_files = [_][]const u8{
     "musl/compat/time32/adjtime32.c",
     "musl/compat/time32/adjtimex_time32.c",
-    "musl/compat/time32/aio_suspend_time32.c",
+    // "musl/compat/time32/aio_suspend_time32.c", // migrated to lib/c/aio.zig
     "musl/compat/time32/clock_adjtime32.c",
     "musl/compat/time32/clock_getres_time32.c",
     "musl/compat/time32/clock_gettime32.c",
@@ -1811,8 +1811,8 @@ const compat_time32_files = [_][]const u8{
     "musl/compat/time32/lstat_time32.c",
     "musl/compat/time32/lutimes_time32.c",
     "musl/compat/time32/mktime32.c",
-    "musl/compat/time32/mq_timedreceive_time32.c",
-    "musl/compat/time32/mq_timedsend_time32.c",
+    // "musl/compat/time32/mq_timedreceive_time32.c", // migrated to lib/c/mq.zig
+    // "musl/compat/time32/mq_timedsend_time32.c", // migrated to lib/c/mq.zig
     "musl/compat/time32/mtx_timedlock_time32.c",
     "musl/compat/time32/nanosleep_time32.c",
     "musl/compat/time32/ppoll_time32.c",
