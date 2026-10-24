@@ -761,6 +761,15 @@ fn lowerZigArgs(
     if (conf_comp.version_script.value) |version_script| (try zig_args.addManyAsArray(gpa, 2)).* = .{
         "--version-script", try maker.resolveLazyPathIndexAbs(arena, version_script, compile_index),
     };
+    if (conf_comp.wit_path.value) |wit_path| {
+        try zig_args.append(gpa, try std.fmt.allocPrint(arena, "-fwit-path={s}", .{try maker.resolveLazyPathIndexAbs(arena, wit_path, compile_index)}));
+    }
+    if (conf_comp.wit_world.value) |wit_world| {
+        try zig_args.append(gpa, try std.fmt.allocPrint(arena, "-fwit-world={s}", .{wit_world.slice(conf)}));
+    }
+    if (conf_comp.wasi_adapter.value) |wasi_adapter| {
+        try zig_args.append(gpa, try std.fmt.allocPrint(arena, "-fwasi-adapter={s}", .{try maker.resolveLazyPathIndexAbs(arena, wasi_adapter, compile_index)}));
+    }
     if (conf_comp.flags2.linker_allow_undefined_version.toBool()) |x| {
         try zig_args.append(gpa, if (x) "--undefined-version" else "--no-undefined-version");
     }
