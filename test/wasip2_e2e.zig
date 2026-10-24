@@ -153,6 +153,19 @@ fn verifyFilesystem(io: Io) !void {
         }
         try testing.expect(found_hello);
         try testing.expectEqual(@as(usize, 1), entry_count);
+
+        // Verify directory mutation (createFile / deleteFile) on an opened subdirectory
+        // exercises descriptor-flags.mutate-directory (0x20) in path_open.
+        {
+            var nested_file = try dir.createFile(io, "nested_via_opendir.txt", .{ .read = true });
+            defer nested_file.close(io);
+            var nested_writer = nested_file.writer(io, &.{});
+            try nested_writer.interface.writeAll("Opened dir mutation!");
+        }
+        const nested_content = try dir.readFile(io, "nested_via_opendir.txt", &read_buf);
+        try testing.expectEqualStrings("Opened dir mutation!", nested_content);
+        try dir.deleteFile(io, "nested_via_opendir.txt");
+        try testing.expectError(error.FileNotFound, dir.statFile(io, "nested_via_opendir.txt", .{}));
     }
 
     try cwd.rename(file_path, cwd, renamed_path, io);
