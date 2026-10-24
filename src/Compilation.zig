@@ -3432,7 +3432,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     try man.addInputPathOptional(opts.version_script, .{});
     man.hash.addOptionalBytes(opts.wit_path);
     man.hash.addOptionalBytes(opts.wit_world);
-    man.hash.addOptionalBytes(opts.wasi_adapter_path);
+    try man.addInputPathOptional(if (opts.wasi_adapter_path) |p| .initCwd(p) else null, .{});
     man.hash.add(opts.allow_undefined_version);
     man.hash.addOptional(opts.enable_new_dtags);
 

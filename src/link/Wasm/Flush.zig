@@ -3143,7 +3143,9 @@ fn readWitPathAlloc(io: std.Io, gpa: Allocator, wit_path: []const u8) ![]u8 {
             }
             while (try it.next(io)) |entry| {
                 if (entry.kind == .file and mem.endsWith(u8, entry.name, ".wit")) {
-                    try names.append(gpa, try gpa.dupe(u8, entry.name));
+                    const duped_name = try gpa.dupe(u8, entry.name);
+                    errdefer gpa.free(duped_name);
+                    try names.append(gpa, duped_name);
                 }
             }
             if (names.items.len == 0) return error.FileNotFound;
@@ -3159,12 +3161,15 @@ fn readWitPathAlloc(io: std.Io, gpa: Allocator, wit_path: []const u8) ![]u8 {
                 sources.deinit(gpa);
             }
             for (names.items) |name| {
+                const text = try dir.readFileAlloc(io, name, gpa, .unlimited);
+                errdefer gpa.free(text);
                 try sources.append(gpa, .{
                     .path = name,
-                    .text = try dir.readFileAlloc(io, name, gpa, .unlimited),
+                    .text = text,
                 });
             }
             const combined = try Wasm.component.wit.resolver.combineWitSources(gpa, sources.items, wit_path, null);
+            for (combined.paths) |p| gpa.free(p);
             gpa.free(combined.paths);
             return combined.text;
         },
