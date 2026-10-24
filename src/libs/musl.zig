@@ -580,7 +580,7 @@ const src_files = [_][]const u8{
     // "musl/src/exit/_Exit.c", // migrated to lib/c/exit.zig
     // "musl/src/exit/quick_exit.c", // migrated to lib/c/exit.zig,
     // "musl/src/fcntl/creat.c",
-    // "musl/src/fcntl/fcntl.c",
+    // "musl/src/fcntl/fcntl.c", // migrated to lib/c/fcntl.zig
     // "musl/src/fcntl/openat.c",
     // "musl/src/fcntl/open.c",
     // "musl/src/fenv/aarch64/fenv.s", // migrated to lib/c/fenv.zig; exports: feclearexcept,feraiseexcept,fetestexcept,fegetround,__fesetround,fegetenv,fesetenv
@@ -630,7 +630,7 @@ const src_files = [_][]const u8{
     // "musl/src/ipc/msgget.c",
     // "musl/src/ipc/msgrcv.c",
     // "musl/src/ipc/msgsnd.c",
-    "musl/src/ipc/semctl.c",
+    // "musl/src/ipc/semctl.c", // migrated to lib/c/ipc.zig
     // "musl/src/ipc/semget.c",
     // "musl/src/ipc/semop.c",
     // "musl/src/ipc/semtimedop.c",
@@ -676,7 +676,7 @@ const src_files = [_][]const u8{
     "musl/src/ldso/x86_64/tlsdesc.s",
     // "musl/src/legacy/cuserid.c", // migrated to lib/c/legacy.zig
     // "musl/src/legacy/daemon.c", // migrated to lib/c/legacy.zig
-    "musl/src/legacy/err.c",
+    // "musl/src/legacy/err.c", // migrated to lib/c/legacy.zig; exports: vwarn,vwarnx,verr,verrx,warn,warnx,err,errx
     // "musl/src/legacy/euidaccess.c", // migrated to lib/c/legacy.zig; exports: euidaccess,eaccess
     // "musl/src/legacy/ftw.c", // migrated to lib/c/legacy.zig
     // "musl/src/legacy/futimes.c", // migrated to lib/c/legacy.zig
@@ -715,7 +715,7 @@ const src_files = [_][]const u8{
     // "musl/src/linux/open_by_handle_at.c",
     // "musl/src/linux/personality.c",
     // "musl/src/linux/pivot_root.c",
-    // "musl/src/linux/prctl.c",
+    // "musl/src/linux/prctl.c", // migrated to lib/c/linux.zig
     // "musl/src/linux/preadv2.c",
     // "musl/src/linux/prlimit.c",
     // "musl/src/linux/process_vm.c",
@@ -1037,7 +1037,7 @@ const src_files = [_][]const u8{
     // "musl/src/misc/setpriority.c",
     // "musl/src/misc/setrlimit.c",
     // "musl/src/misc/syscall.c", // migrated to lib/c/misc.zig
-    "musl/src/misc/syslog.c",
+    // "musl/src/misc/syslog.c", // migrated to lib/c/misc.zig; exports: setlogmask,closelog,openlog,syslog,vsyslog,__syslog_lockptr
     // "musl/src/misc/wordexp.c",
     // "musl/src/mman/mmap.c",
     "musl/src/mman/mremap.c",
@@ -1174,9 +1174,9 @@ const src_files = [_][]const u8{
     // "musl/src/prng/random.c",
     // "musl/src/process/aarch64/vfork.s", // migrated to lib/c/process.zig
     // "musl/src/process/arm/vfork.s", // migrated to lib/c/process.zig
-    "musl/src/process/execl.c",
-    "musl/src/process/execle.c",
-    "musl/src/process/execlp.c",
+    // "musl/src/process/execl.c", // migrated to lib/c/process.zig
+    // "musl/src/process/execle.c", // migrated to lib/c/process.zig
+    // "musl/src/process/execlp.c", // migrated to lib/c/process.zig
     // "musl/src/process/execv.c", // migrated to lib/c/process.zig
     // "musl/src/process/execvp.c", // migrated to lib/c/process.zig
     // "musl/src/process/fexecve.c", // migrated to lib/c/unistd.zig
@@ -1360,8 +1360,8 @@ const src_files = [_][]const u8{
     "musl/src/stdio/asprintf.c",
     // "musl/src/stdio/clearerr.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/dprintf.c",
-    "musl/src/stdio/ext2.c",
-    "musl/src/stdio/ext.c",
+    // "musl/src/stdio/ext2.c", // migrated to lib/c/stdio.zig; exports: __freadahead,__freadptr,__freadptrinc,__fseterr
+    // "musl/src/stdio/ext.c", // migrated to lib/c/stdio.zig; exports: _flushlbf,__fsetlocking,__fwriting,__freading,__freadable,__fwritable,__flbf,__fbufsize,__fpending,__fpurge
     "musl/src/stdio/fclose.c",
     // "musl/src/stdio/__fclose_ca.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/__fdopen.c",
@@ -1398,7 +1398,7 @@ const src_files = [_][]const u8{
     "musl/src/stdio/fwprintf.c",
     // "musl/src/stdio/fwrite.c", // migrated to lib/c/stdio.zig; exports: __fwritex,fwrite
     "musl/src/stdio/fwscanf.c",
-    "musl/src/stdio/getc.c",
+    // "musl/src/stdio/getc.c", // migrated to lib/c/stdio.zig
     // "musl/src/stdio/getchar.c", // migrated to lib/c/stdio.zig
     // "musl/src/stdio/getchar_unlocked.c", // migrated to lib/c/stdio.zig
     // "musl/src/stdio/getc_unlocked.c", // migrated to lib/c/stdio.zig
@@ -1456,21 +1456,21 @@ const src_files = [_][]const u8{
     // "musl/src/stdio/__uflow.c", // migrated to lib/c/stdio.zig
     // "musl/src/stdio/ungetc.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/ungetwc.c",
-    "musl/src/stdio/vasprintf.c",
-    "musl/src/stdio/vdprintf.c",
-    "musl/src/stdio/vfprintf.c",
-    "musl/src/stdio/vfscanf.c",
-    "musl/src/stdio/vfwprintf.c",
-    "musl/src/stdio/vfwscanf.c",
-    "musl/src/stdio/vprintf.c",
-    "musl/src/stdio/vscanf.c",
-    "musl/src/stdio/vsnprintf.c",
-    "musl/src/stdio/vsprintf.c",
-    "musl/src/stdio/vsscanf.c",
-    "musl/src/stdio/vswprintf.c",
-    "musl/src/stdio/vswscanf.c",
-    "musl/src/stdio/vwprintf.c",
-    "musl/src/stdio/vwscanf.c",
+    // "musl/src/stdio/vasprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vdprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vfprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vfscanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vfwprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vfwscanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vscanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vsnprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vsprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vsscanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vswprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vswscanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vwprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vwscanf.c", // migrated to lib/c/stdio.zig
     "musl/src/stdio/wprintf.c",
     "musl/src/stdio/wscanf.c",
     // "musl/src/stdlib/atof.c",

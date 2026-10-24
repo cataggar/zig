@@ -102,10 +102,61 @@ const off_tid = part1_size;
 const off_robust_head: usize = part1_size + map_base_off + 8 * ptr_size;
 const off_robust_off: usize = off_robust_head + ptr_size;
 const off_robust_pending: usize = off_robust_head + 2 * ptr_size;
-const can_compile_c_va_arg = switch (arch) {
-    .aarch64, .aarch64_be, .s390x => false,
-    else => true,
-};
+const VaList = std.builtin.VaList;
+
+inline fn cVaArg(ap: *VaList, comptime T: type) T {
+    if ((builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .aarch64_be) and
+        builtin.os.tag != .macos and builtin.os.tag != .ios and
+        builtin.os.tag != .tvos and builtin.os.tag != .watchos and
+        builtin.os.tag != .visionos and builtin.os.tag != .windows)
+    {
+        const is_be = builtin.cpu.arch == .aarch64_be;
+        const align_bytes: usize = @max(@alignOf(T), 8);
+        const size_bytes: usize = @sizeOf(T);
+        const offs = ap.__gr_offs;
+        if (offs < 0) {
+            const aligned_offs: c_int = if (align_bytes > 8)
+                (offs + @as(c_int, @intCast(align_bytes - 1))) & -@as(c_int, @intCast(align_bytes))
+            else
+                offs;
+            const reg_size: c_int = @intCast((size_bytes + 7) & ~@as(usize, 7));
+            const new_offs = aligned_offs + reg_size;
+            ap.__gr_offs = new_offs;
+            if (new_offs <= 0) {
+                const top: usize = @intFromPtr(ap.__gr_top);
+                const base_addr: usize = @bitCast(@as(isize, @bitCast(top)) + @as(isize, aligned_offs));
+                const be_delta: usize = if (is_be and size_bytes < 8) 8 - size_bytes else 0;
+                return @as(*align(1) const T, @ptrFromInt(base_addr + be_delta)).*;
+            }
+        }
+        const stack_addr: usize = @intFromPtr(ap.__stack);
+        const aligned_stack: usize = (stack_addr + (align_bytes - 1)) & ~(align_bytes - 1);
+        const stack_size: usize = (size_bytes + 7) & ~@as(usize, 7);
+        ap.__stack = @ptrFromInt(aligned_stack + stack_size);
+        const be_delta: usize = if (is_be and size_bytes < 8) 8 - size_bytes else 0;
+        return @as(*align(1) const T, @ptrFromInt(aligned_stack + be_delta)).*;
+    }
+    if (builtin.cpu.arch == .s390x) {
+        const padded_size: usize = 8;
+        const padding: usize = padded_size - @sizeOf(T);
+        const addr: usize = if (ap.__gpr < 5) blk: {
+            const count: usize = @intCast(ap.__gpr);
+            ap.__gpr += 1;
+            break :blk @intFromPtr(ap.__reg_save_area) + (2 + count) * padded_size + padding;
+        } else blk: {
+            const ovf: usize = @intFromPtr(ap.__overflow_arg_area);
+            ap.__overflow_arg_area = @ptrFromInt(ovf + padded_size);
+            break :blk ovf + padding;
+        };
+        return @as(*align(1) const T, @ptrFromInt(addr)).*;
+    }
+    if (builtin.cpu.arch == .x86_64 and (builtin.os.tag == .windows or builtin.os.tag == .uefi)) {
+        const cur: usize = @intFromPtr(ap.*);
+        ap.* = @ptrFromInt(cur + 8);
+        return @as(*align(1) const T, @ptrFromInt(cur)).*;
+    }
+    return @cVaArg(ap, T);
+}
 
 const LibC = extern struct {
     can_do_threads: u8,
@@ -191,11 +242,9 @@ comptime {
         symbol(&posix_spawn_file_actions_destroy_impl, "posix_spawn_file_actions_destroy");
         symbol(&__execvpe, "__execvpe");
         symbol(&execvpImpl, "execvp");
-        if (can_compile_c_va_arg) {
-            symbol(&execlImpl, "execl");
-            symbol(&execleImpl, "execle");
-            symbol(&execlpImpl, "execlp");
-        }
+        symbol(&execlImpl, "execl");
+        symbol(&execleImpl, "execle");
+        symbol(&execlpImpl, "execlp");
         symbol(&forkImpl, "fork");
         symbol(&dummyForkHandler, "__fork_handler");
         symbol(&dummyForkHandler, "__malloc_atfork");
@@ -637,7 +686,7 @@ fn execlImpl(path: [*:0]const u8, argv0: ?[*:0]const u8, ...) callconv(.c) c_int
     argv_buf[0] = argv0;
     var argc: usize = 1;
     while (argc < MAX_ARGS) : (argc += 1) {
-        argv_buf[argc] = @cVaArg(&ap, ?[*:0]const u8);
+        argv_buf[argc] = cVaArg(&ap, ?[*:0]const u8);
         if (argv_buf[argc] == null) break;
     }
     argv_buf[argc] = null;
@@ -653,12 +702,12 @@ fn execleImpl(path: [*:0]const u8, argv0: ?[*:0]const u8, ...) callconv(.c) c_in
     argv_buf[0] = argv0;
     var argc: usize = 1;
     while (argc < MAX_ARGS) : (argc += 1) {
-        argv_buf[argc] = @cVaArg(&ap, ?[*:0]const u8);
+        argv_buf[argc] = cVaArg(&ap, ?[*:0]const u8);
         if (argv_buf[argc] == null) break;
     }
     argv_buf[argc] = null;
     // envp follows the null terminator
-    const envp = @cVaArg(&ap, [*:null]const ?[*:0]const u8);
+    const envp = cVaArg(&ap, [*:null]const ?[*:0]const u8);
 
     return execve(path, @ptrCast(&argv_buf), envp);
 }
@@ -671,7 +720,7 @@ fn execlpImpl(file: [*:0]const u8, argv0: ?[*:0]const u8, ...) callconv(.c) c_in
     argv_buf[0] = argv0;
     var argc: usize = 1;
     while (argc < MAX_ARGS) : (argc += 1) {
-        argv_buf[argc] = @cVaArg(&ap, ?[*:0]const u8);
+        argv_buf[argc] = cVaArg(&ap, ?[*:0]const u8);
         if (argv_buf[argc] == null) break;
     }
     argv_buf[argc] = null;
