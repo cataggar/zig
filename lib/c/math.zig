@@ -1169,6 +1169,7 @@ comptime {
         symbol(&__math_uflowf, "__math_uflowf");
         symbol(&__math_xflow, "__math_xflow");
         symbol(&__math_xflowf, "__math_xflowf");
+        symbol(&scalb, "scalb");
         symbol(&scalbf, "scalbf");
         symbol(&nextafter, "nextafter");
         symbol(&nexttoward, "nexttoward");

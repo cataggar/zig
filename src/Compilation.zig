@@ -2512,7 +2512,6 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
                     if (!std.zig.target.canBuildLibC(target)) return diag.fail(.cross_libc_unavailable);
 
                     comp.queued_jobs.wasi_libc_crt_file[@backingInt(wasi_libc.execModelCrtFile(comp.config.wasi_exec_model))] = true;
-                    comp.queued_jobs.wasi_libc_crt_file[@backingInt(wasi_libc.CrtFile.libc_a)] = true;
                 } else if (target.isMinGW()) {
                     if (!std.zig.target.canBuildLibC(target)) return diag.fail(.cross_libc_unavailable);
 
@@ -7348,7 +7347,7 @@ pub fn updateSubCompilation(
     }
 }
 
-fn buildOutputFromZig(
+pub fn buildOutputFromZig(
     comp: *Compilation,
     src_basename: []const u8,
     root_name: []const u8,

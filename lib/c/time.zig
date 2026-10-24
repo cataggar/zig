@@ -6,10 +6,10 @@ const errno = @import("../c.zig").errno;
 const syscallArg = @import("../c.zig").syscallArg;
 
 const TZNAME_MAX = 6;
-const NAME_MAX = linux.NAME_MAX;
-const PATH_MAX = linux.PATH_MAX;
+const NAME_MAX = 255;
+const PATH_MAX = 4096;
 const time_t = c_longlong;
-const Timespec = if (@sizeOf(c_long) >= 8)
+const Timespec = if (@sizeOf(c_long) >= 8 or builtin.target.isWasiLibC())
     extern struct { sec: time_t, nsec: c_long }
 else if (builtin.cpu.arch.endian() == .little)
     extern struct { sec: time_t, nsec: c_long, _pad: c_long = 0 }
@@ -29,7 +29,8 @@ const timeb = extern struct {
     timezone: c_short,
     dstflag: c_short,
 };
-const tm = extern struct {
+const gmtoff_t = if (builtin.target.isWasiLibC()) c_int else c_long;
+const tm = if (builtin.target.isWasiLibC()) extern struct {
     tm_sec: c_int,
     tm_min: c_int,
     tm_hour: c_int,
@@ -39,7 +40,20 @@ const tm = extern struct {
     tm_wday: c_int,
     tm_yday: c_int,
     tm_isdst: c_int,
-    __tm_gmtoff: c_long,
+    __tm_gmtoff: gmtoff_t,
+    __tm_zone: ?[*:0]const u8,
+    __tm_nsec: c_int = 0,
+} else extern struct {
+    tm_sec: c_int,
+    tm_min: c_int,
+    tm_hour: c_int,
+    tm_mday: c_int,
+    tm_mon: c_int,
+    tm_year: c_int,
+    tm_wday: c_int,
+    tm_yday: c_int,
+    tm_isdst: c_int,
+    __tm_gmtoff: gmtoff_t,
     __tm_zone: ?[*:0]const u8,
 };
 const __utc: [3:0]u8 = "UTC".*;
@@ -63,7 +77,10 @@ var old_tz: ?[*]u8 = &old_tz_buf;
 var old_tz_size: usize = 32;
 var timezone_lock: c_int = 0;
 var __timezone_lockptr: *volatile c_int = &timezone_lock;
-const LibC = extern struct {
+const LibC = if (builtin.target.isWasiLibC()) extern struct {
+    global_locale: locale_struct,
+    current_locale: ?*locale_struct,
+} else extern struct {
     can_do_threads: u8,
     threaded: u8,
     secure: u8,
@@ -99,6 +116,9 @@ extern "c" fn pthread_setcancelstate(state: c_int, oldstate: ?*c_int) callconv(.
 extern "c" fn malloc(size: usize) callconv(.c) ?*anyopaque;
 extern "c" fn __lock(l: *volatile c_int) callconv(.c) void;
 extern "c" fn __unlock(l: *volatile c_int) callconv(.c) void;
+extern const _CLOCK_REALTIME: anyopaque;
+extern "c" fn clock_gettime(clk: *const anyopaque, ts: *Timespec) callconv(.c) c_int;
+extern "c" fn __clock_gettime(clk: *const anyopaque, ts: *Timespec) callconv(.c) c_int;
 const PTHREAD_CANCEL_DEFERRED = 0;
 const MAP_FAILED = std.math.maxInt(usize);
 var getdate_err: c_int = 0;
@@ -106,14 +126,6 @@ var tmbuf: tm = undefined;
 
 comptime {
     if (builtin.target.isMuslLibC()) {
-        symbol(&ftimeLinux, "ftime");
-        symbol(&ftimeLinux, "__ftime64");
-        symbol(&__localtime_r, "localtime_r");
-        symbol(&__localtime_r, "__localtime64_r");
-        symbol(&__gmtime_r, "gmtime_r");
-        symbol(&__gmtime_r, "__gmtime64_r");
-        symbol(&timespec_getLinux, "timespec_get");
-        symbol(&timespec_getLinux, "__timespec_get_time64");
         symbol(&clock_gettimeLinux, "clock_gettime");
         symbol(&clock_gettimeLinux, "__clock_gettime");
         symbol(&clock_gettimeLinux, "__clock_gettime64");
@@ -137,6 +149,16 @@ comptime {
         symbol(&utimeLinux, "utime");
         symbol(&utimeLinux, "__utime64");
         symbol(&__map_file, "__map_file");
+    }
+    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
+        symbol(&ftimeLinux, "ftime");
+        symbol(&ftimeLinux, "__ftime64");
+        symbol(&__localtime_r, "localtime_r");
+        symbol(&__localtime_r, "__localtime64_r");
+        symbol(&__gmtime_r, "gmtime_r");
+        symbol(&__gmtime_r, "__gmtime64_r");
+        symbol(&timespec_getLinux, "timespec_get");
+        symbol(&timespec_getLinux, "__timespec_get_time64");
         symbol(&strftimeFmt1, "__strftime_fmt_1");
         symbol(&__strftime_l, "__strftime_l");
         symbol(&strftimeImpl, "strftime");
@@ -155,8 +177,6 @@ comptime {
         symbol(&__tzname, "__tzname");
         symbol(&__tzname, "tzname");
         @export(&__timezone_lockptr, .{ .name = "__timezone_lockptr", .linkage = .weak, .visibility = .hidden });
-    }
-    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&difftimeImpl, "difftime");
         symbol(&difftimeImpl, "__difftime64");
         symbol(&__month_to_secs, "__month_to_secs");
@@ -166,7 +186,6 @@ comptime {
         symbol(&timegmImpl, "timegm");
         symbol(&timegmImpl, "__timegm_time64");
         symbol(&__gmtime_r, "__gmtime_r");
-        if (builtin.target.isWasiLibC()) symbol(&__gmtime_r, "gmtime_r");
         symbol(&gmtimeImpl, "gmtime");
         symbol(&gmtimeImpl, "__gmtime64");
         symbol(&__utc, "__utc");
@@ -174,7 +193,7 @@ comptime {
         symbol(&__asctime_r, "asctime_r");
         symbol(&asctimeImpl, "asctime");
     }
-    if (builtin.target.isMuslLibC() and builtin.link_libc) {
+    if ((builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) and builtin.link_libc) {
         symbol(&ctimeImpl, "ctime");
         symbol(&ctimeImpl, "__ctime64");
         symbol(&ctime_rImpl, "ctime_r");
@@ -187,12 +206,6 @@ comptime {
         symbol(&strptimeImpl, "strptime");
         symbol(&getdate_err, "getdate_err");
         symbol(&getdateImpl, "getdate");
-    }
-    if (builtin.target.isWasiLibC() and builtin.link_libc) {
-        symbol(&ctimeImpl, "ctime");
-        symbol(&ctimeImpl, "__ctime64");
-        symbol(&ctime_rImpl, "ctime_r");
-        symbol(&ctime_rImpl, "__ctime64_r");
     }
 }
 
@@ -376,11 +389,11 @@ fn isAlpha(c: u8) bool {
 }
 
 fn lockTimezone() void {
-    __lock(&timezone_lock);
+    if (!builtin.target.isWasiLibC()) __lock(&timezone_lock);
 }
 
 fn unlockTimezone() void {
-    __unlock(&timezone_lock);
+    if (!builtin.target.isWasiLibC()) __unlock(&timezone_lock);
 }
 
 fn clockLinux() callconv(.c) c_long {
@@ -411,7 +424,11 @@ fn difftimeImpl(t1: time_t, t0: time_t) callconv(.c) f64 {
 
 fn ftimeLinux(tp: *timeb) callconv(.c) c_int {
     var ts: Timespec = undefined;
-    if (clockGettime(@backingInt(linux.CLOCK.REALTIME), &ts) < 0) return -1;
+    const r = if (builtin.target.isWasiLibC())
+        clock_gettime(&_CLOCK_REALTIME, &ts)
+    else
+        clockGettime(@backingInt(linux.CLOCK.REALTIME), &ts);
+    if (r < 0) return -1;
     tp.time = ts.sec;
     tp.millitm = @intCast(@divTrunc(ts.nsec, 1000000));
     tp.timezone = 0;
@@ -421,7 +438,11 @@ fn ftimeLinux(tp: *timeb) callconv(.c) c_int {
 
 fn timespec_getLinux(ts: *Timespec, base: c_int) callconv(.c) c_int {
     if (base != 1) return 0; // TIME_UTC = 1
-    if (clockGettime(@backingInt(linux.CLOCK.REALTIME), ts) < 0) return 0;
+    const r = if (builtin.target.isWasiLibC())
+        __clock_gettime(&_CLOCK_REALTIME, ts)
+    else
+        clockGettime(@backingInt(linux.CLOCK.REALTIME), ts);
+    if (r < 0) return 0;
     return base;
 }
 
@@ -580,10 +601,10 @@ fn __tm_to_secs(t: *const tm) callconv(.c) c_longlong {
 }
 
 fn timegmImpl(t: *tm) callconv(.c) time_t {
-    var new: tm = undefined;
+    var new: tm = std.mem.zeroes(tm);
     const secs = __tm_to_secs(t);
     if (__secs_to_tm(secs, &new) < 0) {
-        std.c._errno().* = @backingInt(linux.E.OVERFLOW);
+        std.c._errno().* = @backingInt(std.posix.E.OVERFLOW);
         return -1;
     }
     new.tm_isdst = 0;
@@ -595,7 +616,7 @@ fn timegmImpl(t: *tm) callconv(.c) time_t {
 
 fn __gmtime_r(t: *const time_t, r: *tm) callconv(.c) ?*tm {
     if (__secs_to_tm(t.*, r) < 0) {
-        std.c._errno().* = @backingInt(linux.E.OVERFLOW);
+        std.c._errno().* = @backingInt(std.posix.E.OVERFLOW);
         return null;
     }
     r.tm_isdst = 0;
@@ -760,7 +781,9 @@ fn doTzset() void {
         r0[i] = 0;
         r1[i] = 0;
     }
-    if (zi) |z| _ = linux.munmap(z, map_size);
+    if (!builtin.target.isWasiLibC()) {
+        if (zi) |z| _ = linux.munmap(z, map_size);
+    }
     zi = null;
     var s_len = cStringLen(s);
     if (s_len > PATH_MAX + 1) {
@@ -782,32 +805,38 @@ fn doTzset() void {
         if (p2 != s and (p2[0] == '+' or p2[0] == '-' or isDigit(p2[0]) or cStringEq(&dummy_name, "UTC") or cStringEq(&dummy_name, "GMT"))) posix_form = true;
     }
     if (!posix_form) {
-        if (s[0] == ':') s += 1;
-        if (s[0] == '/' or s[0] == '.') {
-            if (__libc.secure == 0 or cStringEq(s, "/etc/localtime")) map = __map_file(s, &map_size);
+        if (builtin.target.isWasiLibC()) {
+            s = &__utc;
         } else {
-            const l0 = cStringLen(s);
-            if (l0 <= NAME_MAX and !cStringChr(s, '.')) {
-                @memcpy(pathname_base[0 .. l0 + 1], s[0 .. l0 + 1]);
-                pathname_base[l0] = 0;
-                const search = "/usr/share/zoneinfo/\x00/share/zoneinfo/\x00/etc/zoneinfo/\x00";
-                var try_idx: usize = 0;
-                while (map == null and search[try_idx] != 0) {
-                    const try_path: [*:0]const u8 = @ptrCast(search.ptr + try_idx);
-                    const l = cStringLen(try_path);
-                    @memcpy((pathname_base - l)[0..l], try_path[0..l]);
-                    map = __map_file(pathname_base - l, &map_size);
-                    try_idx += l + 1;
+            if (s[0] == ':') s += 1;
+            if (s[0] == '/' or s[0] == '.') {
+                if (__libc.secure == 0 or cStringEq(s, "/etc/localtime")) map = __map_file(s, &map_size);
+            } else {
+                const l0 = cStringLen(s);
+                if (l0 <= NAME_MAX and !cStringChr(s, '.')) {
+                    @memcpy(pathname_base[0 .. l0 + 1], s[0 .. l0 + 1]);
+                    pathname_base[l0] = 0;
+                    const search = "/usr/share/zoneinfo/\x00/share/zoneinfo/\x00/etc/zoneinfo/\x00";
+                    var try_idx: usize = 0;
+                    while (map == null and search[try_idx] != 0) {
+                        const try_path: [*:0]const u8 = @ptrCast(search.ptr + try_idx);
+                        const l = cStringLen(try_path);
+                        @memcpy((pathname_base - l)[0..l], try_path[0..l]);
+                        map = __map_file(pathname_base - l, &map_size);
+                        try_idx += l + 1;
+                    }
                 }
             }
+            if (map == null) s = &__utc;
         }
-        if (map == null) s = &__utc;
     }
-    if (map) |m| if (map_size < 44 or !std.mem.eql(u8, m[0..4], "TZif")) {
-        _ = linux.munmap(m, map_size);
-        map = null;
-        s = &__utc;
-    };
+    if (!builtin.target.isWasiLibC()) {
+        if (map) |m| if (map_size < 44 or !std.mem.eql(u8, m[0..4], "TZif")) {
+            _ = linux.munmap(m, map_size);
+            map = null;
+            s = &__utc;
+        };
+    }
     zi = map;
     if (map) |m| {
         var scale: u5 = 2;
@@ -1018,12 +1047,14 @@ fn __localtime_r(t: *const time_t, r: *tm) callconv(.c) ?*tm {
     if (t64 < @as(c_longlong, std.math.minInt(c_int)) * 31622400 or
         t64 > @as(c_longlong, std.math.maxInt(c_int)) * 31622400)
     {
-        std.c._errno().* = @backingInt(linux.E.OVERFLOW);
+        std.c._errno().* = @backingInt(std.posix.E.OVERFLOW);
         return null;
     }
-    __secs_to_zone(t64, 0, &r.tm_isdst, &r.__tm_gmtoff, null, &r.__tm_zone);
+    var off: c_long = undefined;
+    __secs_to_zone(t64, 0, &r.tm_isdst, &off, null, &r.__tm_zone);
+    r.__tm_gmtoff = @intCast(off);
     if (__secs_to_tm(t64 + r.__tm_gmtoff, r) < 0) {
-        std.c._errno().* = @backingInt(linux.E.OVERFLOW);
+        std.c._errno().* = @backingInt(std.posix.E.OVERFLOW);
         return null;
     }
     return r;
@@ -1034,21 +1065,24 @@ fn localtimeImpl(t: *const time_t) callconv(.c) ?*tm {
 }
 
 fn mktimeImpl(t: *tm) callconv(.c) time_t {
-    var new: tm = undefined;
+    var new: tm = std.mem.zeroes(tm);
     var opp: c_long = undefined;
+    var off: c_long = undefined;
     var secs = __tm_to_secs(t);
 
-    __secs_to_zone(secs, 1, &new.tm_isdst, &new.__tm_gmtoff, &opp, &new.__tm_zone);
+    __secs_to_zone(secs, 1, &new.tm_isdst, &off, &opp, &new.__tm_zone);
+    new.__tm_gmtoff = @intCast(off);
 
     if (t.tm_isdst >= 0 and new.tm_isdst != t.tm_isdst)
         secs -= opp - new.__tm_gmtoff;
 
     secs -= new.__tm_gmtoff;
 
-    __secs_to_zone(secs, 0, &new.tm_isdst, &new.__tm_gmtoff, &opp, &new.__tm_zone);
+    __secs_to_zone(secs, 0, &new.tm_isdst, &off, &opp, &new.__tm_zone);
+    new.__tm_gmtoff = @intCast(off);
 
     if (__secs_to_tm(secs + new.__tm_gmtoff, &new) < 0) {
-        std.c._errno().* = @backingInt(linux.E.OVERFLOW);
+        std.c._errno().* = @backingInt(std.posix.E.OVERFLOW);
         return -1;
     }
 
@@ -1358,20 +1392,20 @@ fn parseNumericDigits(dest: *c_int, s: *[*:0]const u8, width: c_int, adj: c_int)
 fn getdateImpl(s: [*:0]const u8) callconv(.c) ?*tm {
     var ret: ?*tm = null;
     var cs: c_int = undefined;
-    _ = pthread_setcancelstate(PTHREAD_CANCEL_DEFERRED, &cs);
+    if (!builtin.target.isWasiLibC()) _ = pthread_setcancelstate(PTHREAD_CANCEL_DEFERRED, &cs);
 
     const datemsk = getenv("DATEMSK") orelse {
         getdate_err = 1;
-        _ = pthread_setcancelstate(cs, null);
+        if (!builtin.target.isWasiLibC()) _ = pthread_setcancelstate(cs, null);
         return null;
     };
 
     const f = fopen(datemsk, "rbe") orelse {
-        if (std.c._errno().* == @backingInt(linux.E.NOMEM))
+        if (std.c._errno().* == @backingInt(std.posix.E.NOMEM))
             getdate_err = 6
         else
             getdate_err = 2;
-        _ = pthread_setcancelstate(cs, null);
+        if (!builtin.target.isWasiLibC()) _ = pthread_setcancelstate(cs, null);
         return null;
     };
 
@@ -1392,7 +1426,7 @@ fn getdateImpl(s: [*:0]const u8) callconv(.c) ?*tm {
     }
 
     _ = fclose(f);
-    _ = pthread_setcancelstate(cs, null);
+    if (!builtin.target.isWasiLibC()) _ = pthread_setcancelstate(cs, null);
     return ret;
 }
 
@@ -1446,6 +1480,12 @@ const pthread = extern struct {
 };
 
 fn currentLocale() locale_t {
+    if (builtin.target.isWasiLibC()) {
+        if (__libc.current_locale == null) {
+            __libc.current_locale = &__libc.global_locale;
+        }
+        return @ptrCast(__libc.current_locale.?);
+    }
     return @ptrCast(pthread_self().locale);
 }
 

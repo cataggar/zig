@@ -46,6 +46,10 @@ comptime {
             symbol(&__xmknodat, "__xmknodat");
         }
     }
+    if (builtin.target.isWasiLibC() and builtin.link_libc) {
+        symbol(&futimesatWasi, "__futimesat");
+        symbol(&futimesatWasi, "futimesat");
+    }
 }
 
 // --- Direct syscall wrappers ---
@@ -450,6 +454,8 @@ fn lchmodLinux(path: [*:0]const u8, mode: linux.mode_t) callconv(.c) c_int {
 }
 
 const Timeval = extern struct { tv_sec: i64, tv_usec: c_long };
+const WasiTimeval = extern struct { tv_sec: i64, tv_usec: i64 };
+extern "c" fn utimensat(dirfd: c_int, pathname: ?[*:0]const u8, times: ?*const [2]Ts, flags: c_int) callconv(.c) c_int;
 
 fn __futimesat(dirfd: c_int, pathname: ?[*:0]const u8, times: ?*const [2]Timeval) callconv(.c) c_int {
     if (times) |tv| {
@@ -464,6 +470,21 @@ fn __futimesat(dirfd: c_int, pathname: ?[*:0]const u8, times: ?*const [2]Timeval
         return utimensatLinux(dirfd, pathname, &ts, 0);
     }
     return utimensatLinux(dirfd, pathname, null, 0);
+}
+
+fn futimesatWasi(dirfd: c_int, pathname: ?[*:0]const u8, times: ?*const [2]WasiTimeval) callconv(.c) c_int {
+    if (times) |tv| {
+        if (@as(u64, @bitCast(tv[0].tv_usec)) >= 1000000 or @as(u64, @bitCast(tv[1].tv_usec)) >= 1000000) {
+            std.c._errno().* = @intFromEnum(std.c.E.INVAL);
+            return -1;
+        }
+        const ts = [2]Ts{
+            .{ .sec = tv[0].tv_sec, .nsec = @intCast(tv[0].tv_usec * 1000) },
+            .{ .sec = tv[1].tv_sec, .nsec = @intCast(tv[1].tv_usec * 1000) },
+        };
+        return utimensat(dirfd, pathname, &ts, 0);
+    }
+    return utimensat(dirfd, pathname, null, 0);
 }
 
 // --- __xstat compat ---

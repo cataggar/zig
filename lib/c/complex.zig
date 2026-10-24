@@ -413,6 +413,8 @@ comptime {
         symbol(&cimagC, "cimag");
         symbol(&cimagfC, "cimagf");
         symbol(&cimaglC, "cimagl");
+    }
+    if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&ldexp_cexpC, "__ldexp_cexp");
         symbol(&ldexp_cexpfC, "__ldexp_cexpf");
     }

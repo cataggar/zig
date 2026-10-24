@@ -40,7 +40,7 @@ const glob_t = extern struct {
 // OS types (musl Linux layout)
 // ============================================================
 const Stat = switch (builtin.cpu.arch) {
-    .x86_64, .powerpc64, .powerpc64le, .s390x, .mips, .mipsel => extern struct {
+    .x86_64, .powerpc64, .powerpc64le, .s390x, .mips, .mipsel, .wasm32, .wasm64 => extern struct {
         _pad0: [24]u8,
         st_mode: u32,
         _rest: [228]u8,
@@ -63,7 +63,11 @@ const Stat = switch (builtin.cpu.arch) {
 
 const DIR = opaque {};
 
-const Dirent = extern struct {
+const Dirent = if (builtin.target.isWasiLibC()) extern struct {
+    d_ino: u64,
+    d_type: u8,
+    d_name: [4096]u8,
+} else extern struct {
     d_ino: u64,
     d_off: i64,
     d_reclen: u16,
@@ -184,9 +188,9 @@ const CHARCLASS_NAME_MAX: usize = 14;
 const PATH_MAX: usize = 4096;
 const MB_LEN_MAX: usize = 4;
 const MAX_NEG_CLASSES: usize = 64;
-const DT_DIR: u8 = 4;
-const DT_LNK: u8 = 10;
-const DT_REG: u8 = 8;
+const DT_DIR: u8 = if (builtin.target.isWasiLibC()) 3 else 4;
+const DT_LNK: u8 = if (builtin.target.isWasiLibC()) 7 else 10;
+const DT_REG: u8 = if (builtin.target.isWasiLibC()) 4 else 8;
 const ENOMEM: c_int = 12;
 const ENOENT: c_int = 2;
 
@@ -4000,14 +4004,14 @@ fn doGlob(
             (if (flags & GLOB_NOESCAPE != 0) FNM_NOESCAPE else 0) |
             (if (flags & GLOB_PERIOD == 0) FNM_PERIOD else 0);
 
-        if (fnmatchImpl(@ptrCast(&de.d_name), @ptrCast(pat), fnm_flags) != 0) {
+        if (fnmatchImpl(@ptrCast(pat), @ptrCast(&de.d_name), fnm_flags) != 0) {
             if (p2) |p2v| p2v[0] = saved_sep;
             continue;
         }
 
         if (p2 != null and flags & GLOB_PERIOD != 0 and de.d_name[0] == '.' and
             (de.d_name[1] == 0 or (de.d_name[1] == '.' and de.d_name[2] == 0)) and
-            fnmatchImpl(@ptrCast(&de.d_name), @ptrCast(pat), fnm_flags | FNM_PERIOD) != 0)
+            fnmatchImpl(@ptrCast(pat), @ptrCast(&de.d_name), fnm_flags | FNM_PERIOD) != 0)
         {
             if (p2) |p2v| p2v[0] = saved_sep;
             continue;
@@ -4124,8 +4128,10 @@ fn globImpl(
         buf[0] = 0;
         var pos: usize = 0;
         var s: [*]u8 = p;
-        if (flags & (GLOB_TILDE | GLOB_TILDE_CHECK) != 0 and p[0] == '~') {
-            @"error" = expandTilde(&s, &buf, &pos);
+        if (!builtin.target.isWasiLibC()) {
+            if (flags & (GLOB_TILDE | GLOB_TILDE_CHECK) != 0 and p[0] == '~') {
+                @"error" = expandTilde(&s, &buf, &pos);
+            }
         }
         if (@"error" == 0) {
             @"error" = doGlob(&buf, pos, 0, s, flags, errfunc, &tail);
@@ -4225,13 +4231,15 @@ fn globfreeImpl(g: *glob_t) callconv(.c) void {
 // ============================================================
 
 comptime {
-    if (builtin.target.isMuslLibC() and builtin.link_libc) {
+    if ((builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) and builtin.link_libc) {
         symbol(&regcompImpl, "regcomp");
         symbol(&regexecImpl, "regexec");
         symbol(&regfreeImpl, "regfree");
         symbol(&regerrorImpl, "regerror");
         symbol(&fnmatchImpl, "fnmatch");
         symbol(&globImpl, "glob");
+        symbol(&globImpl, "glob64");
         symbol(&globfreeImpl, "globfree");
+        symbol(&globfreeImpl, "globfree64");
     }
 }

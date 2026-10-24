@@ -9,7 +9,7 @@ comptime {
         symbol(&__errno_location, "__errno_location");
         symbol(&__errno_location, "___errno_location");
     }
-    if (builtin.target.isMuslLibC() and builtin.os.tag != .wasi and builtin.link_libc) {
+    if ((builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) and builtin.link_libc) {
         symbol(&strerror, "strerror");
         symbol(&__strerror_l, "__strerror_l");
         symbol(&__strerror_l, "strerror_l");
@@ -28,13 +28,13 @@ fn __errno_location() callconv(.c) *c_int {
 
 // Error message table indexed by errno value.
 // Max errno on Linux is ~133 (1133 on MIPS for EDQUOT).
-const MAX_ERRNO = if (builtin.cpu.arch.isMIPS()) 1134 else 134;
+const MAX_ERRNO = if (builtin.target.isWasiLibC()) 77 else if (builtin.cpu.arch.isMIPS()) 1134 else 134;
 
 const errmsg = blk: {
     @setEvalBranchQuota(5000);
     var table: [MAX_ERRNO][*:0]const u8 = undefined;
     for (&table) |*entry| entry.* = "No error information";
-    const E = linux.E;
+    const E = if (builtin.target.isWasiLibC()) std.os.wasi.errno_t else linux.E;
     table[@backingInt(E.ILSEQ)] = "Illegal byte sequence";
     table[@backingInt(E.DOM)] = "Domain error";
     table[@backingInt(E.RANGE)] = "Result not representable";
@@ -62,7 +62,6 @@ const errmsg = blk: {
     table[@backingInt(E.PIPE)] = "Broken pipe";
     table[@backingInt(E.IO)] = "I/O error";
     table[@backingInt(E.NXIO)] = "No such device or address";
-    table[@backingInt(E.NOTBLK)] = "Block device required";
     table[@backingInt(E.NODEV)] = "No such device";
     table[@backingInt(E.NOTDIR)] = "Not a directory";
     table[@backingInt(E.ISDIR)] = "Is a directory";
@@ -87,10 +86,6 @@ const errmsg = blk: {
     table[@backingInt(E.NOSYS)] = "Function not implemented";
     table[@backingInt(E.NOMSG)] = "No message of desired type";
     table[@backingInt(E.IDRM)] = "Identifier removed";
-    table[@backingInt(E.NOSTR)] = "Device not a stream";
-    table[@backingInt(E.NODATA)] = "No data available";
-    table[@backingInt(E.TIME)] = "Device timeout";
-    table[@backingInt(E.NOSR)] = "Out of streams resources";
     table[@backingInt(E.NOLINK)] = "Link has been severed";
     table[@backingInt(E.PROTO)] = "Protocol error";
     table[@backingInt(E.BADMSG)] = "Bad message";
@@ -100,9 +95,7 @@ const errmsg = blk: {
     table[@backingInt(E.PROTOTYPE)] = "Protocol wrong type for socket";
     table[@backingInt(E.NOPROTOOPT)] = "Protocol not available";
     table[@backingInt(E.PROTONOSUPPORT)] = "Protocol not supported";
-    table[@backingInt(E.SOCKTNOSUPPORT)] = "Socket type not supported";
     table[@backingInt(E.OPNOTSUPP)] = "Not supported";
-    table[@backingInt(E.PFNOSUPPORT)] = "Protocol family not supported";
     table[@backingInt(E.AFNOSUPPORT)] = "Address family not supported by protocol";
     table[@backingInt(E.ADDRNOTAVAIL)] = "Address not available";
     table[@backingInt(E.NETDOWN)] = "Network is down";
@@ -112,19 +105,30 @@ const errmsg = blk: {
     table[@backingInt(E.NOBUFS)] = "No buffer space available";
     table[@backingInt(E.ISCONN)] = "Socket is connected";
     table[@backingInt(E.NOTCONN)] = "Socket not connected";
-    table[@backingInt(E.SHUTDOWN)] = "Cannot send after socket shutdown";
     table[@backingInt(E.ALREADY)] = "Operation already in progress";
     table[@backingInt(E.INPROGRESS)] = "Operation in progress";
     table[@backingInt(E.STALE)] = "Stale file handle";
-    table[@backingInt(E.REMOTEIO)] = "Remote I/O error";
     table[@backingInt(E.DQUOT)] = "Quota exceeded";
-    table[@backingInt(E.NOMEDIUM)] = "No medium found";
-    table[@backingInt(E.MEDIUMTYPE)] = "Wrong medium type";
     table[@backingInt(E.MULTIHOP)] = "Multihop attempted";
-    table[@backingInt(E.NOKEY)] = "Required key not available";
-    table[@backingInt(E.KEYEXPIRED)] = "Key has expired";
-    table[@backingInt(E.KEYREVOKED)] = "Key has been revoked";
-    table[@backingInt(E.KEYREJECTED)] = "Key was rejected by service";
+    if (builtin.target.isWasiLibC()) {
+        table[@backingInt(E.NOTCAPABLE)] = "Capabilities insufficient";
+    } else {
+        table[@backingInt(E.NOTBLK)] = "Block device required";
+        table[@backingInt(E.NOSTR)] = "Device not a stream";
+        table[@backingInt(E.NODATA)] = "No data available";
+        table[@backingInt(E.TIME)] = "Device timeout";
+        table[@backingInt(E.NOSR)] = "Out of streams resources";
+        table[@backingInt(E.SOCKTNOSUPPORT)] = "Socket type not supported";
+        table[@backingInt(E.PFNOSUPPORT)] = "Protocol family not supported";
+        table[@backingInt(E.SHUTDOWN)] = "Cannot send after socket shutdown";
+        table[@backingInt(E.REMOTEIO)] = "Remote I/O error";
+        table[@backingInt(E.NOMEDIUM)] = "No medium found";
+        table[@backingInt(E.MEDIUMTYPE)] = "Wrong medium type";
+        table[@backingInt(E.NOKEY)] = "Required key not available";
+        table[@backingInt(E.KEYEXPIRED)] = "Key has expired";
+        table[@backingInt(E.KEYREVOKED)] = "Key has been revoked";
+        table[@backingInt(E.KEYREJECTED)] = "Key was rejected by service";
+    }
     break :blk table;
 };
 

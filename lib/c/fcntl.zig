@@ -18,6 +18,20 @@ comptime {
         symbol(&posix_fadviseLinux, "posix_fadvise");
         symbol(&posix_fallocateLinux, "posix_fallocate");
     }
+    if (builtin.target.isWasiLibC() and builtin.link_libc) {
+        symbol(&creatWasi, "creat");
+        symbol(&creatWasi, "creat64");
+    }
+}
+
+extern "c" fn __wasilibc_open_nomode(path: [*:0]const c_char, oflag: c_int) callconv(.c) c_int;
+
+fn creatWasi(path: [*:0]const c_char, mode: c_uint) callconv(.c) c_int {
+    _ = mode;
+    const O_CREAT: c_int = 0x1 << 12;
+    const O_TRUNC: c_int = 0x8 << 12;
+    const O_WRONLY: c_int = 0x10000000;
+    return __wasilibc_open_nomode(path, O_CREAT | O_WRONLY | O_TRUNC);
 }
 
 fn creatLinux(path: [*:0]const c_char, mode: linux.mode_t) callconv(.c) c_int {

@@ -160,8 +160,10 @@ comptime {
         symbol(&daemonLinux, "daemon");
         symbol(&ulimitLinux, "ulimit");
     }
-    if (builtin.target.isWasiLibC()) {}
-    if (builtin.link_libc) {
+    if (builtin.target.isWasiLibC()) {
+        symbol(&getpagesize, "getpagesize");
+    }
+    if (builtin.target.isMuslLibC() and builtin.link_libc) {
         symbol(&ftw, "ftw");
         symbol(&vwarn, "vwarn");
         symbol(&vwarnx, "vwarnx");

@@ -30,51 +30,57 @@ pub fn execModelCrtFileFullName(wasi_exec_model: std.lang.WasiExecModel) []const
 /// TODO replace anyerror with explicit error set, recording user-friendly errors with
 /// lockAndSetMiscFailure and returning error.AlreadyReported. see libcxx.zig for example.
 pub fn buildCrtFile(comp: *Compilation, crt_file: CrtFile, prog_node: std.Progress.Node) anyerror!void {
-    if (!build_options.have_llvm) {
-        return error.ZigCompilerNotBuiltWithLLVMExtensions;
-    }
-
     const gpa = comp.gpa;
-    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
-    defer arena_allocator.deinit();
-    const arena = arena_allocator.allocator();
+    const io = comp.io;
 
     switch (crt_file) {
         .crt1_reactor_o => {
-            var args = std.array_list.Managed([]const u8).init(arena);
-            try addCCArgs(comp, arena, &args, .{});
-            try addLibcBottomHalfIncludes(comp, arena, &args);
-
-            var files = [_]Compilation.CSourceFile{
-                .{
-                    .src_path = try comp.dirs.zig_lib.join(arena, &.{
-                        "libc", try sanitize(arena, crt1_reactor_src_file),
-                    }),
-                    .extra_flags = args.items,
-                    .owner = undefined,
-                },
-            };
-
-            return comp.build_crt_file("crt1-reactor", .Obj, .@"wasi crt1-reactor.o", prog_node, &files, .{});
+            var out: ?Compilation.CrtFile = null;
+            try comp.buildOutputFromZig(
+                "c/wasi_crt1_reactor.zig",
+                "crt1-reactor",
+                .Obj,
+                .static,
+                .@"wasi crt1-reactor.o",
+                prog_node,
+                .{},
+                &out,
+            );
+            errdefer if (out) |*cf| cf.deinit(gpa, io);
+            const basename = try gpa.dupe(u8, "crt1-reactor.o");
+            errdefer gpa.free(basename);
+            comp.mutex.lockUncancelable(io);
+            defer comp.mutex.unlock(io);
+            try comp.crt_files.ensureUnusedCapacity(gpa, 1);
+            comp.crt_files.putAssumeCapacityNoClobber(basename, out.?);
         },
         .crt1_command_o => {
-            var args = std.array_list.Managed([]const u8).init(arena);
-            try addCCArgs(comp, arena, &args, .{});
-            try addLibcBottomHalfIncludes(comp, arena, &args);
-
-            var files = [_]Compilation.CSourceFile{
-                .{
-                    .src_path = try comp.dirs.zig_lib.join(arena, &.{
-                        "libc", try sanitize(arena, crt1_command_src_file),
-                    }),
-                    .extra_flags = args.items,
-                    .owner = undefined,
-                },
-            };
-
-            return comp.build_crt_file("crt1-command", .Obj, .@"wasi crt1-command.o", prog_node, &files, .{});
+            var out: ?Compilation.CrtFile = null;
+            try comp.buildOutputFromZig(
+                "c/wasi_crt1_command.zig",
+                "crt1-command",
+                .Obj,
+                .static,
+                .@"wasi crt1-command.o",
+                prog_node,
+                .{},
+                &out,
+            );
+            errdefer if (out) |*cf| cf.deinit(gpa, io);
+            const basename = try gpa.dupe(u8, "crt1-command.o");
+            errdefer gpa.free(basename);
+            comp.mutex.lockUncancelable(io);
+            defer comp.mutex.unlock(io);
+            try comp.crt_files.ensureUnusedCapacity(gpa, 1);
+            comp.crt_files.putAssumeCapacityNoClobber(basename, out.?);
         },
         .libc_a => {
+            if (!build_options.have_llvm) {
+                return error.ZigCompilerNotBuiltWithLLVMExtensions;
+            }
+            var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+            defer arena_allocator.deinit();
+            const arena = arena_allocator.allocator();
             var libc_sources = std.array_list.Managed(Compilation.CSourceFile).init(arena);
 
             {
@@ -458,373 +464,373 @@ fn addLibcTopHalfIncludes(
 
 const libc_bottom_half_src_files = [_][]const u8{};
 const libc_top_half_src_files = [_][]const u8{
-    "musl/src/complex/__cexp.c",
-    "musl/src/complex/__cexpf.c",
-    "musl/src/conf/confstr.c",
-    "musl/src/conf/legacy.c",
-    "musl/src/conf/pathconf.c",
-    "musl/src/crypt/crypt_blowfish.c",
-    "musl/src/crypt/crypt.c",
-    "musl/src/crypt/crypt_des.c",
-    "musl/src/crypt/crypt_md5.c",
-    "musl/src/crypt/crypt_r.c",
-    "musl/src/crypt/crypt_sha256.c",
-    "musl/src/crypt/crypt_sha512.c",
-    "musl/src/crypt/encrypt.c",
-    "musl/src/env/setenv.c",
-    "musl/src/exit/assert.c",
-    "musl/src/exit/quick_exit.c",
+    // "musl/src/complex/__cexp.c", // migrated to lib/c/complex.zig
+    // "musl/src/complex/__cexpf.c", // migrated to lib/c/complex.zig
+    // "musl/src/conf/confstr.c", // migrated to lib/c/conf.zig
+    // "musl/src/conf/legacy.c", // migrated to lib/c/conf.zig
+    // "musl/src/conf/pathconf.c", // migrated to lib/c/conf.zig
+    // "musl/src/crypt/crypt_blowfish.c", // migrated to lib/c/crypt.zig
+    // "musl/src/crypt/crypt.c", // migrated to lib/c/crypt.zig
+    // "musl/src/crypt/crypt_des.c", // migrated to lib/c/crypt.zig
+    // "musl/src/crypt/crypt_md5.c", // migrated to lib/c/crypt.zig
+    // "musl/src/crypt/crypt_r.c", // migrated to lib/c/crypt.zig
+    // "musl/src/crypt/crypt_sha256.c", // migrated to lib/c/crypt.zig
+    // "musl/src/crypt/crypt_sha512.c", // migrated to lib/c/crypt.zig
+    // "musl/src/crypt/encrypt.c", // migrated to lib/c/crypt.zig
+    // "musl/src/env/setenv.c", // migrated to lib/c/env.zig
+    // "musl/src/exit/assert.c", // migrated to lib/c/exit.zig
+    // "musl/src/exit/quick_exit.c", // migrated to lib/c/exit.zig
     // "musl/src/fenv/fegetexceptflag.c", // migrated to lib/c/fenv.zig
     // "musl/src/fenv/feholdexcept.c", // migrated to lib/c/fenv.zig
     // "musl/src/fenv/fenv.c", // migrated to lib/c/fenv.zig
     // "musl/src/fenv/fesetexceptflag.c", // migrated to lib/c/fenv.zig
     // "musl/src/fenv/fesetround.c", // migrated to lib/c/fenv.zig
     // "musl/src/fenv/feupdateenv.c", // migrated to lib/c/fenv.zig
-    "musl/src/legacy/getpagesize.c",
-    "musl/src/locale/c_locale.c",
-    "musl/src/locale/duplocale.c",
-    "musl/src/locale/freelocale.c",
-    "musl/src/locale/iconv.c",
-    "musl/src/locale/iconv_close.c",
-    "musl/src/locale/langinfo.c",
-    "musl/src/locale/__lctrans.c",
-    "musl/src/locale/localeconv.c",
-    "musl/src/locale/__mo_lookup.c",
-    "musl/src/locale/pleval.c",
-    "musl/src/locale/setlocale.c",
-    "musl/src/locale/strfmon.c",
-    "musl/src/locale/strtod_l.c",
-    "musl/src/locale/wcscoll.c",
-    "musl/src/locale/wcsxfrm.c",
-    "musl/src/math/acosh.c",
-    "musl/src/math/asinh.c",
-    "musl/src/math/atan2l.c",
-    "musl/src/math/cbrtl.c",
-    "musl/src/math/__cos.c",
-    "musl/src/math/__cosdf.c",
-    "musl/src/math/erfl.c",
-    "musl/src/math/exp10l.c",
-    "musl/src/math/exp2f_data.c",
-    "musl/src/math/exp2l.c",
-    "musl/src/math/exp_data.c",
-    "musl/src/math/expm1.c",
-    "musl/src/math/expm1f.c",
-    "musl/src/math/expm1l.c",
-    "musl/src/math/__invtrigl.c",
-    "musl/src/math/j0.c",
-    "musl/src/math/j0f.c",
-    "musl/src/math/j1.c",
-    "musl/src/math/j1f.c",
-    "musl/src/math/jn.c",
-    "musl/src/math/jnf.c",
-    "musl/src/math/lgammal.c",
-    "musl/src/math/llround.c",
-    "musl/src/math/__math_divzero.c",
-    "musl/src/math/__math_divzerof.c",
-    "musl/src/math/__math_invalid.c",
-    "musl/src/math/__math_invalidf.c",
-    "musl/src/math/__math_invalidl.c",
-    "musl/src/math/__math_oflow.c",
-    "musl/src/math/__math_oflowf.c",
-    "musl/src/math/__math_uflow.c",
-    "musl/src/math/__math_uflowf.c",
-    "musl/src/math/__math_xflow.c",
-    "musl/src/math/__math_xflowf.c",
-    "musl/src/math/__polevll.c",
-    "musl/src/math/pow_data.c",
-    "musl/src/math/powf_data.c",
-    "musl/src/math/__rem_pio2_large.c",
-    "musl/src/math/scalb.c",
-    "musl/src/math/__sin.c",
-    "musl/src/math/__sindf.c",
-    "musl/src/math/__tan.c",
-    "musl/src/math/__tandf.c",
-    "musl/src/math/tgamma.c",
-    "musl/src/math/tgammaf.c",
-    "musl/src/math/tgammal.c",
-    "musl/src/misc/a64l.c",
-    "musl/src/misc/basename.c",
-    "musl/src/misc/dirname.c",
-    "musl/src/misc/getdomainname.c",
-    "musl/src/misc/gethostid.c",
-    "musl/src/misc/getopt.c",
-    "musl/src/misc/getopt_long.c",
-    "musl/src/misc/getsubopt.c",
-    "musl/src/misc/realpath.c",
-    "musl/src/multibyte/btowc.c",
-    "musl/src/multibyte/c16rtomb.c",
-    "musl/src/multibyte/c32rtomb.c",
-    "musl/src/multibyte/internal.c",
-    "musl/src/multibyte/mblen.c",
-    "musl/src/multibyte/mbrlen.c",
-    "musl/src/multibyte/mbrtoc16.c",
-    "musl/src/multibyte/mbrtoc32.c",
-    "musl/src/multibyte/mbrtowc.c",
-    "musl/src/multibyte/mbsinit.c",
-    "musl/src/multibyte/mbsnrtowcs.c",
-    "musl/src/multibyte/mbsrtowcs.c",
-    "musl/src/multibyte/mbstowcs.c",
-    "musl/src/multibyte/mbtowc.c",
-    "musl/src/multibyte/wcrtomb.c",
-    "musl/src/multibyte/wcsnrtombs.c",
-    "musl/src/multibyte/wcsrtombs.c",
-    "musl/src/multibyte/wcstombs.c",
-    "musl/src/multibyte/wctob.c",
-    "musl/src/multibyte/wctomb.c",
-    "musl/src/network/htonl.c",
-    "musl/src/network/htons.c",
-    "musl/src/network/in6addr_any.c",
-    "musl/src/network/in6addr_loopback.c",
-    "musl/src/network/inet_aton.c",
-    "musl/src/network/inet_ntop.c",
-    "musl/src/network/inet_pton.c",
-    "musl/src/network/ntohl.c",
-    "musl/src/network/ntohs.c",
-    "musl/src/regex/fnmatch.c",
-    "musl/src/regex/regerror.c",
-    "musl/src/stdio/asprintf.c",
-    "musl/src/stdio/clearerr.c",
-    "musl/src/stdio/dprintf.c",
-    "musl/src/stdio/ext2.c",
-    "musl/src/stdio/ext.c",
-    "musl/src/stdio/fclose.c",
-    "musl/src/stdio/__fclose_ca.c",
-    "musl/src/stdio/feof.c",
-    "musl/src/stdio/ferror.c",
-    "musl/src/stdio/fflush.c",
-    "musl/src/stdio/fgetln.c",
-    "musl/src/stdio/fgets.c",
-    "musl/src/stdio/fgetwc.c",
-    "musl/src/stdio/fgetws.c",
-    "musl/src/stdio/fileno.c",
-    "musl/src/stdio/__fmodeflags.c",
-    "musl/src/stdio/fopencookie.c",
-    "musl/src/stdio/fprintf.c",
-    "musl/src/stdio/fputs.c",
-    "musl/src/stdio/fputwc.c",
-    "musl/src/stdio/fputws.c",
-    "musl/src/stdio/fread.c",
-    "musl/src/stdio/fscanf.c",
-    "musl/src/stdio/fwide.c",
-    "musl/src/stdio/fwprintf.c",
-    "musl/src/stdio/fwrite.c",
-    "musl/src/stdio/fwscanf.c",
-    "musl/src/stdio/getchar_unlocked.c",
-    "musl/src/stdio/getc_unlocked.c",
-    "musl/src/stdio/getdelim.c",
-    "musl/src/stdio/getline.c",
-    "musl/src/stdio/getw.c",
-    "musl/src/stdio/getwc.c",
-    "musl/src/stdio/getwchar.c",
-    "musl/src/stdio/ofl_add.c",
-    "musl/src/stdio/__overflow.c",
-    "musl/src/stdio/perror.c",
-    "musl/src/stdio/putchar_unlocked.c",
-    "musl/src/stdio/putc_unlocked.c",
-    "musl/src/stdio/puts.c",
-    "musl/src/stdio/putw.c",
-    "musl/src/stdio/putwc.c",
-    "musl/src/stdio/putwchar.c",
-    "musl/src/stdio/rewind.c",
-    "musl/src/stdio/scanf.c",
-    "musl/src/stdio/setbuf.c",
-    "musl/src/stdio/setbuffer.c",
-    "musl/src/stdio/setlinebuf.c",
-    "musl/src/stdio/setvbuf.c",
-    "musl/src/stdio/snprintf.c",
-    "musl/src/stdio/sprintf.c",
-    "musl/src/stdio/sscanf.c",
-    "musl/src/stdio/__stdio_exit.c",
-    "musl/src/stdio/swprintf.c",
-    "musl/src/stdio/swscanf.c",
-    "musl/src/stdio/__toread.c",
-    "musl/src/stdio/__towrite.c",
-    "musl/src/stdio/__uflow.c",
-    "musl/src/stdio/ungetc.c",
-    "musl/src/stdio/ungetwc.c",
-    "musl/src/stdio/vasprintf.c",
-    "musl/src/stdio/vfwscanf.c",
-    "musl/src/stdio/vprintf.c",
-    "musl/src/stdio/vscanf.c",
-    "musl/src/stdio/vsprintf.c",
-    "musl/src/stdio/vwprintf.c",
-    "musl/src/stdio/vwscanf.c",
-    "musl/src/stdio/wprintf.c",
-    "musl/src/stdio/wscanf.c",
-    "musl/src/stdlib/atof.c",
-    "musl/src/stdlib/ecvt.c",
-    "musl/src/stdlib/fcvt.c",
-    "musl/src/stdlib/gcvt.c",
-    "musl/src/string/strerror_r.c",
-    "musl/src/string/strverscmp.c",
-    "musl/src/string/wcscasecmp.c",
-    "musl/src/string/wcscasecmp_l.c",
-    "musl/src/string/wcsncasecmp.c",
-    "musl/src/string/wcsncasecmp_l.c",
-    "musl/src/thread/default_attr.c",
-    "musl/src/thread/pthread_attr_destroy.c",
-    "musl/src/thread/pthread_attr_init.c",
-    "musl/src/thread/pthread_attr_setdetachstate.c",
-    "musl/src/thread/pthread_attr_setstack.c",
-    "musl/src/thread/pthread_attr_setstacksize.c",
-    "musl/src/thread/pthread_barrierattr_destroy.c",
-    "musl/src/thread/pthread_barrierattr_init.c",
-    "musl/src/thread/pthread_barrierattr_setpshared.c",
-    "musl/src/thread/pthread_cleanup_push.c",
-    "musl/src/thread/pthread_condattr_destroy.c",
-    "musl/src/thread/pthread_condattr_init.c",
-    "musl/src/thread/pthread_condattr_setpshared.c",
-    "musl/src/thread/pthread_equal.c",
-    "musl/src/thread/pthread_getspecific.c",
-    "musl/src/thread/pthread_mutexattr_destroy.c",
-    "musl/src/thread/pthread_mutexattr_init.c",
-    "musl/src/thread/pthread_mutexattr_setpshared.c",
-    "musl/src/thread/pthread_mutexattr_settype.c",
-    "musl/src/thread/pthread_mutex_init.c",
-    "musl/src/thread/pthread_rwlockattr_destroy.c",
-    "musl/src/thread/pthread_rwlockattr_init.c",
-    "musl/src/thread/pthread_rwlockattr_setpshared.c",
-    "musl/src/thread/pthread_rwlock_destroy.c",
-    "musl/src/thread/pthread_rwlock_init.c",
-    "musl/src/thread/pthread_setcancelstate.c",
-    "musl/src/thread/pthread_setcanceltype.c",
-    "musl/src/thread/pthread_setspecific.c",
-    "musl/src/thread/pthread_testcancel.c",
-    "musl/src/thread/thrd_sleep.c",
-    "musl/src/time/ftime.c",
-    "musl/src/time/strptime.c",
-    "musl/src/time/timespec_get.c",
+    // "musl/src/legacy/getpagesize.c", // migrated to lib/c/legacy.zig
+    // "musl/src/locale/c_locale.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/duplocale.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/freelocale.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/iconv.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/iconv_close.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/langinfo.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/__lctrans.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/localeconv.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/__mo_lookup.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/pleval.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/setlocale.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/strfmon.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/strtod_l.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/wcscoll.c", // migrated to lib/c/locale.zig
+    // "musl/src/locale/wcsxfrm.c", // migrated to lib/c/locale.zig
+    // "musl/src/math/acosh.c", // migrated to lib/c/math.zig
+    // "musl/src/math/asinh.c", // migrated to lib/c/math.zig
+    // "musl/src/math/atan2l.c", // migrated to lib/c/math.zig
+    // "musl/src/math/cbrtl.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__cos.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__cosdf.c", // migrated to lib/c/math.zig
+    // "musl/src/math/erfl.c", // migrated to lib/c/math.zig
+    // "musl/src/math/exp10l.c", // migrated to lib/c/math.zig
+    // "musl/src/math/exp2f_data.c", // migrated to lib/c/math.zig
+    // "musl/src/math/exp2l.c", // migrated to lib/c/math.zig
+    // "musl/src/math/exp_data.c", // migrated to lib/c/math.zig
+    // "musl/src/math/expm1.c", // migrated to lib/c/math.zig
+    // "musl/src/math/expm1f.c", // migrated to lib/c/math.zig
+    // "musl/src/math/expm1l.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__invtrigl.c", // migrated to lib/c/math.zig
+    // "musl/src/math/j0.c", // migrated to lib/c/math.zig
+    // "musl/src/math/j0f.c", // migrated to lib/c/math.zig
+    // "musl/src/math/j1.c", // migrated to lib/c/math.zig
+    // "musl/src/math/j1f.c", // migrated to lib/c/math.zig
+    // "musl/src/math/jn.c", // migrated to lib/c/math.zig
+    // "musl/src/math/jnf.c", // migrated to lib/c/math.zig
+    // "musl/src/math/lgammal.c", // migrated to lib/c/math.zig
+    // "musl/src/math/llround.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__math_divzero.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__math_divzerof.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__math_invalid.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__math_invalidf.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__math_invalidl.c", // migrated to lib/c/wasi_sources.zig
+    // "musl/src/math/__math_oflow.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__math_oflowf.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__math_uflow.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__math_uflowf.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__math_xflow.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__math_xflowf.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__polevll.c", // migrated to lib/c/math.zig
+    // "musl/src/math/pow_data.c", // migrated to lib/c/math.zig
+    // "musl/src/math/powf_data.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__rem_pio2_large.c", // migrated to lib/c/math.zig
+    // "musl/src/math/scalb.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__sin.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__sindf.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__tan.c", // migrated to lib/c/math.zig
+    // "musl/src/math/__tandf.c", // migrated to lib/c/math.zig
+    // "musl/src/math/tgamma.c", // migrated to lib/c/math.zig
+    // "musl/src/math/tgammaf.c", // migrated to lib/c/math.zig
+    // "musl/src/math/tgammal.c", // migrated to lib/c/math.zig
+    // "musl/src/misc/a64l.c", // migrated to lib/c/misc.zig
+    // "musl/src/misc/basename.c", // migrated to lib/c/misc.zig
+    // "musl/src/misc/dirname.c", // migrated to lib/c/misc.zig
+    // "musl/src/misc/getdomainname.c", // migrated to lib/c/misc.zig
+    // "musl/src/misc/gethostid.c", // migrated to lib/c/misc.zig
+    // "musl/src/misc/getopt.c", // migrated to lib/c/misc.zig
+    // "musl/src/misc/getopt_long.c", // migrated to lib/c/misc.zig
+    // "musl/src/misc/getsubopt.c", // migrated to lib/c/misc.zig
+    // "musl/src/misc/realpath.c", // migrated to lib/c/misc.zig
+    // "musl/src/multibyte/btowc.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/c16rtomb.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/c32rtomb.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/internal.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mblen.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbrlen.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbrtoc16.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbrtoc32.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbrtowc.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbsinit.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbsnrtowcs.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbsrtowcs.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbstowcs.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/mbtowc.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/wcrtomb.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/wcsnrtombs.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/wcsrtombs.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/wcstombs.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/wctob.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/multibyte/wctomb.c", // migrated to lib/c/multibyte.zig
+    // "musl/src/network/htonl.c", // migrated to lib/c/network.zig
+    // "musl/src/network/htons.c", // migrated to lib/c/network.zig
+    // "musl/src/network/in6addr_any.c", // migrated to lib/c/network.zig
+    // "musl/src/network/in6addr_loopback.c", // migrated to lib/c/network.zig
+    // "musl/src/network/inet_aton.c", // migrated to lib/c/network.zig
+    // "musl/src/network/inet_ntop.c", // migrated to lib/c/network.zig
+    // "musl/src/network/inet_pton.c", // migrated to lib/c/network.zig
+    // "musl/src/network/ntohl.c", // migrated to lib/c/network.zig
+    // "musl/src/network/ntohs.c", // migrated to lib/c/network.zig
+    // "musl/src/regex/fnmatch.c", // migrated to lib/c/regex.zig
+    // "musl/src/regex/regerror.c", // migrated to lib/c/regex.zig
+    // "musl/src/stdio/asprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/clearerr.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/dprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/ext2.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/ext.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fclose.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/__fclose_ca.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/feof.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/ferror.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fflush.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fgetln.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fgets.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fgetwc.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fgetws.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fileno.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/__fmodeflags.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fopencookie.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fputs.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fputwc.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fputws.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fread.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fscanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fwide.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fwprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fwrite.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/fwscanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/getchar_unlocked.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/getc_unlocked.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/getdelim.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/getline.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/getw.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/getwc.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/getwchar.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/ofl_add.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/__overflow.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/perror.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/putchar_unlocked.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/putc_unlocked.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/puts.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/putw.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/putwc.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/putwchar.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/rewind.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/scanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/setbuf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/setbuffer.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/setlinebuf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/setvbuf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/snprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/sprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/sscanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/__stdio_exit.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/swprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/swscanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/__toread.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/__towrite.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/__uflow.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/ungetc.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/ungetwc.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vasprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vfwscanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vscanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vsprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vwprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/vwscanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/wprintf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdio/wscanf.c", // migrated to lib/c/stdio.zig
+    // "musl/src/stdlib/atof.c", // migrated to lib/c/stdlib.zig
+    // "musl/src/stdlib/ecvt.c", // migrated to lib/c/stdlib.zig
+    // "musl/src/stdlib/fcvt.c", // migrated to lib/c/stdlib.zig
+    // "musl/src/stdlib/gcvt.c", // migrated to lib/c/stdlib.zig
+    // "musl/src/string/strerror_r.c", // migrated to lib/c/string.zig
+    // "musl/src/string/strverscmp.c", // migrated to lib/c/string.zig
+    // "musl/src/string/wcscasecmp.c", // migrated to lib/c/string.zig
+    // "musl/src/string/wcscasecmp_l.c", // migrated to lib/c/string.zig
+    // "musl/src/string/wcsncasecmp.c", // migrated to lib/c/string.zig
+    // "musl/src/string/wcsncasecmp_l.c", // migrated to lib/c/string.zig
+    // "musl/src/thread/default_attr.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_attr_destroy.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_attr_init.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_attr_setdetachstate.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_attr_setstack.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_attr_setstacksize.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_barrierattr_destroy.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_barrierattr_init.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_barrierattr_setpshared.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_cleanup_push.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_condattr_destroy.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_condattr_init.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_condattr_setpshared.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_equal.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_getspecific.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_mutexattr_destroy.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_mutexattr_init.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_mutexattr_setpshared.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_mutexattr_settype.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_mutex_init.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_rwlockattr_destroy.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_rwlockattr_init.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_rwlockattr_setpshared.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_rwlock_destroy.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_rwlock_init.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_setcancelstate.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_setcanceltype.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_setspecific.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/pthread_testcancel.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/thread/thrd_sleep.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "musl/src/time/ftime.c", // migrated to lib/c/time.zig
+    // "musl/src/time/strptime.c", // migrated to lib/c/time.zig
+    // "musl/src/time/timespec_get.c", // migrated to lib/c/time.zig
 
-    "wasi/libc-top-half/musl/src/conf/fpathconf.c",
-    "wasi/libc-top-half/musl/src/conf/sysconf.c",
-    "wasi/libc-top-half/musl/src/dirent/alphasort.c",
-    "wasi/libc-top-half/musl/src/dirent/versionsort.c",
-    "wasi/libc-top-half/musl/src/env/clearenv.c",
-    "wasi/libc-top-half/musl/src/env/getenv.c",
-    "wasi/libc-top-half/musl/src/env/putenv.c",
-    "wasi/libc-top-half/musl/src/env/__stack_chk_fail.c",
-    "wasi/libc-top-half/musl/src/env/unsetenv.c",
-    "wasi/libc-top-half/musl/src/errno/strerror.c",
-    "wasi/libc-top-half/musl/src/exit/atexit.c",
-    "wasi/libc-top-half/musl/src/exit/at_quick_exit.c",
-    "wasi/libc-top-half/musl/src/exit/exit.c",
-    "wasi/libc-top-half/musl/src/fcntl/creat.c",
-    "wasi/libc-top-half/musl/src/internal/defsysinfo.c",
-    "wasi/libc-top-half/musl/src/internal/floatscan.c",
-    "wasi/libc-top-half/musl/src/internal/intscan.c",
-    "wasi/libc-top-half/musl/src/internal/libc.c",
-    "wasi/libc-top-half/musl/src/internal/shgetc.c",
-    "wasi/libc-top-half/musl/src/locale/catclose.c",
-    "wasi/libc-top-half/musl/src/locale/catgets.c",
-    "wasi/libc-top-half/musl/src/locale/catopen.c",
-    "wasi/libc-top-half/musl/src/locale/locale_map.c",
-    "wasi/libc-top-half/musl/src/locale/newlocale.c",
-    "wasi/libc-top-half/musl/src/locale/uselocale.c",
-    "wasi/libc-top-half/musl/src/math/__expo2.c",
-    "wasi/libc-top-half/musl/src/math/__expo2f.c",
-    "wasi/libc-top-half/musl/src/math/__rem_pio2.c",
-    "wasi/libc-top-half/musl/src/math/__rem_pio2f.c",
-    "wasi/libc-top-half/musl/src/math/__rem_pio2l.c",
-    "wasi/libc-top-half/musl/src/math/sinh.c",
-    "wasi/libc-top-half/musl/src/misc/fmtmsg.c",
-    "wasi/libc-top-half/musl/src/misc/nftw.c",
-    "wasi/libc-top-half/musl/src/prng/random.c",
-    "wasi/libc-top-half/musl/src/regex/glob.c",
-    "wasi/libc-top-half/musl/src/regex/regcomp.c",
-    "wasi/libc-top-half/musl/src/regex/regexec.c",
-    "wasi/libc-top-half/musl/src/regex/tre-mem.c",
-    "wasi/libc-top-half/musl/src/stat/futimesat.c",
-    "wasi/libc-top-half/musl/src/stdio/__fdopen.c",
-    "wasi/libc-top-half/musl/src/stdio/fgetc.c",
-    "wasi/libc-top-half/musl/src/stdio/fgetpos.c",
-    "wasi/libc-top-half/musl/src/stdio/fmemopen.c",
-    "wasi/libc-top-half/musl/src/stdio/fopen.c",
-    "wasi/libc-top-half/musl/src/stdio/__fopen_rb_ca.c",
-    "wasi/libc-top-half/musl/src/stdio/fputc.c",
-    "wasi/libc-top-half/musl/src/stdio/freopen.c",
-    "wasi/libc-top-half/musl/src/stdio/fseek.c",
-    "wasi/libc-top-half/musl/src/stdio/fsetpos.c",
-    "wasi/libc-top-half/musl/src/stdio/ftell.c",
-    "wasi/libc-top-half/musl/src/stdio/getc.c",
-    "wasi/libc-top-half/musl/src/stdio/getchar.c",
-    "wasi/libc-top-half/musl/src/stdio/ofl.c",
-    "wasi/libc-top-half/musl/src/stdio/open_memstream.c",
-    "wasi/libc-top-half/musl/src/stdio/open_wmemstream.c",
-    "wasi/libc-top-half/musl/src/stdio/printf.c",
-    "wasi/libc-top-half/musl/src/stdio/putc.c",
-    "wasi/libc-top-half/musl/src/stdio/putchar.c",
-    "wasi/libc-top-half/musl/src/stdio/stderr.c",
-    "wasi/libc-top-half/musl/src/stdio/stdin.c",
-    "wasi/libc-top-half/musl/src/stdio/__stdio_close.c",
-    "wasi/libc-top-half/musl/src/stdio/__stdio_read.c",
-    "wasi/libc-top-half/musl/src/stdio/__stdio_seek.c",
-    "wasi/libc-top-half/musl/src/stdio/__stdio_write.c",
-    "wasi/libc-top-half/musl/src/stdio/stdout.c",
-    "wasi/libc-top-half/musl/src/stdio/__stdout_write.c",
-    "wasi/libc-top-half/musl/src/stdio/vdprintf.c",
-    "wasi/libc-top-half/musl/src/stdio/vfprintf.c",
-    "wasi/libc-top-half/musl/src/stdio/vfscanf.c",
-    "wasi/libc-top-half/musl/src/stdio/vfwprintf.c",
-    "wasi/libc-top-half/musl/src/stdio/vsnprintf.c",
-    "wasi/libc-top-half/musl/src/stdio/vsscanf.c",
-    "wasi/libc-top-half/musl/src/stdio/vswprintf.c",
-    "wasi/libc-top-half/musl/src/stdio/vswscanf.c",
-    "wasi/libc-top-half/musl/src/stdlib/strtod.c",
-    "wasi/libc-top-half/musl/src/stdlib/wcstod.c",
-    "wasi/libc-top-half/musl/src/stdlib/wcstol.c",
-    "wasi/libc-top-half/musl/src/thread/pthread_attr_get.c",
-    "wasi/libc-top-half/musl/src/thread/pthread_attr_setguardsize.c",
-    "wasi/libc-top-half/musl/src/thread/pthread_attr_setschedparam.c",
-    "wasi/libc-top-half/musl/src/thread/pthread_cancel.c",
-    "wasi/libc-top-half/musl/src/thread/pthread_condattr_setclock.c",
-    "wasi/libc-top-half/musl/src/thread/pthread_key_create.c",
-    "wasi/libc-top-half/musl/src/thread/pthread_mutexattr_setprotocol.c",
-    "wasi/libc-top-half/musl/src/thread/pthread_mutexattr_setrobust.c",
-    "wasi/libc-top-half/musl/src/thread/pthread_mutex_destroy.c",
-    "wasi/libc-top-half/musl/src/thread/pthread_self.c",
-    "wasi/libc-top-half/musl/src/time/getdate.c",
-    "wasi/libc-top-half/musl/src/time/localtime.c",
-    "wasi/libc-top-half/musl/src/time/localtime_r.c",
-    "wasi/libc-top-half/musl/src/time/mktime.c",
-    "wasi/libc-top-half/musl/src/time/strftime.c",
-    "wasi/libc-top-half/musl/src/time/__tz.c",
-    "wasi/libc-top-half/musl/src/time/wcsftime.c",
+    // "wasi/libc-top-half/musl/src/conf/fpathconf.c", // migrated to lib/c/conf.zig
+    // "wasi/libc-top-half/musl/src/conf/sysconf.c", // migrated to lib/c/conf.zig
+    // "wasi/libc-top-half/musl/src/dirent/alphasort.c", // migrated to lib/c/dirent.zig
+    // "wasi/libc-top-half/musl/src/dirent/versionsort.c", // migrated to lib/c/dirent.zig
+    // "wasi/libc-top-half/musl/src/env/clearenv.c", // migrated to lib/c/env.zig
+    // "wasi/libc-top-half/musl/src/env/getenv.c", // migrated to lib/c/env.zig
+    // "wasi/libc-top-half/musl/src/env/putenv.c", // migrated to lib/c/env.zig
+    // "wasi/libc-top-half/musl/src/env/__stack_chk_fail.c", // migrated to lib/c/env.zig
+    // "wasi/libc-top-half/musl/src/env/unsetenv.c", // migrated to lib/c/env.zig
+    // "wasi/libc-top-half/musl/src/errno/strerror.c", // migrated to lib/c/errno.zig
+    // "wasi/libc-top-half/musl/src/exit/atexit.c", // migrated to lib/c/exit.zig
+    // "wasi/libc-top-half/musl/src/exit/at_quick_exit.c", // migrated to lib/c/exit.zig
+    // "wasi/libc-top-half/musl/src/exit/exit.c", // migrated to lib/c/exit.zig
+    // "wasi/libc-top-half/musl/src/fcntl/creat.c", // migrated to lib/c/fcntl.zig
+    // "wasi/libc-top-half/musl/src/internal/defsysinfo.c", // migrated to lib/c/internal.zig
+    // "wasi/libc-top-half/musl/src/internal/floatscan.c", // migrated to lib/c/internal.zig
+    // "wasi/libc-top-half/musl/src/internal/intscan.c", // migrated to lib/c/internal.zig
+    // "wasi/libc-top-half/musl/src/internal/libc.c", // migrated to lib/c/internal.zig
+    // "wasi/libc-top-half/musl/src/internal/shgetc.c", // migrated to lib/c/internal.zig
+    // "wasi/libc-top-half/musl/src/locale/catclose.c", // migrated to lib/c/locale.zig
+    // "wasi/libc-top-half/musl/src/locale/catgets.c", // migrated to lib/c/locale.zig
+    // "wasi/libc-top-half/musl/src/locale/catopen.c", // migrated to lib/c/locale.zig
+    // "wasi/libc-top-half/musl/src/locale/locale_map.c", // migrated to lib/c/locale.zig
+    // "wasi/libc-top-half/musl/src/locale/newlocale.c", // migrated to lib/c/locale.zig
+    // "wasi/libc-top-half/musl/src/locale/uselocale.c", // migrated to lib/c/locale.zig
+    // "wasi/libc-top-half/musl/src/math/__expo2.c", // migrated to lib/c/math.zig
+    // "wasi/libc-top-half/musl/src/math/__expo2f.c", // migrated to lib/c/math.zig
+    // "wasi/libc-top-half/musl/src/math/__rem_pio2.c", // migrated to lib/c/math.zig
+    // "wasi/libc-top-half/musl/src/math/__rem_pio2f.c", // migrated to lib/c/math.zig
+    // "wasi/libc-top-half/musl/src/math/__rem_pio2l.c", // migrated to lib/c/math.zig
+    // "wasi/libc-top-half/musl/src/math/sinh.c", // migrated to lib/c/math.zig
+    // "wasi/libc-top-half/musl/src/misc/fmtmsg.c", // migrated to lib/c/misc.zig
+    // "wasi/libc-top-half/musl/src/misc/nftw.c", // migrated to lib/c/misc.zig
+    // "wasi/libc-top-half/musl/src/prng/random.c", // migrated to lib/c/stdlib/random.zig
+    // "wasi/libc-top-half/musl/src/regex/glob.c", // migrated to lib/c/regex.zig
+    // "wasi/libc-top-half/musl/src/regex/regcomp.c", // migrated to lib/c/regex.zig
+    // "wasi/libc-top-half/musl/src/regex/regexec.c", // migrated to lib/c/regex.zig
+    // "wasi/libc-top-half/musl/src/regex/tre-mem.c", // migrated to lib/c/regex.zig
+    // "wasi/libc-top-half/musl/src/stat/futimesat.c", // migrated to lib/c/stat.zig
+    // "wasi/libc-top-half/musl/src/stdio/__fdopen.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/fgetc.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/fgetpos.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/fmemopen.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/fopen.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/__fopen_rb_ca.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/fputc.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/freopen.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/fseek.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/fsetpos.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/ftell.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/getc.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/getchar.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/ofl.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/open_memstream.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/open_wmemstream.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/printf.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/putc.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/putchar.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/stderr.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/stdin.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/__stdio_close.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/__stdio_read.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/__stdio_seek.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/__stdio_write.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/stdout.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/__stdout_write.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/vdprintf.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/vfprintf.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/vfscanf.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/vfwprintf.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/vsnprintf.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/vsscanf.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/vswprintf.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdio/vswscanf.c", // migrated to lib/c/stdio.zig
+    // "wasi/libc-top-half/musl/src/stdlib/strtod.c", // migrated to lib/c/stdlib.zig
+    // "wasi/libc-top-half/musl/src/stdlib/wcstod.c", // migrated to lib/c/stdlib.zig
+    // "wasi/libc-top-half/musl/src/stdlib/wcstol.c", // migrated to lib/c/stdlib.zig
+    // "wasi/libc-top-half/musl/src/thread/pthread_attr_get.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "wasi/libc-top-half/musl/src/thread/pthread_attr_setguardsize.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "wasi/libc-top-half/musl/src/thread/pthread_attr_setschedparam.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "wasi/libc-top-half/musl/src/thread/pthread_cancel.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "wasi/libc-top-half/musl/src/thread/pthread_condattr_setclock.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "wasi/libc-top-half/musl/src/thread/pthread_key_create.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "wasi/libc-top-half/musl/src/thread/pthread_mutexattr_setprotocol.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "wasi/libc-top-half/musl/src/thread/pthread_mutexattr_setrobust.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "wasi/libc-top-half/musl/src/thread/pthread_mutex_destroy.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "wasi/libc-top-half/musl/src/thread/pthread_self.c", // migrated to lib/c/wasi_thread_stub.zig
+    // "wasi/libc-top-half/musl/src/time/getdate.c", // migrated to lib/c/time.zig
+    // "wasi/libc-top-half/musl/src/time/localtime.c", // migrated to lib/c/time.zig
+    // "wasi/libc-top-half/musl/src/time/localtime_r.c", // migrated to lib/c/time.zig
+    // "wasi/libc-top-half/musl/src/time/mktime.c", // migrated to lib/c/time.zig
+    // "wasi/libc-top-half/musl/src/time/strftime.c", // migrated to lib/c/time.zig
+    // "wasi/libc-top-half/musl/src/time/__tz.c", // migrated to lib/c/time.zig
+    // "wasi/libc-top-half/musl/src/time/wcsftime.c", // migrated to lib/c/time.zig
 };
 
-const crt1_command_src_file = "wasi/libc-bottom-half/crt/crt1-command.c";
-const crt1_reactor_src_file = "wasi/libc-bottom-half/crt/crt1-reactor.c";
+// const crt1_command_src_file = "wasi/libc-bottom-half/crt/crt1-command.c"; // migrated to lib/c/wasi_crt1_command.zig
+// const crt1_reactor_src_file = "wasi/libc-bottom-half/crt/crt1-reactor.c"; // migrated to lib/c/wasi_crt1_reactor.zig
 
 const fts_src_files = &[_][]const u8{
-    "wasi/fts/musl-fts/fts.c",
+    // "wasi/fts/musl-fts/fts.c", // migrated to lib/c/fts.zig
 };
 
 const setjmp_src_files = &[_][]const u8{
-    "wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c",
+    // "wasi/libc-top-half/musl/src/setjmp/wasm32/rt.c", // migrated to lib/c/wasi_sources.zig
 };
 
 const emulated_dl_src_files = &[_][]const u8{
-    "wasi/libc-top-half/musl/src/misc/dl.c",
+    // "wasi/libc-top-half/musl/src/misc/dl.c", // migrated to lib/c/wasi_sources.zig
 };
 
 const emulated_process_clocks_src_files = &[_][]const u8{
-    "wasi/libc-bottom-half/clocks/clock.c",
-    "wasi/libc-bottom-half/clocks/getrusage.c",
-    "wasi/libc-bottom-half/clocks/times.c",
+    // "wasi/libc-bottom-half/clocks/clock.c", // migrated to lib/c/wasi_sources.zig
+    // "wasi/libc-bottom-half/clocks/getrusage.c", // migrated to lib/c/wasi_sources.zig
+    // "wasi/libc-bottom-half/clocks/times.c", // migrated to lib/c/wasi_sources.zig
 };
 
 const emulated_getpid_src_files = &[_][]const u8{
-    "wasi/libc-bottom-half/getpid/getpid.c",
+    // "wasi/libc-bottom-half/getpid/getpid.c", // migrated to lib/c/wasi_sources.zig
 };
 
 const emulated_mman_src_files = &[_][]const u8{
-    "wasi/libc-bottom-half/mman/mman.c",
+    // "wasi/libc-bottom-half/mman/mman.c", // migrated to lib/c/wasi_sources.zig
 };
 
 const emulated_signal_bottom_half_src_files = &[_][]const u8{
-    "wasi/libc-bottom-half/signal/signal.c",
+    // "wasi/libc-bottom-half/signal/signal.c", // migrated to lib/c/wasi_sources.zig
 };
 
 const emulated_signal_top_half_src_files = &[_][]const u8{
-    "musl/src/signal/psignal.c",
-    "musl/src/string/strsignal.c",
+    // "musl/src/signal/psignal.c", // migrated to lib/c/wasi_sources.zig
+    // "musl/src/string/strsignal.c", // migrated to lib/c/wasi_sources.zig
 };

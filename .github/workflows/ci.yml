@@ -95,6 +95,26 @@ jobs:
             -target wasm32-wasi .ci-tmp/hello.zig -femit-bin=.ci-tmp/hello.wasm
           wasmtime run .ci-tmp/hello.wasm
 
+          cat << 'EOF' > .ci-tmp/hello_libc.zig
+          const std = @import("std");
+          extern "c" fn snprintf(buf: [*]u8, size: usize, fmt: [*:0]const u8, ...) c_int;
+          extern "c" fn strtod(nptr: [*:0]const u8, endptr: ?*[*:0]u8) f64;
+          extern "c" fn fnmatch(pat: [*:0]const u8, str: [*:0]const u8, flags: c_int) c_int;
+          extern "c" fn crypt(key: [*:0]const u8, salt: [*:0]const u8) ?[*:0]u8;
+          pub fn main() !void {
+              var buf: [128]u8 = undefined;
+              const n = snprintf(&buf, buf.len, "wasi-libc: %d %.2f", @as(c_int, 42), strtod("2.50", null));
+              try std.testing.expect(n > 0);
+              try std.testing.expectEqualStrings("wasi-libc: 42 2.50", buf[0..@intCast(n)]);
+              try std.testing.expectEqual(@as(c_int, 0), fnmatch("*.zig", "wasi_libc.zig", 0));
+              const hashed = crypt("pass", "$1$salt$") orelse return error.CryptFailed;
+              try std.testing.expect(std.mem.startsWith(u8, std.mem.span(hashed), "$1$salt$"));
+          }
+          EOF
+          .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasi -lc .ci-tmp/hello_libc.zig -femit-bin=.ci-tmp/hello_libc.wasm
+          wasmtime run .ci-tmp/hello_libc.wasm
+
       - name: Run vendored wabt component tests
         run: |
           .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \

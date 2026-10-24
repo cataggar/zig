@@ -99,9 +99,7 @@ pub inline fn syscallArg(value: anytype) std.os.linux.syscall_arg_t {
 comptime {
     _ = @import("c/crypt.zig");
     _ = @import("c/ctype.zig");
-    if (!builtin.target.isWasiLibC()) {
-        _ = @import("c/errno.zig");
-    }
+    _ = @import("c/errno.zig");
     _ = @import("c/inttypes.zig");
     if (!builtin.target.isMinGW()) {
         _ = @import("c/malloc.zig");
@@ -156,13 +154,29 @@ comptime {
         _ = @import("c/sys/utsname.zig");
     }
     if (builtin.target.isWasiLibC()) {
+        _ = @import("c/conf.zig");
+        _ = @import("c/dirent.zig");
+        _ = @import("c/env.zig");
+        _ = @import("c/exit.zig");
+        _ = @import("c/fcntl.zig");
         _ = @import("c/fenv.zig");
+        _ = @import("c/fts.zig");
+        _ = @import("c/internal.zig");
+        _ = @import("c/legacy.zig");
+        _ = @import("c/locale.zig");
+        _ = @import("c/misc.zig");
+        _ = @import("c/multibyte.zig");
+        _ = @import("c/network.zig");
+        _ = @import("c/regex.zig");
         _ = @import("c/search.zig");
+        _ = @import("c/stat.zig");
+        _ = @import("c/stdio.zig");
         _ = @import("c/time.zig");
         _ = @import("c/unistd.zig");
         _ = @import("c/wasi_cloudlibc.zig");
         _ = @import("c/wasi_sources.zig");
         _ = @import("c/wasi_thread_stub.zig");
+        _ = @import("c/sys/utsname.zig");
     }
 
     if (builtin.os.tag == .windows) {

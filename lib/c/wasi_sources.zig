@@ -672,7 +672,7 @@ fn wasilibcRegisterPreopenedFdImpl(fd: c_int, prefix: [*:0]const u8) callconv(.c
 
 fn wasilibcFindRelpathImpl(path: [*:0]const u8, abs_prefix: *[*:0]const u8, relative_path: *[*:0]u8, relative_path_len: usize) callconv(.c) c_int {
     var rpl = relative_path_len;
-    return wasilibcFindRelpathAllocImpl(path, abs_prefix, relative_path, &rpl, 0);
+    return wasilibcFindRelpathAllocImpl(path, abs_prefix, @ptrCast(relative_path), &rpl, 0);
 }
 
 fn wasilibcFindAbspathImpl(path: [*:0]const u8, abs_prefix: *[*:0]const u8, relative_path: *[*:0]const u8) callconv(.c) c_int {
@@ -778,7 +778,7 @@ fn makeAbsolute(path: [*:0]const u8) ?[*:0]u8 {
     return @ptrCast(buf);
 }
 
-fn wasilibcFindRelpathAllocImpl(path: [*:0]const u8, abs_prefix: *[*:0]const u8, relative_buf: *[*:0]u8, relative_buf_len: *usize, can_realloc: c_int) callconv(.c) c_int {
+fn wasilibcFindRelpathAllocImpl(path: [*:0]const u8, abs_prefix: *[*:0]const u8, relative_buf: *?[*:0]u8, relative_buf_len: *usize, can_realloc: c_int) callconv(.c) c_int {
     const abspath = makeAbsolute(path) orelse {
         std.c._errno().* = ENOMEM;
         return -1;
@@ -799,7 +799,7 @@ fn wasilibcFindRelpathAllocImpl(path: [*:0]const u8, abs_prefix: *[*:0]const u8,
         relative_buf.* = @ptrCast(tmp);
         relative_buf_len.* = rel_len + 1;
     }
-    _ = strcpy(@ptrCast(relative_buf.*), rel);
+    _ = strcpy(@ptrCast(relative_buf.*.?), rel);
     return fd;
 }
 
@@ -809,12 +809,9 @@ fn chdirImpl(path: [*:0]const u8) callconv(.c) c_int {
         var relative_buf_len: usize = 0;
     };
     var abs: [*:0]const u8 = undefined;
-    var rb = ChdirState.relative_buf orelse @as([*:0]u8, @ptrCast(@constCast("")));
-    var rbl = ChdirState.relative_buf_len;
-    const parent_fd = wasilibcFindRelpathAllocImpl(path, &abs, &rb, &rbl, 1);
-    ChdirState.relative_buf = rb;
-    ChdirState.relative_buf_len = rbl;
+    const parent_fd = wasilibcFindRelpathAllocImpl(path, &abs, &ChdirState.relative_buf, &ChdirState.relative_buf_len, 1);
     if (parent_fd == -1) return -1;
+    const rb = ChdirState.relative_buf.?;
 
     var dirinfo: Stat = undefined;
     const ret = fstatat(parent_fd, rb, &dirinfo, 0);
@@ -847,7 +844,7 @@ fn chdirImpl(path: [*:0]const u8) callconv(.c) c_int {
 // =========================================================================
 // posix.c - absolute path functions via preopen lookup
 // =========================================================================
-fn findRelpath2(path: [*:0]const u8, relative: *[*:0]u8, relative_len: *usize) c_int {
+fn findRelpath2(path: [*:0]const u8, relative: *?[*:0]u8, relative_len: *usize) c_int {
     var abs: [*:0]const u8 = undefined;
     return wasilibcFindRelpathAllocImpl(path, &abs, relative, relative_len, 1);
 }
@@ -857,12 +854,8 @@ fn findRelpath(path: [*:0]const u8, relative: *[*:0]u8) c_int {
         threadlocal var relative_buf: ?[*:0]u8 = null;
         threadlocal var relative_buf_len: usize = 0;
     };
-    var rb = State.relative_buf orelse @as([*:0]u8, @ptrCast(@constCast("")));
-    var rbl = State.relative_buf_len;
-    const fd = findRelpath2(path, &rb, &rbl);
-    State.relative_buf = rb;
-    State.relative_buf_len = rbl;
-    relative.* = rb;
+    const fd = findRelpath2(path, &State.relative_buf, &State.relative_buf_len);
+    if (State.relative_buf) |rb| relative.* = rb;
     return fd;
 }
 
@@ -871,12 +864,8 @@ fn findRelpathAlt(path: [*:0]const u8, relative: *[*:0]u8) c_int {
         threadlocal var relative_buf: ?[*:0]u8 = null;
         threadlocal var relative_buf_len: usize = 0;
     };
-    var rb = State.relative_buf orelse @as([*:0]u8, @ptrCast(@constCast("")));
-    var rbl = State.relative_buf_len;
-    const fd = findRelpath2(path, &rb, &rbl);
-    State.relative_buf = rb;
-    State.relative_buf_len = rbl;
-    relative.* = rb;
+    const fd = findRelpath2(path, &State.relative_buf, &State.relative_buf_len);
+    if (State.relative_buf) |rb| relative.* = rb;
     return fd;
 }
 
@@ -1286,8 +1275,6 @@ fn wasilibcMaybeReinitializeEnvironEagerlyStrong() callconv(.c) void {
 // =========================================================================
 extern fn __main_argc_argv(argc: usize, argv: [*:null]?[*:0]u8) c_int;
 
-fn wasmCallDtorsImpl() callconv(.c) void {}
-
 fn mainVoidImpl() callconv(.c) c_int {
     wasilibcEnsureEnvironImpl();
     var argv_buf_size: usize = 0;
@@ -1488,6 +1475,509 @@ fn utimesImpl(path: [*:0]const u8, times: ?*const [2]Timeval) callconv(.c) c_int
 }
 
 // =========================================================================
+// dl.c - stub dynamic linking functions
+// =========================================================================
+var dl_error: ?[*:0]const u8 = null;
+
+fn dlcloseImpl(library: ?*anyopaque) callconv(.c) c_int {
+    _ = library;
+    dl_error = "dlclose not implemented";
+    return -1;
+}
+
+fn dlerrorImpl() callconv(.c) ?[*:0]u8 {
+    const v = dl_error;
+    dl_error = null;
+    return @constCast(v);
+}
+
+fn dlopenImpl(name: ?[*:0]const u8, flags: c_int) callconv(.c) ?*anyopaque {
+    _ = name;
+    _ = flags;
+    dl_error = "dlopen not implemented";
+    return null;
+}
+
+fn dlsymImpl(noalias library: ?*anyopaque, noalias name: ?[*:0]const u8) callconv(.c) ?*anyopaque {
+    _ = library;
+    _ = name;
+    dl_error = "dlsym not implemented";
+    return null;
+}
+
+fn dladdrImpl(addr: ?*const anyopaque, info: ?*anyopaque) callconv(.c) c_int {
+    _ = addr;
+    _ = info;
+    dl_error = "dladdr not implemented";
+    return 0;
+}
+
+// =========================================================================
+// setjmp/wasm32/rt.c - Wasm EH setjmp/longjmp runtime
+// =========================================================================
+const JmpBufImpl = extern struct {
+    func_invocation_id: ?*anyopaque,
+    label: u32,
+    arg: extern struct {
+        env: ?*anyopaque,
+        val: c_int,
+    },
+};
+
+extern fn @"llvm.wasm.throw"(tag: i32, ptr: *anyopaque) noreturn;
+
+fn wasmSetjmpImpl(env: *anyopaque, label: u32, func_invocation_id: ?*anyopaque) callconv(.c) void {
+    const jb: *JmpBufImpl = @ptrCast(@alignCast(env));
+    if (label == 0 or func_invocation_id == null) {
+        @trap();
+    }
+    jb.func_invocation_id = func_invocation_id;
+    jb.label = label;
+}
+
+fn wasmSetjmpTestImpl(env: *anyopaque, func_invocation_id: ?*anyopaque) callconv(.c) u32 {
+    const jb: *JmpBufImpl = @ptrCast(@alignCast(env));
+    if (jb.label == 0 or func_invocation_id == null) {
+        @trap();
+    }
+    if (jb.func_invocation_id == func_invocation_id) {
+        return jb.label;
+    }
+    return 0;
+}
+
+fn wasmLongjmpImpl(env: *anyopaque, val: c_int) callconv(.c) noreturn {
+    const jb: *JmpBufImpl = @ptrCast(@alignCast(env));
+    jb.arg.env = env;
+    jb.arg.val = if (val == 0) 1 else val;
+    @"llvm.wasm.throw"(1, @ptrCast(&jb.arg));
+}
+
+// =========================================================================
+// clocks/{clock,getrusage,times}.c & getpid/getpid.c
+// =========================================================================
+const WasiClockId = extern struct {
+    id: wasi.clockid_t,
+};
+const clock_process_cputime_id = WasiClockId{ .id = .PROCESS_CPUTIME_ID };
+const clock_thread_cputime_id = WasiClockId{ .id = .THREAD_CPUTIME_ID };
+
+var clock_start: wasi.timestamp_t = 0;
+
+fn clockInitImpl() callconv(.c) void {
+    _ = wasi.clock_time_get(.MONOTONIC, 0, &clock_start);
+}
+
+fn clockImpl() callconv(.c) i64 {
+    var now: wasi.timestamp_t = 0;
+    _ = wasi.clock_time_get(.MONOTONIC, 0, &now);
+    return @bitCast(now -% clock_start);
+}
+
+const Rusage = extern struct {
+    ru_utime: Timeval,
+    ru_stime: Timeval,
+};
+
+const RUSAGE_SELF: c_int = 1;
+const RUSAGE_CHILDREN: c_int = 2;
+const NSEC_PER_SEC: u64 = 1_000_000_000;
+
+fn timestampToTimeval(t: u64) Timeval {
+    return .{
+        .tv_sec = @intCast(t / NSEC_PER_SEC),
+        .tv_usec = @intCast((t % NSEC_PER_SEC) / 1000),
+    };
+}
+
+fn getrusageImpl(who: c_int, r_usage: *Rusage) callconv(.c) c_int {
+    switch (who) {
+        RUSAGE_SELF => {
+            const usertime: u64 = @bitCast(clockImpl());
+            r_usage.* = .{
+                .ru_utime = timestampToTimeval(usertime),
+                .ru_stime = .{ .tv_sec = 0, .tv_usec = 0 },
+            };
+            return 0;
+        },
+        RUSAGE_CHILDREN => {
+            r_usage.* = .{
+                .ru_utime = .{ .tv_sec = 0, .tv_usec = 0 },
+                .ru_stime = .{ .tv_sec = 0, .tv_usec = 0 },
+            };
+            return 0;
+        },
+        else => {
+            setErrno(EINVAL);
+            return -1;
+        },
+    }
+}
+
+const Tms = extern struct {
+    tms_utime: i64,
+    tms_stime: i64,
+    tms_cutime: i64,
+    tms_cstime: i64,
+};
+
+fn timesImpl(buffer: *Tms) callconv(.c) i64 {
+    const user = clockImpl();
+    buffer.* = .{
+        .tms_utime = user,
+        .tms_stime = 0,
+        .tms_cutime = 0,
+        .tms_cstime = 0,
+    };
+    var realtime: wasi.timestamp_t = 0;
+    _ = wasi.clock_time_get(.MONOTONIC, 0, &realtime);
+    return @bitCast(realtime);
+}
+
+fn getpidImpl() callconv(.c) c_int {
+    return 42;
+}
+
+// =========================================================================
+// mman/mman.c - userspace emulation of mmap, munmap, mprotect
+// =========================================================================
+extern fn pread(fd: c_int, buf: [*]u8, count: usize, offset: i64) isize;
+
+const MmanMap = extern struct {
+    prot: c_int,
+    flags: c_int,
+    offset: i64,
+    length: usize,
+};
+
+const MAP_SHARED: c_int = 0x01;
+const MAP_PRIVATE: c_int = 0x02;
+const MAP_SHARED_VALIDATE: c_int = 0x03;
+const MAP_FIXED: c_int = 0x10;
+const MAP_ANON: c_int = 0x20;
+const MAP_GROWSDOWN: c_int = 0x0100;
+const MAP_NORESERVE: c_int = 0x4000;
+const MAP_HUGETLB: c_int = 0x40000;
+const MAP_FIXED_NOREPLACE: c_int = 0x100000;
+
+const PROT_NONE: c_int = 0;
+const PROT_READ: c_int = 1;
+const PROT_WRITE: c_int = 2;
+const PROT_EXEC: c_int = 4;
+
+const EINTR: c_int = @backingInt(wasi.errno_t.INTR);
+const ENOTSUP: c_int = @backingInt(wasi.errno_t.OPNOTSUPP);
+const MAP_FAILED: ?*anyopaque = @ptrFromInt(std.math.maxInt(usize));
+
+fn mmapImpl(addr: ?*anyopaque, length: usize, prot: c_int, flags: c_int, fd: c_int, offset: i64) callconv(.c) ?*anyopaque {
+    _ = addr;
+    if ((flags & (MAP_PRIVATE | MAP_SHARED)) == 0 or
+        (flags & MAP_FIXED) != 0 or
+        (flags & MAP_SHARED_VALIDATE) == MAP_SHARED_VALIDATE or
+        (flags & MAP_NORESERVE) != 0 or
+        (flags & MAP_GROWSDOWN) != 0 or
+        (flags & MAP_HUGETLB) != 0 or
+        (flags & MAP_FIXED_NOREPLACE) != 0)
+    {
+        setErrno(EINVAL);
+        return MAP_FAILED;
+    }
+
+    if (prot == PROT_NONE or (prot & PROT_EXEC) != 0) {
+        setErrno(EINVAL);
+        return MAP_FAILED;
+    }
+
+    if (length == 0) {
+        setErrno(EINVAL);
+        return MAP_FAILED;
+    }
+
+    const buf_len = std.math.add(usize, length, @sizeOf(MmanMap)) catch {
+        setErrno(ENOMEM);
+        return MAP_FAILED;
+    };
+
+    const raw = malloc(buf_len) orelse {
+        setErrno(ENOMEM);
+        return MAP_FAILED;
+    };
+    const map: *MmanMap = @ptrCast(@alignCast(raw));
+    map.prot = prot;
+    map.flags = flags;
+    map.offset = offset;
+    map.length = length;
+
+    const body: [*]u8 = raw + @sizeOf(MmanMap);
+    if ((flags & MAP_ANON) == 0) {
+        var rem = length;
+        var cur_off = offset;
+        var ptr = body;
+        while (rem > 0) {
+            const nread = pread(fd, ptr, rem, cur_off);
+            if (nread < 0) {
+                if (std.c._errno().* == EINTR) continue;
+                return MAP_FAILED;
+            }
+            if (nread == 0) break;
+            const n: usize = @intCast(nread);
+            rem -= n;
+            cur_off += @intCast(n);
+            ptr += n;
+        }
+    } else {
+        @memset(body[0..length], 0);
+    }
+
+    return @ptrCast(body);
+}
+
+fn munmapImpl(addr: ?*anyopaque, length: usize) callconv(.c) c_int {
+    const raw: [*]u8 = @ptrCast(addr orelse {
+        setErrno(EINVAL);
+        return -1;
+    });
+    const map: *MmanMap = @ptrCast(@alignCast(raw - @sizeOf(MmanMap)));
+    if (map.length != length) {
+        setErrno(EINVAL);
+        return -1;
+    }
+    free(@ptrCast(map));
+    return 0;
+}
+
+fn mprotectImpl(addr: ?*anyopaque, length: usize, prot: c_int) callconv(.c) c_int {
+    const begin: usize = if (addr) |p| @intFromPtr(p) else 0;
+    if ((begin & (PAGESIZE - 1)) != 0) {
+        setErrno(EINVAL);
+        return -1;
+    }
+    const end = std.math.add(usize, begin, length) catch {
+        setErrno(ENOMEM);
+        return -1;
+    };
+    const memory_size: usize = @wasmMemorySize(0) * PAGESIZE;
+    if (end > memory_size) {
+        setErrno(ENOMEM);
+        return -1;
+    }
+    if (prot != (PROT_READ | PROT_WRITE)) {
+        setErrno(ENOTSUP);
+        return -1;
+    }
+    return 0;
+}
+
+fn posixMadviseImpl(addr: ?*anyopaque, length: usize, advice: c_int) callconv(.c) c_int {
+    _ = addr;
+    _ = length;
+    _ = advice;
+    return 0;
+}
+
+// =========================================================================
+// signal/signal.c, musl/src/signal/psignal.c, musl/src/string/strsignal.c
+// =========================================================================
+const WasiFile = extern struct {
+    flags: c_uint,
+    rpos: ?[*]u8,
+    rend: ?[*]u8,
+    close: ?*const anyopaque,
+    wend: ?[*]u8,
+    wpos: ?[*]u8,
+    wbase: ?[*]u8,
+    read: ?*const anyopaque,
+    write: ?*const anyopaque,
+    seek: ?*const anyopaque,
+    buf: ?[*]u8,
+    buf_size: usize,
+    prev: ?*WasiFile,
+    next: ?*WasiFile,
+    fd: c_int,
+    mode: c_int,
+    lbf: c_int,
+    cookie: ?*anyopaque,
+    off: i64,
+    getln_buf: ?[*]u8,
+    shend: ?[*]u8,
+    shlim: i64,
+    shcnt: i64,
+    locale: ?*anyopaque,
+};
+
+extern var stderr: *WasiFile;
+extern fn fprintf(stream: *WasiFile, format: [*:0]const u8, ...) c_int;
+
+const _NSIG = 65;
+
+const signal_descriptions: [_NSIG][*:0]const u8 = blk: {
+    var desc: [_NSIG][*:0]const u8 = undefined;
+    desc[0] = "Unknown signal";
+    desc[1] = "Hangup";
+    desc[2] = "Interrupt";
+    desc[3] = "Quit";
+    desc[4] = "Illegal instruction";
+    desc[5] = "Trace/breakpoint trap";
+    desc[6] = "Aborted";
+    desc[7] = "Bus error";
+    desc[8] = "Arithmetic exception";
+    desc[9] = "Killed";
+    desc[10] = "User defined signal 1";
+    desc[11] = "Segmentation fault";
+    desc[12] = "User defined signal 2";
+    desc[13] = "Broken pipe";
+    desc[14] = "Alarm clock";
+    desc[15] = "Terminated";
+    desc[16] = "Stack fault";
+    desc[17] = "Child process status";
+    desc[18] = "Continued";
+    desc[19] = "Stopped (signal)";
+    desc[20] = "Stopped";
+    desc[21] = "Stopped (tty input)";
+    desc[22] = "Stopped (tty output)";
+    desc[23] = "Urgent I/O condition";
+    desc[24] = "CPU time limit exceeded";
+    desc[25] = "File size limit exceeded";
+    desc[26] = "Virtual timer expired";
+    desc[27] = "Profiling timer expired";
+    desc[28] = "Window changed";
+    desc[29] = "I/O possible";
+    desc[30] = "Power failure";
+    desc[31] = "Bad system call";
+    @setEvalBranchQuota(10000);
+    for (32.._NSIG) |i| {
+        desc[i] = std.fmt.comptimePrint("RT{d}", .{i});
+    }
+    break :blk desc;
+};
+
+fn strsignalImpl(signum: c_int) callconv(.c) [*:0]u8 {
+    const u: c_uint = @bitCast(signum);
+    const idx: usize = if (u -% 1 >= _NSIG - 1) 0 else @intCast(u);
+    return @constCast(signal_descriptions[idx]);
+}
+
+fn psignalImpl(sig: c_int, msg: ?[*:0]const u8) callconv(.c) void {
+    const f = stderr;
+    const s = strsignalImpl(sig);
+    const old_locale = f.locale;
+    const old_mode = f.mode;
+    const old_errno = std.c._errno().*;
+
+    const msg_str: [*:0]const u8 = msg orelse "";
+    const sep_str: [*:0]const u8 = if (msg != null) ": " else "";
+    if (fprintf(f, "%s%s%s\n", msg_str, sep_str, s) >= 0) {
+        std.c._errno().* = old_errno;
+    }
+    f.mode = old_mode;
+    f.locale = old_locale;
+}
+
+const SigHandler = *const fn (c_int) callconv(.c) void;
+
+fn sigIgnImpl(sig: c_int) callconv(.c) void {
+    _ = sig;
+}
+
+fn sigErrImpl(sig: c_int) callconv(.c) noreturn {
+    _ = sig;
+    @trap();
+}
+
+fn coreHandler(sig: c_int) callconv(.c) void {
+    _ = fprintf(stderr, "Program received fatal signal: %s\n", strsignalImpl(sig));
+    abortImpl();
+}
+
+fn terminateHandler(sig: c_int) callconv(.c) void {
+    _ = fprintf(stderr, "Program received termination signal: %s\n", strsignalImpl(sig));
+    abortImpl();
+}
+
+fn stopHandler(sig: c_int) callconv(.c) void {
+    _ = fprintf(stderr, "Program received stop signal: %s\n", strsignalImpl(sig));
+    abortImpl();
+}
+
+fn continueHandler(sig: c_int) callconv(.c) void {
+    _ = sig;
+}
+
+const default_handlers: [_NSIG]?SigHandler = blk: {
+    var h: [_NSIG]?SigHandler = @splat(null);
+    // Default behavior: "core".
+    h[3] = &coreHandler; // SIGQUIT
+    h[4] = &coreHandler; // SIGILL
+    h[5] = &coreHandler; // SIGTRAP
+    h[6] = &coreHandler; // SIGABRT
+    h[7] = &coreHandler; // SIGBUS
+    h[8] = &coreHandler; // SIGFPE
+    h[11] = &coreHandler; // SIGSEGV
+    h[24] = &coreHandler; // SIGXCPU
+    h[25] = &coreHandler; // SIGXFSZ
+    h[31] = &coreHandler; // SIGSYS
+
+    // Default behavior: ignore.
+    h[17] = &sigIgnImpl; // SIGCHLD
+    h[23] = &sigIgnImpl; // SIGURG
+    h[28] = &sigIgnImpl; // SIGWINCH
+
+    // Default behavior: "continue".
+    h[18] = &continueHandler; // SIGCONT
+
+    // Default behavior: "stop".
+    h[19] = &stopHandler; // SIGSTOP
+    h[20] = &stopHandler; // SIGTSTP
+    h[21] = &stopHandler; // SIGTTIN
+    h[22] = &stopHandler; // SIGTTOU
+
+    // Default behavior: "terminate".
+    h[1] = &terminateHandler; // SIGHUP
+    h[2] = &terminateHandler; // SIGINT
+    h[9] = &terminateHandler; // SIGKILL
+    h[10] = &terminateHandler; // SIGUSR1
+    h[12] = &terminateHandler; // SIGUSR2
+    h[13] = &terminateHandler; // SIGPIPE
+    h[14] = &terminateHandler; // SIGALRM
+    h[15] = &terminateHandler; // SIGTERM
+    h[16] = &terminateHandler; // SIGSTKFLT
+    h[26] = &terminateHandler; // SIGVTALRM
+    h[27] = &terminateHandler; // SIGPROF
+    h[29] = &terminateHandler; // SIGIO / SIGPOLL
+    h[30] = &terminateHandler; // SIGPWR
+    break :blk h;
+};
+
+var sig_handlers: [_NSIG]?SigHandler = @splat(null);
+
+fn raiseImpl(sig: c_int) callconv(.c) c_int {
+    if (sig < 0 or sig >= _NSIG) {
+        setErrno(EINVAL);
+        return -1;
+    }
+    const idx: usize = @intCast(sig);
+    if (sig_handlers[idx]) |func| {
+        func(sig);
+    } else if (default_handlers[idx]) |def_fn| {
+        def_fn(sig);
+    } else {
+        @trap();
+    }
+    return 0;
+}
+
+fn signalImpl(sig: c_int, func: ?SigHandler) callconv(.c) ?SigHandler {
+    if (sig < 0 or sig >= _NSIG or sig == 9 or sig == 19) {
+        setErrno(EINVAL);
+        return &sigErrImpl;
+    }
+    const idx: usize = @intCast(sig);
+    const old = sig_handlers[idx];
+    sig_handlers[idx] = func;
+    return old;
+}
+
+// =========================================================================
 // Symbol exports
 // =========================================================================
 comptime {
@@ -1533,6 +2023,7 @@ comptime {
 
         // getentropy.c
         symbol(&getentropyImpl, "__getentropy");
+        symbol(&getentropyImpl, "getentropy");
 
         // isatty.c
         symbol(&isattyImpl, "__isatty");
@@ -1634,7 +2125,6 @@ comptime {
         symbol(&wasilibcInitializeEnvironEagerly, "__wasilibc_initialize_environ_eagerly");
 
         // __main_void.c
-        symbol(&wasmCallDtorsImpl, "__wasm_call_dtors");
         symbol(&mainVoidImpl, "__main_void");
 
         // arc4random.c
@@ -1689,6 +2179,47 @@ comptime {
         symbol(&wasiSockSend, "__wasi_sock_send");
         symbol(&wasiSockShutdown, "__wasi_sock_shutdown");
 
+        // dl.c
+        symbol(&dlcloseImpl, "dlclose");
+        symbol(&dlerrorImpl, "dlerror");
+        symbol(&dlopenImpl, "dlopen");
+        symbol(&dlsymImpl, "dlsym");
+        symbol(&dladdrImpl, "dladdr");
+
+        // setjmp/wasm32/rt.c
+        if (builtin.target.cpu.has(.wasm, .exception_handling)) {
+            symbol(&wasmSetjmpImpl, "__wasm_setjmp");
+            symbol(&wasmSetjmpTestImpl, "__wasm_setjmp_test");
+            symbol(&wasmLongjmpImpl, "__wasm_longjmp");
+        }
+
+        // clocks/{clock,getrusage,times}.c & getpid/getpid.c
+        symbol(&clockInitImpl, "__wasilibc_init_clock");
+        symbol(&clockImpl, "__clock");
+        symbol(&clockImpl, "clock");
+        @export(&clock_process_cputime_id, .{ .name = "_CLOCK_PROCESS_CPUTIME_ID", .linkage = .weak, .visibility = .hidden });
+        @export(&clock_thread_cputime_id, .{ .name = "_CLOCK_THREAD_CPUTIME_ID", .linkage = .weak, .visibility = .hidden });
+        symbol(&getrusageImpl, "getrusage");
+        symbol(&timesImpl, "times");
+        symbol(&getpidImpl, "getpid");
+
+        // mman/mman.c
+        symbol(&mmapImpl, "mmap");
+        symbol(&munmapImpl, "munmap");
+        symbol(&mprotectImpl, "mprotect");
+        symbol(&posixMadviseImpl, "posix_madvise");
+        symbol(&posixMadviseImpl, "madvise");
+
+        // signal/signal.c, psignal.c, strsignal.c
+        symbol(&sigIgnImpl, "__SIG_IGN");
+        symbol(&sigErrImpl, "__SIG_ERR");
+        symbol(&raiseImpl, "raise");
+        symbol(&signalImpl, "signal");
+        symbol(&signalImpl, "bsd_signal");
+        symbol(&signalImpl, "__sysv_signal");
+        symbol(&psignalImpl, "psignal");
+        symbol(&strsignalImpl, "strsignal");
+
         // Exported globals
         @export(&__wasilibc_environ, .{ .name = "__wasilibc_environ", .linkage = .weak, .visibility = .hidden });
         @export(&__wasilibc_environ, .{ .name = "_environ", .linkage = .weak, .visibility = .hidden });
@@ -1696,6 +2227,9 @@ comptime {
         @export(&wasilibc_cwd, .{ .name = "__wasilibc_cwd", .linkage = .weak, .visibility = .hidden });
 
         asm (
+            \\.section .init_array.10,"",@
+            \\.p2align 2, 0x0
+            \\.int32 __wasilibc_init_clock
             \\.section .init_array.50,"",@
             \\.p2align 2, 0x0
             \\.int32 __wasilibc_initialize_environ_eagerly

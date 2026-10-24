@@ -18,17 +18,17 @@ const timeval = extern struct {
     usec: i64,
 };
 const sym = @import("../c.zig").symbol;
-extern "c" fn c_close(fd: c_int) c_int;
-extern "c" fn c_malloc(size: usize) ?[*]align(@alignOf(usize)) u8;
-extern "c" fn c_free(ptr: ?*anyopaque) void;
-extern "c" fn c_realloc(ptr: ?*anyopaque, size: usize) ?[*]align(@alignOf(usize)) u8;
-extern "c" fn c_qsort(
-    base: ?*anyopaque,
-    nmemb: usize,
-    size: usize,
-    compar: *const fn (*const anyopaque, *const anyopaque) callconv(.c) c_int,
-) void;
-extern "c" fn c_openat_nomode(dir: c_int, path: [*:0]const u8, flags: c_int) c_int;
+const c_close = @extern(*const fn (c_int) callconv(.c) c_int, .{ .name = "close" });
+const c_malloc = @extern(*const fn (usize) callconv(.c) ?[*]align(@alignOf(usize)) u8, .{ .name = "malloc" });
+const c_free = @extern(*const fn (?*anyopaque) callconv(.c) void, .{ .name = "free" });
+const c_realloc = @extern(*const fn (?*anyopaque, usize) callconv(.c) ?[*]align(@alignOf(usize)) u8, .{ .name = "realloc" });
+const c_qsort = @extern(*const fn (
+    ?*anyopaque,
+    usize,
+    usize,
+    *const fn (*const anyopaque, *const anyopaque) callconv(.c) c_int,
+) callconv(.c) void, .{ .name = "qsort" });
+const c_openat_nomode = @extern(*const fn (c_int, [*:0]const u8, c_int) callconv(.c) c_int, .{ .name = "__wasilibc_nocwd_openat_nomode" });
 const DIRENT_DEFAULT_BUFFER_SIZE: usize = 4096;
 /// Internal DIR structure matching cloudlibc dirent_impl.h
 const DIR = extern struct {
@@ -133,6 +133,20 @@ comptime {
         symbol(&gettimeofdayWasi, "gettimeofday");
         symbol(&schedYieldWasi, "sched_yield");
         symbol(&renameatWasi, "__wasilibc_nocwd_renameat");
+        symbol(&dirfdWasi, "dirfd");
+        symbol(&telldirWasi, "telldir");
+        symbol(&seekdirWasi, "seekdir");
+        symbol(&rewinddirWasi, "rewinddir");
+        symbol(&fdclosedirWasi, "fdclosedir");
+        symbol(&closedirWasi, "closedir");
+        symbol(&fdopendirWasi, "fdopendir");
+        symbol(&opendiratWasi, "__wasilibc_nocwd_opendirat");
+        symbol(&readdirWasi, "readdir");
+        symbol(&scandiratWasi, "__wasilibc_nocwd_scandirat");
+        symbol(&pollWasi, "poll");
+        symbol(&pselectWasi, "pselect");
+        symbol(&selectWasi, "select");
+        symbol(&ioctlWasi, "ioctl");
         @export(&clock_monotonic, .{ .name = "_CLOCK_MONOTONIC", .linkage = .weak, .visibility = .hidden });
         @export(&clock_realtime, .{ .name = "_CLOCK_REALTIME", .linkage = .weak, .visibility = .hidden });
     }
@@ -1329,7 +1343,7 @@ fn pollWasi(fds: ?[*]PollFd, nfds: usize, timeout: c_int) callconv(.c) c_int {
 fn pollWasiP1(fds: ?[*]PollFd, nfds: usize, timeout: c_int) c_int {
     const max_subs = 2 * nfds + 1;
     if (max_subs == 0) {
-        setErrno(.NOTSUP);
+        setErrno(.OPNOTSUPP);
         return -1;
     }
 
@@ -1381,7 +1395,7 @@ fn pollWasiP1(fds: ?[*]PollFd, nfds: usize, timeout: c_int) c_int {
     }
 
     if (nsubs == 0) {
-        setErrno(.NOTSUP);
+        setErrno(.OPNOTSUPP);
         return -1;
     }
 
@@ -1398,7 +1412,7 @@ fn pollWasiP1(fds: ?[*]PollFd, nfds: usize, timeout: c_int) c_int {
         .SUCCESS => {},
         else => |err| {
             if (nsubs == 0)
-                setErrno(.NOTSUP)
+                setErrno(.OPNOTSUPP)
             else
                 setErrno(err);
             return -1;
@@ -1413,7 +1427,7 @@ fn pollWasiP1(fds: ?[*]PollFd, nfds: usize, timeout: c_int) c_int {
     // Set revents from events.
     for (events[0..nevents]) |*event| {
         if (event.type == .FD_READ or event.type == .FD_WRITE) {
-            const pollfd: *PollFd = @ptrFromInt(event.userdata);
+            const pollfd: *PollFd = @ptrFromInt(@as(usize, @intCast(event.userdata)));
             if (event.@"error" == .BADF) {
                 pollfd.revents |= POLLNVAL;
             } else if (event.@"error" == .PIPE) {

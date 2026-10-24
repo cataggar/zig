@@ -4,6 +4,7 @@ const symbol = @import("../c.zig").symbol;
 
 comptime {
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
+        symbol(&bittab, "__fsmu8");
         symbol(&btowc, "btowc");
         symbol(&c16rtomb, "c16rtomb");
         symbol(&c32rtomb, "c32rtomb");
@@ -26,7 +27,7 @@ comptime {
     }
 }
 
-const EILSEQ: c_int = 84;
+const EILSEQ: c_int = @backingInt(std.c.E.ILSEQ);
 const WEOF: c_uint = 0xFFFFFFFF;
 const MB_LEN_MAX = 4;
 
@@ -44,9 +45,12 @@ const map_base_off: usize = if (ptr_size == 8) 24 else 20;
 const off_locale = part1_size + map_base_off + 11 * ptr_size + 8;
 const LocaleStruct = extern struct { cat: [6]?*const anyopaque };
 extern "c" fn pthread_self() *anyopaque;
+extern "c" fn __nl_langinfo(item: c_int) [*:0]u8;
 
 /// Musl treats any non-null LC_CTYPE locale map as UTF-8 (CURRENT_UTF8).
 fn currentUtf8() bool {
+    if (builtin.is_test) return true;
+    if (builtin.target.isWasiLibC()) return __nl_langinfo(14)[0] == 'U';
     if (!builtin.target.isMuslLibC()) return false;
     const self = @intFromPtr(pthread_self());
     const loc_ptr: *?*const LocaleStruct = @ptrFromInt(self + off_locale);
