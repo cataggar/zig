@@ -1,0 +1,115 @@
+name: WASI Component CI
+
+on:
+  push:
+    branches: [wabt-component]
+  pull_request:
+    branches: [wabt-component]
+
+permissions:
+  contents: read
+
+jobs:
+  wasm-component:
+    name: Build & Test WASI Component
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.17.0 via ghr
+        uses: cataggar/ghr/actions/install@v0.7.0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tools: |
+            cataggar/zig@v0.17.0 RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
+
+      - name: Install Wasmtime
+        run: |
+          curl -sSfL https://wasmtime.dev/install.sh | bash
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: Cache stage1 bootstrap
+        id: cache-zig1
+        uses: actions/cache@v4
+        with:
+          path: .ci-bootstrap/zig1
+          key: zig1-${{ runner.os }}-${{ hashFiles('stage1/zig1.wasm', 'stage1/wasm2c.c', 'stage1/wasi.c') }}
+
+      - name: Build stage1 bootstrap (if not cached)
+        if: steps.cache-zig1.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .ci-bootstrap
+          zig cc -std=c99 -O2 stage1/wasm2c.c -o .ci-bootstrap/zig-wasm2c
+          .ci-bootstrap/zig-wasm2c stage1/zig1.wasm .ci-bootstrap/zig1.c
+          zig cc -std=c99 -O1 -fno-strict-aliasing .ci-bootstrap/zig1.c stage1/wasi.c -lm -o .ci-bootstrap/zig1
+          rm -f .ci-bootstrap/zig1.c .ci-bootstrap/zig-wasm2c
+
+      - name: Build zig-wasm (dev=.wasm)
+        run: |
+          mkdir -p .ci-bootstrap
+          cat << 'EOF' > .ci-bootstrap/build_options_wasm.zig
+          pub const mem_leak_frames: u32 = 0;
+          pub const have_llvm = false;
+          pub const llvm_has_m68k = false;
+          pub const llvm_has_csky = false;
+          pub const llvm_has_arc = false;
+          pub const llvm_has_xtensa = false;
+          pub const debug_gpa = false;
+          pub const dev = .wasm;
+          pub const io_mode: enum { threaded, evented } = .threaded;
+          pub const value_interpret_mode = .by_name;
+          pub const version: [:0]const u8 = "0.18.0-dev.0+wabt";
+          pub const semver = @import("std").SemanticVersion.parse(version) catch unreachable;
+          pub const enable_debug_extensions = false;
+          pub const log_level: @import("std").log.Level = .err;
+          pub const enable_link_snapshots = false;
+          pub const enable_tracy = false;
+          pub const enable_tracy_callstack = false;
+          pub const enable_tracy_allocation = false;
+          pub const tracy_callstack_depth: u32 = 6;
+          pub const value_tracing = false;
+          EOF
+          .ci-bootstrap/zig1 lib build-exe -ofmt=c -lc -OReleaseSmall \
+            --name zig-wasm \
+            -femit-bin=.ci-bootstrap/zig-wasm.c \
+            -target x86_64-linux-gnu \
+            --dep build_options \
+            -Mroot=src/main.zig \
+            -Mbuild_options=.ci-bootstrap/build_options_wasm.zig
+          zig cc -std=c99 -O0 -fno-sanitize=undefined -fno-stack-protector -fno-strict-aliasing \
+            -Wno-address-of-packed-member -Istage1 .ci-bootstrap/zig-wasm.c \
+            -lm -lpthread -ldl -o .ci-bootstrap/zig-wasm
+          rm -f .ci-bootstrap/zig-wasm.c
+
+      - name: Verify wasm32-wasi baseline
+        run: |
+          mkdir -p .ci-tmp
+          cat << 'EOF' > .ci-tmp/hello.zig
+          const std = @import("std");
+          pub fn main() void {}
+          EOF
+          .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasi .ci-tmp/hello.zig -femit-bin=.ci-tmp/hello.wasm
+          wasmtime run .ci-tmp/hello.wasm
+
+      - name: Run vendored wabt component tests (when present)
+        run: |
+          if [ -f src/link/Wasm/component/root.zig ]; then
+            .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
+              -target wasm32-wasi --test-cmd wasmtime --test-cmd-bin \
+              src/link/Wasm/component/root.zig
+          fi
+
+      - name: Verify wasm32-wasip2 target (when present)
+        run: |
+          if grep -q 'wasip2,' lib/std/Target.zig; then
+            .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
+              -target wasm32-wasip2 .ci-tmp/hello.zig -femit-bin=.ci-tmp/hello-p2.wasm
+            ls -lh .ci-tmp/hello-p2.wasm
+            if [ -f test/wasip2_e2e.zig ]; then
+              .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
+                -target wasm32-wasip2 test/wasip2_e2e.zig -femit-bin=.ci-tmp/wasip2_e2e.wasm
+              wasmtime run .ci-tmp/wasip2_e2e.wasm
+            fi
+          fi
