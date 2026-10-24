@@ -148,7 +148,7 @@ pub fn detect(
         return self;
     }
 
-    if (builtin.os.tag != .windows and builtin.os.tag != .wasi) {
+    if (builtin.os.tag != .windows and !builtin.os.tag.isWasi()) {
         const triple = try std.zig.target.linuxTriple(arena, native_target);
 
         const qual = native_target.ptrBitWidth();

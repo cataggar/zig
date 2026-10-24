@@ -160,7 +160,7 @@ pub fn resolve(options: Options) ResolveError!Config {
     const target = &options.resolved_target.result;
 
     // WASI-only. Resolve the optional exec-model option, defaults to command.
-    if (target.os.tag != .wasi and options.wasi_exec_model != null)
+    if (!target.os.tag.isWasi() and options.wasi_exec_model != null)
         return error.WasiExecModelRequiresWasi;
     const wasi_exec_model = options.wasi_exec_model orelse .command;
 

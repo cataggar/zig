@@ -1629,7 +1629,7 @@ fn wasmLink(lld: *Lld, arena: Allocator) !void {
         // is not the case, it means we will get "exec format error" when trying to run
         // it, and then can react to that in the same way as trying to run an ELF file
         // from a foreign CPU architecture.
-        if (Io.File.Permissions.has_executable_bit and target.os.tag == .wasi and
+        if (Io.File.Permissions.has_executable_bit and target.os.tag.isWasi() and
             comp.config.output_mode == .Exe)
         {
             // chmod does not interact with umask, so we use a conservative -rwxr--r-- here.

@@ -214,7 +214,7 @@ pub const Environ = struct {
     };
 
     pub const String = switch (native_os) {
-        .windows, .wasi => struct {},
+        .windows, .wasi, .wasip2 => struct {},
         else => struct {
             PATH: ?[:0]const u8 = null,
             DEBUGINFOD_CACHE_PATH: ?[:0]const u8 = null,
@@ -269,7 +269,7 @@ pub const Environ = struct {
                 }
                 comptime assert(@sizeOf(String) == 0);
             }
-        } else if (native_os == .wasi and !builtin.link_libc) {
+        } else if (native_os.isWasi() and !builtin.link_libc) {
             var environ_size: usize = undefined;
             var environ_buf_size: usize = undefined;
 
@@ -354,7 +354,7 @@ pub const NullFile = switch (native_os) {
             }
         }
     },
-    .wasi, .ios, .tvos, .visionos, .watchos => struct {
+    .wasi, .wasip2, .ios, .tvos, .visionos, .watchos => struct {
         fn deinit(this: @This()) void {
             _ = this;
         }
@@ -1959,7 +1959,7 @@ pub fn io(t: *Threaded) Io {
 pub const socket_flags_unsupported = is_darwin or native_os == .haiku;
 const have_accept4 = !socket_flags_unsupported;
 const have_flock_open_flags = @hasField(posix.O, "EXLOCK");
-const have_networking = std.options.networking and native_os != .wasi;
+const have_networking = std.options.networking and !native_os.isWasi();
 const have_flock = @TypeOf(posix.system.flock) != void;
 const have_sendmmsg = native_os == .linux;
 const have_futex = switch (builtin.cpu.arch) {
@@ -1989,13 +1989,13 @@ const have_fchmodat_flags = native_os != .linux or
     (!builtin.abi.isAndroid() and std.c.versionCheck(.{ .major = 2, .minor = 32, .patch = 0 }));
 
 const have_fchown = switch (native_os) {
-    .wasi, .windows => false,
+    .wasi, .wasip2, .windows => false,
     else => true,
 };
 
 const have_fchmod = switch (native_os) {
     .windows => false,
-    .wasi => builtin.link_libc,
+    .wasi, .wasip2 => builtin.link_libc,
     else => true,
 };
 
@@ -2011,11 +2011,11 @@ const have_wait4 = switch (native_os) {
 };
 
 const have_mmap = switch (native_os) {
-    .wasi, .windows => false,
+    .wasi, .wasip2, .windows => false,
     else => true,
 };
 const have_poll = switch (native_os) {
-    .wasi, .windows => false,
+    .wasi, .wasip2, .windows => false,
     else => true,
 };
 
@@ -2781,7 +2781,7 @@ fn batchAwaitConcurrent(userdata: ?*anyopaque, b: *Io.Batch, timeout: Io.Timeout
         }
         return;
     }
-    if (native_os == .wasi) {
+    if (native_os.isWasi()) {
         // TODO call poll_oneoff
         return error.ConcurrencyUnavailable;
     }
@@ -3339,7 +3339,7 @@ fn submitComplete(ring: []u32, complete_tail: *Io.Batch.RingIndex, op: u32) void
 
 const dirCreateDir = switch (native_os) {
     .windows => dirCreateDirWindows,
-    .wasi => dirCreateDirWasi,
+    .wasi, .wasip2 => dirCreateDirWasi,
     else => dirCreateDirPosix,
 };
 
@@ -3555,7 +3555,7 @@ fn dirCreateDirPath(
 
 const dirCreateDirPathOpen = switch (native_os) {
     .windows => dirCreateDirPathOpenWindows,
-    .wasi => dirCreateDirPathOpenWasi,
+    .wasi, .wasip2 => dirCreateDirPathOpenWasi,
     else => dirCreateDirPathOpenPosix,
 };
 
@@ -3709,7 +3709,7 @@ fn dirStat(userdata: ?*anyopaque, dir: Dir) Dir.StatError!Dir.Stat {
 const dirStatFile = switch (native_os) {
     .linux => dirStatFileLinux,
     .windows => dirStatFileWindows,
-    .wasi => dirStatFileWasi,
+    .wasi, .wasip2 => dirStatFileWasi,
     else => dirStatFilePosix,
 };
 
@@ -3972,7 +3972,7 @@ fn fileLength(userdata: ?*anyopaque, file: File) File.LengthError!u64 {
 const fileStat = switch (native_os) {
     .linux => fileStatLinux,
     .windows => fileStatWindows,
-    .wasi => fileStatWasi,
+    .wasi, .wasip2 => fileStatWasi,
     else => fileStatPosix,
 };
 
@@ -4173,7 +4173,7 @@ fn fileStatWasi(userdata: ?*anyopaque, file: File) File.StatError!File.Stat {
 
 const dirAccess = switch (native_os) {
     .windows => dirAccessWindows,
-    .wasi => dirAccessWasi,
+    .wasi, .wasip2 => dirAccessWasi,
     else => dirAccessPosix,
 };
 
@@ -4339,7 +4339,7 @@ fn dirAccessWindows(
 
 const dirCreateFile = switch (native_os) {
     .windows => dirCreateFileWindows,
-    .wasi => dirCreateFileWasi,
+    .wasi, .wasip2 => dirCreateFileWasi,
     else => dirCreateFilePosix,
 };
 
@@ -4909,7 +4909,7 @@ fn atomicFileInit(
 
 const dirOpenFile = switch (native_os) {
     .windows => dirOpenFileWindows,
-    .wasi => dirOpenFileWasi,
+    .wasi, .wasip2 => dirOpenFileWasi,
     else => dirOpenFilePosix,
 };
 
@@ -4925,7 +4925,7 @@ fn dirOpenFilePosix(
     const sub_path_posix = try pathToPosix(sub_path, &path_buffer);
 
     var flags: posix.O = switch (native_os) {
-        .wasi => .{
+        .wasi, .wasip2 => .{
             .read = options.mode != .write_only,
             .write = options.mode != .read_only,
             .NOFOLLOW = !options.follow_symlinks,
@@ -5355,7 +5355,7 @@ fn dirOpenFileWasi(
 }
 
 const dirOpenDir = switch (native_os) {
-    .wasi => dirOpenDirWasi,
+    .wasi, .wasip2 => dirOpenDirWasi,
     .haiku => dirOpenDirHaiku,
     else => dirOpenDirPosix,
 };
@@ -5379,7 +5379,7 @@ fn dirOpenDirPosix(
     const sub_path_posix = try pathToPosix(sub_path, &path_buffer);
 
     var flags: posix.O = switch (native_os) {
-        .wasi => .{
+        .wasi, .wasip2 => .{
             .read = true,
             .NOFOLLOW = !options.follow_symlinks,
             .DIRECTORY = true,
@@ -5566,7 +5566,7 @@ const dirRead = switch (native_os) {
     .illumos => dirReadIllumos,
     .haiku => dirReadHaiku,
     .windows => dirReadWindows,
-    .wasi => dirReadWasi,
+    .wasi, .wasip2 => dirReadWasi,
     else => dirReadUnimplemented,
 };
 
@@ -6906,7 +6906,7 @@ pub const WindowsPathSpace = struct {
 };
 
 fn dirRealPathFilePosix(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, out_buffer: []u8) Dir.RealPathFileError!usize {
-    if (native_os == .wasi) return error.OperationUnsupported;
+    if (native_os.isWasi()) return error.OperationUnsupported;
 
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
@@ -7004,7 +7004,7 @@ const dirRealPath = switch (native_os) {
 };
 
 fn dirRealPathPosix(userdata: ?*anyopaque, dir: Dir, out_buffer: []u8) Dir.RealPathError!usize {
-    if (native_os == .wasi) return error.OperationUnsupported;
+    if (native_os.isWasi()) return error.OperationUnsupported;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
     return realPathPosix(dir.handle, out_buffer);
@@ -7022,14 +7022,14 @@ const fileRealPath = switch (native_os) {
 };
 
 fn fileRealPathWindows(userdata: ?*anyopaque, file: File, out_buffer: []u8) File.RealPathError!usize {
-    if (native_os == .wasi) return error.OperationUnsupported;
+    if (native_os.isWasi()) return error.OperationUnsupported;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
     return realPathWindows(file.handle, out_buffer);
 }
 
 fn fileRealPathPosix(userdata: ?*anyopaque, file: File, out_buffer: []u8) File.RealPathError!usize {
-    if (native_os == .wasi) return error.OperationUnsupported;
+    if (native_os.isWasi()) return error.OperationUnsupported;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
     return realPathPosix(file.handle, out_buffer);
@@ -7213,7 +7213,7 @@ fn linkat(
 
 const dirDeleteFile = switch (native_os) {
     .windows => dirDeleteFileWindows,
-    .wasi => dirDeleteFileWasi,
+    .wasi, .wasip2 => dirDeleteFileWasi,
     else => dirDeleteFilePosix,
 };
 
@@ -7370,7 +7370,7 @@ fn dirDeleteFilePosix(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8) Dir
 
 const dirDeleteDir = switch (native_os) {
     .windows => dirDeleteDirWindows,
-    .wasi => dirDeleteDirWasi,
+    .wasi, .wasip2 => dirDeleteDirWasi,
     else => dirDeleteDirPosix,
 };
 
@@ -7611,7 +7611,7 @@ fn dirDeleteDirPosix(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8) Dir.
 
 const dirRename = switch (native_os) {
     .windows => dirRenameWindows,
-    .wasi => dirRenameWasi,
+    .wasi, .wasip2 => dirRenameWasi,
     else => dirRenamePosix,
 };
 
@@ -8014,7 +8014,7 @@ fn renameat(
 
 const dirSymLink = switch (native_os) {
     .windows => dirSymLinkWindows,
-    .wasi => dirSymLinkWasi,
+    .wasi, .wasip2 => dirSymLinkWasi,
     else => dirSymLinkPosix,
 };
 
@@ -8252,7 +8252,7 @@ fn dirReadLink(userdata: ?*anyopaque, dir: Dir, sub_path: []const u8, buffer: []
     _ = t;
     switch (native_os) {
         .windows => return dirReadLinkWindows(dir, sub_path, buffer),
-        .wasi => return dirReadLinkWasi(dir, sub_path, buffer),
+        .wasi, .wasip2 => return dirReadLinkWasi(dir, sub_path, buffer),
         else => return dirReadLinkPosix(dir, sub_path, buffer),
     }
 }
@@ -8793,7 +8793,7 @@ fn dirSetFileOwner(
 
 const fileSync = switch (native_os) {
     .windows => fileSyncWindows,
-    .wasi => fileSyncWasi,
+    .wasi, .wasip2 => fileSyncWasi,
     else => fileSyncPosix,
 };
 
@@ -8917,7 +8917,7 @@ fn isTty(file: File) Io.Cancelable!bool {
         }
     }
 
-    if (native_os == .wasi) {
+    if (native_os.isWasi()) {
         var statbuf: std.os.wasi.fdstat_t = undefined;
         const err = std.os.wasi.fd_fdstat_get(file.handle, &statbuf);
         if (err != .SUCCESS)
@@ -9031,7 +9031,7 @@ fn supportsAnsiEscapeCodes(t: *Threaded, file: File) Io.Cancelable!bool {
         };
     }
 
-    if (native_os == .wasi) {
+    if (native_os.isWasi()) {
         // WASI sanitizes stdout when fd is a tty so ANSI escape codes
         // will not be interpreted as actual cursor commands, and
         // stderr is always sanitized.
@@ -9167,7 +9167,7 @@ fn fileSetLength(userdata: ?*anyopaque, file: File, length: u64) File.SetLengthE
         };
     }
 
-    if (native_os == .wasi and !builtin.link_libc) {
+    if (native_os.isWasi() and !builtin.link_libc) {
         const syscall: Syscall = try .start();
         while (true) {
             switch (std.os.wasi.fd_filestat_set_size(file.handle, length)) {
@@ -9258,7 +9258,7 @@ fn fileSetPermissions(userdata: ?*anyopaque, file: File, permissions: File.Permi
                 else => |status| return syscall.unexpectedNtstatus(status),
             };
         },
-        .wasi => return error.Unexpected, // Unsupported OS.
+        .wasi, .wasip2 => return error.Unexpected, // Unsupported OS.
         else => return setPermissionsPosix(file.handle, permissions.toMode()),
     }
 }
@@ -9307,7 +9307,7 @@ fn dirSetTimestamps(
         @panic("TODO implement dirSetTimestamps windows");
     }
 
-    if (native_os == .wasi and !builtin.link_libc) {
+    if (native_os.isWasi() and !builtin.link_libc) {
         @panic("TODO implement dirSetTimestamps wasi");
     }
 
@@ -9385,7 +9385,7 @@ fn fileSetTimestamps(
         };
     }
 
-    if (native_os == .wasi and !builtin.link_libc) {
+    if (native_os.isWasi() and !builtin.link_libc) {
         var atime: std.os.wasi.timestamp_t = 0;
         var mtime: std.os.wasi.timestamp_t = 0;
         var flags: std.os.wasi.fstflags_t = .{};
@@ -9455,7 +9455,7 @@ const windows_lock_range_off: windows.LARGE_INTEGER = 0;
 const windows_lock_range_len: windows.LARGE_INTEGER = 1;
 
 fn fileLock(userdata: ?*anyopaque, file: File, lock: File.Lock) File.LockError!void {
-    if (native_os == .wasi) return error.FileLocksUnsupported;
+    if (native_os.isWasi()) return error.FileLocksUnsupported;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
 
@@ -9536,7 +9536,7 @@ fn fileLock(userdata: ?*anyopaque, file: File, lock: File.Lock) File.LockError!v
 }
 
 fn fileTryLock(userdata: ?*anyopaque, file: File, lock: File.Lock) File.LockError!bool {
-    if (native_os == .wasi) return error.FileLocksUnsupported;
+    if (native_os.isWasi()) return error.FileLocksUnsupported;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
 
@@ -9629,7 +9629,7 @@ fn fileTryLock(userdata: ?*anyopaque, file: File, lock: File.Lock) File.LockErro
 }
 
 fn fileUnlock(userdata: ?*anyopaque, file: File) void {
-    if (native_os == .wasi) return;
+    if (native_os.isWasi()) return;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
 
@@ -9665,7 +9665,7 @@ fn fileUnlock(userdata: ?*anyopaque, file: File) void {
 }
 
 fn fileDowngradeLock(userdata: ?*anyopaque, file: File) File.DowngradeLockError!void {
-    if (native_os == .wasi) return;
+    if (native_os.isWasi()) return;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
 
@@ -9828,7 +9828,7 @@ fn dirHardLink(
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
 
-    if (native_os == .wasi and !builtin.link_libc) {
+    if (native_os.isWasi() and !builtin.link_libc) {
         const flags: std.os.wasi.lookupflags_t = .{
             .SYMLINK_FOLLOW = options.follow_symlinks,
         };
@@ -9918,7 +9918,7 @@ fn fileReadStreamingPosix(file: File, data: []const []u8) File.ReadStreamingErro
     const dest = iovecs_buffer[0..i];
     assert(dest[0].len > 0);
 
-    if (native_os == .wasi and !builtin.link_libc) {
+    if (native_os.isWasi() and !builtin.link_libc) {
         const syscall: Syscall = try .start();
         while (true) {
             var nread: usize = undefined;
@@ -9962,7 +9962,7 @@ fn fileReadStreamingPosix(file: File, data: []const []u8) File.ReadStreamingErro
             },
             .BADF => {
                 syscall.finish();
-                if (native_os == .wasi) return error.IsDir; // File operation on directory.
+                if (native_os.isWasi()) return error.IsDir; // File operation on directory.
                 return error.NotOpenForReading;
             },
             .AGAIN => return syscall.fail(error.WouldBlock),
@@ -10095,7 +10095,7 @@ fn fileReadPositionalPosix(file: File, data: []const []u8, offset: u64) File.Rea
     const dest = iovecs_buffer[0..i];
     assert(dest[0].len > 0);
 
-    if (native_os == .wasi and !builtin.link_libc) {
+    if (native_os.isWasi() and !builtin.link_libc) {
         const syscall: Syscall = try .start();
         while (true) {
             var nread: usize = undefined;
@@ -10157,7 +10157,7 @@ fn fileReadPositionalPosix(file: File, data: []const []u8, offset: u64) File.Rea
                 .FAULT => |err| return syscall.errnoBug(err),
                 .BADF => {
                     syscall.finish();
-                    if (native_os == .wasi) return error.IsDir; // File operation on directory.
+                    if (native_os.isWasi()) return error.IsDir; // File operation on directory.
                     return error.NotOpenForReading;
                 },
                 else => |err| return syscall.unexpectedErrno(err),
@@ -10191,7 +10191,7 @@ fn fileReadPositionalPosix(file: File, data: []const []u8, offset: u64) File.Rea
             .FAULT => |err| return syscall.errnoBug(err),
             .BADF => {
                 syscall.finish();
-                if (native_os == .wasi) return error.IsDir; // File operation on directory.
+                if (native_os.isWasi()) return error.IsDir; // File operation on directory.
                 return error.NotOpenForReading;
             },
             else => |err| return syscall.unexpectedErrno(err),
@@ -10324,7 +10324,7 @@ fn fileSeekBy(userdata: ?*anyopaque, file: File, offset: i64) File.SeekError!voi
         };
     }
 
-    if (native_os == .wasi and !builtin.link_libc) {
+    if (native_os.isWasi() and !builtin.link_libc) {
         var new_offset: std.os.wasi.filesize_t = undefined;
         const syscall: Syscall = try .start();
         while (true) {
@@ -10432,7 +10432,7 @@ fn fileSeekTo(userdata: ?*anyopaque, file: File, offset: u64) File.SeekError!voi
         };
     }
 
-    if (native_os == .wasi and !builtin.link_libc) {
+    if (native_os.isWasi() and !builtin.link_libc) {
         const syscall: Syscall = try .start();
         while (true) {
             var new_offset: std.os.wasi.filesize_t = undefined;
@@ -10524,7 +10524,7 @@ fn posixSeekTo(fd: posix.fd_t, offset: u64) File.SeekError!void {
 fn processExecutableOpen(userdata: ?*anyopaque, flags: Dir.OpenFileOptions) process.OpenExecutableError!File {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     switch (native_os) {
-        .wasi => return error.OperationUnsupported,
+        .wasi, .wasip2 => return error.OperationUnsupported,
         .linux, .serenity => return dirOpenFilePosix(t, .{ .handle = posix.AT.FDCWD }, "/proc/self/exe", flags),
         .windows => {
             // If ImagePathName is a symlink, then it will contain the path of the symlink,
@@ -10831,7 +10831,7 @@ fn fileWritePositional(
 
     if (iovlen == 0) return 0;
 
-    if (native_os == .wasi and !builtin.link_libc) {
+    if (native_os.isWasi() and !builtin.link_libc) {
         var n_written: usize = undefined;
         const syscall: Syscall = try .start();
         while (true) {
@@ -11016,7 +11016,7 @@ fn fileWriteStreaming(
 
     if (iovlen == 0) return 0;
 
-    if (native_os == .wasi and !builtin.link_libc) {
+    if (native_os.isWasi() and !builtin.link_libc) {
         var n_written: usize = undefined;
         const syscall: Syscall = try .start();
         while (true) {
@@ -11771,7 +11771,7 @@ fn now(userdata: ?*anyopaque, clock: Io.Clock) Io.Timestamp {
     _ = t;
     return switch (native_os) {
         .windows => nowWindows(clock),
-        .wasi => nowWasi(clock),
+        .wasi, .wasip2 => nowWasi(clock),
         else => nowPosix(clock),
     };
 }
@@ -11803,7 +11803,7 @@ fn clockResolution(userdata: ?*anyopaque, clock: Io.Clock) Io.Clock.ResolutionEr
             },
             .cpu_process, .cpu_thread => return error.ClockUnavailable,
         },
-        .wasi => {
+        .wasi, .wasip2 => {
             if (builtin.link_libc) return clockResolutionPosix(clock);
             var ns: std.os.wasi.timestamp_t = undefined;
             return switch (std.os.wasi.clock_res_get(clockToWasi(clock), &ns)) {
@@ -11907,7 +11907,7 @@ fn nowWasi(clock: Io.Clock) Io.Timestamp {
 fn sleep(userdata: ?*anyopaque, timeout: Io.Timeout) Io.Cancelable!void {
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     if (use_parking_sleep) return parking_sleep.sleep(timeout);
-    if (native_os == .wasi) return sleepWasi(t, timeout);
+    if (native_os.isWasi()) return sleepWasi(t, timeout);
     if (@TypeOf(posix.system.clock_nanosleep) != void) return sleepPosix(timeout);
     return sleepNanosleep(t, timeout);
 }
@@ -12903,7 +12903,7 @@ fn netReadPosix(fd: net.Socket.Handle, data: [][]u8, control: []u8) net.Stream.R
     const dest = iovecs_buffer[0..i];
     assert(dest[0].len > 0);
 
-    if (native_os == .wasi and !builtin.link_libc) {
+    if (native_os.isWasi() and !builtin.link_libc) {
         const syscall: Syscall = try .start();
         while (true) {
             var n: usize = undefined;
@@ -13557,7 +13557,7 @@ fn addAfdBuf(
 /// This is either usize or u32. Since, either is fine, let's use the same
 /// `addBuf` function for both writing to a file and sending network messages.
 const iovlen_t = switch (native_os) {
-    .wasi => u32,
+    .wasi, .wasip2 => u32,
     else => @FieldType(posix.msghdr_const, "iovlen"),
 };
 
@@ -14237,7 +14237,7 @@ fn processCurrentPath(userdata: ?*anyopaque, buffer: []u8) process.CurrentPathEr
         return end_index;
     }
 
-    if (native_os == .wasi and !builtin.link_libc) {
+    if (native_os.isWasi() and !builtin.link_libc) {
         if (buffer.len == 0) return error.NameTooLong;
         buffer[0] = '.';
         return 1;
@@ -14277,7 +14277,7 @@ fn processSetCurrentDir(userdata: ?*anyopaque, dir: Dir) process.SetCurrentDirEr
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
 
-    if (native_os == .wasi) return error.OperationUnsupported;
+    if (native_os.isWasi()) return error.OperationUnsupported;
 
     if (is_windows) {
         var dir_path_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
@@ -14308,7 +14308,7 @@ fn processSetCurrentPath(userdata: ?*anyopaque, path: []const u8) process.SetCur
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
 
-    if (native_os == .wasi) return error.OperationUnsupported;
+    if (native_os.isWasi()) return error.OperationUnsupported;
 
     if (is_windows) {
         var path_w_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
@@ -15259,7 +15259,7 @@ fn processReplace(userdata: ?*anyopaque, options: process.ReplaceOptions) proces
 }
 
 const processSpawn = switch (native_os) {
-    .wasi, .emscripten, .ios, .tvos, .visionos, .watchos => processSpawnUnsupported,
+    .wasi, .wasip2, .emscripten, .ios, .tvos, .visionos, .watchos => processSpawnUnsupported,
     .windows => processSpawnWindows,
     .driverkit, .maccatalyst, .macos => processSpawnDarwin,
     else => processSpawnPosix,
@@ -15551,7 +15551,7 @@ fn processSpawnPosix(userdata: ?*anyopaque, options: process.SpawnOptions) proce
 }
 
 fn childWait(userdata: ?*anyopaque, child: *process.Child) process.Child.WaitError!process.Child.Term {
-    if (native_os == .wasi) unreachable;
+    if (native_os.isWasi()) unreachable;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     _ = t;
     switch (native_os) {
@@ -15561,7 +15561,7 @@ fn childWait(userdata: ?*anyopaque, child: *process.Child) process.Child.WaitErr
 }
 
 fn childKill(userdata: ?*anyopaque, child: *process.Child) void {
-    if (native_os == .wasi) unreachable;
+    if (native_os.isWasi()) unreachable;
     const t: *Threaded = @ptrCast(@alignCast(userdata));
     if (is_windows) {
         childKillWindows(t, child, 1) catch childCleanupWindows(child);
@@ -17916,7 +17916,7 @@ pub fn fallbackSeed(aslr_addr: ?*anyopaque, seed: *[Csprng.seed_len]u8) void {
     std.mem.writeInt(usize, seed[seed.len - @sizeOf(usize) ..][0..@sizeOf(usize)], @intFromPtr(aslr_addr), .native);
     const fallbackSeedImpl = switch (native_os) {
         .windows => fallbackSeedWindows,
-        .wasi => if (builtin.link_libc) fallbackSeedPosix else fallbackSeedWasi,
+        .wasi, .wasip2 => if (builtin.link_libc) fallbackSeedPosix else fallbackSeedWasi,
         else => fallbackSeedPosix,
     };
     fallbackSeedImpl(seed);
@@ -18006,7 +18006,7 @@ fn randomSecure(userdata: ?*anyopaque, buffer: []u8) Io.RandomSecureError!void {
         return;
     }
 
-    if (native_os == .wasi) {
+    if (native_os.isWasi()) {
         if (buffer.len == 0) return;
         const syscall: Syscall = try .start();
         while (true) switch (std.os.wasi.random_get(buffer.ptr, buffer.len)) {
@@ -19257,7 +19257,7 @@ fn fileMemoryMapDestroy(userdata: ?*anyopaque, mm: *File.MemoryMap) void {
             _ = windows.ntdll.NtUnmapViewOfSection(windows.current_process, memory.ptr);
             windows.CloseHandle(section);
         },
-        .wasi => unreachable,
+        .wasi, .wasip2 => unreachable,
         else => {
             if (memory.len == 0) return;
             switch (posix.errno(posix.system.munmap(memory.ptr, memory.len))) {
@@ -19293,7 +19293,7 @@ fn fileMemoryMapSetLength(
             return;
         }
         switch (native_os) {
-            .wasi => unreachable,
+            .wasi, .wasip2 => unreachable,
             .linux => {
                 const flags: posix.MREMAP = .{ .MAYMOVE = true };
                 const addr_hint: ?[*]const u8 = null;
@@ -19367,7 +19367,7 @@ fn mmSyncRead(file: File, memory: []u8, offset: u64) File.ReadPositionalError!vo
             }
             i += n;
         }
-    } else if (native_os == .wasi and !builtin.link_libc) {
+    } else if (native_os.isWasi() and !builtin.link_libc) {
         var i: usize = 0;
         const syscall: Syscall = try .start();
         while (true) {
@@ -19463,7 +19463,7 @@ fn mmSyncWrite(file: File, memory: []u8, offset: u64) File.WritePositionalError!
             if (buf.len == 0) break;
             i += try writeFilePositionalWindows(file, memory[i..], offset + i);
         }
-    } else if (native_os == .wasi and !builtin.link_libc) {
+    } else if (native_os.isWasi() and !builtin.link_libc) {
         var i: usize = 0;
         var n: usize = undefined;
         const syscall: Syscall = try .start();
@@ -19952,7 +19952,7 @@ fn OpenFile(sub_path_w: []const u16, options: OpenFileOptions) OpenError!windows
 }
 
 pub fn closeFd(fd: posix.fd_t) void {
-    if (native_os == .wasi and !builtin.link_libc) {
+    if (native_os.isWasi() and !builtin.link_libc) {
         switch (std.os.wasi.fd_close(fd)) {
             .SUCCESS, .INTR => {},
             .BADF => recoverableOsBugDetected(), // use after free

@@ -297,7 +297,7 @@ test "listen on a unix socket, send bytes, receive bytes" {
 }
 
 test "listen on a unix socket, pass file descriptor" {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi) {
+    if (builtin.os.tag == .windows or builtin.os.tag.isWasi()) {
         // Windows and WASI don't have the concept of control/ancillary data.
         return error.SkipZigTest;
     }

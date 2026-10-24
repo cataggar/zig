@@ -80,7 +80,7 @@ pub const Color = enum {
     /// CLICOLOR_FORCE environment variables. Color is always disabled on WASI per
     /// https://github.com/WebAssembly/WASI/issues/162
     pub fn settingFromEnvironment(environ_map: *const std.process.Environ.Map) Color {
-        return if (builtin.os.tag == .wasi or EnvVar.NO_COLOR.isSet(environ_map))
+        return if (builtin.os.tag.isWasi() or EnvVar.NO_COLOR.isSet(environ_map))
             .off
         else if (EnvVar.CLICOLOR_FORCE.isSet(environ_map))
             .on
@@ -1452,7 +1452,7 @@ pub const SubprocessCommand = struct {
 /// means the path has no repeated separators, no "." or ".." components, and no trailing separator.
 /// On WASI, "" is returned instead of ".".
 pub fn getResolvedCwd(io: Io, gpa: Allocator) std.process.CurrentPathAllocError![]u8 {
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag.isWasi()) {
         if (std.debug.runtime_safety) {
             const cwd = try std.process.currentPathAlloc(io, gpa);
             defer gpa.free(cwd);
@@ -1524,7 +1524,7 @@ pub const Directories = struct {
         local_cache_strat: LocalCacheStrategy,
         preopens: std.process.Preopens,
         self_exe_path: switch (builtin.target.os.tag) {
-            .wasi => void,
+            .wasi, .wasip2 => void,
             else => []const u8,
         },
         environ_map: *const std.process.Environ.Map,
@@ -1533,7 +1533,7 @@ pub const Directories = struct {
 
     /// Uses `std.process.fatal` on error conditions.
     pub fn init(arena: Allocator, io: Io, options: InitOptions) Directories {
-        const wasi = builtin.target.os.tag == .wasi;
+        const wasi = builtin.target.os.tag.isWasi();
         const cwd = options.cwd;
 
         const zig_lib: Cache.Directory = d: {
@@ -1710,7 +1710,7 @@ pub fn resolveGlobalCacheDir(arena: Allocator, environ_map: *const std.process.E
     const app_name = "zig";
 
     switch (builtin.os.tag) {
-        .wasi => @compileError("on WASI the global cache dir must be resolved with preopens"),
+        .wasi, .wasip2 => @compileError("on WASI the global cache dir must be resolved with preopens"),
         .windows => {
             const local_app_data_dir = EnvVar.LOCALAPPDATA.get(environ_map) orelse
                 return error.AppDataDirUnavailable;
@@ -1761,7 +1761,7 @@ pub fn resolvePath(
     cwd_resolved: []const u8,
     paths: []const []const u8,
 ) Allocator.Error![]u8 {
-    if (builtin.target.os.tag == .wasi) {
+    if (builtin.target.os.tag.isWasi()) {
         assert(mem.eql(u8, cwd_resolved, ""));
         const res = try Dir.path.resolve(gpa, paths);
         if (mem.eql(u8, res, ".")) {

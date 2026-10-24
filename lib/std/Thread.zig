@@ -13,7 +13,7 @@ const posix = std.posix;
 const windows = std.os.windows;
 const testing = std.testing;
 
-pub const use_pthreads = native_os != .windows and native_os != .wasi and builtin.link_libc;
+pub const use_pthreads = native_os != .windows and !native_os.isWasi() and builtin.link_libc;
 
 const Impl = if (native_os == .windows)
     WindowsThreadImpl
@@ -21,7 +21,7 @@ else if (use_pthreads)
     PosixThreadImpl
 else if (native_os == .linux)
     LinuxThreadImpl
-else if (native_os == .wasi)
+else if (native_os.isWasi())
     WasiThreadImpl
 else
     UnsupportedImpl;
@@ -267,6 +267,7 @@ pub const Id = switch (native_os) {
     .openbsd,
     .haiku,
     .wasi,
+    .wasip2,
     .serenity,
     => u32,
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => u64,
@@ -1703,7 +1704,7 @@ test detach {
 }
 
 test "Thread.getCpuCount" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os.isWasi()) return error.SkipZigTest;
 
     const cpu_count = try Thread.getCpuCount();
     try std.testing.expect(cpu_count >= 1);
@@ -1747,7 +1748,7 @@ pub fn maybeAttachSignalStack() void {
         // TODO: Windows vectored exception handlers always run on the main stack, but we could use
         // some target-specific inline assembly to swap the stack pointer.
         .windows => return,
-        .wasi => return,
+        .wasi, .wasip2 => return,
         else => {},
     }
     const global = struct {
