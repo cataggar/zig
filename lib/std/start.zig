@@ -19,6 +19,10 @@ comptime {
     // decls there get run.
     _ = root;
 
+    if (native_os == .wasip2 and !builtin.link_libc and !@hasDecl(root, "cabi_realloc")) {
+        @export(&cabiRealloc, .{ .name = "cabi_realloc" });
+    }
+
     if (builtin.output_mode == .Lib and builtin.link_mode == .dynamic) {
         const dll_main_crt_startup = if (builtin.abi.isGnu()) "DllMainCRTStartup" else "_DllMainCRTStartup";
         if (native_os == .windows and !builtin.link_libc and !@hasDecl(root, dll_main_crt_startup)) {
@@ -55,7 +59,7 @@ comptime {
             }
         } else if (native_os == .uefi) {
             if (!@hasDecl(root, "EfiMain")) @export(&EfiMain, .{ .name = "EfiMain" });
-        } else if (native_os.isWasi()) {
+        } else if (native_os == .wasi) {
             const wasm_start_sym = switch (builtin.wasi_exec_model) {
                 .reactor => "_initialize",
                 .command => "_start",
@@ -64,6 +68,24 @@ comptime {
                 // Only call main when defined. For WebAssembly it's allowed to pass `-fno-entry` in which
                 // case it's not required to provide an entrypoint such as main.
                 @export(&startWasi, .{ .name = wasm_start_sym });
+            }
+        } else if (native_os == .wasip2) {
+            switch (builtin.wasi_exec_model) {
+                .reactor => {
+                    if (!@hasDecl(root, "_initialize") and @hasDecl(root, "main")) {
+                        @export(&startWasi, .{ .name = "_initialize" });
+                    }
+                },
+                .command => {
+                    if (@hasDecl(root, "main")) {
+                        if (!@hasDecl(root, "wasi:cli/run@0.2.6#run")) {
+                            @export(&startWasip2Command, .{ .name = "wasi:cli/run@0.2.6#run" });
+                        }
+                        if (!@hasDecl(root, "wasi:cli/run@0.2.0#run")) {
+                            @export(&startWasip2Command, .{ .name = "wasi:cli/run@0.2.0#run" });
+                        }
+                    }
+                },
             }
         } else if (is_wasm and native_os == .freestanding) {
             // Only call main when defined. For WebAssembly it's allowed to pass `-fno-entry` in which
@@ -127,6 +149,37 @@ fn startWasi() callconv(.c) void {
         .reactor => _ = @call(.always_inline, callMain, .{ {}, std.process.Environ.Block.global }),
         .command => std.os.wasi.proc_exit(@call(.always_inline, callMain, .{ {}, std.process.Environ.Block.global })),
     }
+}
+
+fn startWasip2Command() callconv(.c) i32 {
+    const status = @call(.always_inline, callMain, .{ {}, std.process.Environ.Block.global });
+    return if (status == 0) 0 else 1;
+}
+
+fn cabiRealloc(old_ptr: ?[*]u8, old_len: usize, alignment: usize, new_len: usize) callconv(.c) ?[*]u8 {
+    if (alignment == 0 or (alignment & (alignment - 1)) != 0) return null;
+    const log2_align: std.mem.Alignment = .fromByteUnits(alignment);
+    if (new_len == 0) {
+        if (old_ptr) |p| {
+            if (old_len != 0) {
+                std.heap.wasm_allocator.rawFree(p[0..old_len], log2_align, @returnAddress());
+            }
+        }
+        return @ptrFromInt(alignment);
+    }
+    if (old_ptr) |p| {
+        if (old_len != 0) {
+            if (std.heap.wasm_allocator.rawResize(p[0..old_len], log2_align, new_len, @returnAddress())) {
+                return p;
+            }
+            const new_p = std.heap.wasm_allocator.rawAlloc(new_len, log2_align, @returnAddress()) orelse return null;
+            const copy_len = @min(old_len, new_len);
+            @memcpy(new_p[0..copy_len], p[0..copy_len]);
+            std.heap.wasm_allocator.rawFree(p[0..old_len], log2_align, @returnAddress());
+            return new_p;
+        }
+    }
+    return std.heap.wasm_allocator.rawAlloc(new_len, log2_align, @returnAddress());
 }
 
 fn EfiMain(handle: uefi.Handle, system_table: *uefi.tables.SystemTable) callconv(.c) usize {
