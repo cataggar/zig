@@ -1448,6 +1448,8 @@ fn buildOutputType(
                         test_runner_path = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "--test-cmd")) {
                         try test_exec_args.append(arena, args_iter.nextOrFatal());
+                    } else if (mem.cutPrefix(u8, arg, "--test-cmd=")) |rest| {
+                        try test_exec_args.append(arena, rest);
                     } else if (mem.eql(u8, arg, "--cache-dir")) {
                         override_local_cache_dir = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "--global-cache-dir")) {
