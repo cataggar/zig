@@ -1260,7 +1260,7 @@ test "shrink large object to large object" {
 }
 
 test "shrink large object to large object with larger alignment" {
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag.isWasi()) {
         // https://github.com/ziglang/zig/issues/22731
         return error.SkipZigTest;
     }
@@ -1326,7 +1326,7 @@ test "non-page-allocator backing allocator" {
 }
 
 test "realloc large object to larger alignment" {
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag.isWasi()) {
         // https://github.com/ziglang/zig/issues/22731
         return error.SkipZigTest;
     }

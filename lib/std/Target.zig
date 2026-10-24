@@ -60,6 +60,7 @@ pub const Os = struct {
 
         emscripten,
         wasi,
+        wasip2,
 
         amdhsa,
         amdpal,
@@ -92,6 +93,13 @@ pub const Os = struct {
         pub inline fn isBSD(tag: Tag) bool {
             return tag.isDarwin() or switch (tag) {
                 .freebsd, .openbsd, .netbsd, .dragonfly => true,
+                else => false,
+            };
+        }
+
+        pub inline fn isWasi(tag: Tag) bool {
+            return switch (tag) {
+                .wasi, .wasip2 => true,
                 else => false,
             };
         }
@@ -203,6 +211,7 @@ pub const Os = struct {
                 .vita,
 
                 .wasi,
+                .wasip2,
 
                 .amdhsa,
                 .amdpal,
@@ -661,6 +670,12 @@ pub const Os = struct {
                         .max = .{ .major = 0, .minor = 3, .patch = 0 },
                     },
                 },
+                .wasip2 => .{
+                    .semver = .{
+                        .min = .{ .major = 0, .minor = 2, .patch = 0 },
+                        .max = .{ .major = 0, .minor = 3, .patch = 0 },
+                    },
+                },
 
                 .amdhsa => .{
                     .semver = .{
@@ -966,6 +981,7 @@ pub const Abi = enum {
             .vulkan,
             .tios,
             .wasi,
+            .wasip2,
             => .none,
         };
     }
@@ -2339,6 +2355,7 @@ pub fn requiresLibC(target: *const Target) bool {
         .amdpal,
         .hurd,
         .wasi,
+        .wasip2,
         .uefi,
         .opencl,
         .opengl,
@@ -2510,6 +2527,7 @@ pub const DynamicLinker = struct {
 
             .emscripten,
             .wasi,
+            .wasip2,
 
             .amdhsa,
             .amdpal,
@@ -2957,6 +2975,7 @@ pub const DynamicLinker = struct {
 
             .emscripten,
             .wasi,
+            .wasip2,
 
             .amdhsa,
             .amdpal,
@@ -2968,6 +2987,7 @@ pub const DynamicLinker = struct {
             .vulkan,
 
             .tios,
+
             .ashetos,
             => none,
         } catch unreachable;
@@ -3335,6 +3355,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
         .openbsd,
 
         .wasi,
+        .wasip2,
         .emscripten,
         => switch (c_type) {
             .char => 8,
@@ -3783,4 +3804,21 @@ const assert = std.debug.assert;
 
 test {
     std.testing.refAllDecls(Cpu.Arch);
+}
+
+test "wasm32-wasip2 target query and properties" {
+    const query = try Query.parse(.{
+        .arch_os_abi = "wasm32-wasip2",
+    });
+    try std.testing.expectEqual(Cpu.Arch.wasm32, query.cpu_arch.?);
+    try std.testing.expectEqual(Os.Tag.wasip2, query.os_tag.?);
+    try std.testing.expect(query.os_tag.?.isWasi());
+    try std.testing.expect(Os.Tag.wasi.isWasi());
+    try std.testing.expect(!Os.Tag.linux.isWasi());
+
+    const default_os = Os.Tag.wasip2.defaultVersionRange(.wasm32, .none);
+    try std.testing.expectEqual(@as(u32, 0), default_os.version_range.semver.min.major);
+    try std.testing.expectEqual(@as(u32, 2), default_os.version_range.semver.min.minor);
+    try std.testing.expectEqual(Abi.none, Abi.default(.wasm32, .wasip2));
+    try std.testing.expectEqualSlices(u8, ".wasm", Os.Tag.wasip2.exeFileExt(.wasm32));
 }

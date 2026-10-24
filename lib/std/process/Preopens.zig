@@ -10,13 +10,13 @@ const Allocator = std.mem.Allocator;
 map: Map,
 
 pub const empty: Preopens = switch (native_os) {
-    .wasi => .{ .map = .empty },
+    .wasi, .wasip2 => .{ .map = .empty },
     else => .{ .map = {} },
 };
 
 pub const Map = switch (native_os) {
     // Indexed by file descriptor number.
-    .wasi => std.array_hash_map.String(void),
+    .wasi, .wasip2 => std.array_hash_map.String(void),
     else => void,
 };
 
@@ -27,7 +27,7 @@ pub const Resource = union(enum) {
 
 pub fn get(p: *const Preopens, name: []const u8) ?Resource {
     switch (native_os) {
-        .wasi => {
+        .wasi, .wasip2 => {
             const index = p.map.getIndex(name) orelse return null;
             if (index <= 2) return .{ .file = .{
                 .handle = @intCast(index),
@@ -47,7 +47,7 @@ pub fn get(p: *const Preopens, name: []const u8) ?Resource {
 pub const InitError = Allocator.Error || error{Unexpected};
 
 pub fn init(arena: Allocator) InitError!Preopens {
-    if (native_os != .wasi) return .{ .map = {} };
+    if (!native_os.isWasi()) return .{ .map = {} };
     const wasi = std.os.wasi;
     var map: Map = .empty;
 
