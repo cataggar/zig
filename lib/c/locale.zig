@@ -99,17 +99,17 @@ const map_base_off: usize = if (ptr_size == 8) 24 else 20;
 const off_locale = part1_size + map_base_off + 11 * ptr_size + 8;
 
 inline fn currentLocaleSlot() **LocaleStruct {
+    if (builtin.target.isWasiLibC()) {
+        if (__libc.current_locale == null) {
+            __libc.current_locale = &__libc.global_locale;
+        }
+        return @ptrCast(&__libc.current_locale);
+    }
     const self = @intFromPtr(pthread_self());
     return @ptrFromInt(self + off_locale);
 }
 
 inline fn currentLocale() *LocaleStruct {
-    if (builtin.target.isWasiLibC()) {
-        if (__libc.current_locale == null) {
-            __libc.current_locale = &__libc.global_locale;
-        }
-        return __libc.current_locale.?;
-    }
     return currentLocaleSlot().*;
 }
 

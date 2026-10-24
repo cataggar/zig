@@ -851,8 +851,8 @@ fn findRelpath2(path: [*:0]const u8, relative: *?[*:0]u8, relative_len: *usize) 
 
 fn findRelpath(path: [*:0]const u8, relative: *[*:0]u8) c_int {
     const State = struct {
-        threadlocal var relative_buf: ?[*:0]u8 = null;
-        threadlocal var relative_buf_len: usize = 0;
+        var relative_buf: ?[*:0]u8 = null;
+        var relative_buf_len: usize = 0;
     };
     const fd = findRelpath2(path, &State.relative_buf, &State.relative_buf_len);
     if (State.relative_buf) |rb| relative.* = rb;
@@ -861,8 +861,8 @@ fn findRelpath(path: [*:0]const u8, relative: *[*:0]u8) c_int {
 
 fn findRelpathAlt(path: [*:0]const u8, relative: *[*:0]u8) c_int {
     const State = struct {
-        threadlocal var relative_buf: ?[*:0]u8 = null;
-        threadlocal var relative_buf_len: usize = 0;
+        var relative_buf: ?[*:0]u8 = null;
+        var relative_buf_len: usize = 0;
     };
     const fd = findRelpath2(path, &State.relative_buf, &State.relative_buf_len);
     if (State.relative_buf) |rb| relative.* = rb;
@@ -1385,7 +1385,7 @@ const RngState = struct {
     reserve: [RNG_RESERVE_LEN]u8 = undefined,
 };
 
-threadlocal var rng_state: RngState = .{};
+var rng_state: RngState = .{};
 
 fn arc4randomBufImpl(buffer: [*]u8, len_in: usize) callconv(.c) void {
     if (!rng_state.initialized) {
