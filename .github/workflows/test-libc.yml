@@ -8,8 +8,9 @@ on:
         required: true
         type: string
       test-filter:
-        description: 'Test filter (e.g. powf, llround)'
-        required: true
+        description: 'Test filter (e.g. powf, llround; empty for all tests)'
+        required: false
+        default: ''
         type: string
       targets:
         description: 'Target groups to test (comma-separated, or "all")'
@@ -194,10 +195,12 @@ jobs:
 
           ARGS=(
             -Dlibc-test-path="$HOME/libc-test"
-            -Dtest-filter="$FILTER"
             -j$JOBS
             --summary all
           )
+          if [ -n "$FILTER" ]; then
+            ARGS+=(-Dtest-filter="$FILTER")
+          fi
 
           # Apply target filter
           TARGET_FILTER="${{ matrix.target-filter }}"
@@ -219,4 +222,4 @@ jobs:
           # `test-libc` to `test-libc-nsz` (musl-only `libc_test_nsz_targets`).
           # `test-libc` on 0.17 is a different step that builds/runs lib/c for
           # gnu/freebsd/netbsd/openbsd dynamic targets, which cannot run under QEMU.
-          stage4/bin/zig build test-libc-nsz --zig-lib-dir lib "${ARGS[@]}"
+          stage4/bin/zig build --zig-lib=lib test-libc-nsz "${ARGS[@]}"
