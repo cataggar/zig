@@ -34,15 +34,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .ci-bootstrap/zig1
-          key: zig1-${{ runner.os }}-${{ hashFiles('stage1/zig1.wasm', 'stage1/wasm2c.c', 'stage1/wasi.c') }}
+          key: zig1-v2-${{ runner.os }}-${{ hashFiles('stage1/zig1.wasm', 'stage1/wasm2c.c', 'stage1/wasi.c') }}
 
       - name: Build stage1 bootstrap (if not cached)
         if: steps.cache-zig1.outputs.cache-hit != 'true'
         run: |
           mkdir -p .ci-bootstrap
-          zig cc -std=c99 -O2 stage1/wasm2c.c -o .ci-bootstrap/zig-wasm2c
+          zig cc -target x86_64-linux-gnu -mcpu=baseline -std=c99 -O2 -fno-sanitize=undefined stage1/wasm2c.c -o .ci-bootstrap/zig-wasm2c
           .ci-bootstrap/zig-wasm2c stage1/zig1.wasm .ci-bootstrap/zig1.c
-          zig cc -std=c99 -O1 -fno-strict-aliasing .ci-bootstrap/zig1.c stage1/wasi.c -lm -o .ci-bootstrap/zig1
+          zig cc -target x86_64-linux-gnu -mcpu=baseline -std=c99 -O2 -fno-sanitize=undefined -fno-stack-protector -fno-strict-aliasing \
+            -Wno-address-of-packed-member -Istage1 .ci-bootstrap/zig1.c stage1/wasi.c -lm -o .ci-bootstrap/zig1
           rm -f .ci-bootstrap/zig1.c .ci-bootstrap/zig-wasm2c
 
       - name: Build zig-wasm (dev=.wasm)
