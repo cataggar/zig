@@ -762,6 +762,9 @@ pub const Step = extern struct {
         expect_errors: Storage.FlagUnion(.flags4, .expect_errors, ExpectErrors),
         linker_script: Storage.FlagOptional(.flags4, .linker_script, LazyPath.Index),
         version_script: Storage.FlagOptional(.flags4, .version_script, LazyPath.Index),
+        wit_path: Storage.FlagOptional(.flags4, .has_wit_path, LazyPath.Index),
+        wit_world: Storage.FlagOptional(.flags4, .has_wit_world, String),
+        wasi_adapter: Storage.FlagOptional(.flags4, .has_wasi_adapter, LazyPath.Index),
         zig_lib_dir: Storage.FlagOptional(.flags3, .zig_lib_dir, LazyPath.Index),
         libc_file: Storage.FlagOptional(.flags4, .libc_file, LazyPath.Index),
         win32_manifest: Storage.FlagOptional(.flags3, .win32_manifest, LazyPath.Index),
@@ -1077,7 +1080,11 @@ pub const Step = extern struct {
             generated_llvm_ir: bool,
             generated_h: bool,
             incremental: DefaultingBool,
-            _: u7 = 0,
+            has_wit_path: bool = false,
+            has_wit_world: bool = false,
+            has_wasi_adapter: bool = false,
+
+            _: u4 = 0,
         };
 
         pub fn isDynamicLibrary(compile: *const Compile) bool {

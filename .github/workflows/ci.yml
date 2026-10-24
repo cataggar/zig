@@ -107,6 +107,7 @@ jobs:
           if grep -q 'wasip2,' lib/std/Target.zig; then
             .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
               -target wasm32-wasip2 .ci-tmp/hello.zig -femit-bin=.ci-tmp/hello-p2.wasm
+            wasmtime run .ci-tmp/hello-p2.wasm
             .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
               -target wasm32-wasip2 -mexec-model=reactor .ci-tmp/hello.zig -femit-bin=.ci-tmp/hello-p2-reactor.wasm
             ls -lh .ci-tmp/hello-p2.wasm .ci-tmp/hello-p2-reactor.wasm
