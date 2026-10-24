@@ -239,6 +239,8 @@ jobs:
     steps:
       - name: Checkout (for scripts/sign-asset.exp)
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
