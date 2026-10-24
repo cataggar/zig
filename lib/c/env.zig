@@ -246,7 +246,7 @@ fn a_crash() noreturn {
     @trap();
 }
 
-fn pthread_self_ptr() *PThread {
+pub fn pthread_self_ptr() *PThread {
     const tp = get_tp();
     const self = if (TLS_ABOVE_TP) tp - @sizeOf(PThread) - TP_OFFSET else tp;
     return @ptrFromInt(self);

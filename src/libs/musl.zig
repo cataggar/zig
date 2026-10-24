@@ -930,8 +930,8 @@ const src_files = [_][]const u8{
     //"musl/src/math/remainderl.c", // migrated to lib/c/math.zig
     //"musl/src/math/__rem_pio2.c", // migrated to lib/c/math.zig; exports: j0,j1,jn
     //"musl/src/math/__rem_pio2f.c", // migrated to lib/c/math.zig; exports: j0f,j1f,jnf
-    //"musl/src/math/__rem_pio2_large.c", // migrated to lib/c/math.zig; exports: cosl,sinl,tanl
-    //"musl/src/math/__rem_pio2l.c", // migrated to lib/c/math.zig; exports: cosl,sinl,tanl
+    //"musl/src/math/__rem_pio2_large.c", // migrated to lib/c/math.zig; exports: j0,j1,jn
+    //"musl/src/math/__rem_pio2l.c", // migrated to lib/c/math.zig; exports: j0,j1,jn
     //"musl/src/math/remquo.c", // migrated to lib/c/math.zig
     //"musl/src/math/remquof.c", // migrated to lib/c/math.zig
     //"musl/src/math/remquol.c", // migrated to lib/c/math.zig

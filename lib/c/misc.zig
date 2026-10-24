@@ -222,13 +222,6 @@ const Option = extern struct {
     val: c_int,
 };
 const required_argument: c_int = 1;
-extern "c" var optarg: ?[*:0]u8;
-extern "c" var optind: c_int;
-extern "c" var opterr: c_int;
-extern "c" var optopt: c_int;
-extern "c" var __optpos: c_int;
-extern "c" var __optreset: c_int;
-extern "c" fn getopt(argc: c_int, argv: [*]const ?[*:0]u8, optstring: [*:0]const u8) c_int;
 extern "c" fn mblen(s: [*]const u8, n: usize) c_int;
 const sigset_t = [128 / @sizeOf(c_ulong)]c_ulong;
 const wordexp_t = extern struct {
@@ -351,7 +344,7 @@ comptime {
         symbol(&addmntent, "addmntent");
         symbol(&hasmntopt, "hasmntopt");
         symbol(&realpath, "realpath");
-        @export(&optarg_val, .{ .name = "optarg" });
+        @export(&optarg_val, .{ .name = "optarg", .linkage = .weak });
         symbol(&optind_val, "optind");
         symbol(&opterr_val, "opterr");
         symbol(&optopt_val, "optopt");
@@ -1360,8 +1353,8 @@ fn getopt_long_core(
     idx: ?*c_int,
     longonly: c_int,
 ) c_int {
-    optarg = null;
-    const cur = argv[@intCast(optind)] orelse return getopt(argc, argv, optstring);
+    optarg_val = null;
+    const cur = argv[@intCast(optind_val)] orelse return getopt_fn(argc, argv, optstring);
     const cur_b: [*]const u8 = @ptrCast(cur);
 
     if (longopts != null and cur[0] == '-' and
@@ -1415,25 +1408,25 @@ fn getopt_long_core(
         if (cnt == 1) {
             i = match;
             const opt = match_arg;
-            optind += 1;
+            optind_val += 1;
             if (opt[0] == '=') {
                 if (opts[i].has_arg == 0) {
-                    optopt = opts[i].val;
-                    if (colon or opterr == 0) return '?';
+                    optopt_val = opts[i].val;
+                    if (colon or opterr_val == 0) return '?';
                     __getopt_msg(@ptrCast(argv[0].?), ": option does not take an argument: ", @ptrCast(opts[i].name.?), strlen(opts[i].name.?));
                     return '?';
                 }
-                optarg = @ptrCast(@constCast(opt + 1));
+                optarg_val = @ptrCast(@constCast(opt + 1));
             } else if (opts[i].has_arg == required_argument) {
-                optarg = @constCast(argv[@intCast(optind)]);
-                if (optarg == null) {
-                    optopt = opts[i].val;
+                optarg_val = @constCast(argv[@intCast(optind_val)]);
+                if (optarg_val == null) {
+                    optopt_val = opts[i].val;
                     if (colon) return ':';
-                    if (opterr == 0) return '?';
+                    if (opterr_val == 0) return '?';
                     __getopt_msg(@ptrCast(argv[0].?), ": option requires an argument: ", @ptrCast(opts[i].name.?), strlen(opts[i].name.?));
                     return '?';
                 }
-                optind += 1;
+                optind_val += 1;
             }
             if (idx) |p| p.* = @intCast(i);
             if (opts[i].flag) |flag| {
@@ -1444,15 +1437,15 @@ fn getopt_long_core(
         }
 
         if (cur[1] == '-') {
-            optopt = 0;
-            if (!colon and opterr != 0) {
+            optopt_val = 0;
+            if (!colon and opterr_val != 0) {
                 __getopt_msg(@ptrCast(argv[0].?), if (cnt != 0) ": option is ambiguous: " else ": unrecognized option: ", cur_b + 2, strlen(@ptrCast(cur_b + 2)));
             }
-            optind += 1;
+            optind_val += 1;
             return '?';
         }
     }
-    return getopt(argc, argv, optstring);
+    return getopt_fn(argc, argv, optstring);
 }
 
 fn getopt_long_impl(
@@ -1463,32 +1456,32 @@ fn getopt_long_impl(
     idx: ?*c_int,
     longonly: c_int,
 ) c_int {
-    if (optind == 0 or __optreset != 0) {
-        __optreset = 0;
-        __optpos = 0;
-        optind = 1;
+    if (optind_val == 0 or optreset_val != 0) {
+        optreset_val = 0;
+        optpos_val = 0;
+        optind_val = 1;
     }
-    if (optind >= argc or argv[@intCast(optind)] == null) return -1;
-    const skipped = optind;
+    if (optind_val >= argc or argv[@intCast(optind_val)] == null) return -1;
+    const skipped = optind_val;
     const os_b: [*]const u8 = @ptrCast(optstring);
     if (os_b[0] != '+' and os_b[0] != '-') {
-        var ii = optind;
+        var ii = optind_val;
         while (true) : (ii += 1) {
             if (ii >= argc or argv[@intCast(ii)] == null) return -1;
             const a = argv[@intCast(ii)].?;
             if (a[0] == '-' and a[1] != 0) break;
         }
-        optind = ii;
+        optind_val = ii;
     }
-    const resumed = optind;
+    const resumed = optind_val;
     const ret = getopt_long_core(argc, argv, optstring, longopts, idx, longonly);
     if (resumed > skipped) {
-        const cnt = optind - resumed;
+        const cnt = optind_val - resumed;
         var j: c_int = 0;
         while (j < cnt) : (j += 1) {
-            permute(argv, skipped, optind - 1);
+            permute(argv, skipped, optind_val - 1);
         }
-        optind = skipped + cnt;
+        optind_val = skipped + cnt;
     }
     return ret;
 }

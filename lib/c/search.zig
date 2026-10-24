@@ -15,10 +15,10 @@ comptime {
         symbol(&lfindImpl, "lfind");
         symbol(&hcreateImpl, "hcreate");
         symbol(&hdestroyImpl, "hdestroy");
-        symbol(&hsearchImpl, "hsearch");
+        symbol(&hsearchExport, "hsearch");
         symbol(&hcreate_rImpl, "hcreate_r");
         symbol(&hdestroy_rImpl, "hdestroy_r");
-        symbol(&hsearch_rImpl, "hsearch_r");
+        symbol(&hsearch_rExport, "hsearch_r");
     }
 }
 
@@ -205,10 +205,9 @@ fn tdeleteImpl(key: ?*const anyopaque, rootp: ?*?*anyopaque, cmp: ComparFn) call
     std.c.free(@ptrCast(node));
     i -= 1;
     a[i].* = child;
-    while (i > 0) {
+    while (i > 1) {
         i -= 1;
         if (balance(a[i]) == 0) break;
-        if (i == 0) break;
     }
     return @ptrCast(parent);
 }
@@ -343,8 +342,10 @@ fn resize(tab: *Tab, nel: usize) bool {
             for (0..old_mask + 1) |i| {
                 if (old[i].key) |k| {
                     var h = keyhash(k) & tab.mask;
+                    var j: usize = 1;
                     while (tab.entries.?[h].key != null) {
-                        h = (h + 1) & tab.mask; // linear probe during resize is fine
+                        h = (h +% j) & tab.mask;
+                        j += 1;
                     }
                     tab.entries.?[h] = old[i];
                 }
@@ -436,6 +437,34 @@ fn hsearchImpl(item: ENTRY, action: ACTION) callconv(.c) ?*ENTRY {
     if (hsearch_rImpl(item, action, &retval, &htab_global) == 0) return null;
     return retval;
 }
+
+const hsearchExport = switch (builtin.cpu.arch) {
+    .powerpc, .powerpcle => struct {
+        fn call(item: *const ENTRY, action: ACTION) callconv(.c) ?*ENTRY {
+            return hsearchImpl(item.*, action);
+        }
+    }.call,
+    .riscv32 => struct {
+        fn call(key: ?[*:0]u8, data: ?*anyopaque, action: ACTION) callconv(.c) ?*ENTRY {
+            return hsearchImpl(.{ .key = key, .data = data }, action);
+        }
+    }.call,
+    else => hsearchImpl,
+};
+
+const hsearch_rExport = switch (builtin.cpu.arch) {
+    .powerpc, .powerpcle => struct {
+        fn call(item: *const ENTRY, action: ACTION, retval: *?*ENTRY, htab: *HSearchData) callconv(.c) c_int {
+            return hsearch_rImpl(item.*, action, retval, htab);
+        }
+    }.call,
+    .riscv32 => struct {
+        fn call(key: ?[*:0]u8, data: ?*anyopaque, action: ACTION, retval: *?*ENTRY, htab: *HSearchData) callconv(.c) c_int {
+            return hsearch_rImpl(.{ .key = key, .data = data }, action, retval, htab);
+        }
+    }.call,
+    else => hsearch_rImpl,
+};
 
 // ── Tests ────────────────────────────────────────────────────────────
 

@@ -23,7 +23,11 @@ const is_arm_hard_float = switch (builtin.abi) {
 const riscv_has_f = is_riscv and std.Target.riscv.featureSetHas(builtin.cpu.features, .f);
 const loongarch_has_f = is_loongarch and builtin.abi != .muslsf and
     std.Target.loongarch.featureSetHas(builtin.cpu.features, .f);
-const mips_soft_float = is_mips and std.Target.mips.featureSetHas(builtin.cpu.features, .soft_float);
+const mips_soft_float = is_mips and (std.Target.mips.featureSetHas(builtin.cpu.features, .soft_float) or
+    switch (builtin.abi) {
+        .eabi, .gnueabi, .musleabi, .muslsf => true,
+        else => false,
+    });
 const mips_hard_float = is_mips and !mips_soft_float;
 
 const m68k_hard_float = arch == .m68k and
