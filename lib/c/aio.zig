@@ -657,9 +657,24 @@ fn aio_cancel_impl(fd: c_int, cb: ?*aiocb) callconv(.c) c_int {
     return ret;
 }
 
+const Timespec = if (@sizeOf(c_long) >= 8)
+    extern struct { sec: i64, nsec: c_long }
+else if (builtin.cpu.arch.endian() == .little)
+    extern struct { sec: i64, nsec: c_long, _pad: c_long = 0 }
+else
+    extern struct { sec: i64, _pad: c_long = 0, nsec: c_long };
+
+const Timespec32 = extern struct {
+    sec: c_long,
+    nsec: c_long,
+};
+
+extern "c" fn clock_gettime(clk: c_int, ts: *Timespec) c_int;
+extern "c" fn __timedwait_cp(addr: *volatile c_int, val: c_int, clk: c_int, at: ?*const Timespec, priv: c_int) c_int;
+
 // ─── aio_suspend ────────────────────────────────────────────────────
 
-fn aio_suspend_impl(cbs: [*]const ?*const aiocb, cnt: c_int, ts: ?*const std.c.timespec) callconv(.c) c_int {
+fn aio_suspend_impl(cbs: [*]const ?*const aiocb, cnt: c_int, ts: ?*const Timespec) callconv(.c) c_int {
     pthread_testcancel();
 
     if (cnt < 0) {
@@ -679,9 +694,9 @@ fn aio_suspend_impl(cbs: [*]const ?*const aiocb, cnt: c_int, ts: ?*const std.c.t
         }
     }
 
-    var at: std.c.timespec = undefined;
+    var at: Timespec = undefined;
     if (ts) |timeout| {
-        _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &at);
+        _ = clock_gettime(@backingInt(linux.CLOCK.MONOTONIC), &at);
         at.sec += timeout.sec;
         at.nsec += timeout.nsec;
         if (at.nsec >= 1_000_000_000) {
@@ -730,8 +745,8 @@ fn aio_suspend_impl(cbs: [*]const ?*const aiocb, cnt: c_int, ts: ?*const std.c.t
             },
         }
 
-        const wait_ts: ?*const std.c.timespec = if (ts != null) &at else null;
-        const wait_ret = futexTimedWait(pfut, expect, std.c.CLOCK.MONOTONIC, wait_ts);
+        const wait_ts: ?*const Timespec = if (ts != null) &at else null;
+        const wait_ret = __timedwait_cp(pfut, expect, @backingInt(linux.CLOCK.MONOTONIC), wait_ts, 1);
 
         switch (wait_ret) {
             @backingInt(linux.E.TIMEDOUT) => {
@@ -749,6 +764,14 @@ fn aio_suspend_impl(cbs: [*]const ?*const aiocb, cnt: c_int, ts: ?*const std.c.t
             else => {},
         }
     }
+}
+
+fn aio_suspend_time32(cbs: [*]const ?*const aiocb, cnt: c_int, ts32: ?*const Timespec32) callconv(.c) c_int {
+    if (ts32) |t| {
+        const ts: Timespec = .{ .sec = t.sec, .nsec = t.nsec };
+        return aio_suspend_impl(cbs, cnt, &ts);
+    }
+    return aio_suspend_impl(cbs, cnt, null);
 }
 
 // ─── lio_listio ─────────────────────────────────────────────────────
@@ -932,6 +955,10 @@ comptime {
         c_lib.symbol(&aio_error_impl, "aio_error");
         c_lib.symbol(&aio_cancel_impl, "aio_cancel");
         c_lib.symbol(&aio_suspend_impl, "aio_suspend");
+        c_lib.symbol(&aio_suspend_impl, "__aio_suspend_time64");
+        if (@sizeOf(c_long) == 4) {
+            c_lib.symbol(&aio_suspend_time32, "__aio_suspend_time32");
+        }
         c_lib.symbol(&lio_listio_impl, "lio_listio");
         c_lib.symbol(&aio_close_impl, "__aio_close");
         c_lib.symbol(&aio_atfork_impl, "__aio_atfork");

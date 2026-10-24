@@ -31,6 +31,7 @@ comptime {
 
         symbol(&posix_madviseLinux, "posix_madvise");
 
+        symbol(&shm_mapnameLinux, "__shm_mapname");
         symbol(&shm_openLinux, "shm_open");
         symbol(&shm_unlinkLinux, "shm_unlink");
     }
@@ -80,35 +81,36 @@ fn posix_madviseLinux(addr: *anyopaque, len: usize, advice: c_int) callconv(.c) 
     return @intCast(-@as(isize, @bitCast(std.os.linux.madvise(@ptrCast(addr), len, @bitCast(advice)))));
 }
 
-fn shm_openLinux(name: [*:0]const u8, flag: c_int, mode: linux.mode_t) callconv(.c) c_int {
-    // Validate and construct /dev/shm/<name> path
+fn shm_mapnameLinux(name: [*:0]const u8, buf: [*]u8) callconv(.c) ?[*:0]u8 {
     var ptr = name;
     while (ptr[0] == '/') ptr += 1;
     if (ptr[0] == 0) {
         std.c._errno().* = @backingInt(linux.E.INVAL);
-        return -1;
+        return null;
     }
-    // Check for embedded '/' or "." / ".."
     var len: usize = 0;
     while (ptr[len] != 0) : (len += 1) {
         if (ptr[len] == '/') {
             std.c._errno().* = @backingInt(linux.E.INVAL);
-            return -1;
+            return null;
         }
     }
     if (len <= 2 and ptr[0] == '.' and (len == 1 or ptr[1] == '.')) {
         std.c._errno().* = @backingInt(linux.E.INVAL);
-        return -1;
+        return null;
     }
     if (len > 255) {
         std.c._errno().* = @backingInt(linux.E.NAMETOOLONG);
-        return -1;
+        return null;
     }
-    var buf: [255 + 10]u8 = undefined;
     @memcpy(buf[0..9], "/dev/shm/");
-    @memcpy(buf[9..][0..len], ptr[0..len]);
-    buf[9 + len] = 0;
-    const path: [*:0]const u8 = buf[0 .. 9 + len :0];
+    @memcpy(buf[9..][0 .. len + 1], ptr[0 .. len + 1]);
+    return @ptrCast(buf);
+}
+
+fn shm_openLinux(name: [*:0]const u8, flag: c_int, mode: linux.mode_t) callconv(.c) c_int {
+    var buf: [255 + 10]u8 = undefined;
+    const path = shm_mapnameLinux(name, &buf) orelse return -1;
 
     // Open with O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK
     const extra_flags: linux.O = .{ .NOFOLLOW = true, .CLOEXEC = true, .NONBLOCK = true };
@@ -117,32 +119,8 @@ fn shm_openLinux(name: [*:0]const u8, flag: c_int, mode: linux.mode_t) callconv(
 }
 
 fn shm_unlinkLinux(name: [*:0]const u8) callconv(.c) c_int {
-    var ptr = name;
-    while (ptr[0] == '/') ptr += 1;
-    if (ptr[0] == 0) {
-        std.c._errno().* = @backingInt(linux.E.INVAL);
-        return -1;
-    }
-    var len: usize = 0;
-    while (ptr[len] != 0) : (len += 1) {
-        if (ptr[len] == '/') {
-            std.c._errno().* = @backingInt(linux.E.INVAL);
-            return -1;
-        }
-    }
-    if (len <= 2 and ptr[0] == '.' and (len == 1 or ptr[1] == '.')) {
-        std.c._errno().* = @backingInt(linux.E.INVAL);
-        return -1;
-    }
-    if (len > 255) {
-        std.c._errno().* = @backingInt(linux.E.NAMETOOLONG);
-        return -1;
-    }
     var buf: [255 + 10]u8 = undefined;
-    @memcpy(buf[0..9], "/dev/shm/");
-    @memcpy(buf[9..][0..len], ptr[0..len]);
-    buf[9 + len] = 0;
-    const path: [*:0]const u8 = buf[0 .. 9 + len :0];
+    const path = shm_mapnameLinux(name, &buf) orelse return -1;
 
     return errno(linux.unlink(path));
 }

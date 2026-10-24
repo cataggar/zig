@@ -2,6 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 const linux = std.os.linux;
 const symbol = @import("../c.zig").symbol;
+extern "c" fn __getauxval(item: c_ulong) c_ulong;
 // POSIX limit values
 const _POSIX_LINK_MAX = 8;
 const _POSIX_MAX_CANON = 255;
@@ -235,7 +236,9 @@ fn sysconf(name: c_int) callconv(.c) c_long {
         10 => 0,
         11 => 2147483647,
         12, 13 => blk: {
-            var val: c_long = @intCast(linux.getauxval(std.elf.AT.MINSIGSTKSZ));
+            const saved_errno = std.c._errno().*;
+            var val: c_long = @bitCast(__getauxval(std.elf.AT.MINSIGSTKSZ));
+            std.c._errno().* = saved_errno;
             if (val < linux.MINSIGSTKSZ) val = linux.MINSIGSTKSZ;
             if (code == 13) val += linux.SIGSTKSZ - linux.MINSIGSTKSZ;
             break :blk val;

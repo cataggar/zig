@@ -1,6 +1,7 @@
 const builtin = @import("builtin");
 const symbol = @import("../c.zig").symbol;
 extern fn __tls_get_addr(v: *const [2]usize) callconv(.c) ?*anyopaque;
+extern "c" fn __getauxval(item: c_ulong) c_ulong;
 const RTLD_DI_LINKMAP = 2;
 const std = @import("std");
 const elf = std.elf;
@@ -48,7 +49,9 @@ comptime {
     }
     if (builtin.target.isMuslLibC()) {
         if (builtin.link_libc) {
-            if (@sizeOf(c_long) < 8) {}
+            if (@sizeOf(c_long) < 8) {
+                symbol(&__dlsym_stub, "__dlsym_redir_time64");
+            }
         }
     }
 }
@@ -70,7 +73,7 @@ fn dlclose(p: ?*anyopaque) callconv(.c) c_int {
 fn dlinfo(dso: ?*anyopaque, req: c_int, res: ?*anyopaque) callconv(.c) c_int {
     if (stub_invalid_handle(dso) != 0) return -1;
     if (req != RTLD_DI_LINKMAP) {
-        dl_seterr_impl("Unsupported request %d", req);
+        setDlError("Unsupported request {d}", .{req});
         return -1;
     }
     const ptr: *?*anyopaque = @ptrCast(@alignCast(res));
@@ -81,7 +84,7 @@ fn dlinfo(dso: ?*anyopaque, req: c_int, res: ?*anyopaque) callconv(.c) c_int {
 fn dlopen(file: ?[*:0]const u8, mode: c_int) callconv(.c) ?*anyopaque {
     _ = file;
     _ = mode;
-    dl_seterr_impl("Dynamic loading not supported");
+    setDlError("Dynamic loading not supported", .{});
     return null;
 }
 
@@ -92,7 +95,7 @@ fn dlsym(p: ?*anyopaque, s: ?[*:0]const u8) callconv(.c) ?*anyopaque {
 fn __dlsym_stub(p: ?*anyopaque, s: ?[*:0]const u8, ra: ?*anyopaque) callconv(.c) ?*anyopaque {
     _ = p;
     _ = ra;
-    dl_seterr_impl("Symbol not found: %s", s);
+    setDlError("Symbol not found: {s}", .{if (s) |str| std.mem.span(str) else "(null)"});
     return null;
 }
 
@@ -149,11 +152,11 @@ fn get_DYNAMIC() ?[*]const elf.Dyn {
 }
 
 fn dl_iterate_phdr_impl(callback: DlPhdrCallback, data: ?*anyopaque) callconv(.c) c_int {
-    const linux = std.os.linux;
-
-    const at_phdr = linux.getauxval(elf.AT.PHDR);
-    const at_phnum = linux.getauxval(elf.AT.PHNUM);
-    const at_phent = linux.getauxval(elf.AT.PHENT);
+    const saved_errno = std.c._errno().*;
+    const at_phdr: usize = @intCast(__getauxval(elf.AT.PHDR));
+    const at_phnum: usize = @intCast(__getauxval(elf.AT.PHNUM));
+    const at_phent: usize = @intCast(__getauxval(elf.AT.PHENT));
+    std.c._errno().* = saved_errno;
 
     if (at_phdr == 0 or at_phnum == 0 or at_phent == 0) return 0;
 
