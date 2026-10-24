@@ -688,6 +688,9 @@ const compile_usage =
     \\  --force_undefined [name]       Specify the symbol must be defined for the link to succeed
     \\  -fsoname[=name]                Override the default SONAME value
     \\  -fno-soname                    Disable emitting a SONAME
+    \\  -fwit-path=[path]              (WASI) Specify WIT file or directory for component linking
+    \\  -fwit-world=[name]             (WASI) Specify WIT world name for component linking
+    \\  -fwasi-adapter=[path]          (WASI) Specify preview1 adapter module for component linking
     \\  -flld                          Force using LLD as the linker
     \\  -fno-lld                       Prevent using LLD as the linker
     \\  -fcompiler-rt                  Always include compiler-rt symbols in output
@@ -965,6 +968,9 @@ fn buildOutputType(
     var want_ubsan_rt: ?bool = null;
     var linker_script: ?[]const u8 = null;
     var version_script: ?[]const u8 = null;
+    var wit_path: ?[]const u8 = null;
+    var wit_world: ?[]const u8 = null;
+    var wasi_adapter_path: ?[]const u8 = null;
     var linker_repro: ?bool = null;
     var linker_allow_undefined_version: bool = false;
     var linker_enable_new_dtags: ?bool = null;
@@ -1624,6 +1630,12 @@ fn buildOutputType(
                         soname = .{ .yes = rest };
                     } else if (mem.eql(u8, arg, "-fno-soname")) {
                         soname = .no;
+                    } else if (mem.cutPrefix(u8, arg, "-fwit-path=")) |rest| {
+                        wit_path = rest;
+                    } else if (mem.cutPrefix(u8, arg, "-fwit-world=")) |rest| {
+                        wit_world = rest;
+                    } else if (mem.cutPrefix(u8, arg, "-fwasi-adapter=")) |rest| {
+                        wasi_adapter_path = rest;
                     } else if (mem.eql(u8, arg, "-femit-bin")) {
                         emit_bin = .yes_default_path;
                     } else if (mem.cutPrefix(u8, arg, "-femit-bin=")) |rest| {
@@ -3728,6 +3740,9 @@ fn buildOutputType(
         .version = optional_version,
         .compatibility_version = compatibility_version,
         .libc_installation = if (create_module.libc_installation) |*lci| lci else null,
+        .wit_path = wit_path,
+        .wit_world = wit_world,
+        .wasi_adapter_path = wasi_adapter_path,
         .verbose_cc = verbose_cc,
         .verbose_link = verbose_link,
         .verbose_air = verbose_air,

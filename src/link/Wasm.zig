@@ -13,6 +13,7 @@ const Wasm = @This();
 const Archive = @import("Wasm/Archive.zig");
 const Object = @import("Wasm/Object.zig");
 pub const Flush = @import("Wasm/Flush.zig");
+pub const component = @import("Wasm/component/root.zig");
 
 const builtin = @import("builtin");
 const native_endian = builtin.cpu.arch.endian();
@@ -72,6 +73,9 @@ global_base: ?u64,
 initial_memory: ?u64,
 /// When defined, sets the maximum memory size of the memory.
 max_memory: ?u64,
+wit_path: ?[]const u8 = null,
+wit_world: ?[]const u8 = null,
+wasi_adapter_path: ?[]const u8 = null,
 /// When true, will export the function table to the host environment.
 export_table: bool,
 /// When true, remove maximum size from function table, allowing table to grow.
@@ -3361,6 +3365,10 @@ pub fn createEmpty(
         },
         .name = undefined,
         .string_table = .empty,
+        .wit_path = options.wit_path,
+        .wit_world = options.wit_world,
+        .wasi_adapter_path = options.wasi_adapter_path,
+
         .string_bytes = .empty,
         .export_table = options.export_table,
         .growable_table = options.growable_table,
@@ -3845,6 +3853,13 @@ pub fn prelink(wasm: *Wasm, prog_node: std.Progress.Node) link.Error!void {
             if (import.resolution != .unresolved) {
                 import.flags.exported = true;
                 wasm.entry_resolution = import.resolution;
+            }
+        } else if (entry_name == wasm.preloaded_strings.@"wasi:cli/run@0.2.6#run") {
+            if (wasm.object_function_imports.getPtr(wasm.preloaded_strings._start)) |import| {
+                if (import.resolution != .unresolved) {
+                    import.flags.exported = true;
+                    wasm.entry_resolution = import.resolution;
+                }
             }
         }
     }

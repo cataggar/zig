@@ -1457,6 +1457,9 @@ const CacheUse = union(CacheMode) {
 pub const CreateOptions = struct {
     dirs: std.zig.Directories,
     thread_limit: usize,
+    wit_path: ?[]const u8 = null,
+    wit_world: ?[]const u8 = null,
+    wasi_adapter_path: ?[]const u8 = null,
     self_exe_path: ?[]const u8 = null,
 
     /// Options that have been resolved by calling `resolveDefaults`.
@@ -2237,6 +2240,9 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
             .stack_size = options.stack_size,
             .image_base = options.image_base,
             .version_script = options.version_script,
+            .wit_path = options.wit_path,
+            .wit_world = options.wit_world,
+            .wasi_adapter_path = options.wasi_adapter_path,
             .allow_undefined_version = options.linker_allow_undefined_version,
             .enable_new_dtags = options.linker_enable_new_dtags,
             .gc_sections = options.linker_gc_sections,
@@ -3424,6 +3430,9 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
 
     try man.addInputPathOptional(opts.linker_script, .{});
     try man.addInputPathOptional(opts.version_script, .{});
+    man.hash.addOptionalBytes(opts.wit_path);
+    man.hash.addOptionalBytes(opts.wit_world);
+    man.hash.addOptionalBytes(opts.wasi_adapter_path);
     man.hash.add(opts.allow_undefined_version);
     man.hash.addOptional(opts.enable_new_dtags);
 

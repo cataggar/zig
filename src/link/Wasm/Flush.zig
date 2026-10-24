@@ -333,8 +333,12 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                 }
                 _ = f.function_imports.swapRemove(nav_export.name);
 
-                if (nav_export.name.toOptional() == entry_name)
+                if (nav_export.name.toOptional() == entry_name or
+                    (entry_name == wasm.preloaded_strings.@"wasi:cli/run@0.2.6#run".toOptional() and
+                        nav_export.name == wasm.preloaded_strings._start))
+                {
                     wasm.entry_resolution = .fromIpNav(wasm, nav_export.nav_index);
+                }
             } else {
                 // data exports are linker symbols
                 // explicit exports become address globals
@@ -504,9 +508,15 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
 
     if (entry_name.unwrap()) |name| {
         if (wasm.entry_resolution == .unresolved) {
-            var err = try diags.addErrorWithNotes(1);
-            try err.addMsg("entry symbol '{s}' missing", .{name.slice(wasm)});
-            err.addNote("'-fno-entry' suppresses this error", .{});
+            if (target.os.tag == .wasip2 and comp.config.wasi_exec_model == .reactor and
+                name == wasm.preloaded_strings._initialize)
+            {
+                wasm.entry_name = .none;
+            } else {
+                var err = try diags.addErrorWithNotes(1);
+                try err.addMsg("entry symbol '{s}' missing", .{name.slice(wasm)});
+                err.addNote("'-fno-entry' suppresses this error", .{});
+            }
         }
     }
 
@@ -1721,6 +1731,8 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
 
         try emitProducerSection(gpa, binary_bytes);
         try emitFeaturesSection(gpa, binary_bytes, target);
+    } else if (is_obj) {
+        try emitFeaturesSection(gpa, binary_bytes, target);
     }
 
     // Finally, write the entire binary into the file.
@@ -1744,6 +1756,40 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
             try builder.append(gpa, name, binary_bytes.items);
         }
         builder.write(&file_writer.interface) catch |err| switch (err) {
+            error.WriteFailed => return file_writer.err.?,
+        };
+    } else if (!is_obj and target.os.tag == .wasip2) {
+        const wit_source = if (wasm.wit_path) |wit_path|
+            readWitPathAlloc(io, gpa, wit_path) catch |err|
+                return diags.fail("failed to read WIT path '{s}': {s}", .{ wit_path, @errorName(err) })
+        else
+            null;
+        defer if (wit_source) |s| gpa.free(s);
+
+        const custom_adapter_bytes = if (wasm.wasi_adapter_path) |adapter_path|
+            std.Io.Dir.cwd().readFileAlloc(io, adapter_path, gpa, .unlimited) catch |err|
+                return diags.fail("failed to read WASI adapter file '{s}': {s}", .{ adapter_path, @errorName(err) })
+        else
+            null;
+        defer if (custom_adapter_bytes) |b| gpa.free(b);
+
+        const exec_model: std.builtin.WasiExecModel = if (comp.config.output_mode == .Lib)
+            .reactor
+        else
+            comp.config.wasi_exec_model;
+
+        const component_bytes = Wasm.component.linkComponent(gpa, binary_bytes.items, .{
+            .exec_model = exec_model,
+            .wit_source = wit_source,
+            .wit_world = wasm.wit_world,
+            .custom_adapter_bytes = custom_adapter_bytes,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return diags.fail("failed to build WASI component: {s}", .{@errorName(err)}),
+        };
+        defer gpa.free(component_bytes);
+
+        file_writer.interface.writeAll(component_bytes) catch |err| switch (err) {
             error.WriteFailed => return file_writer.err.?,
         };
     } else {
@@ -3081,6 +3127,48 @@ fn appendLeb128(gpa: Allocator, bytes: *ArrayList(u8), value: anytype) Allocator
     defer bytes.* = aw.toArrayList();
     return aw.writer.writeLeb128(value) catch |err| switch (err) {
         error.WriteFailed => return error.OutOfMemory,
+    };
+}
+
+fn readWitPathAlloc(io: std.Io, gpa: Allocator, wit_path: []const u8) ![]u8 {
+    return std.Io.Dir.cwd().readFileAlloc(io, wit_path, gpa, .unlimited) catch |err| switch (err) {
+        error.IsDir => {
+            var dir = try std.Io.Dir.cwd().openDir(io, wit_path, .{ .iterate = true });
+            defer dir.close(io);
+            var it = dir.iterate();
+            var names: ArrayList([]u8) = .empty;
+            defer {
+                for (names.items) |n| gpa.free(n);
+                names.deinit(gpa);
+            }
+            while (try it.next(io)) |entry| {
+                if (entry.kind == .file and mem.endsWith(u8, entry.name, ".wit")) {
+                    try names.append(gpa, try gpa.dupe(u8, entry.name));
+                }
+            }
+            if (names.items.len == 0) return error.FileNotFound;
+            mem.sort([]u8, names.items, {}, struct {
+                fn lessThan(_: void, a: []u8, b: []u8) bool {
+                    return mem.lessThan(u8, a, b);
+                }
+            }.lessThan);
+            const WitSource = Wasm.component.wit.resolver.WitSource;
+            var sources: ArrayList(WitSource) = .empty;
+            defer {
+                for (sources.items) |s| gpa.free(s.text);
+                sources.deinit(gpa);
+            }
+            for (names.items) |name| {
+                try sources.append(gpa, .{
+                    .path = name,
+                    .text = try dir.readFileAlloc(io, name, gpa, .unlimited),
+                });
+            }
+            const combined = try Wasm.component.wit.resolver.combineWitSources(gpa, sources.items, wit_path, null);
+            gpa.free(combined.paths);
+            return combined.text;
+        },
+        else => return err,
     };
 }
 
