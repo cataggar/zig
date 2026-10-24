@@ -89,6 +89,9 @@ comptime {
                             if (!@hasDecl(root, "wasi:cli/run@0.2.0#run")) {
                                 @export(&startWasip2Command, .{ .name = "wasi:cli/run@0.2.0#run" });
                             }
+                            if (!@hasDecl(root, "_start")) {
+                                @export(&startWasip2Preview1, .{ .name = "_start" });
+                            }
                         }
                     },
                 }
@@ -161,6 +164,10 @@ fn startWasi() callconv(.c) void {
 fn startWasip2Command() callconv(.c) i32 {
     const status = @call(.always_inline, callMain, .{ {}, std.process.Environ.Block.global });
     return if (status == 0) 0 else 1;
+}
+
+fn startWasip2Preview1() callconv(.c) void {
+    if (startWasip2Command() != 0) @trap();
 }
 
 fn cabiRealloc(old_ptr: ?[*]u8, old_len: usize, alignment: usize, new_len: usize) callconv(.c) ?[*]u8 {

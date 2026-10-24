@@ -712,6 +712,7 @@ pub fn fd_pread(
     nread: *usize,
 ) callconv(.c) wasi.errno_t {
     nread.* = 0;
+    if (fd >= 0 and fd <= 2) return .SPIPE;
     const entry = getFdEntry(fd) orelse return .BADF;
 
     var stream_ret: [8]u8 align(4) = @splat(0);
@@ -808,6 +809,7 @@ pub fn fd_pwrite(
     nwritten: *usize,
 ) callconv(.c) wasi.errno_t {
     nwritten.* = 0;
+    if (fd >= 0 and fd <= 2) return .SPIPE;
     const entry = getFdEntry(fd) orelse return .BADF;
 
     var stream_ret: [8]u8 align(4) = @splat(0);
@@ -1462,4 +1464,9 @@ test "canonical ABI struct layouts and timestamp decoding" {
     err_ret_canon[0] = 1;
     err_ret_canon[1] = 20; // no-entry at offset 1
     try std.testing.expectEqual(wasi.errno_t.NOENT, descriptorErrorOnlyResult(&err_ret_canon));
+
+    var n: usize = 0;
+    try std.testing.expectEqual(wasi.errno_t.SPIPE, fd_pread(0, undefined, 0, 0, &n));
+    try std.testing.expectEqual(wasi.errno_t.SPIPE, fd_pwrite(1, undefined, 0, 0, &n));
+    try std.testing.expectEqual(wasi.errno_t.SPIPE, fd_pwrite(2, undefined, 0, 0, &n));
 }
