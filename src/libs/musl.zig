@@ -757,7 +757,7 @@ const src_files = [_][]const u8{
     // "musl/src/locale/dcngettext.c", // migrated to lib/c/locale.zig
     // "musl/src/locale/duplocale.c", // migrated to lib/c/locale.zig
     // "musl/src/locale/freelocale.c", // migrated to lib/c/locale.zig
-    "musl/src/locale/iconv.c",
+    // "musl/src/locale/iconv.c", // migrated to lib/c/locale.zig
     // "musl/src/locale/iconv_close.c", // migrated to lib/c/locale.zig
     // "musl/src/locale/langinfo.c", // migrated to lib/c/locale.zig; exports: nl_langinfo,nl_langinfo_l
     // "musl/src/locale/__lctrans.c", // migrated to lib/c/locale.zig
@@ -767,7 +767,7 @@ const src_files = [_][]const u8{
     // "musl/src/locale/newlocale.c", // migrated to lib/c/locale.zig
     // "musl/src/locale/pleval.c", // migrated to lib/c/locale.zig; exports: __pleval
     // "musl/src/locale/setlocale.c", // migrated to lib/c/locale.zig
-    "musl/src/locale/strfmon.c",
+    // "musl/src/locale/strfmon.c", // migrated to lib/c/locale.zig
     // "musl/src/locale/strtod_l.c", // migrated to lib/c/locale.zig
     // "musl/src/locale/textdomain.c", // migrated to lib/c/locale.zig
     // "musl/src/locale/uselocale.c", // migrated to lib/c/locale.zig
