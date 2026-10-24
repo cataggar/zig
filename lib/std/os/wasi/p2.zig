@@ -301,6 +301,21 @@ pub fn translateDescriptorFlags(
     if (fs_flags.SYNC) desc_flags |= 4;
     if (fs_flags.DSYNC) desc_flags |= 8;
     if (fs_flags.RSYNC) desc_flags |= 16;
+    const has_mutate_dir_rights =
+        fs_rights_base.PATH_CREATE_DIRECTORY or
+        fs_rights_base.PATH_CREATE_FILE or
+        fs_rights_base.PATH_LINK_SOURCE or
+        fs_rights_base.PATH_LINK_TARGET or
+        fs_rights_base.PATH_RENAME_SOURCE or
+        fs_rights_base.PATH_RENAME_TARGET or
+        fs_rights_base.PATH_FILESTAT_SET_SIZE or
+        fs_rights_base.PATH_FILESTAT_SET_TIMES or
+        fs_rights_base.PATH_SYMLINK or
+        fs_rights_base.PATH_REMOVE_DIRECTORY or
+        fs_rights_base.PATH_UNLINK_FILE;
+    if (!oflags.CREAT and !oflags.TRUNC and (oflags.DIRECTORY or has_mutate_dir_rights)) {
+        desc_flags |= 32;
+    }
     if (desc_flags == 0) desc_flags = 1;
     return desc_flags;
 }
@@ -941,17 +956,14 @@ pub fn fd_renumber(from: wasi.fd_t, to: wasi.fd_t) callconv(.c) wasi.errno_t {
     if (to < 3) return .BADF;
     const to_idx: usize = @intCast(to);
     if (to_idx >= max_fds) return .BADF;
+    if (from_entry.is_preopen or fd_table[to_idx].is_preopen) return .NOTSUP;
 
-    if (fd_table[to_idx].in_use and !fd_table[to_idx].is_preopen) {
+    if (fd_table[to_idx].in_use) {
         @"[resource-drop]descriptor"(fd_table[to_idx].handle);
     }
 
     fd_table[to_idx] = from_entry.*;
-    fd_table[to_idx].is_preopen = false;
-
-    if (!from_entry.is_preopen) {
-        from_entry.* = .{};
-    }
+    from_entry.* = .{};
     return .SUCCESS;
 }
 
@@ -1138,6 +1150,20 @@ pub fn path_open(
         desc_flags,
         &ret,
     );
+    if (ret[0] != 0 and (desc_flags & 32) != 0) {
+        var fallback_flags = desc_flags & ~@as(u32, 32);
+        if (fallback_flags == 0) fallback_flags = 1;
+        ret = @splat(0);
+        @"[method]descriptor.open-at"(
+            dir_entry.handle,
+            path_flags,
+            path,
+            path_len,
+            open_flags,
+            fallback_flags,
+            &ret,
+        );
+    }
     if (ret[0] != 0) return errorCodeToErrno(ret[4]);
 
     const new_handle = std.mem.readInt(i32, ret[4..8], .little);
@@ -1405,6 +1431,11 @@ test "flag translations" {
         .{ .FD_WRITE = true },
         .{},
         .{ .SYNC = true, .DSYNC = true, .RSYNC = true },
+    ));
+    try std.testing.expectEqual(@as(u32, 1 | 32), translateDescriptorFlags(
+        .{ .FD_READDIR = true, .PATH_CREATE_FILE = true },
+        .{ .DIRECTORY = true },
+        .{},
     ));
 }
 
