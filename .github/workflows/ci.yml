@@ -2,9 +2,9 @@ name: WASI Component CI
 
 on:
   push:
-    branches: [wabt-component]
+    branches: [wasi, wabt-component]
   pull_request:
-    branches: [wabt-component]
+    branches: [wasi, wabt-component]
 
 permissions:
   contents: read
@@ -63,6 +63,7 @@ jobs:
           pub const version: [:0]const u8 = "0.18.0-dev.0+wabt";
           pub const semver = @import("std").SemanticVersion.parse(version) catch unreachable;
           pub const enable_debug_extensions = false;
+          pub const enable_logging = false;
           pub const log_level: @import("std").log.Level = .err;
           pub const enable_link_snapshots = false;
           pub const enable_tracy = false;
