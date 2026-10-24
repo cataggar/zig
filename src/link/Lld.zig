@@ -179,9 +179,13 @@ const Wasm = struct {
     /// When true, will allow undefined symbols
     import_symbols: bool,
     fn init(comp: *Compilation, options: link.File.OpenOptions) !Wasm {
+        const target = &comp.root_mod.resolved_target.result;
         const default_entry_name: []const u8 = switch (comp.config.wasi_exec_model) {
             .reactor => "_initialize",
-            .command => "_start",
+            .command => switch (target.os.tag) {
+                .wasip2 => "wasi:cli/run@0.2.6#run",
+                else => "_start",
+            },
         };
         return .{
             .entry_name = switch (options.entry) {
