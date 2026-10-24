@@ -2483,6 +2483,7 @@ const PreloadedStrings = struct {
     __zig_errors_len: String,
     _initialize: String,
     _start: String,
+    @"wasi:cli/run@0.2.6#run": String,
     memory: String,
     env: String,
 };
@@ -3386,8 +3387,8 @@ pub fn createEmpty(
 
     wasm.entry_name = switch (options.entry) {
         .disabled => .none,
-        .default => if (output_mode != .Exe) .none else defaultEntrySymbolName(&wasm.preloaded_strings, wasi_exec_model).toOptional(),
-        .enabled => defaultEntrySymbolName(&wasm.preloaded_strings, wasi_exec_model).toOptional(),
+        .default => if (output_mode != .Exe) .none else defaultEntrySymbolName(&wasm.preloaded_strings, target.os.tag, wasi_exec_model).toOptional(),
+        .enabled => defaultEntrySymbolName(&wasm.preloaded_strings, target.os.tag, wasi_exec_model).toOptional(),
         .named => |name| (try wasm.internString(name)).toOptional(),
     };
 
@@ -4296,11 +4297,15 @@ pub fn flush(
 
 fn defaultEntrySymbolName(
     preloaded_strings: *const PreloadedStrings,
+    os_tag: std.Target.Os.Tag,
     wasi_exec_model: std.lang.WasiExecModel,
 ) String {
     return switch (wasi_exec_model) {
         .reactor => preloaded_strings._initialize,
-        .command => preloaded_strings._start,
+        .command => switch (os_tag) {
+            .wasip2 => preloaded_strings.@"wasi:cli/run@0.2.6#run",
+            else => preloaded_strings._start,
+        },
     };
 }
 
