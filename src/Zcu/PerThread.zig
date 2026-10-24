@@ -616,7 +616,7 @@ pub fn updateFile(
         }
 
         // If we already have the exclusive lock then it is our job to update.
-        if (builtin.os.tag == .wasi or lock == .exclusive) break true;
+        if (builtin.os.tag.isWasi() or lock == .exclusive) break true;
         // Otherwise, unlock to give someone a chance to get the exclusive lock
         // and then upgrade to an exclusive lock.
         cache_file.unlock(io);

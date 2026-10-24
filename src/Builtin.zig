@@ -272,7 +272,7 @@ pub fn append(opts: @This(), buffer: *std.array_list.Managed(u8)) Allocator.Erro
         opts.omit_frame_pointer,
     });
 
-    if (target.os.tag == .wasi) {
+    if (target.os.tag.isWasi()) {
         try buffer.print(
             \\pub const wasi_exec_model: std.lang.WasiExecModel = .{f};
             \\

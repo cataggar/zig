@@ -14,7 +14,7 @@ vector: Vector,
 /// queried and heap-allocated at runtime.
 pub const Vector = switch (native_os) {
     .windows => []const u16, // WTF-16 encoded
-    .wasi => switch (builtin.link_libc) {
+    .wasi, .wasip2 => switch (builtin.link_libc) {
         false => void,
         true => []const [*:0]const u8,
     },
@@ -26,7 +26,7 @@ pub const Vector = switch (native_os) {
 pub const Iterator = struct {
     const Inner = switch (native_os) {
         .windows => Windows,
-        .wasi => if (builtin.link_libc) Posix else Wasi,
+        .wasi, .wasip2 => if (builtin.link_libc) Posix else Wasi,
         else => Posix,
     };
 
@@ -35,7 +35,7 @@ pub const Iterator = struct {
     /// Initialize the args iterator. Consider using `initAllocator` instead
     /// for cross-platform compatibility.
     pub fn init(a: Args) Iterator {
-        if (native_os == .wasi) @compileError("In WASI, use initAllocator instead.");
+        if (native_os.isWasi()) @compileError("In WASI, use initAllocator instead.");
         if (native_os == .windows) @compileError("In Windows, use initAllocator instead.");
         return .{ .inner = .init(a) };
     }
@@ -44,7 +44,7 @@ pub const Iterator = struct {
 
     /// You must deinitialize iterator's internal buffers by calling `deinit` when done.
     pub fn initAllocator(a: Args, gpa: Allocator) InitError!Iterator {
-        if (native_os == .wasi and !builtin.link_libc) {
+        if (native_os.isWasi() and !builtin.link_libc) {
             return .{ .inner = try .init(gpa) };
         }
         if (native_os == .windows) {
@@ -73,7 +73,7 @@ pub const Iterator = struct {
     /// `initAllocator` function.
     pub fn deinit(it: *Iterator) void {
         // Unless we're targeting WASI or Windows, this is a no-op.
-        if (native_os == .wasi and !builtin.link_libc) it.inner.deinit();
+        if (native_os.isWasi() and !builtin.link_libc) it.inner.deinit();
         if (native_os == .windows) it.inner.deinit();
     }
 
@@ -504,7 +504,7 @@ pub fn toSlice(a: Args, arena: Allocator) ToSliceError![]const [:0]const u8 {
         }
 
         return result_slice_list;
-    } else if (native_os == .wasi and !builtin.link_libc) {
+    } else if (native_os.isWasi() and !builtin.link_libc) {
         var count: usize = undefined;
         var buf_size: usize = undefined;
 

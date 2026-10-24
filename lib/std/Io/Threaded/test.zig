@@ -171,7 +171,7 @@ test "cancel blocked read from pipe" {
     var read_end: Io.File = undefined;
     var write_end: Io.File = undefined;
     switch (builtin.target.os.tag) {
-        .wasi => return error.SkipZigTest,
+        .wasi, .wasip2 => return error.SkipZigTest,
         .windows => {
             const pipe = try threaded.windowsCreatePipe(.{
                 .server = .{ .mode = .{ .IO = .SYNCHRONOUS_NONALERT } },

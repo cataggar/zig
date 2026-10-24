@@ -53,7 +53,8 @@ pub fn libCxxNeedsLibUnwind(target: *const std.Target) bool {
         .tvos,
         .visionos,
         .freestanding,
-        .wasi, // Wasm/WASI currently doesn't offer support for libunwind, so don't link it.
+        .wasi,
+        .wasip2, // Wasm/WASI currently doesn't offer support for libunwind, so don't link it.
         => false,
 
         .windows => target.abi.isGnu(),

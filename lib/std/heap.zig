@@ -581,7 +581,7 @@ const page_size_min_default: ?usize = switch (builtin.os.tag) {
         .thumb, .thumbeb, .arm, .armeb, .aarch64, .aarch64_be => 4 << 10,
         else => null,
     },
-    .wasi => switch (builtin.cpu.arch) {
+    .wasi, .wasip2 => switch (builtin.cpu.arch) {
         .wasm32, .wasm64 => 64 << 10,
         else => null,
     },
@@ -746,7 +746,7 @@ const page_size_max_default: ?usize = switch (builtin.os.tag) {
         .thumb, .thumbeb, .arm, .armeb, .aarch64, .aarch64_be => 4 << 10,
         else => null,
     },
-    .wasi => switch (builtin.cpu.arch) {
+    .wasi, .wasip2 => switch (builtin.cpu.arch) {
         .wasm32, .wasm64 => 64 << 10,
         else => null,
     },

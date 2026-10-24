@@ -346,7 +346,7 @@ test "addCertsFromDirPath compiles and accepts an empty directory" {
 }
 
 test "scan for OS-provided certificates" {
-    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+    if (builtin.os.tag.isWasi()) return error.SkipZigTest;
 
     const io = std.testing.io;
     const gpa = std.testing.allocator;
