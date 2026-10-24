@@ -146,14 +146,14 @@ const powf_impl = struct {
 
         // log2(x) = log1p(z/c-1)/ln2 + log2(c) + k
         const r = z * invc - 1;
-        const y0 = logc + k;
+        const y0_val = logc + k;
 
         // Pipelined polynomial evaluation to approximate log1p(r)/ln2.
         const r2 = r * r;
         var yy = A[0] * r + A[1];
         const p = A[2] * r + A[3];
         const r4 = r2 * r2;
-        var q = A[4] * r + y0;
+        var q = A[4] * r + y0_val;
         q = p * r2 + q;
         yy = yy * r4 + q;
         return yy;
@@ -250,7 +250,7 @@ const powf_impl = struct {
 };
 const maxInt = std.math.maxInt;
 const minInt = std.math.minInt;
-export var __signgam: c_int = 0;
+var __signgam: c_int = 0;
 // Constants for f64 erf/erfc implementation
 const erf_erx: f64 = 8.45062911510467529297e-01; // 0x3FEB0AC1, 0x60000000
 const erf_efx8: f64 = 1.02703333676410069053e+00; // 0x3FF06EBA, 0x8214DB69
@@ -370,6 +370,99 @@ const erff_sb4: f32 = 3.1998581543e+03;
 const erff_sb5: f32 = 2.5530502930e+03;
 const erff_sb6: f32 = 4.7452853394e+02;
 const erff_sb7: f32 = -2.2440952301e+01;
+const erfl_erx: f80 = 0.845062911510467529296875;
+const erfl_efx8: f80 = 1.0270333367641005911692712249723613735048E0;
+const erfl_pp = [6]f80{
+    1.122751350964552113068262337278335028553E6,
+    -2.808533301997696164408397079650699163276E6,
+    -3.314325479115357458197119660818768924100E5,
+    -6.848684465326256109712135497895525446398E4,
+    -2.657817695110739185591505062971929859314E3,
+    -1.655310302737837556654146291646499062882E2,
+};
+const erfl_qq = [6]f80{
+    8.745588372054466262548908189000448124232E6,
+    3.746038264792471129367533128637019611485E6,
+    7.066358783162407559861156173539693900031E5,
+    7.448928604824620999413120955705448117056E4,
+    4.511583986730994111992253980546131408924E3,
+    1.368902937933296323345610240009071254014E2,
+};
+const erfl_pa = [8]f80{
+    -1.076952146179812072156734957705102256059E0,
+    1.884814957770385593365179835059971587220E2,
+    -5.339153975012804282890066622962070115606E1,
+    4.435910679869176625928504532109635632618E1,
+    1.683219516032328828278557309642929135179E1,
+    -2.360236618396952560064259585299045804293E0,
+    1.852230047861891953244413872297940938041E0,
+    9.394994446747752308256773044667843200719E-2,
+};
+const erfl_qa = [7]f80{
+    4.559263722294508998149925774781887811255E2,
+    3.289248982200800575749795055149780689738E2,
+    2.846070965875643009598627918383314457912E2,
+    1.398715859064535039433275722017479994465E2,
+    6.060190733759793706299079050985358190726E1,
+    2.078695677795422351040502569964299664233E1,
+    4.641271134150895940966798357442234498546E0,
+};
+const erfl_ra = [9]f80{
+    1.363566591833846324191000679620738857234E-1,
+    1.018203167219873573808450274314658434507E1,
+    1.862359362334248675526472871224778045594E2,
+    1.411622588180721285284945138667933330348E3,
+    5.088538459741511988784440103218342840478E3,
+    8.928251553922176506858267311750789273656E3,
+    7.264436000148052545243018622742770549982E3,
+    2.387492459664548651671894725748959751119E3,
+    2.220916652813908085449221282808458466556E2,
+};
+const erfl_sa = [9]f80{
+    -1.382234625202480685182526402169222331847E1,
+    -3.315638835627950255832519203687435946482E2,
+    -2.949124863912936259747237164260785326692E3,
+    -1.246622099070875940506391433635999693661E4,
+    -2.673079795851665428695842853070996219632E4,
+    -2.880269786660559337358397106518918220991E4,
+    -1.450600228493968044773354186390390823713E4,
+    -2.874539731125893533960680525192064277816E3,
+    -1.402241261419067750237395034116942296027E2,
+};
+const erfl_rb = [8]f80{
+    -4.869587348270494309550558460786501252369E-5,
+    -4.030199390527997378549161722412466959403E-3,
+    -9.434425866377037610206443566288917589122E-2,
+    -9.319032754357658601200655161585539404155E-1,
+    -4.273788174307459947350256581445442062291E0,
+    -8.842289940696150508373541814064198259278E0,
+    -7.069215249419887403187988144752613025255E0,
+    -1.401228723639514787920274427443330704764E0,
+};
+const erfl_sb = [7]f80{
+    4.936254964107175160157544545879293019085E-3,
+    1.583457624037795744377163924895349412015E-1,
+    1.850647991850328356622940552450636420484E0,
+    9.927611557279019463768050710008450625415E0,
+    2.531667257649436709617165336779212114570E1,
+    2.869752886406743386458304052862814690045E1,
+    1.182059497870819562441683560749192539345E1,
+};
+const erfl_rc = [6]f80{
+    -8.299617545269701963973537248996670806850E-5,
+    -6.243845685115818513578933902532056244108E-3,
+    -1.141667210620380223113693474478394397230E-1,
+    -7.521343797212024245375240432734425789409E-1,
+    -1.765321928311155824664963633786967602934E0,
+    -1.029403473103215800456761180695263439188E0,
+};
+const erfl_sc = [5]f80{
+    8.413244363014929493035952542677768808601E-3,
+    2.065114333816877479753334599639158060979E-1,
+    1.639064941530797583766364412782135680148E0,
+    4.936788463787115555582319302981666347450E0,
+    5.005177727208955487404729933261347679090E0,
+};
 const mem = std.mem;
 // lgamma_r f64 polynomial coefficients
 const lg_pi: f64 = 3.14159265358979311600e+00; // 0x400921FB, 0x54442D18
@@ -789,6 +882,76 @@ fn tanhf(x: f32) callconv(.c) f32 {
     return math.tanh(x);
 }
 
+fn fpBarrierValue(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
+    var y: T = undefined;
+    const ptr: *volatile T = &y;
+    ptr.* = x;
+    return ptr.*;
+}
+
+fn forceEval(comptime T: type, x: T) void {
+    @setFloatMode(.strict);
+    var y: T = undefined;
+    const ptr: *volatile T = &y;
+    ptr.* = x;
+}
+
+fn __math_divzero(sign: u32) callconv(.c) f64 {
+    @setFloatMode(.strict);
+    return fpBarrierValue(f64, if (sign != 0) -1.0 else 1.0) / 0.0;
+}
+
+fn __math_divzerof(sign: u32) callconv(.c) f32 {
+    @setFloatMode(.strict);
+    return fpBarrierValue(f32, if (sign != 0) -1.0 else 1.0) / 0.0;
+}
+
+fn __math_invalid(x: f64) callconv(.c) f64 {
+    @setFloatMode(.strict);
+    return (x - x) / (x - x);
+}
+
+fn __math_invalidf(x: f32) callconv(.c) f32 {
+    @setFloatMode(.strict);
+    return (x - x) / (x - x);
+}
+
+fn __math_invalidl(x: c_longdouble) callconv(.c) c_longdouble {
+    @setFloatMode(.strict);
+    return (x - x) / (x - x);
+}
+
+fn __math_xflow(sign: u32, y: f64) callconv(.c) f64 {
+    @setFloatMode(.strict);
+    return fpBarrierValue(f64, if (sign != 0) -y else y) * y;
+}
+
+fn __math_xflowf(sign: u32, y: f32) callconv(.c) f32 {
+    @setFloatMode(.strict);
+    return fpBarrierValue(f32, if (sign != 0) -y else y) * y;
+}
+
+fn __math_oflow(sign: u32) callconv(.c) f64 {
+    @setFloatMode(.strict);
+    return __math_xflow(sign, 0x1p769);
+}
+
+fn __math_oflowf(sign: u32) callconv(.c) f32 {
+    @setFloatMode(.strict);
+    return __math_xflowf(sign, 0x1p97);
+}
+
+fn __math_uflow(sign: u32) callconv(.c) f64 {
+    @setFloatMode(.strict);
+    return __math_xflow(sign, 0x1p-767);
+}
+
+fn __math_uflowf(sign: u32) callconv(.c) f32 {
+    @setFloatMode(.strict);
+    return __math_xflowf(sign, 0x1p-95);
+}
+
 comptime {
     if (builtin.target.isMinGW()) {
         symbol(&isnan, "isnan");
@@ -835,29 +998,56 @@ comptime {
     }
     if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
         symbol(&acos, "acos");
+        symbol(&acosh_, "acosh");
         symbol(&acoshf, "acoshf");
         symbol(&acosl, "acosl");
         symbol(&asin, "asin");
+        symbol(&asinh_, "asinh");
         symbol(&asinhf, "asinhf");
         symbol(&asinl, "asinl");
         symbol(&atan, "atan");
+        symbol(&atan2l, "atan2l");
         symbol(&atanhf, "atanhf");
         symbol(&cbrt, "cbrt");
         symbol(&cbrtf, "cbrtf");
+        symbol(&cbrtl_, "cbrtl");
         symbol(&cosh, "cosh");
         symbol(&cosl, "cosl");
+        symbol(&erfl, "erfl");
+        symbol(&erfcl, "erfcl");
         symbol(&exp10, "exp10");
         symbol(&exp10f, "exp10f");
+        symbol(&exp10l, "exp10l");
+        symbol(&exp2l, "exp2l");
+        symbol(&expm1, "expm1");
+        symbol(&expm1f, "expm1f");
+        symbol(&expm1l, "expm1l");
         symbol(&fdimf, "fdimf");
         symbol(&fmaf, "fmaf");
         symbol(&fmal, "fmal");
         symbol(&hypot, "hypot");
         symbol(&ilogbf, "ilogbf");
         symbol(&ilogbl, "ilogbl");
+        symbol(&j0, "j0");
+        symbol(&y0, "y0");
+        symbol(&j0f, "j0f");
+        symbol(&y0f, "y0f");
+        symbol(&j1, "j1");
+        symbol(&y1, "y1");
+        symbol(&j1f, "j1f");
+        symbol(&y1f, "y1f");
+        symbol(&jn, "jn");
+        symbol(&yn, "yn");
+        symbol(&jnf, "jnf");
+        symbol(&ynf, "ynf");
         symbol(&ldexpf, "ldexpf");
         symbol(&ldexpl, "ldexpl");
+        symbol(&lgammal_, "lgammal");
+        symbol(&lgammal_r_, "__lgammal_r");
+        symbol(&lgammal_r_, "lgammal_r");
         symbol(&llrintf, "llrintf");
         symbol(&llrintl, "llrintl");
+        symbol(&llround, "llround");
         symbol(&llroundf, "llroundf");
         symbol(&llroundl, "llroundl");
         symbol(&log1p, "log1p");
@@ -869,6 +1059,7 @@ comptime {
         symbol(&modf, "modf");
         symbol(&nan, "nan");
         symbol(&nanf, "nanf");
+        symbol(&nearbyintf, "nearbyintf");
         symbol(&nearbyintl, "nearbyintl");
         symbol(&nextafterf, "nextafterf");
         symbol(&nextafterl, "nextafterl");
@@ -877,11 +1068,16 @@ comptime {
         symbol(&pow, "pow");
         symbol(&pow10, "pow10");
         symbol(&pow10f, "pow10f");
+        symbol(&pow10l, "pow10l");
         symbol(&sincosl, "sincosl");
+        symbol(&sinh_, "sinh");
         symbol(&sinhf, "sinhf");
         symbol(&sinl, "sinl");
         symbol(&tanh, "tanh");
         symbol(&tanl, "tanl");
+        symbol(&tgamma, "tgamma");
+        symbol(&tgammaf, "tgammaf");
+        symbol(&tgammal, "tgammal");
         symbol(&expl, "expl");
         symbol(&log10l, "log10l");
         symbol(&log2l, "log2l");
@@ -938,9 +1134,21 @@ comptime {
         symbol(&powl, "powl");
     }
     if (builtin.target.isMuslLibC()) {
+        symbol(&__math_divzero, "__math_divzero");
+        symbol(&__math_divzerof, "__math_divzerof");
+        symbol(&__math_invalid, "__math_invalid");
+        symbol(&__math_invalidf, "__math_invalidf");
+        symbol(&__math_invalidl, "__math_invalidl");
+        symbol(&__math_oflow, "__math_oflow");
+        symbol(&__math_oflowf, "__math_oflowf");
+        symbol(&__math_uflow, "__math_uflow");
+        symbol(&__math_uflowf, "__math_uflowf");
+        symbol(&__math_xflow, "__math_xflow");
+        symbol(&__math_xflowf, "__math_xflowf");
         symbol(&copysign, "copysign");
         symbol(&copysignf, "copysignf");
         symbol(&rint, "rint");
+        symbol(&scalb, "scalb");
         symbol(&scalbf, "scalbf");
         symbol(&rintf, "rintf");
         symbol(&__fpclassify, "__fpclassify");
@@ -954,19 +1162,40 @@ comptime {
         symbol(&nearbyint, "nearbyint");
     }
     if (builtin.target.isWasiLibC()) {
+        symbol(&__math_divzero, "__math_divzero");
+        symbol(&__math_divzerof, "__math_divzerof");
+        symbol(&__math_invalid, "__math_invalid");
+        symbol(&__math_invalidf, "__math_invalidf");
+        symbol(&__math_invalidl, "__math_invalidl");
+        symbol(&__math_oflow, "__math_oflow");
+        symbol(&__math_oflowf, "__math_oflowf");
+        symbol(&__math_uflow, "__math_uflow");
+        symbol(&__math_uflowf, "__math_uflowf");
+        symbol(&__math_xflow, "__math_xflow");
+        symbol(&__math_xflowf, "__math_xflowf");
         symbol(&scalbf, "scalbf");
         symbol(&nextafter, "nextafter");
         symbol(&nexttoward, "nexttoward");
     }
-    @export(&__signgam, .{ .name = "signgam", .linkage = .weak });
+    symbol(&__signgam, "__signgam");
+    symbol(&__signgam, "signgam");
+}
+
+fn acosWithFlags(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
+    if (@abs(x) > 1.0) {
+        std.math.raiseInvalid();
+        return math.nan(T);
+    }
+    return math.acos(x);
 }
 
 fn acos(x: f64) callconv(.c) f64 {
-    return math.acos(x);
+    return acosWithFlags(f64, x);
 }
 
 fn acosf(x: f32) callconv(.c) f32 {
-    return math.acos(x);
+    return acosWithFlags(f32, x);
 }
 
 fn acoshf(x: f32) callconv(.c) f32 {
@@ -1027,7 +1256,7 @@ fn coshf(x: f32) callconv(.c) f32 {
     const absx: f32 = @bitCast(w);
 
     if (w < 0x42b17217) {
-        const t = math.expm1(absx);
+        const t = expm1f(absx);
         return 1.0 + t * t / (2.0 * (1.0 + t));
     }
 
@@ -1040,6 +1269,40 @@ fn exp10(x: f64) callconv(.c) f64 {
 
 fn exp10f(x: f32) callconv(.c) f32 {
     return math.pow(f32, 10.0, x);
+}
+
+fn exp10l(x: c_longdouble) callconv(.c) c_longdouble {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => @floatCast(exp10(@floatCast(x))),
+        80 => @floatCast(exp10lWide(f80, @floatCast(x))),
+        128 => @floatCast(exp10lWide(f128, @floatCast(x))),
+        else => powl(10.0, x),
+    };
+}
+
+fn exp10lWide(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
+    const p10 = [31]T{
+        1e-15, 1e-14, 1e-13, 1e-12, 1e-11, 1e-10,
+        1e-9,  1e-8,  1e-7,  1e-6,  1e-5,  1e-4,
+        1e-3,  1e-2,  1e-1,  1,     1e1,   1e2,
+        1e3,   1e4,   1e5,   1e6,   1e7,   1e8,
+        1e9,   1e10,  1e11,  1e12,  1e13,  1e14,
+        1e15,
+    };
+    var n_ld: c_longdouble = undefined;
+    var y: T = @floatCast(modfl(@floatCast(x), &n_ld));
+    const n: T = @floatCast(n_ld);
+    const U = @Int(.unsigned, @typeInfo(T).float.bits);
+    const u_bits: U = @bitCast(n);
+    const se: u16 = @truncate(u_bits >> (@typeInfo(T).float.bits - 16));
+    if ((se & 0x7fff) < 0x3fff + 4) {
+        const idx: usize = @intCast(@as(i32, @intFromFloat(n)) + 15);
+        if (y == 0) return p10[idx];
+        y = @floatCast(exp2l(@floatCast(@as(T, 3.32192809488736234787031942948939) * y)));
+        return y * p10[idx];
+    }
+    return @floatCast(powl(10.0, @floatCast(x)));
 }
 
 fn hypot(x: f64, y: f64) callconv(.c) f64 {
@@ -1241,7 +1504,12 @@ fn pow10f(x: f32) callconv(.c) f32 {
     return exp10f(x);
 }
 
+fn pow10l(x: c_longdouble) callconv(.c) c_longdouble {
+    return exp10l(x);
+}
+
 fn rint(x: f64) callconv(.c) f64 {
+    @setFloatMode(.strict);
     const toint: f64 = 1.0 / @as(f64, math.floatEps(f64));
     const a: u64 = @bitCast(x);
     const e = a >> 52 & 0x7ff;
@@ -1286,8 +1554,181 @@ fn cosl(x: c_longdouble) callconv(.c) c_longdouble {
     };
 }
 
-fn expm1f(x: f32) callconv(.c) f32 {
-    return math.expm1(x);
+fn expm1(x_: f64) callconv(.c) f64 {
+    @setFloatMode(.strict);
+    const o_threshold: f64 = 7.09782712893383973096e+02;
+    const ln2_hi: f64 = 6.93147180369123816490e-01;
+    const ln2_lo: f64 = 1.90821492927058770002e-10;
+    const invln2: f64 = 1.44269504088896338700e+00;
+    const Q1: f64 = -3.33333333333331316428e-02;
+    const Q2: f64 = 1.58730158725481460165e-03;
+    const Q3: f64 = -7.93650757867487942473e-05;
+    const Q4: f64 = 4.00821782732936239552e-06;
+    const Q5: f64 = -2.01099218183624371326e-07;
+
+    var x = x_;
+    const bits: u64 = @bitCast(x);
+    var hx: u32 = @truncate(bits >> 32);
+    const sign = (hx >> 31) != 0;
+    hx &= 0x7fffffff;
+
+    if (hx >= 0x4043687A) {
+        if (math.isNan(x)) return x;
+        if (sign) return -1.0;
+        if (x > o_threshold) {
+            return fpBarrierValue(f64, x) * 0x1p1023;
+        }
+    }
+
+    var k: i32 = undefined;
+    var hi: f64 = undefined;
+    var lo: f64 = undefined;
+    var c: f64 = 0.0;
+    if (hx > 0x3fd62e42) {
+        if (hx < 0x3FF0A2B2) {
+            if (!sign) {
+                hi = x - ln2_hi;
+                lo = ln2_lo;
+                k = 1;
+            } else {
+                hi = x + ln2_hi;
+                lo = -ln2_lo;
+                k = -1;
+            }
+        } else {
+            k = @intFromFloat(invln2 * x + (if (sign) @as(f64, -0.5) else @as(f64, 0.5)));
+            const t: f64 = @floatFromInt(k);
+            hi = x - t * ln2_hi;
+            lo = t * ln2_lo;
+        }
+        x = hi - lo;
+        c = (hi - x) - lo;
+    } else if (hx < 0x3c900000) {
+        if (hx < 0x00100000) {
+            forceEval(f32, @floatCast(x));
+        }
+        return x;
+    } else {
+        k = 0;
+    }
+
+    const hfx = 0.5 * x;
+    const hxs = x * hfx;
+    const r1 = 1.0 + hxs * (Q1 + hxs * (Q2 + hxs * (Q3 + hxs * (Q4 + hxs * Q5))));
+    const t = 3.0 - r1 * hfx;
+    var e = hxs * ((r1 - t) / (6.0 - x * t));
+    if (k == 0) {
+        return x - (x * e - hxs);
+    }
+    e = x * (e - c) - c;
+    e -= hxs;
+    if (k == -1) return 0.5 * (x - e) - 0.5;
+    if (k == 1) {
+        if (x < -0.25) return -2.0 * (e - (x + 0.5));
+        return 1.0 + 2.0 * (x - e);
+    }
+    const twopk: f64 = @bitCast(@as(u64, @intCast(0x3ff + k)) << 52);
+    if (k <= -2 or k > 56) {
+        var y = x - e + 1.0;
+        if (k == 1024) {
+            y = fpBarrierValue(f64, y * 2.0) * 0x1p1023;
+        } else {
+            y = y * twopk;
+        }
+        return y - 1.0;
+    }
+    const uf: f64 = @bitCast(@as(u64, @intCast(0x3ff - k)) << 52);
+    if (k < 20) {
+        return (x - e + (1.0 - uf)) * twopk;
+    } else {
+        return (x - (e + uf) + 1.0) * twopk;
+    }
+}
+
+fn expm1f(x_: f32) callconv(.c) f32 {
+    @setFloatMode(.strict);
+    const ln2_hi: f32 = 6.9313812256e-01;
+    const ln2_lo: f32 = 9.0580006145e-06;
+    const invln2: f32 = 1.4426950216e+00;
+    const Q1: f32 = -3.3333212137e-02;
+    const Q2: f32 = 1.5807170421e-03;
+
+    var x = x_;
+    var hx: u32 = @bitCast(x);
+    const sign = (hx >> 31) != 0;
+    hx &= 0x7fffffff;
+
+    if (hx >= 0x4195b844) {
+        if (hx > 0x7f800000) return x;
+        if (sign) return -1.0;
+        if (hx > 0x42b17217) {
+            return fpBarrierValue(f32, x) * 0x1p127;
+        }
+    }
+
+    var k: i32 = undefined;
+    var hi: f32 = undefined;
+    var lo: f32 = undefined;
+    var c: f32 = 0.0;
+    if (hx > 0x3eb17218) {
+        if (hx < 0x3F851592) {
+            if (!sign) {
+                hi = x - ln2_hi;
+                lo = ln2_lo;
+                k = 1;
+            } else {
+                hi = x + ln2_hi;
+                lo = -ln2_lo;
+                k = -1;
+            }
+        } else {
+            k = @intFromFloat(invln2 * x + (if (sign) @as(f32, -0.5) else @as(f32, 0.5)));
+            const t: f32 = @floatFromInt(k);
+            hi = x - t * ln2_hi;
+            lo = t * ln2_lo;
+        }
+        x = hi - lo;
+        c = (hi - x) - lo;
+    } else if (hx < 0x33000000) {
+        if (hx < 0x00800000) {
+            forceEval(f32, x * x);
+        }
+        return x;
+    } else {
+        k = 0;
+    }
+
+    const hfx = 0.5 * x;
+    const hxs = x * hfx;
+    const r1 = 1.0 + hxs * (Q1 + hxs * Q2);
+    const t = 3.0 - r1 * hfx;
+    var e = hxs * ((r1 - t) / (6.0 - x * t));
+    if (k == 0) {
+        return x - (x * e - hxs);
+    }
+    e = x * (e - c) - c;
+    e -= hxs;
+    if (k == -1) return 0.5 * (x - e) - 0.5;
+    if (k == 1) {
+        if (x < -0.25) return -2.0 * (e - (x + 0.5));
+        return 1.0 + 2.0 * (x - e);
+    }
+    const twopk: f32 = @bitCast(@as(u32, @intCast(0x7f + k)) << 23);
+    if (k <= -2 or k > 56) {
+        var y = x - e + 1.0;
+        if (k == 128) {
+            y = fpBarrierValue(f32, y * 2.0) * 0x1p127;
+        } else {
+            y = y * twopk;
+        }
+        return y - 1.0;
+    }
+    const uf: f32 = @bitCast(@as(u32, @intCast(0x7f - k)) << 23);
+    if (k < 20) {
+        return (x - e + (1.0 - uf)) * twopk;
+    } else {
+        return (x - (e + uf) + 1.0) * twopk;
+    }
 }
 
 fn fdimGeneric(comptime T: type, x: T, y: T) T {
@@ -1363,6 +1804,10 @@ fn llrintl(x: c_longdouble) callconv(.c) c_longlong {
     return intFromFloat(c_longlong, rintGeneric(c_longdouble, x));
 }
 
+fn llround(x: f64) callconv(.c) c_longlong {
+    return @intFromFloat(math.round(x));
+}
+
 fn llroundf(x: f32) callconv(.c) c_longlong {
     return @intFromFloat(math.round(x));
 }
@@ -1426,12 +1871,58 @@ fn lroundl(x: c_longdouble) callconv(.c) c_long {
     return @round(x);
 }
 
+extern fn fetestexcept(c_int) c_int;
+extern fn feclearexcept(c_int) c_int;
+
+fn nearbyintWithFlags(comptime T: type, comptime rint_fn: fn (T) callconv(.c) T, x: T) T {
+    if (comptime builtin.target.cpu.arch == .aarch64 or builtin.target.cpu.arch == .aarch64_be) {
+        const FE_INEXACT_AARCH64: u64 = 0x10;
+        const fpsr_before = asm volatile ("mrs %[ret], fpsr"
+            : [ret] "=r" (-> u64),
+        );
+        const y = rint_fn(x);
+        if ((fpsr_before & FE_INEXACT_AARCH64) == 0) {
+            const fpsr_after = asm volatile ("mrs %[ret], fpsr"
+                : [ret] "=r" (-> u64),
+            );
+            if ((fpsr_after & FE_INEXACT_AARCH64) != 0) {
+                const cleared = fpsr_after & ~FE_INEXACT_AARCH64;
+                asm volatile ("msr fpsr, %[val]"
+                    :
+                    : [val] "r" (cleared),
+                );
+            }
+        }
+        return y;
+    }
+    if (comptime !builtin.is_test or builtin.link_libc) {
+        const fe_inexact: c_int = switch (builtin.target.cpu.arch) {
+            .x86_64, .x86, .hexagon => 0x20,
+            .arm, .armeb, .thumb, .thumbeb => 0x10,
+            .riscv32, .riscv64 => 0x01,
+            .loongarch64 => 0x010000,
+            .m68k => 0x08,
+            .mips, .mipsel, .mips64, .mips64el => 0x04,
+            .powerpc, .powerpcle, .powerpc64, .powerpc64le => 0x02000000,
+            .s390x => 0x080000,
+            else => 0,
+        };
+        if (fe_inexact != 0) {
+            const e = fetestexcept(fe_inexact);
+            const y = fpBarrierValue(T, rint_fn(fpBarrierValue(T, x)));
+            if (e == 0) _ = feclearexcept(fe_inexact);
+            return y;
+        }
+    }
+    return rint_fn(x);
+}
+
 fn nearbyintf(x: f32) callconv(.c) f32 {
-    return rintGeneric(f32, x);
+    return nearbyintWithFlags(f32, rintf, x);
 }
 
 fn nearbyintl(x: c_longdouble) callconv(.c) c_longdouble {
-    return rintGeneric(c_longdouble, x);
+    return nearbyintWithFlags(c_longdouble, rintl, x);
 }
 
 fn nextafterf(x: f32, y: f32) callconv(.c) f32 {
@@ -1515,6 +2006,7 @@ fn raiseNextafterExceptions(comptime T: type, x: T, r: T) void {
 
 /// Generic rint for any IEEE 754 float type.
 fn rintGeneric(comptime T: type, x: T) T {
+    @setFloatMode(.strict);
     const toint: T = 1.0 / math.floatEps(T);
     const FloatBits = @Int(.unsigned, @typeInfo(T).float.bits);
     const mant_bits = math.floatMantissaBits(T);
@@ -1553,7 +2045,7 @@ fn sinhf(x: f32) callconv(.c) f32 {
     const h: f32 = if (ux >> 31 != 0) -0.5 else 0.5;
 
     if (w < 0x42b17217) {
-        const t = math.expm1(absx);
+        const t = expm1f(absx);
         if (w < 0x3f800000) {
             if (w < 0x3f800000 - (12 << 23)) return x;
             return h * (2 * t - t * t / (t + 1));
@@ -1564,7 +2056,16 @@ fn sinhf(x: f32) callconv(.c) f32 {
     return expo2f(absx, 2 * h);
 }
 
+fn expo2(x: f64, sign: f64) f64 {
+    @setFloatMode(.strict);
+    const k = 2043;
+    const kln2: f64 = 0x1.62066151add8bp+10;
+    const scale: f64 = @bitCast(@as(u64, 0x3ff + k / 2) << 52);
+    return math.exp(x - kln2) * (sign * scale) * scale;
+}
+
 fn expo2f(x: f32, sign: f32) f32 {
+    @setFloatMode(.strict);
     const k = 235;
     const kln2: f32 = 0x1.45c778p+7;
     const scale: f32 = @bitCast(@as(u32, (0x7f + k / 2) << 23));
@@ -1697,9 +2198,188 @@ fn x87Tan(x: c_longdouble) c_longdouble {
     };
 }
 
+fn exp2l_ld80(x: f80) f80 {
+    @setFloatMode(.strict);
+    const TBLBITS = 7;
+    const TBLSIZE: u32 = 1 << TBLBITS;
+    const redux: f64 = 0x1.8p63 / @as(f64, TBLSIZE);
+    const P1: f80 = 0x1.62e42fefa39ef35793c7673007e6p-1;
+    const P2: f80 = 0x1.ebfbdff82c58ea86f16b06ec9736p-3;
+    const P3: f80 = 0x1.c6b08d704a0bf8b33a762bad3459p-5;
+    const P4: f80 = 0x1.3b2ab6fba4e7729ccbbe0b4f3fc2p-7;
+    const P5: f80 = 0x1.5d87fe78a67311071dee13fd11d9p-10;
+    const P6: f80 = 0x1.430912f86c7876f4b663b23c5fe5p-13;
+    const tbl = [TBLSIZE * 2]f64{
+        0x1.6a09e667f3bcdp-1, -0x1.bdd3413b2648p-55,
+        0x1.6c012750bdabfp-1, -0x1.2895667ff0cp-57,
+        0x1.6dfb23c651a2fp-1, -0x1.bbe3a683c88p-58,
+        0x1.6ff7df9519484p-1, -0x1.83c0f25860fp-56,
+        0x1.71f75e8ec5f74p-1, -0x1.16e4786887bp-56,
+        0x1.73f9a48a58174p-1, -0x1.0a8d96c65d5p-55,
+        0x1.75feb564267c9p-1, -0x1.0245957316ep-55,
+        0x1.780694fde5d3fp-1, 0x1.866b80a0216p-55,
+        0x1.7a11473eb0187p-1, -0x1.41577ee0499p-56,
+        0x1.7c1ed0130c132p-1, 0x1.f124cd1164ep-55,
+        0x1.7e2f336cf4e62p-1, 0x1.05d02ba157ap-57,
+        0x1.80427543e1a12p-1, -0x1.27c86626d97p-55,
+        0x1.82589994cce13p-1, -0x1.d4c1dd41533p-55,
+        0x1.8471a4623c7adp-1, -0x1.8d684a341cep-56,
+        0x1.868d99b4492edp-1, -0x1.fc6f89bd4f68p-55,
+        0x1.88ac7d98a6699p-1, 0x1.994c2f37cb5p-55,
+        0x1.8ace5422aa0dbp-1, 0x1.6e9f156864bp-55,
+        0x1.8cf3216b5448cp-1, -0x1.0d55e32e9e4p-57,
+        0x1.8f1ae99157736p-1, 0x1.5cc13a2e397p-56,
+        0x1.9145b0b91ffc6p-1, -0x1.dd6792e5825p-55,
+        0x1.93737b0cdc5e5p-1, -0x1.75fc781b58p-58,
+        0x1.95a44cbc8520fp-1, -0x1.64b7c96a5fp-57,
+        0x1.97d829fde4e5p-1,  -0x1.d185b7c1b86p-55,
+        0x1.9a0f170ca07bap-1, -0x1.173bd91cee6p-55,
+        0x1.9c49182a3f09p-1,  0x1.c7c46b071f2p-57,
+        0x1.9e86319e32323p-1, 0x1.824ca78e64cp-57,
+        0x1.a0c667b5de565p-1, -0x1.359495d1cd5p-55,
+        0x1.a309bec4a2d33p-1, 0x1.6305c7ddc368p-55,
+        0x1.a5503b23e255dp-1, -0x1.d2f6edb8d42p-55,
+        0x1.a799e1330b358p-1, 0x1.bcb7ecac564p-55,
+        0x1.a9e6b5579fdbfp-1, 0x1.0fac90ef7fdp-55,
+        0x1.ac36bbfd3f37ap-1, -0x1.f9234cae76dp-56,
+        0x1.ae89f995ad3adp-1, 0x1.7a1cd345dcc8p-55,
+        0x1.b0e07298db666p-1, -0x1.bdef54c80e4p-55,
+        0x1.b33a2b84f15fbp-1, -0x1.2805e3084d8p-58,
+        0x1.b59728de5593ap-1, -0x1.c71dfbbba6ep-55,
+        0x1.b7f76f2fb5e47p-1, -0x1.5584f7e54acp-57,
+        0x1.ba5b030a1064ap-1, -0x1.efcd30e5429p-55,
+        0x1.bcc1e904bc1d2p-1, 0x1.23dd07a2d9fp-56,
+        0x1.bf2c25bd71e09p-1, -0x1.efdca3f6b9c8p-55,
+        0x1.c199bdd85529cp-1, 0x1.11065895049p-56,
+        0x1.c40ab5fffd07ap-1, 0x1.b4537e083c6p-55,
+        0x1.c67f12e57d14bp-1, 0x1.2884dff483c8p-55,
+        0x1.c8f6d9406e7b5p-1, 0x1.1acbc48805cp-57,
+        0x1.cb720dcef9069p-1, 0x1.503cbd1e94ap-57,
+        0x1.cdf0b555dc3fap-1, -0x1.dd83b53829dp-56,
+        0x1.d072d4a07897cp-1, -0x1.cbc3743797a8p-55,
+        0x1.d2f87080d89f2p-1, -0x1.d487b719d858p-55,
+        0x1.d5818dcfba487p-1, 0x1.2ed02d75b37p-56,
+        0x1.d80e316c98398p-1, -0x1.11ec18bedep-55,
+        0x1.da9e603db3285p-1, 0x1.c2300696db5p-55,
+        0x1.dd321f301b46p-1,  0x1.2da5778f019p-55,
+        0x1.dfc97337b9b5fp-1, -0x1.1a5cd4f184b8p-55,
+        0x1.e264614f5a129p-1, -0x1.7b627817a148p-55,
+        0x1.e502ee78b3ff6p-1, 0x1.39e8980a9cdp-56,
+        0x1.e7a51fbc74c83p-1, 0x1.2d522ca0c8ep-55,
+        0x1.ea4afa2a490dap-1, -0x1.e9c23179c288p-55,
+        0x1.ecf482d8e67f1p-1, -0x1.c93f3b411ad8p-55,
+        0x1.efa1bee615a27p-1, 0x1.dc7f486a4b68p-55,
+        0x1.f252b376bba97p-1, 0x1.3a1a5bf0d8e8p-55,
+        0x1.f50765b6e454p-1,  0x1.9d3e12dd8a18p-55,
+        0x1.f7bfdad9cbe14p-1, -0x1.dbb12d00635p-55,
+        0x1.fa7c1819e90d8p-1, 0x1.74853f3a593p-56,
+        0x1.fd3c22b8f71f1p-1, 0x1.2eb74966578p-58,
+        0x1p+0,               0x0p+0,
+        0x1.0163da9fb3335p+0, 0x1.b61299ab8cd8p-54,
+        0x1.02c9a3e778061p+0, -0x1.19083535b08p-56,
+        0x1.04315e86e7f85p+0, -0x1.0a31c1977c98p-54,
+        0x1.059b0d3158574p+0, 0x1.d73e2a475b4p-55,
+        0x1.0706b29ddf6dep+0, -0x1.c91dfe2b13cp-55,
+        0x1.0874518759bc8p+0, 0x1.186be4bb284p-57,
+        0x1.09e3ecac6f383p+0, 0x1.14878183161p-54,
+        0x1.0b5586cf9890fp+0, 0x1.8a62e4adc61p-54,
+        0x1.0cc922b7247f7p+0, 0x1.01edc16e24f8p-54,
+        0x1.0e3ec32d3d1a2p+0, 0x1.03a1727c58p-59,
+        0x1.0fb66affed31bp+0, -0x1.b9bedc44ebcp-57,
+        0x1.11301d0125b51p+0, -0x1.6c51039449bp-54,
+        0x1.12abdc06c31ccp+0, -0x1.1b514b36ca8p-58,
+        0x1.1429aaea92dep+0,  -0x1.32fbf9af1368p-54,
+        0x1.15a98c8a58e51p+0, 0x1.2406ab9eeabp-55,
+        0x1.172b83c7d517bp+0, -0x1.19041b9d78ap-55,
+        0x1.18af9388c8deap+0, -0x1.11023d1970f8p-54,
+        0x1.1a35beb6fcb75p+0, 0x1.e5b4c7b4969p-55,
+        0x1.1bbe084045cd4p+0, -0x1.95386352ef6p-54,
+        0x1.1d4873168b9aap+0, 0x1.e016e00a264p-54,
+        0x1.1ed5022fcd91dp+0, -0x1.1df98027bb78p-54,
+        0x1.2063b88628cd6p+0, 0x1.dc775814a85p-55,
+        0x1.21f49917ddc96p+0, 0x1.2a97e9494a6p-55,
+        0x1.2387a6e756238p+0, 0x1.9b07eb6c7058p-54,
+        0x1.251ce4fb2a63fp+0, 0x1.ac155bef4f5p-55,
+        0x1.26b4565e27cddp+0, 0x1.2bd339940eap-55,
+        0x1.284dfe1f56381p+0, -0x1.a4c3a8c3f0d8p-54,
+        0x1.29e9df51fdee1p+0, 0x1.612e8afad12p-55,
+        0x1.2b87fd0dad99p+0,  -0x1.10adcd6382p-59,
+        0x1.2d285a6e4030bp+0, 0x1.0024754db42p-54,
+        0x1.2ecafa93e2f56p+0, 0x1.1ca0f45d524p-56,
+        0x1.306fe0a31b715p+0, 0x1.6f46ad23183p-55,
+        0x1.32170fc4cd831p+0, 0x1.a9ce78e1804p-55,
+        0x1.33c08b26416ffp+0, 0x1.327218436598p-54,
+        0x1.356c55f929ff1p+0, -0x1.b5cee5c4e46p-55,
+        0x1.371a7373aa9cbp+0, -0x1.63aeabf42ebp-54,
+        0x1.38cae6d05d866p+0, -0x1.e958d3c99048p-54,
+        0x1.3a7db34e59ff7p+0, -0x1.5e436d661f6p-56,
+        0x1.3c32dc313a8e5p+0, -0x1.efff8375d2ap-54,
+        0x1.3dea64c123422p+0, 0x1.ada0911f09fp-55,
+        0x1.3fa4504ac801cp+0, -0x1.7d023f956fap-54,
+        0x1.4160a21f72e2ap+0, -0x1.ef3691c309p-58,
+        0x1.431f5d950a897p+0, -0x1.1c7dde35f7ap-55,
+        0x1.44e086061892dp+0, 0x1.89b7a04ef8p-59,
+        0x1.46a41ed1d0057p+0, 0x1.c944bd1648a8p-54,
+        0x1.486a2b5c13cdp+0,  0x1.3c1a3b69062p-56,
+        0x1.4a32af0d7d3dep+0, 0x1.9cb62f3d1be8p-54,
+        0x1.4bfdad5362a27p+0, 0x1.d4397afec42p-56,
+        0x1.4dcb299fddd0dp+0, 0x1.8ecdbbc6a78p-54,
+        0x1.4f9b2769d2ca7p+0, -0x1.4b309d25958p-54,
+        0x1.516daa2cf6642p+0, -0x1.f768569bd94p-55,
+        0x1.5342b569d4f82p+0, -0x1.07abe1db13dp-55,
+        0x1.551a4ca5d920fp+0, -0x1.d689cefede6p-55,
+        0x1.56f4736b527dap+0, 0x1.9bb2c011d938p-54,
+        0x1.58d12d497c7fdp+0, 0x1.295e15b9a1ep-55,
+        0x1.5ab07dd485429p+0, 0x1.6324c0546478p-54,
+        0x1.5c9268a5946b7p+0, 0x1.c4b1b81698p-60,
+        0x1.5e76f15ad2148p+0, 0x1.ba6f93080e68p-54,
+        0x1.605e1b976dc09p+0, -0x1.3e2429b56de8p-54,
+        0x1.6247eb03a5585p+0, -0x1.383c17e40b48p-54,
+        0x1.6434634ccc32p+0,  -0x1.c483c759d89p-55,
+        0x1.6623882552225p+0, -0x1.bb60987591cp-54,
+        0x1.68155d44ca973p+0, 0x1.038ae44f74p-57,
+    };
+
+    var u_bits: u80 = @bitCast(x);
+    const se: u16 = @truncate(u_bits >> 64);
+    const e: u16 = se & 0x7fff;
+
+    if (e >= 0x3fff + 13) {
+        if (se >= 0x3fff + 14 and (se >> 15) == 0)
+            return x * 0x1p16383;
+        if (e == 0x7fff)
+            return -1.0 / x;
+        if (x < -16382.0) {
+            if (x <= -16446.0 or x - 0x1p63 + 0x1p63 != x)
+                mem.doNotOptimizeAway(@as(f32, @floatCast(-0x1p-149 / x)));
+            if (x <= -16446.0)
+                return 0.0;
+        }
+    } else if (e < 0x3fff - 64) {
+        return 1.0 + x;
+    }
+
+    var uf: f80 = x + redux;
+    u_bits = @bitCast(uf);
+    const m: u64 = @truncate(u_bits);
+    var idx0: u32 = @as(u32, @truncate(m)) +% (TBLSIZE / 2);
+    const ku: u32 = (idx0 / TBLSIZE) * TBLSIZE;
+    const ki: c_int = @divTrunc(@as(i32, @bitCast(ku)), @as(i32, TBLSIZE));
+    idx0 %= TBLSIZE;
+    uf -= redux;
+    const z: f80 = x - uf;
+
+    const t_hi: f80 = tbl[2 * idx0];
+    const t_lo: f80 = tbl[2 * idx0 + 1];
+    const r: f80 = t_lo + (t_hi + t_lo) * z * (P1 + z * (P2 + z * (P3 + z * (P4 + z * (P5 + z * P6))))) + t_hi;
+
+    return @floatCast(scalbnl(@floatCast(r), ki));
+}
+
 fn exp2l(x: c_longdouble) callconv(.c) c_longdouble {
     return switch (@typeInfo(c_longdouble).float.bits) {
         64 => math.exp2(@as(f64, @bitCast(x))),
+        80 => @floatCast(exp2l_ld80(@floatCast(x))),
         else => exp_pure(c_longdouble, x * @as(c_longdouble, 0.6931471805599453094172321214581765680755001343602552541206800094)),
     };
 }
@@ -1713,7 +2393,7 @@ fn expl(x: c_longdouble) callconv(.c) c_longdouble {
 
 fn expm1l(x: c_longdouble) callconv(.c) c_longdouble {
     return switch (@typeInfo(c_longdouble).float.bits) {
-        64 => math.expm1(@as(f64, @bitCast(x))),
+        64 => expm1(@as(f64, @bitCast(x))),
         else => expm1_wide(c_longdouble, x),
     };
 }
@@ -2020,6 +2700,7 @@ fn significandf_(x: f32) callconv(.c) f32 {
 }
 
 fn rintf(x: f32) callconv(.c) f32 {
+    @setFloatMode(.strict);
     const toint: f32 = 1.0 / @as(f32, math.floatEps(f32));
     const a: u32 = @bitCast(x);
     const e = a >> 23 & 0xff;
@@ -2041,6 +2722,7 @@ fn rintf(x: f32) callconv(.c) f32 {
 }
 
 fn rintl(x: c_longdouble) callconv(.c) c_longdouble {
+    @setFloatMode(.strict);
     const toint: c_longdouble = 1.0 / @as(c_longdouble, math.floatEps(c_longdouble));
 
     // NaN or already-integer (includes Inf since Inf >= toint)
@@ -2054,7 +2736,7 @@ fn rintl(x: c_longdouble) callconv(.c) c_longdouble {
 }
 
 fn acosh_(x: f64) callconv(.c) f64 {
-    return math.acosh(x);
+    return acosh64Strict(x);
 }
 
 fn acoshl_(x: c_longdouble) callconv(.c) c_longdouble {
@@ -2263,7 +2945,20 @@ fn polevl(comptime T: type, x: T, coeffs: []const T) T {
 /// Compute exp(x) using expm1. Uses only basic arithmetic — no @exp.
 fn exp_pure(comptime T: type, x: T) T {
     if (T == c_longdouble and @typeInfo(c_longdouble).float.bits == 80) return @floatCast(expl_ld80(@floatCast(x)));
-    return 1.0 + expm1_wide(T, x);
+    if (x == 0) return 1.0;
+    if (math.isNan(x)) return x;
+    if (!math.isFinite(x)) {
+        if (x > 0) return math.inf(T);
+        return 0.0;
+    }
+    const ln2: T = 0.6931471805599453094172321214581765680755001343602552541206800094;
+    const inv_ln2: T = 1.4426950408889634073599246810018921374266459541529859341354494069;
+    const k_f: T = @round(x * inv_ln2);
+    const r = x - k_f * ln2;
+    if (k_f > 0x1p30) return math.inf(T);
+    if (k_f < -0x1p30) return 0.0;
+    const k: i32 = @intFromFloat(k_f);
+    return scalbnStrict(T, 1.0 + taylor_expm1(T, r), k);
 }
 
 /// Port of musl asinh.c using f128 intermediates for < 1.5 ULP accuracy.
@@ -2466,27 +3161,20 @@ fn sinh_(x_: f64) callconv(.c) f64 {
     const u: u64 = @bitCast(x_);
     const absu = u & (std.math.maxInt(u64) >> 1);
     const w: u32 = @intCast(absu >> 32);
-    const absx: f128 = @abs(@as(f128, @floatCast(x_)));
-    if (absx != 0 and absx < @as(f128, math.floatMin(f64))) std.math.raiseUnderflow();
-    var h: f128 = 0.5;
-    if (u >> 63 != 0) h = -h;
+    const absx: f64 = @bitCast(absu);
+    const h: f64 = if (u >> 63 != 0) -0.5 else 0.5;
 
-    // |x| < log(DBL_MAX)
     if (w < 0x40862e42) {
-        const t: f128 = expm1_wide(f128, absx);
+        const t = expm1(absx);
         if (w < 0x3ff00000) {
             if (w < 0x3ff00000 - (26 << 20))
                 return x_;
-            return @floatCast(h * (2 * t - t * t / (t + 1)));
+            return h * (2.0 * t - t * t / (t + 1.0));
         }
-        return @floatCast(h * (t + t / (t + 1)));
+        return h * (t + t / (t + 1.0));
     }
 
-    // |x| > log(DBL_MAX) or nan: f128 exp won't overflow here
-    const t: f128 = exp_pure(f128, absx);
-    const r = h * t;
-    if (math.isFinite(x_) and @abs(r) > @as(f128, math.floatMax(f64))) std.math.raiseOverflow();
-    return @floatCast(r);
+    return expo2(absx, 2.0 * h);
 }
 
 fn sinhl_(x: c_longdouble) callconv(.c) c_longdouble {
@@ -3238,16 +3926,17 @@ fn nexttoward(x: f64, y: c_longdouble) callconv(.c) f64 {
 }
 
 fn scalb(x: f64, fn_: f64) callconv(.c) f64 {
+    @setFloatMode(.strict);
     if (math.isNan(x) or math.isNan(fn_)) return x * fn_;
     if (!math.isFinite(fn_)) {
         if (fn_ > 0.0) return x * fn_;
         return x / (-fn_);
     }
     if (rint(fn_) != fn_) return (fn_ - fn_) / (fn_ - fn_);
-    if (fn_ > 65000.0) return math.scalbn(x, 65000);
-    if (-fn_ > 65000.0) return math.scalbn(x, -65000);
+    if (fn_ > 65000.0) return scalbnStrict(f64, x, 65000);
+    if (-fn_ > 65000.0) return scalbnStrict(f64, x, -65000);
     const n: i32 = @intFromFloat(fn_);
-    return math.scalbn(x, n);
+    return scalbnStrict(f64, x, n);
 }
 
 fn intFromFloat(comptime I: type, x: anytype) I {
@@ -3274,7 +3963,7 @@ fn lrint(x: f64) callconv(.c) c_long {
 }
 
 fn nearbyint(x: f64) callconv(.c) f64 {
-    return rint(x);
+    return nearbyintWithFlags(f64, rint, x);
 }
 
 fn powl(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
@@ -3283,4 +3972,1776 @@ fn powl(x: c_longdouble, y: c_longdouble) callconv(.c) c_longdouble {
 
 fn sinh(x: f64) callconv(.c) f64 {
     return math.sinh(x);
+}
+
+fn cbrtl80(x_: f80) f80 {
+    @setFloatMode(.strict);
+    const B1: u32 = 709958130;
+    var u_bits: u80 = @bitCast(x_);
+    const se: u16 = @truncate(u_bits >> 64);
+    var e: i32 = @intCast(se & 0x7fff);
+    const sign: u16 = se & 0x8000;
+
+    if (e == 0x7fff) return x_ + x_;
+    if (e == 0) {
+        const u_norm: f80 = x_ * 0x1p120;
+        u_bits = @bitCast(u_norm);
+        e = @intCast(@as(u16, @truncate(u_bits >> 64)) & 0x7fff);
+        if (e == 0) return x_;
+        e -= 120;
+    }
+    e -= 0x3fff;
+    u_bits = (u_bits & 0xffffffffffffffff) | (@as(u80, 0x3fff) << 64);
+    var x: f80 = @bitCast(u_bits);
+    switch (@rem(e, 3)) {
+        1, -2 => {
+            x *= 2.0;
+            e -= 1;
+        },
+        2, -1 => {
+            x *= 4.0;
+            e -= 2;
+        },
+        else => {},
+    }
+    const v_se: u16 = sign | @as(u16, @intCast(0x3fff + @divTrunc(e, 3)));
+    const v_f: f80 = @bitCast((@as(u80, v_se) << 64) | (@as(u80, 1) << 63));
+
+    const uft_f: f32 = @floatCast(x);
+    const uft_i: u32 = ((@as(u32, @bitCast(uft_f)) & 0x7fffffff) / 3) + B1;
+    const ft: f32 = @bitCast(uft_i);
+
+    const dx: f64 = @floatCast(x);
+    var dt: f64 = @floatCast(ft);
+    var dr: f64 = dt * dt * dt;
+    dt = dt * (dx + dx + dr) / (dx + dr + dr);
+
+    dr = dt * dt * dt;
+    dt = dt * (dx + dx + dr) / (dx + dr + dr);
+
+    var t: f80 = @as(f80, @floatCast(dt)) + (@as(f80, 0x1.0p32) + @as(f80, 0x1.0p-31)) - @as(f80, 0x1.0p32);
+
+    const s: f80 = t * t;
+    var r: f80 = x / s;
+    const w: f80 = t + t;
+    r = (r - t) / (w + r);
+    t = t + t * r;
+
+    t *= v_f;
+    return t;
+}
+
+fn cbrtl128(x_: f128) f128 {
+    @setFloatMode(.strict);
+    const B1: u32 = 709958130;
+    const mant_mask: u128 = (@as(u128, 1) << 112) - 1;
+    var u_bits: u128 = @bitCast(x_);
+    const se: u16 = @truncate(u_bits >> 112);
+    var e: i32 = @intCast(se & 0x7fff);
+    const sign: u16 = se & 0x8000;
+
+    if (e == 0x7fff) return x_ + x_;
+    if (e == 0) {
+        const u_norm: f128 = x_ * 0x1p120;
+        u_bits = @bitCast(u_norm);
+        e = @intCast(@as(u16, @truncate(u_bits >> 112)) & 0x7fff);
+        if (e == 0) return x_;
+        e -= 120;
+    }
+    e -= 0x3fff;
+    u_bits = (u_bits & mant_mask) | (@as(u128, 0x3fff) << 112);
+    var x: f128 = @bitCast(u_bits);
+    switch (@rem(e, 3)) {
+        1, -2 => {
+            x *= 2.0;
+            e -= 1;
+        },
+        2, -1 => {
+            x *= 4.0;
+            e -= 2;
+        },
+        else => {},
+    }
+    const v_se: u16 = sign | @as(u16, @intCast(0x3fff + @divTrunc(e, 3)));
+    const v_f: f128 = @bitCast(@as(u128, v_se) << 112);
+
+    const uft_f: f32 = @floatCast(x);
+    const uft_i: u32 = ((@as(u32, @bitCast(uft_f)) & 0x7fffffff) / 3) + B1;
+    const ft: f32 = @bitCast(uft_i);
+
+    const dx: f64 = @floatCast(x);
+    var dt: f64 = @floatCast(ft);
+    var dr: f64 = dt * dt * dt;
+    dt = dt * (dx + dx + dr) / (dx + dr + dr);
+
+    dr = dt * dt * dt;
+    dt = dt * (dx + dx + dr) / (dx + dr + dr);
+
+    var t: f128 = @as(f128, @floatCast(dt + 0x2.0p-46)) + @as(f128, 0x1.0p60) - @as(f128, 0x1.0p60);
+
+    const s: f128 = t * t;
+    var r: f128 = x / s;
+    const w: f128 = t + t;
+    r = (r - t) / (w + r);
+    t = t + t * r;
+
+    t *= v_f;
+    return t;
+}
+
+fn cbrtl_(x: c_longdouble) callconv(.c) c_longdouble {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => @floatCast(cbrt(@floatCast(x))),
+        80 => @floatCast(cbrtl80(@floatCast(x))),
+        128 => @floatCast(cbrtl128(@floatCast(x))),
+        else => unreachable,
+    };
+}
+
+fn x87Atan2(y: c_longdouble, x: c_longdouble) c_longdouble {
+    var in_y = y;
+    var in_x = x;
+    var r: c_longdouble = undefined;
+    if (comptime builtin.target.cpu.arch == .x86_64) {
+        asm volatile (
+            \\fldt (%%rax)
+            \\fldt (%%rdx)
+            \\fpatan
+            \\fstpt (%%rcx)
+            :
+            : [y] "{rax}" (&in_y),
+              [x] "{rdx}" (&in_x),
+              [out] "{rcx}" (&r),
+            : .{ .memory = true, .st0 = true, .st1 = true });
+    } else {
+        asm volatile (
+            \\fldt (%%eax)
+            \\fldt (%%edx)
+            \\fpatan
+            \\fstpt (%%ecx)
+            :
+            : [y] "{eax}" (&in_y),
+              [x] "{edx}" (&in_x),
+              [out] "{ecx}" (&r),
+            : .{ .memory = true, .st0 = true, .st1 = true });
+    }
+    return r;
+}
+
+fn atan2l80(y: f80, x: f80) f80 {
+    @setFloatMode(.strict);
+    const pio2_hi: f80 = 0x1.921fb54442d1846ap+0;
+    const pio2_lo: f80 = -0x1.fc8f8cbb5bf8f897p-66;
+    if (math.isNan(x) or math.isNan(y)) return x + y;
+    if (x == 1.0) return @floatCast(atanl(@floatCast(y)));
+
+    const ux: u80 = @bitCast(x);
+    const uy: u80 = @bitCast(y);
+    const ex: u32 = @as(u16, @truncate(ux >> 64)) & 0x7fff;
+    const ey: u32 = @as(u16, @truncate(uy >> 64)) & 0x7fff;
+    const m: u32 = (2 * (@as(u32, @truncate(ux >> 64)) >> 15)) | (@as(u32, @truncate(uy >> 64)) >> 15);
+    if (y == 0.0) {
+        return switch (m) {
+            0, 1 => y,
+            2 => 2.0 * pio2_hi,
+            3 => -2.0 * pio2_hi,
+            else => unreachable,
+        };
+    }
+    if (x == 0.0) return if ((m & 1) != 0) -pio2_hi else pio2_hi;
+    if (ex == 0x7fff) {
+        if (ey == 0x7fff) {
+            return switch (m) {
+                0 => pio2_hi / 2.0,
+                1 => -pio2_hi / 2.0,
+                2 => 1.5 * pio2_hi,
+                3 => -1.5 * pio2_hi,
+                else => unreachable,
+            };
+        } else {
+            return switch (m) {
+                0 => 0.0,
+                1 => -0.0,
+                2 => 2.0 * pio2_hi,
+                3 => -2.0 * pio2_hi,
+                else => unreachable,
+            };
+        }
+    }
+    if (ex +% 120 < ey or ey == 0x7fff) return if ((m & 1) != 0) -pio2_hi else pio2_hi;
+    const z: f80 = if ((m & 2) != 0 and ey +% 120 < ex) 0.0 else @floatCast(atanl(@floatCast(@abs(y / x))));
+    return switch (m) {
+        0 => z,
+        1 => -z,
+        2 => 2.0 * pio2_hi - (z - 2.0 * pio2_lo),
+        3 => (z - 2.0 * pio2_lo) - 2.0 * pio2_hi,
+        else => unreachable,
+    };
+}
+
+fn atan2l128(y: f128, x: f128) f128 {
+    @setFloatMode(.strict);
+    const pio2_hi: f128 = 0x1.921fb54442d18469898cc51701b8p+0;
+    const pio2_lo: f128 = 0x1.f97b839a252049c1114cf98e804p-114;
+    if (math.isNan(x) or math.isNan(y)) return x + y;
+    if (x == 1.0) return @floatCast(atanl(@floatCast(y)));
+
+    const ux: u128 = @bitCast(x);
+    const uy: u128 = @bitCast(y);
+    const ex: u32 = @as(u16, @truncate(ux >> 112)) & 0x7fff;
+    const ey: u32 = @as(u16, @truncate(uy >> 112)) & 0x7fff;
+    const m: u32 = (2 * (@as(u32, @truncate(ux >> 112)) >> 15)) | (@as(u32, @truncate(uy >> 112)) >> 15);
+    if (y == 0.0) {
+        return switch (m) {
+            0, 1 => y,
+            2 => 2.0 * pio2_hi,
+            3 => -2.0 * pio2_hi,
+            else => unreachable,
+        };
+    }
+    if (x == 0.0) return if ((m & 1) != 0) -pio2_hi else pio2_hi;
+    if (ex == 0x7fff) {
+        if (ey == 0x7fff) {
+            return switch (m) {
+                0 => pio2_hi / 2.0,
+                1 => -pio2_hi / 2.0,
+                2 => 1.5 * pio2_hi,
+                3 => -1.5 * pio2_hi,
+                else => unreachable,
+            };
+        } else {
+            return switch (m) {
+                0 => 0.0,
+                1 => -0.0,
+                2 => 2.0 * pio2_hi,
+                3 => -2.0 * pio2_hi,
+                else => unreachable,
+            };
+        }
+    }
+    if (ex +% 120 < ey or ey == 0x7fff) return if ((m & 1) != 0) -pio2_hi else pio2_hi;
+    const z: f128 = if ((m & 2) != 0 and ey +% 120 < ex) 0.0 else @floatCast(atanl(@floatCast(@abs(y / x))));
+    return switch (m) {
+        0 => z,
+        1 => -z,
+        2 => 2.0 * pio2_hi - (z - 2.0 * pio2_lo),
+        3 => (z - 2.0 * pio2_lo) - 2.0 * pio2_hi,
+        else => unreachable,
+    };
+}
+
+fn atan2l(y: c_longdouble, x: c_longdouble) callconv(.c) c_longdouble {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => @floatCast(atan2(@floatCast(y), @floatCast(x))),
+        80 => switch (builtin.target.cpu.arch) {
+            .x86, .x86_64 => x87Atan2(y, x),
+            else => @floatCast(atan2l80(@floatCast(y), @floatCast(x))),
+        },
+        128 => @floatCast(atan2l128(@floatCast(y), @floatCast(x))),
+        else => unreachable,
+    };
+}
+
+fn erflIx(x: f80) u32 {
+    const u: u80 = @bitCast(x);
+    const se: u32 = @truncate(u >> 64);
+    const m: u64 = @truncate(u);
+    return ((se & 0x7fff) << 16) | @as(u32, @truncate(m >> 48));
+}
+
+fn erflErfc1(x: f80) f80 {
+    const s = @abs(x) - 1;
+    const P = erfl_pa[0] + s * (erfl_pa[1] + s * (erfl_pa[2] +
+        s * (erfl_pa[3] + s * (erfl_pa[4] + s * (erfl_pa[5] + s * (erfl_pa[6] + s * erfl_pa[7]))))));
+    const Q = erfl_qa[0] + s * (erfl_qa[1] + s * (erfl_qa[2] +
+        s * (erfl_qa[3] + s * (erfl_qa[4] + s * (erfl_qa[5] + s * (erfl_qa[6] + s))))));
+    return 1 - erfl_erx - P / Q;
+}
+
+fn erflErfc2(ix: u32, x_: f80) f80 {
+    if (ix < 0x3fffa000) return erflErfc1(x_);
+
+    const x = @abs(x_);
+    const s = 1 / (x * x);
+    var R: f80 = undefined;
+    var S: f80 = undefined;
+
+    if (ix < 0x4000b6db) {
+        R = erfl_ra[0] + s * (erfl_ra[1] + s * (erfl_ra[2] + s * (erfl_ra[3] + s * (erfl_ra[4] +
+            s * (erfl_ra[5] + s * (erfl_ra[6] + s * (erfl_ra[7] + s * erfl_ra[8])))))));
+        S = erfl_sa[0] + s * (erfl_sa[1] + s * (erfl_sa[2] + s * (erfl_sa[3] + s * (erfl_sa[4] +
+            s * (erfl_sa[5] + s * (erfl_sa[6] + s * (erfl_sa[7] + s * (erfl_sa[8] + s))))))));
+    } else if (ix < 0x4001d555) {
+        R = erfl_rb[0] + s * (erfl_rb[1] + s * (erfl_rb[2] + s * (erfl_rb[3] + s * (erfl_rb[4] +
+            s * (erfl_rb[5] + s * (erfl_rb[6] + s * erfl_rb[7]))))));
+        S = erfl_sb[0] + s * (erfl_sb[1] + s * (erfl_sb[2] + s * (erfl_sb[3] + s * (erfl_sb[4] +
+            s * (erfl_sb[5] + s * (erfl_sb[6] + s))))));
+    } else {
+        R = erfl_rc[0] + s * (erfl_rc[1] + s * (erfl_rc[2] + s * (erfl_rc[3] +
+            s * (erfl_rc[4] + s * erfl_rc[5]))));
+        S = erfl_sc[0] + s * (erfl_sc[1] + s * (erfl_sc[2] + s * (erfl_sc[3] +
+            s * (erfl_sc[4] + s))));
+    }
+
+    const z: f80 = @bitCast(@as(u80, @bitCast(x)) & (~@as(u80, 0) << 40));
+    const e1: f80 = @floatCast(expl(@floatCast(-z * z - 0.5625)));
+    const e2: f80 = @floatCast(expl(@floatCast((z - x) * (z + x) + R / S)));
+    return e1 * e2 / x;
+}
+
+fn erfl80(x: f80) f80 {
+    const ix = erflIx(x);
+    const sign = @as(u32, @truncate(@as(u80, @bitCast(x)) >> 79));
+
+    if (ix >= 0x7fff0000) return @as(f80, @floatFromInt(1 - 2 * @as(i32, @intCast(sign)))) + 1 / x;
+    if (ix < 0x3ffed800) {
+        if (ix < 0x3fde8000) return 0.125 * (8 * x + erfl_efx8 * x);
+        const z = x * x;
+        const r = erfl_pp[0] + z * (erfl_pp[1] + z * (erfl_pp[2] + z * (erfl_pp[3] + z * (erfl_pp[4] + z * erfl_pp[5]))));
+        const s = erfl_qq[0] + z * (erfl_qq[1] + z * (erfl_qq[2] + z * (erfl_qq[3] + z * (erfl_qq[4] + z * (erfl_qq[5] + z)))));
+        const y = r / s;
+        return x + x * y;
+    }
+    const y = if (ix < 0x4001d555) 1 - erflErfc2(ix, x) else 1 - @as(f80, 0x1p-16382);
+    return if (sign != 0) -y else y;
+}
+
+fn erfcl80(x: f80) f80 {
+    const ix = erflIx(x);
+    const sign = @as(u32, @truncate(@as(u80, @bitCast(x)) >> 79));
+
+    if (ix >= 0x7fff0000) return @as(f80, @floatFromInt(2 * @as(i32, @intCast(sign)))) + 1 / x;
+    if (ix < 0x3ffed800) {
+        if (ix < 0x3fbe0000) return 1.0 - x;
+        const z = x * x;
+        const r = erfl_pp[0] + z * (erfl_pp[1] + z * (erfl_pp[2] + z * (erfl_pp[3] + z * (erfl_pp[4] + z * erfl_pp[5]))));
+        const s = erfl_qq[0] + z * (erfl_qq[1] + z * (erfl_qq[2] + z * (erfl_qq[3] + z * (erfl_qq[4] + z * (erfl_qq[5] + z)))));
+        const y = r / s;
+        if (ix < 0x3ffd8000) return 1.0 - (x + x * y);
+        return 0.5 - (x - 0.5 + x * y);
+    }
+    if (ix < 0x4005d600) return if (sign != 0) 2 - erflErfc2(ix, x) else erflErfc2(ix, x);
+    const y: f80 = 0x1p-16382;
+    return if (sign != 0) 2 - y else y * y;
+}
+
+fn erfl(x: c_longdouble) callconv(.c) c_longdouble {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => @floatCast(erf_(@floatCast(x))),
+        80 => @floatCast(erfl80(@floatCast(x))),
+        128 => @floatCast(erf_(@floatCast(x))),
+        else => math.erf(x),
+    };
+}
+
+fn erfcl(x: c_longdouble) callconv(.c) c_longdouble {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64 => @floatCast(erfc_(@floatCast(x))),
+        80 => @floatCast(erfcl80(@floatCast(x))),
+        128 => @floatCast(erfc_(@floatCast(x))),
+        else => math.erfc(x),
+    };
+}
+
+// migrated from musl/src/math/j0.c
+const bessel_invsqrtpi64: f64 = 5.64189583547756279280e-01;
+const bessel_tpi64: f64 = 6.36619772367581382433e-01;
+
+const j0_R02: f64 = 1.56249999999999947958e-02;
+const j0_R03: f64 = -1.89979294238854721751e-04;
+const j0_R04: f64 = 1.82954049532700665670e-06;
+const j0_R05: f64 = -4.61832688532103189199e-09;
+const j0_S01: f64 = 1.56191029464890010492e-02;
+const j0_S02: f64 = 1.16926784663337450260e-04;
+const j0_S03: f64 = 5.13546550207318111446e-07;
+const j0_S04: f64 = 1.16614003333790000205e-09;
+
+const y0_u00: f64 = -7.38042951086872317523e-02;
+const y0_u01: f64 = 1.76666452509181115538e-01;
+const y0_u02: f64 = -1.38185671945596898896e-02;
+const y0_u03: f64 = 3.47453432093683650238e-04;
+const y0_u04: f64 = -3.81407053724364161125e-06;
+const y0_u05: f64 = 1.95590137035022920206e-08;
+const y0_u06: f64 = -3.98205194132103398453e-11;
+const y0_v01: f64 = 1.27304834834123699328e-02;
+const y0_v02: f64 = 7.60068627350353253702e-05;
+const y0_v03: f64 = 2.59150851840457805467e-07;
+const y0_v04: f64 = 4.41110311332675467403e-10;
+
+const j0_pR8 = [_]f64{ 0.00000000000000000000e+00, -7.03124999999900357484e-02, -8.08167041275349795626e+00, -2.57063105679704847262e+02, -2.48521641009428822144e+03, -5.25304380490729545272e+03 };
+const j0_pS8 = [_]f64{ 1.16534364619668181717e+02, 3.83374475364121826715e+03, 4.05978572648472545552e+04, 1.16752972564375915681e+05, 4.76277284146730962675e+04 };
+const j0_pR5 = [_]f64{ -1.14125464691894502584e-11, -7.03124940873599280078e-02, -4.15961064470587782438e+00, -6.76747652265167261021e+01, -3.31231299649172967747e+02, -3.46433388365604912451e+02 };
+const j0_pS5 = [_]f64{ 6.07539382692300335975e+01, 1.05125230595704579173e+03, 5.97897094333855784498e+03, 9.62544514357774460223e+03, 2.40605815922939109441e+03 };
+const j0_pR3 = [_]f64{ -2.54704601771951915620e-09, -7.03119616381481654654e-02, -2.40903221549529611423e+00, -2.19659774734883086467e+01, -5.80791704701737572236e+01, -3.14479470594888503854e+01 };
+const j0_pS3 = [_]f64{ 3.58560338055209726349e+01, 3.61513983050303863820e+02, 1.19360783792111533330e+03, 1.12799679856907414432e+03, 1.73580930813335754692e+02 };
+const j0_pR2 = [_]f64{ -8.87534333032526411254e-08, -7.03030995483624743247e-02, -1.45073846780952986357e+00, -7.63569613823527770791e+00, -1.11931668860356747786e+01, -3.23364579351335335033e+00 };
+const j0_pS2 = [_]f64{ 2.22202997532088808441e+01, 1.36206794218215208048e+02, 2.70470278658083486789e+02, 1.53875394208320329881e+02, 1.46576176948256193810e+01 };
+
+const j0_qR8 = [_]f64{ 0.00000000000000000000e+00, 7.32421874999935051953e-02, 1.17682064682252693899e+01, 5.57673380256401856059e+02, 8.85919720756468632317e+03, 3.70146267776887834771e+04 };
+const j0_qS8 = [_]f64{ 1.63776026895689824414e+02, 8.09834494656449805916e+03, 1.42538291419120476348e+05, 8.03309257119514397345e+05, 8.40501579819060512818e+05, -3.43899293537866615225e+05 };
+const j0_qR5 = [_]f64{ 1.84085963594515531381e-11, 7.32421766612684765896e-02, 5.83563508962056953777e+00, 1.35111577286449829671e+02, 1.02724376596164097464e+03, 1.98997785864605384631e+03 };
+const j0_qS5 = [_]f64{ 8.27766102236537761883e+01, 2.07781416421392987104e+03, 1.88472887785718085070e+04, 5.67511122894947329769e+04, 3.59767538425114471465e+04, -5.35434275601944773371e+03 };
+const j0_qR3 = [_]f64{ 4.37741014089738620906e-09, 7.32411180042911447163e-02, 3.34423137516170720929e+00, 4.26218440745412650017e+01, 1.70808091340565596283e+02, 1.66733948696651168575e+02 };
+const j0_qS3 = [_]f64{ 4.87588729724587182091e+01, 7.09689221056606015736e+02, 3.70414822620111362994e+03, 6.46042516752568917582e+03, 2.51633368920368957333e+03, -1.49247451836156386662e+02 };
+const j0_qR2 = [_]f64{ 1.50444444886983272379e-07, 7.32234265963079278272e-02, 1.99819174093815998816e+00, 1.44956029347885735348e+01, 3.16662317504781540833e+01, 1.62527075710929267416e+01 };
+const j0_qS2 = [_]f64{ 3.03655848355219184498e+01, 2.69348118608049844624e+02, 8.44783757595320139444e+02, 8.82935845112488550512e+02, 2.12666388511798828631e+02, -5.31095493882666946917e+00 };
+
+fn j0_common(ix: u32, x: f64, y0_: bool) f64 {
+    const s = math.sin(x);
+    var c = math.cos(x);
+    if (y0_) c = -c;
+    var cc = s + c;
+    if (ix < 0x7fe00000) {
+        var ss = s - c;
+        const z = -math.cos(2 * x);
+        if (s * c < 0)
+            cc = z / ss
+        else
+            ss = z / cc;
+        if (ix < 0x48000000) {
+            if (y0_) ss = -ss;
+            cc = j0_pzero(x) * cc - j0_qzero(x) * ss;
+        }
+    }
+    return bessel_invsqrtpi64 * cc / @sqrt(x);
+}
+
+fn j0(x_: f64) callconv(.c) f64 {
+    const bits: u64 = @bitCast(x_);
+    var ix: u32 = @truncate(bits >> 32);
+    ix &= 0x7fffffff;
+
+    if (ix >= 0x7ff00000) return 1 / (x_ * x_);
+    const x = @abs(x_);
+    if (ix >= 0x40000000) return j0_common(ix, x, false);
+    if (ix >= 0x3f200000) {
+        const z = x * x;
+        const r = z * (j0_R02 + z * (j0_R03 + z * (j0_R04 + z * j0_R05)));
+        const s = 1 + z * (j0_S01 + z * (j0_S02 + z * (j0_S03 + z * j0_S04)));
+        return (1 + x / 2) * (1 - x / 2) + z * (r / s);
+    }
+    var y = x;
+    if (ix >= 0x38000000) y = 0.25 * y * y;
+    return 1 - y;
+}
+
+fn y0(x: f64) callconv(.c) f64 {
+    const bits: u64 = @bitCast(x);
+    const ix: u32 = @truncate(bits >> 32);
+    const lx: u32 = @truncate(bits);
+
+    if (((ix << 1) | lx) == 0) return -1 / @as(f64, 0.0);
+    if ((ix >> 31) != 0) return 0 / @as(f64, 0.0);
+    if (ix >= 0x7ff00000) return 1 / x;
+    if (ix >= 0x40000000) return j0_common(ix, x, true);
+    if (ix >= 0x3e400000) {
+        const z = x * x;
+        const u = y0_u00 + z * (y0_u01 + z * (y0_u02 + z * (y0_u03 + z * (y0_u04 + z * (y0_u05 + z * y0_u06)))));
+        const v = 1.0 + z * (y0_v01 + z * (y0_v02 + z * (y0_v03 + z * y0_v04)));
+        return u / v + bessel_tpi64 * (j0(x) * math.log(f64, math.e, x));
+    }
+    return y0_u00 + bessel_tpi64 * math.log(f64, math.e, x);
+}
+
+fn j0_pzero(x: f64) f64 {
+    var p: []const f64 = undefined;
+    var q: []const f64 = undefined;
+    const bits: u64 = @bitCast(x);
+    const ix: u32 = @as(u32, @truncate(bits >> 32)) & 0x7fffffff;
+    if (ix >= 0x40200000) {
+        p = j0_pR8[0..];
+        q = j0_pS8[0..];
+    } else if (ix >= 0x40122E8B) {
+        p = j0_pR5[0..];
+        q = j0_pS5[0..];
+    } else if (ix >= 0x4006DB6D) {
+        p = j0_pR3[0..];
+        q = j0_pS3[0..];
+    } else {
+        p = j0_pR2[0..];
+        q = j0_pS2[0..];
+    }
+    const z = 1.0 / (x * x);
+    const r = p[0] + z * (p[1] + z * (p[2] + z * (p[3] + z * (p[4] + z * p[5]))));
+    const s = 1.0 + z * (q[0] + z * (q[1] + z * (q[2] + z * (q[3] + z * q[4]))));
+    return 1.0 + r / s;
+}
+
+fn j0_qzero(x: f64) f64 {
+    var p: []const f64 = undefined;
+    var q: []const f64 = undefined;
+    const bits: u64 = @bitCast(x);
+    const ix: u32 = @as(u32, @truncate(bits >> 32)) & 0x7fffffff;
+    if (ix >= 0x40200000) {
+        p = j0_qR8[0..];
+        q = j0_qS8[0..];
+    } else if (ix >= 0x40122E8B) {
+        p = j0_qR5[0..];
+        q = j0_qS5[0..];
+    } else if (ix >= 0x4006DB6D) {
+        p = j0_qR3[0..];
+        q = j0_qS3[0..];
+    } else {
+        p = j0_qR2[0..];
+        q = j0_qS2[0..];
+    }
+    const z = 1.0 / (x * x);
+    const r = p[0] + z * (p[1] + z * (p[2] + z * (p[3] + z * (p[4] + z * p[5]))));
+    const s = 1.0 + z * (q[0] + z * (q[1] + z * (q[2] + z * (q[3] + z * (q[4] + z * q[5])))));
+    return (-0.125 + r / s) / x;
+}
+
+// migrated from musl/src/math/j0f.c
+const bessel_invsqrtpi32: f32 = 5.6418961287e-01;
+const bessel_tpi32: f32 = 6.3661974669e-01;
+
+const j0f_R02: f32 = 1.5625000000e-02;
+const j0f_R03: f32 = -1.8997929874e-04;
+const j0f_R04: f32 = 1.8295404516e-06;
+const j0f_R05: f32 = -4.6183270541e-09;
+const j0f_S01: f32 = 1.5619102865e-02;
+const j0f_S02: f32 = 1.1692678527e-04;
+const j0f_S03: f32 = 5.1354652442e-07;
+const j0f_S04: f32 = 1.1661400734e-09;
+
+const y0f_u00: f32 = -7.3804296553e-02;
+const y0f_u01: f32 = 1.7666645348e-01;
+const y0f_u02: f32 = -1.3818567619e-02;
+const y0f_u03: f32 = 3.4745343146e-04;
+const y0f_u04: f32 = -3.8140706238e-06;
+const y0f_u05: f32 = 1.9559013964e-08;
+const y0f_u06: f32 = -3.9820518410e-11;
+const y0f_v01: f32 = 1.2730483897e-02;
+const y0f_v02: f32 = 7.6006865129e-05;
+const y0f_v03: f32 = 2.5915085189e-07;
+const y0f_v04: f32 = 4.4111031494e-10;
+
+const j0f_pR8 = [_]f32{ 0.0000000000e+00, -7.0312500000e-02, -8.0816707611e+00, -2.5706311035e+02, -2.4852163086e+03, -5.2530439453e+03 };
+const j0f_pS8 = [_]f32{ 1.1653436279e+02, 3.8337448730e+03, 4.0597855469e+04, 1.1675296875e+05, 4.7627726562e+04 };
+const j0f_pR5 = [_]f32{ -1.1412546255e-11, -7.0312492549e-02, -4.1596107483e+00, -6.7674766541e+01, -3.3123129272e+02, -3.4643338013e+02 };
+const j0f_pS5 = [_]f32{ 6.0753936768e+01, 1.0512523193e+03, 5.9789707031e+03, 9.6254453125e+03, 2.4060581055e+03 };
+const j0f_pR3 = [_]f32{ -2.5470459075e-09, -7.0311963558e-02, -2.4090321064e+00, -2.1965976715e+01, -5.8079170227e+01, -3.1447946548e+01 };
+const j0f_pS3 = [_]f32{ 3.5856033325e+01, 3.6151397705e+02, 1.1936077881e+03, 1.1279968262e+03, 1.7358093262e+02 };
+const j0f_pR2 = [_]f32{ -8.8753431271e-08, -7.0303097367e-02, -1.4507384300e+00, -7.6356959343e+00, -1.1193166733e+01, -3.2336456776e+00 };
+const j0f_pS2 = [_]f32{ 2.2220300674e+01, 1.3620678711e+02, 2.7047027588e+02, 1.5387539673e+02, 1.4657617569e+01 };
+
+const j0f_qR8 = [_]f32{ 0.0000000000e+00, 7.3242187500e-02, 1.1768206596e+01, 5.5767340088e+02, 8.8591972656e+03, 3.7014625000e+04 };
+const j0f_qS8 = [_]f32{ 1.6377603149e+02, 8.0983447266e+03, 1.4253829688e+05, 8.0330925000e+05, 8.4050156250e+05, -3.4389928125e+05 };
+const j0f_qR5 = [_]f32{ 1.8408595828e-11, 7.3242180049e-02, 5.8356351852e+00, 1.3511157227e+02, 1.0272437744e+03, 1.9899779053e+03 };
+const j0f_qS5 = [_]f32{ 8.2776611328e+01, 2.0778142090e+03, 1.8847289062e+04, 5.6751113281e+04, 3.5976753906e+04, -5.3543427734e+03 };
+const j0f_qR3 = [_]f32{ 4.3774099900e-09, 7.3241114616e-02, 3.3442313671e+00, 4.2621845245e+01, 1.7080809021e+02, 1.6673394775e+02 };
+const j0f_qS3 = [_]f32{ 4.8758872986e+01, 7.0968920898e+02, 3.7041481934e+03, 6.4604252930e+03, 2.5163337402e+03, -1.4924745178e+02 };
+const j0f_qR2 = [_]f32{ 1.5044444979e-07, 7.3223426938e-02, 1.9981917143e+00, 1.4495602608e+01, 3.1666231155e+01, 1.6252708435e+01 };
+const j0f_qS2 = [_]f32{ 3.0365585327e+01, 2.6934811401e+02, 8.4478375244e+02, 8.8293585205e+02, 2.1266638184e+02, -5.3109550476e+00 };
+
+fn j0f_common(ix: u32, x: f32, y0_: bool) f32 {
+    const s = math.sin(x);
+    var c = math.cos(x);
+    if (y0_) c = -c;
+    var cc = s + c;
+    if (ix < 0x7f000000) {
+        var ss = s - c;
+        const z = -math.cos(2 * x);
+        if (s * c < 0)
+            cc = z / ss
+        else
+            ss = z / cc;
+        if (ix < 0x58800000) {
+            if (y0_) ss = -ss;
+            cc = j0f_pzero(x) * cc - j0f_qzero(x) * ss;
+        }
+    }
+    return bessel_invsqrtpi32 * cc / @sqrt(x);
+}
+
+fn j0f(x_: f32) callconv(.c) f32 {
+    var ix: u32 = @bitCast(x_);
+    ix &= 0x7fffffff;
+    if (ix >= 0x7f800000) return 1 / (x_ * x_);
+    const x = @abs(x_);
+    if (ix >= 0x40000000) return j0f_common(ix, x, false);
+    if (ix >= 0x3a000000) {
+        const z = x * x;
+        const r = z * (j0f_R02 + z * (j0f_R03 + z * (j0f_R04 + z * j0f_R05)));
+        const s = 1 + z * (j0f_S01 + z * (j0f_S02 + z * (j0f_S03 + z * j0f_S04)));
+        return (1 + x / 2) * (1 - x / 2) + z * (r / s);
+    }
+    var y = x;
+    if (ix >= 0x21800000) y = 0.25 * y * y;
+    return 1 - y;
+}
+
+fn y0f(x: f32) callconv(.c) f32 {
+    const ix: u32 = @bitCast(x);
+    if ((ix & 0x7fffffff) == 0) return -1 / @as(f32, 0.0);
+    if ((ix >> 31) != 0) return 0 / @as(f32, 0.0);
+    if (ix >= 0x7f800000) return 1 / x;
+    if (ix >= 0x40000000) return j0f_common(ix, x, true);
+    if (ix >= 0x39000000) {
+        const z = x * x;
+        const u = y0f_u00 + z * (y0f_u01 + z * (y0f_u02 + z * (y0f_u03 + z * (y0f_u04 + z * (y0f_u05 + z * y0f_u06)))));
+        const v = 1 + z * (y0f_v01 + z * (y0f_v02 + z * (y0f_v03 + z * y0f_v04)));
+        return u / v + bessel_tpi32 * (j0f(x) * math.log(f32, math.e, x));
+    }
+    return y0f_u00 + bessel_tpi32 * math.log(f32, math.e, x);
+}
+
+fn j0f_pzero(x: f32) f32 {
+    var p: []const f32 = undefined;
+    var q: []const f32 = undefined;
+    const ix = @as(u32, @bitCast(x)) & 0x7fffffff;
+    if (ix >= 0x41000000) {
+        p = j0f_pR8[0..];
+        q = j0f_pS8[0..];
+    } else if (ix >= 0x409173eb) {
+        p = j0f_pR5[0..];
+        q = j0f_pS5[0..];
+    } else if (ix >= 0x4036d917) {
+        p = j0f_pR3[0..];
+        q = j0f_pS3[0..];
+    } else {
+        p = j0f_pR2[0..];
+        q = j0f_pS2[0..];
+    }
+    const z = 1.0 / (x * x);
+    const r = p[0] + z * (p[1] + z * (p[2] + z * (p[3] + z * (p[4] + z * p[5]))));
+    const s = 1.0 + z * (q[0] + z * (q[1] + z * (q[2] + z * (q[3] + z * q[4]))));
+    return 1.0 + r / s;
+}
+
+fn j0f_qzero(x: f32) f32 {
+    var p: []const f32 = undefined;
+    var q: []const f32 = undefined;
+    const ix = @as(u32, @bitCast(x)) & 0x7fffffff;
+    if (ix >= 0x41000000) {
+        p = j0f_qR8[0..];
+        q = j0f_qS8[0..];
+    } else if (ix >= 0x409173eb) {
+        p = j0f_qR5[0..];
+        q = j0f_qS5[0..];
+    } else if (ix >= 0x4036d917) {
+        p = j0f_qR3[0..];
+        q = j0f_qS3[0..];
+    } else {
+        p = j0f_qR2[0..];
+        q = j0f_qS2[0..];
+    }
+    const z = 1.0 / (x * x);
+    const r = p[0] + z * (p[1] + z * (p[2] + z * (p[3] + z * (p[4] + z * p[5]))));
+    const s = 1.0 + z * (q[0] + z * (q[1] + z * (q[2] + z * (q[3] + z * (q[4] + z * q[5])))));
+    return (-0.125 + r / s) / x;
+}
+
+// migrated from musl/src/math/j1.c
+const j1_r00: f64 = -6.25000000000000000000e-02;
+const j1_r01: f64 = 1.40705666955189706048e-03;
+const j1_r02: f64 = -1.59955631084035597520e-05;
+const j1_r03: f64 = 4.96727999609584448412e-08;
+const j1_s01: f64 = 1.91537599538363460805e-02;
+const j1_s02: f64 = 1.85946785588630915560e-04;
+const j1_s03: f64 = 1.17718464042623683263e-06;
+const j1_s04: f64 = 5.04636257076217042715e-09;
+const j1_s05: f64 = 1.23542274426137913908e-11;
+
+const y1_U0 = [_]f64{ -1.96057090646238940668e-01, 5.04438716639811282616e-02, -1.91256895875763547298e-03, 2.35252600561610495928e-05, -9.19099158039878874504e-08 };
+const y1_V0 = [_]f64{ 1.99167318236649903973e-02, 2.02552581025135171496e-04, 1.35608801097516229404e-06, 6.22741452364621501295e-09, 1.66559246207992079114e-11 };
+
+const j1_pr8 = [_]f64{ 0.00000000000000000000e+00, 1.17187499999988647970e-01, 1.32394806593073575129e+01, 4.12051854307378562225e+02, 3.87474538913960532227e+03, 7.91447954031891731574e+03 };
+const j1_ps8 = [_]f64{ 1.14207370375678408436e+02, 3.65093083420853463394e+03, 3.69562060269033463555e+04, 9.76027935934950801311e+04, 3.08042720627888811578e+04 };
+const j1_pr5 = [_]f64{ 1.31990519556243522749e-11, 1.17187493190614097638e-01, 6.80275127868432871736e+00, 1.08308182990189109773e+02, 5.17636139533199752805e+02, 5.28715201363337541807e+02 };
+const j1_ps5 = [_]f64{ 5.92805987221131331921e+01, 9.91401418733614377743e+02, 5.35326695291487976647e+03, 7.84469031749551231769e+03, 1.50404688810361062679e+03 };
+const j1_pr3 = [_]f64{ 3.02503916137373618024e-09, 1.17186865567253592491e-01, 3.93297750033315640650e+00, 3.51194035591636932736e+01, 9.10550110750781271918e+01, 4.85590685197364919645e+01 };
+const j1_ps3 = [_]f64{ 3.47913095001251519989e+01, 3.36762458747825746741e+02, 1.04687139975775130551e+03, 8.90811346398256432622e+02, 1.03787932439639277504e+02 };
+const j1_pr2 = [_]f64{ 1.07710830106873743082e-07, 1.17176219462683348094e-01, 2.36851496667608785174e+00, 1.22426109148261232917e+01, 1.76939711271687727390e+01, 5.07352312588818499250e+00 };
+const j1_ps2 = [_]f64{ 2.14364859363821409488e+01, 1.25290227168402751090e+02, 2.32276469057162813669e+02, 1.17679373287147100768e+02, 8.36463893371618283368e+00 };
+
+const j1_qr8 = [_]f64{ 0.00000000000000000000e+00, -1.02539062499992714161e-01, -1.62717534544589987888e+01, -7.59601722513950107896e+02, -1.18498066702429587167e+04, -4.84385124285750353010e+04 };
+const j1_qs8 = [_]f64{ 1.61395369700722909556e+02, 7.82538599923348465381e+03, 1.33875336287249578163e+05, 7.19657723683240939863e+05, 6.66601232617776375264e+05, -2.94490264303834643215e+05 };
+const j1_qr5 = [_]f64{ -2.08979931141764104297e-11, -1.02539050241375426231e-01, -8.05644828123936029840e+00, -1.83669607474888380239e+02, -1.37319376065508163265e+03, -2.61244440453215656817e+03 };
+const j1_qs5 = [_]f64{ 8.12765501384335777857e+01, 1.99179873460485964642e+03, 1.74684851924908907677e+04, 4.98514270910352279316e+04, 2.79480751638918118260e+04, -4.71918354795128470869e+03 };
+const j1_qr3 = [_]f64{ -5.07831226461766561369e-09, -1.02537829820837089745e-01, -4.61011581139473403113e+00, -5.78472216562783643212e+01, -2.28244540737631695038e+02, -2.19210128478909325622e+02 };
+const j1_qs3 = [_]f64{ 4.76651550323729509273e+01, 6.73865112676699709482e+02, 3.38015286679526343505e+03, 5.54772909720722782367e+03, 1.90311919338810798763e+03, -1.35201191444307340817e+02 };
+const j1_qr2 = [_]f64{ -1.78381727510958865572e-07, -1.02517042607985553460e-01, -2.75220568278187460720e+00, -1.96636162643703720221e+01, -4.23253133372830490089e+01, -2.13719211703704061733e+01 };
+const j1_qs2 = [_]f64{ 2.95333629060523854548e+01, 2.52981549982190529136e+02, 7.57502834868645436472e+02, 7.39393205320467245656e+02, 1.55949003336666123687e+02, -4.95949898822628210127e+00 };
+
+fn j1_common(ix: u32, x: f64, y1_: bool, sign: bool) f64 {
+    var s = math.sin(x);
+    if (y1_) s = -s;
+    const c = math.cos(x);
+    var cc = s - c;
+    if (ix < 0x7fe00000) {
+        var ss = -s - c;
+        const z = math.cos(2 * x);
+        if (s * c > 0)
+            cc = z / ss
+        else
+            ss = z / cc;
+        if (ix < 0x48000000) {
+            if (y1_) ss = -ss;
+            cc = j1_pone(x) * cc - j1_qone(x) * ss;
+        }
+    }
+    if (sign) cc = -cc;
+    return bessel_invsqrtpi64 * cc / @sqrt(x);
+}
+
+fn j1(x: f64) callconv(.c) f64 {
+    const bits: u64 = @bitCast(x);
+    var ix: u32 = @truncate(bits >> 32);
+    const sign = (ix >> 31) != 0;
+    ix &= 0x7fffffff;
+    if (ix >= 0x7ff00000) return 1 / (x * x);
+    if (ix >= 0x40000000) return j1_common(ix, @abs(x), false, sign);
+    const z = if (ix >= 0x38000000) blk: {
+        const x2 = x * x;
+        const r = x2 * (j1_r00 + x2 * (j1_r01 + x2 * (j1_r02 + x2 * j1_r03)));
+        const s = 1 + x2 * (j1_s01 + x2 * (j1_s02 + x2 * (j1_s03 + x2 * (j1_s04 + x2 * j1_s05))));
+        break :blk r / s;
+    } else x;
+    return (0.5 + z) * x;
+}
+
+fn y1(x: f64) callconv(.c) f64 {
+    const bits: u64 = @bitCast(x);
+    const ix: u32 = @truncate(bits >> 32);
+    const lx: u32 = @truncate(bits);
+    if (((ix << 1) | lx) == 0) return -1 / @as(f64, 0.0);
+    if ((ix >> 31) != 0) return 0 / @as(f64, 0.0);
+    if (ix >= 0x7ff00000) return 1 / x;
+    if (ix >= 0x40000000) return j1_common(ix, x, true, false);
+    if (ix < 0x3c900000) return -bessel_tpi64 / x;
+    const z = x * x;
+    const u = y1_U0[0] + z * (y1_U0[1] + z * (y1_U0[2] + z * (y1_U0[3] + z * y1_U0[4])));
+    const v = 1 + z * (y1_V0[0] + z * (y1_V0[1] + z * (y1_V0[2] + z * (y1_V0[3] + z * y1_V0[4]))));
+    return x * (u / v) + bessel_tpi64 * (j1(x) * math.log(f64, math.e, x) - 1 / x);
+}
+
+fn j1_pone(x: f64) f64 {
+    var p: []const f64 = undefined;
+    var q: []const f64 = undefined;
+    const ix: u32 = @as(u32, @truncate(@as(u64, @bitCast(x)) >> 32)) & 0x7fffffff;
+    if (ix >= 0x40200000) {
+        p = j1_pr8[0..];
+        q = j1_ps8[0..];
+    } else if (ix >= 0x40122E8B) {
+        p = j1_pr5[0..];
+        q = j1_ps5[0..];
+    } else if (ix >= 0x4006DB6D) {
+        p = j1_pr3[0..];
+        q = j1_ps3[0..];
+    } else {
+        p = j1_pr2[0..];
+        q = j1_ps2[0..];
+    }
+    const z = 1.0 / (x * x);
+    const r = p[0] + z * (p[1] + z * (p[2] + z * (p[3] + z * (p[4] + z * p[5]))));
+    const s = 1.0 + z * (q[0] + z * (q[1] + z * (q[2] + z * (q[3] + z * q[4]))));
+    return 1.0 + r / s;
+}
+
+fn j1_qone(x: f64) f64 {
+    var p: []const f64 = undefined;
+    var q: []const f64 = undefined;
+    const ix: u32 = @as(u32, @truncate(@as(u64, @bitCast(x)) >> 32)) & 0x7fffffff;
+    if (ix >= 0x40200000) {
+        p = j1_qr8[0..];
+        q = j1_qs8[0..];
+    } else if (ix >= 0x40122E8B) {
+        p = j1_qr5[0..];
+        q = j1_qs5[0..];
+    } else if (ix >= 0x4006DB6D) {
+        p = j1_qr3[0..];
+        q = j1_qs3[0..];
+    } else {
+        p = j1_qr2[0..];
+        q = j1_qs2[0..];
+    }
+    const z = 1.0 / (x * x);
+    const r = p[0] + z * (p[1] + z * (p[2] + z * (p[3] + z * (p[4] + z * p[5]))));
+    const s = 1.0 + z * (q[0] + z * (q[1] + z * (q[2] + z * (q[3] + z * (q[4] + z * q[5])))));
+    return (0.375 + r / s) / x;
+}
+
+// migrated from musl/src/math/j1f.c
+const j1f_r00: f32 = -6.2500000000e-02;
+const j1f_r01: f32 = 1.4070566976e-03;
+const j1f_r02: f32 = -1.5995563444e-05;
+const j1f_r03: f32 = 4.9672799207e-08;
+const j1f_s01: f32 = 1.9153760746e-02;
+const j1f_s02: f32 = 1.8594678841e-04;
+const j1f_s03: f32 = 1.1771846857e-06;
+const j1f_s04: f32 = 5.0463624390e-09;
+const j1f_s05: f32 = 1.2354227016e-11;
+
+const y1f_U0 = [_]f32{ -1.9605709612e-01, 5.0443872809e-02, -1.9125689287e-03, 2.3525259166e-05, -9.1909917899e-08 };
+const y1f_V0 = [_]f32{ 1.9916731864e-02, 2.0255257550e-04, 1.3560879779e-06, 6.2274145840e-09, 1.6655924903e-11 };
+
+const j1f_pr8 = [_]f32{ 0.0000000000e+00, 1.1718750000e-01, 1.3239480972e+01, 4.1205184937e+02, 3.8747453613e+03, 7.9144794922e+03 };
+const j1f_ps8 = [_]f32{ 1.1420736694e+02, 3.6509309082e+03, 3.6956207031e+04, 9.7602796875e+04, 3.0804271484e+04 };
+const j1f_pr5 = [_]f32{ 1.3199052094e-11, 1.1718749255e-01, 6.8027510643e+00, 1.0830818176e+02, 5.1763616943e+02, 5.2871520996e+02 };
+const j1f_ps5 = [_]f32{ 5.9280597687e+01, 9.9140142822e+02, 5.3532670898e+03, 7.8446904297e+03, 1.5040468750e+03 };
+const j1f_pr3 = [_]f32{ 3.0250391081e-09, 1.1718686670e-01, 3.9329774380e+00, 3.5119403839e+01, 9.1055007935e+01, 4.8559066772e+01 };
+const j1f_ps3 = [_]f32{ 3.4791309357e+01, 3.3676245117e+02, 1.0468714600e+03, 8.9081134033e+02, 1.0378793335e+02 };
+const j1f_pr2 = [_]f32{ 1.0771083225e-07, 1.1717621982e-01, 2.3685150146e+00, 1.2242610931e+01, 1.7693971634e+01, 5.0735230446e+00 };
+const j1f_ps2 = [_]f32{ 2.1436485291e+01, 1.2529022980e+02, 2.3227647400e+02, 1.1767937469e+02, 8.3646392822e+00 };
+
+const j1f_qr8 = [_]f32{ 0.0000000000e+00, -1.0253906250e-01, -1.6271753311e+01, -7.5960174561e+02, -1.1849806641e+04, -4.8438511719e+04 };
+const j1f_qs8 = [_]f32{ 1.6139537048e+02, 7.8253862305e+03, 1.3387534375e+05, 7.1965775000e+05, 6.6660125000e+05, -2.9449025000e+05 };
+const j1f_qr5 = [_]f32{ -2.0897993405e-11, -1.0253904760e-01, -8.0564479828e+00, -1.8366960144e+02, -1.3731937256e+03, -2.6124443359e+03 };
+const j1f_qs5 = [_]f32{ 8.1276550293e+01, 1.9917987061e+03, 1.7468484375e+04, 4.9851425781e+04, 2.7948074219e+04, -4.7191835938e+03 };
+const j1f_qr3 = [_]f32{ -5.0783124372e-09, -1.0253783315e-01, -4.6101160049e+00, -5.7847221375e+01, -2.2824453735e+02, -2.1921012878e+02 };
+const j1f_qs3 = [_]f32{ 4.7665153503e+01, 6.7386511230e+02, 3.3801528320e+03, 5.5477290039e+03, 1.9031191406e+03, -1.3520118713e+02 };
+const j1f_qr2 = [_]f32{ -1.7838172539e-07, -1.0251704603e-01, -2.7522056103e+00, -1.9663616180e+01, -4.2325313568e+01, -2.1371921539e+01 };
+const j1f_qs2 = [_]f32{ 2.9533363342e+01, 2.5298155212e+02, 7.5750280762e+02, 7.3939318848e+02, 1.5594900513e+02, -4.9594988823e+00 };
+
+fn j1f_common(ix: u32, x: f32, y1_: bool, sign: bool) f32 {
+    var s: f64 = math.sin(@as(f64, x));
+    if (y1_) s = -s;
+    const c: f64 = math.cos(@as(f64, x));
+    var cc = s - c;
+    if (ix < 0x7f000000) {
+        var ss = -s - c;
+        const z = math.cos(2 * @as(f64, x));
+        if (s * c > 0)
+            cc = z / ss
+        else
+            ss = z / cc;
+        if (ix < 0x58800000) {
+            if (y1_) ss = -ss;
+            cc = @as(f64, j1f_pone(x)) * cc - @as(f64, j1f_qone(x)) * ss;
+        }
+    }
+    if (sign) cc = -cc;
+    return @floatCast(@as(f64, bessel_invsqrtpi32) * cc / @sqrt(@as(f64, x)));
+}
+
+fn j1f(x: f32) callconv(.c) f32 {
+    var ix: u32 = @bitCast(x);
+    const sign = (ix >> 31) != 0;
+    ix &= 0x7fffffff;
+    if (ix >= 0x7f800000) return 1 / (x * x);
+    if (ix >= 0x40000000) return j1f_common(ix, @abs(x), false, sign);
+    const z: f32 = if (ix >= 0x39000000) blk: {
+        const x2 = x * x;
+        const r = x2 * (j1f_r00 + x2 * (j1f_r01 + x2 * (j1f_r02 + x2 * j1f_r03)));
+        const s = 1 + x2 * (j1f_s01 + x2 * (j1f_s02 + x2 * (j1f_s03 + x2 * (j1f_s04 + x2 * j1f_s05))));
+        break :blk 0.5 + r / s;
+    } else 0.5;
+    return z * x;
+}
+
+fn y1f(x: f32) callconv(.c) f32 {
+    const ix: u32 = @bitCast(x);
+    if ((ix & 0x7fffffff) == 0) return -1 / @as(f32, 0.0);
+    if ((ix >> 31) != 0) return 0 / @as(f32, 0.0);
+    if (ix >= 0x7f800000) return 1 / x;
+    if (ix >= 0x40000000) return j1f_common(ix, x, true, false);
+    if (ix < 0x33000000) return -bessel_tpi32 / x;
+    const z = x * x;
+    const u = y1f_U0[0] + z * (y1f_U0[1] + z * (y1f_U0[2] + z * (y1f_U0[3] + z * y1f_U0[4])));
+    const v = 1.0 + z * (y1f_V0[0] + z * (y1f_V0[1] + z * (y1f_V0[2] + z * (y1f_V0[3] + z * y1f_V0[4]))));
+    return x * (u / v) + bessel_tpi32 * (j1f(x) * math.log(f32, math.e, x) - 1.0 / x);
+}
+
+fn j1f_pone(x: f32) f32 {
+    var p: []const f32 = undefined;
+    var q: []const f32 = undefined;
+    const ix = @as(u32, @bitCast(x)) & 0x7fffffff;
+    if (ix >= 0x41000000) {
+        p = j1f_pr8[0..];
+        q = j1f_ps8[0..];
+    } else if (ix >= 0x409173eb) {
+        p = j1f_pr5[0..];
+        q = j1f_ps5[0..];
+    } else if (ix >= 0x4036d917) {
+        p = j1f_pr3[0..];
+        q = j1f_ps3[0..];
+    } else {
+        p = j1f_pr2[0..];
+        q = j1f_ps2[0..];
+    }
+    const z = 1.0 / (x * x);
+    const r = p[0] + z * (p[1] + z * (p[2] + z * (p[3] + z * (p[4] + z * p[5]))));
+    const s = 1.0 + z * (q[0] + z * (q[1] + z * (q[2] + z * (q[3] + z * q[4]))));
+    return 1.0 + r / s;
+}
+
+fn j1f_qone(x: f32) f32 {
+    var p: []const f32 = undefined;
+    var q: []const f32 = undefined;
+    const ix = @as(u32, @bitCast(x)) & 0x7fffffff;
+    if (ix >= 0x41000000) {
+        p = j1f_qr8[0..];
+        q = j1f_qs8[0..];
+    } else if (ix >= 0x409173eb) {
+        p = j1f_qr5[0..];
+        q = j1f_qs5[0..];
+    } else if (ix >= 0x4036d917) {
+        p = j1f_qr3[0..];
+        q = j1f_qs3[0..];
+    } else {
+        p = j1f_qr2[0..];
+        q = j1f_qs2[0..];
+    }
+    const z = 1.0 / (x * x);
+    const r = p[0] + z * (p[1] + z * (p[2] + z * (p[3] + z * (p[4] + z * p[5]))));
+    const s = 1.0 + z * (q[0] + z * (q[1] + z * (q[2] + z * (q[3] + z * (q[4] + z * q[5])))));
+    return (0.375 + r / s) / x;
+}
+
+// migrated from musl/src/math/jn.c
+fn jn(n_: c_int, x_: f64) callconv(.c) f64 {
+    @setFloatMode(.strict);
+    var n = n_;
+    var x = x_;
+    const bits: u64 = @bitCast(x);
+    var ix: u32 = @truncate(bits >> 32);
+    const lx: u32 = @truncate(bits);
+    const sign = (ix >> 31) != 0;
+    ix &= 0x7fffffff;
+
+    if ((ix | (lx | (~lx +% 1)) >> 31) > 0x7ff00000) return x;
+
+    if (n < 0) {
+        n = -n;
+        x = -x;
+    }
+    if (n == 0) return j0(x);
+    if (n == 1) return j1(x);
+    const nm1: u32 = @intCast(n - 1);
+    const odd = (n & 1) != 0;
+    if (sign) x = -x;
+
+    var b: f64 = undefined;
+    if ((ix | lx) == 0 or ix == 0x7ff00000) {
+        b = 0.0;
+    } else if (@as(f64, @floatFromInt(n)) <= x) {
+        if (ix >= 0x52d00000) {
+            const temp: f64 = switch (n & 3) {
+                0 => math.cos(x) + math.sin(x),
+                1 => -math.cos(x) + math.sin(x),
+                2 => -math.cos(x) - math.sin(x),
+                3 => math.cos(x) - math.sin(x),
+                else => unreachable,
+            };
+            b = bessel_invsqrtpi64 * temp / @sqrt(x);
+        } else {
+            var a = j0(x);
+            b = j1(x);
+            var i: u32 = 0;
+            while (i < nm1) {
+                i += 1;
+                const temp = b;
+                b = b * (2.0 * @as(f64, @floatFromInt(i)) / x) - a;
+                a = temp;
+            }
+        }
+    } else {
+        if (ix < 0x3e100000) {
+            if (nm1 > 32) {
+                b = 0.0;
+            } else {
+                const temp = x * 0.5;
+                b = temp;
+                var a: f64 = 1.0;
+                var i: u32 = 2;
+                while (i <= nm1 + 1) : (i += 1) {
+                    a *= @floatFromInt(i);
+                    b *= temp;
+                }
+                b = b / a;
+            }
+        } else {
+            const w = (2.0 * @as(f64, @floatFromInt(n))) / x;
+            const h = 2.0 / x;
+            var q0 = w;
+            var z = w + h;
+            var q1 = w * z - 1.0;
+            var k: c_int = 1;
+            while (q1 < 1.0e9) {
+                k += 1;
+                z += h;
+                const tmp = z * q1 - q0;
+                q0 = q1;
+                q1 = tmp;
+            }
+            const m = n + n;
+            var t: f64 = 0.0;
+            var i: c_int = 2 * (n + k);
+            while (i >= m) : (i -= 2) {
+                t = 1.0 / (@as(f64, @floatFromInt(i)) / x - t);
+            }
+            var a = t;
+            b = 1.0;
+            const tmp_n: f64 = @floatFromInt(n);
+            const v = 2.0 / x;
+            const tmp = tmp_n * math.log(f64, math.e, @abs(v * tmp_n));
+            if (tmp < 7.09782712893383973096e+02) {
+                var idx: u32 = nm1;
+                while (idx > 0) : (idx -= 1) {
+                    const di: f64 = @floatFromInt(2 * idx);
+                    const temp = b;
+                    b = b * di / x - a;
+                    a = temp;
+                }
+            } else {
+                var idx: u32 = nm1;
+                while (idx > 0) : (idx -= 1) {
+                    const di: f64 = @floatFromInt(2 * idx);
+                    const temp = b;
+                    b = b * di / x - a;
+                    a = temp;
+                    if (b > 1e100) {
+                        a /= b;
+                        t /= b;
+                        b = 1.0;
+                    }
+                }
+            }
+            const z0 = j0(x);
+            const w0 = j1(x);
+            if (@abs(z0) >= @abs(w0))
+                b = t * z0 / b
+            else
+                b = t * w0 / a;
+        }
+    }
+    return if (sign and odd) -b else b;
+}
+
+fn yn(n_: c_int, x: f64) callconv(.c) f64 {
+    @setFloatMode(.strict);
+    var n = n_;
+    const bits: u64 = @bitCast(x);
+    var ix: u32 = @truncate(bits >> 32);
+    const lx: u32 = @truncate(bits);
+    const sign = (ix >> 31) != 0;
+    ix &= 0x7fffffff;
+
+    if ((ix | (lx | (~lx +% 1)) >> 31) > 0x7ff00000) return x;
+    if ((ix | lx) == 0) return -math.inf(f64) + x;
+    if (sign) return 0.0 / (0.0 * x);
+    var ib: u32 = undefined;
+    const nm1: u32 = if (n < 0) blk: {
+        n = -n;
+        ib = @intCast((n & 1) ^ 1);
+        break :blk @intCast(n - 1);
+    } else blk: {
+        ib = 1;
+        break :blk @intCast(if (n > 0) n - 1 else 0);
+    };
+    if (n == 0) return y0(x);
+    if (n == 1) return if (ib != 0) y1(x) else -y1(x);
+    if (ix == 0x7ff00000) return 0.0;
+
+    var b: f64 = undefined;
+    if (ix >= 0x52d00000) {
+        const temp: f64 = switch (n & 3) {
+            0 => math.sin(x) - math.cos(x),
+            1 => -math.sin(x) - math.cos(x),
+            2 => -math.sin(x) + math.cos(x),
+            3 => math.sin(x) + math.cos(x),
+            else => unreachable,
+        };
+        b = bessel_invsqrtpi64 * temp / @sqrt(x);
+    } else {
+        var a = y0(x);
+        b = y1(x);
+        var i: u32 = 0;
+        while (i < nm1 and (@as(u32, @truncate(@as(u64, @bitCast(b)) >> 32)) & 0x7fffffff) < 0x7ff00000) {
+            i += 1;
+            const temp = b;
+            b = (2.0 * @as(f64, @floatFromInt(i)) / x) * b - a;
+            a = temp;
+        }
+    }
+    return if (ib != 0) b else -b;
+}
+
+// migrated from musl/src/math/jnf.c
+fn jnf(n_: c_int, x_: f32) callconv(.c) f32 {
+    @setFloatMode(.strict);
+    var n = n_;
+    var x = x_;
+    var ix: u32 = @bitCast(x);
+    const sign = (ix >> 31) != 0;
+    ix &= 0x7fffffff;
+    if (ix > 0x7f800000) return x;
+
+    if (n < 0) {
+        n = -n;
+        x = -x;
+    }
+    if (n == 0) return j0f(x);
+    if (n == 1) return j1f(x);
+    const nm1: u32 = @intCast(n - 1);
+    const odd = (n & 1) != 0;
+    if (sign) x = -x;
+
+    var b: f32 = undefined;
+    if (ix == 0 or ix == 0x7f800000) {
+        b = 0.0;
+    } else if (@as(f32, @floatFromInt(n)) <= x) {
+        if (ix >= 0x4e800000) {
+            const temp: f32 = switch (n & 3) {
+                0 => math.cos(x) + math.sin(x),
+                1 => -math.cos(x) + math.sin(x),
+                2 => -math.cos(x) - math.sin(x),
+                3 => math.cos(x) - math.sin(x),
+                else => unreachable,
+            };
+            b = bessel_invsqrtpi32 * temp / @sqrt(x);
+        } else {
+            var a = j0f(x);
+            b = j1f(x);
+            var i: u32 = 0;
+            while (i < nm1) {
+                i += 1;
+                const temp = b;
+                b = b * (2.0 * @as(f32, @floatFromInt(i)) / x) - a;
+                a = temp;
+            }
+        }
+    } else {
+        if (ix < 0x35800000) {
+            if (nm1 > 8) {
+                b = 0.0;
+            } else {
+                const temp = x * 0.5;
+                b = temp;
+                var a: f32 = 1.0;
+                var i: u32 = 2;
+                while (i <= nm1 + 1) : (i += 1) {
+                    a *= @floatFromInt(i);
+                    b *= temp;
+                }
+                b = b / a;
+            }
+        } else {
+            const w = (2.0 * @as(f32, @floatFromInt(n))) / x;
+            const h = 2.0 / x;
+            var q0 = w;
+            var z = w + h;
+            var q1 = w * z - 1.0;
+            var k: c_int = 1;
+            while (q1 < 1.0e9) {
+                k += 1;
+                z += h;
+                const tmp = z * q1 - q0;
+                q0 = q1;
+                q1 = tmp;
+            }
+            const m = n + n;
+            var t: f32 = 0.0;
+            var i: c_int = 2 * (n + k);
+            while (i >= m) : (i -= 2) {
+                t = 1.0 / (@as(f32, @floatFromInt(i)) / x - t);
+            }
+            var a = t;
+            b = 1.0;
+            const tmp_n: f32 = @floatFromInt(n);
+            const v = 2.0 / x;
+            const tmp = tmp_n * math.log(f32, math.e, @abs(v * tmp_n));
+            if (tmp < 8.8721679688e+01) {
+                var idx: u32 = nm1;
+                while (idx > 0) : (idx -= 1) {
+                    const di: f32 = @floatFromInt(2 * idx);
+                    const temp = b;
+                    b = b * di / x - a;
+                    a = temp;
+                }
+            } else {
+                var idx: u32 = nm1;
+                while (idx > 0) : (idx -= 1) {
+                    const di: f32 = @floatFromInt(2 * idx);
+                    const temp = b;
+                    b = b * di / x - a;
+                    a = temp;
+                    if (b > 1e20) {
+                        a /= b;
+                        t /= b;
+                        b = 1.0;
+                    }
+                }
+            }
+            const z0 = j0f(x);
+            const w0 = j1f(x);
+            if (@abs(z0) >= @abs(w0))
+                b = t * z0 / b
+            else
+                b = t * w0 / a;
+        }
+    }
+    return if (sign and odd) -b else b;
+}
+
+fn ynf(n_: c_int, x: f32) callconv(.c) f32 {
+    @setFloatMode(.strict);
+    var n = n_;
+    var ix: u32 = @bitCast(x);
+    const sign = (ix >> 31) != 0;
+    ix &= 0x7fffffff;
+    if (ix > 0x7f800000) return x;
+    if (ix == 0) return -math.inf(f32) + x;
+    if (sign) return 0.0 / (0.0 * x);
+    var ib: u32 = undefined;
+    const nm1: u32 = if (n < 0) blk: {
+        n = -n;
+        ib = @intCast((n & 1) ^ 1);
+        break :blk @intCast(n - 1);
+    } else blk: {
+        ib = 1;
+        break :blk @intCast(if (n > 0) n - 1 else 0);
+    };
+    if (n == 0) return y0f(x);
+    if (n == 1) return if (ib != 0) y1f(x) else -y1f(x);
+    if (ix == 0x7f800000) return 0.0;
+
+    var b: f32 = undefined;
+    if (ix >= 0x4e800000) {
+        const temp: f32 = switch (n & 3) {
+            0 => math.sin(x) - math.cos(x),
+            1 => -math.sin(x) - math.cos(x),
+            2 => -math.sin(x) + math.cos(x),
+            3 => math.sin(x) + math.cos(x),
+            else => unreachable,
+        };
+        b = bessel_invsqrtpi32 * temp / @sqrt(x);
+    } else {
+        var a = y0f(x);
+        b = y1f(x);
+        var i: u32 = 0;
+        while (i < nm1 and (@as(u32, @bitCast(b)) & 0x7fffffff) < 0x7f800000) {
+            i += 1;
+            const temp = b;
+            b = (2.0 * @as(f32, @floatFromInt(i)) / x) * b - a;
+            a = temp;
+        }
+    }
+    return if (ib != 0) b else -b;
+}
+
+// migrated from musl/src/math/tgamma.c
+const tgamma_lanczos_g: f64 = 6.024680040776729583740234375;
+const tgamma_lanczos_gmhalf: f64 = 5.524680040776729583740234375;
+const tgamma_num = [13]f64{
+    23531376880.410759688572007674451636754734846804940,
+    42919803642.649098768957899047001988850926355848959,
+    35711959237.355668049440185451547166705960488635843,
+    17921034426.037209699919755754458931112671403265390,
+    6039542586.3520280050642916443072979210699388420708,
+    1439720407.3117216736632230727949123939715485786772,
+    248874557.86205415651146038641322942321632125127801,
+    31426415.585400194380614231628318205362874684987640,
+    2876370.6289353724412254090516208496135991145378768,
+    186056.26539522349504029498971604569928220784236328,
+    8071.6720023658162106380029022722506138218516325024,
+    210.82427775157934587250973392071336271166969580291,
+    2.5066282746310002701649081771338373386264310793408,
+};
+const tgamma_den = [13]f64{
+    0.0,
+    39916800.0,
+    120543840.0,
+    150917976.0,
+    105258076.0,
+    45995730.0,
+    13339535.0,
+    2637558.0,
+    357423.0,
+    32670.0,
+    1925.0,
+    66.0,
+    1.0,
+};
+const tgamma_fact = [23]f64{
+    1,
+    1,
+    2,
+    6,
+    24,
+    120,
+    720,
+    5040,
+    40320,
+    362880,
+    3628800,
+    39916800,
+    479001600,
+    6227020800,
+    87178291200,
+    1307674368000,
+    20922789888000,
+    355687428096000,
+    6402373705728000,
+    121645100408832000,
+    2432902008176640000,
+    51090942171709440000.0,
+    1124000727777607680000.0,
+};
+
+fn tgamma(x_: f64) callconv(.c) f64 {
+    @setFloatMode(.strict);
+    var x = x_;
+    const u: u64 = @bitCast(x);
+    const ix: u32 = @as(u32, @truncate(u >> 32)) & 0x7fffffff;
+    const sign: u32 = @truncate(u >> 63);
+
+    if (ix >= 0x7ff00000) return x + math.inf(f64);
+    if (ix < (0x3ff - 54) << 20) return 1.0 / x;
+
+    if (x == @floor(x)) {
+        if (sign != 0) return __math_invalid(x);
+        if (x <= @as(f64, @floatFromInt(tgamma_fact.len))) {
+            const idx: usize = @intFromFloat(x);
+            return tgamma_fact[idx - 1];
+        }
+    }
+
+    if (ix >= 0x40670000) {
+        if (sign != 0) {
+            _ = fpBarrierValue(f32, @floatCast(0x1p-126 / x));
+            if (@floor(x) * 0.5 == @floor(x * 0.5)) return 0.0;
+            return -0.0;
+        }
+        x *= 0x1p1023;
+        return x;
+    }
+
+    const absx = if (sign != 0) -x else x;
+    const y = absx + tgamma_lanczos_gmhalf;
+    var dy: f64 = if (absx > tgamma_lanczos_gmhalf)
+        (y - absx) - tgamma_lanczos_gmhalf
+    else
+        (y - tgamma_lanczos_gmhalf) - absx;
+
+    var z = absx - 0.5;
+    var n: f64 = 0.0;
+    var d: f64 = 0.0;
+    if (absx < 8.0) {
+        var i: usize = 13;
+        while (i > 0) {
+            i -= 1;
+            n = n * absx + tgamma_num[i];
+            d = d * absx + tgamma_den[i];
+        }
+    } else {
+        var i: usize = 0;
+        while (i < 13) : (i += 1) {
+            n = n / absx + tgamma_num[i];
+            d = d / absx + tgamma_den[i];
+        }
+    }
+    const exp_neg_y: f64 = @floatCast(exp_pure(f128, -@as(f128, y)));
+    var r = (n / d) * exp_neg_y;
+    if (x < 0.0) {
+        r = -3.141592653589793238462643383279502884 / (sin_pi64(absx) * absx * r);
+        dy = -dy;
+        z = -z;
+    }
+    r += dy * tgamma_lanczos_g * r / y;
+    z = @floatCast(exp_pure(f128, @as(f128, 0.5 * z) * log_pure(f128, @as(f128, y))));
+    return r * z * z;
+}
+
+fn tgammaf(x: f32) callconv(.c) f32 {
+    @setFloatMode(.strict);
+    return @floatCast(tgamma(x));
+}
+
+// migrated from musl/src/math/tgammal.c
+const tgammal80_P = [8]f80{
+    4.212760487471622013093E-5,
+    4.542931960608009155600E-4,
+    4.092666828394035500949E-3,
+    2.385363243461108252554E-2,
+    1.113062816019361559013E-1,
+    3.629515436640239168939E-1,
+    8.378004301573126728826E-1,
+    1.000000000000000000009E0,
+};
+const tgammal80_Q = [9]f80{
+    -1.397148517476170440917E-5,
+    2.346584059160635244282E-4,
+    -1.237799246653152231188E-3,
+    -7.955933682494738320586E-4,
+    2.773706565840072979165E-2,
+    -4.633887671244534213831E-2,
+    -2.243510905670329164562E-1,
+    4.150160950588455434583E-1,
+    9.999999999999999999908E-1,
+};
+const tgammal80_STIR = [9]f80{
+    7.147391378143610789273E-4,
+    -2.363848809501759061727E-5,
+    -5.950237554056330156018E-4,
+    6.989332260623193171870E-5,
+    7.840334842744753003862E-4,
+    -2.294719747873185405699E-4,
+    -2.681327161876304418288E-3,
+    3.472222222230075327854E-3,
+    8.333333333333331800504E-2,
+};
+const tgammal80_S = [9]f80{
+    -1.193945051381510095614E-3,
+    7.220599478036909672331E-3,
+    -9.622023360406271645744E-3,
+    -4.219773360705915470089E-2,
+    1.665386113720805206758E-1,
+    -4.200263503403344054473E-2,
+    -6.558780715202540684668E-1,
+    5.772156649015328608253E-1,
+    1.000000000000000000000E0,
+};
+const tgammal80_SN = [9]f80{
+    1.133374167243894382010E-3,
+    7.220837261893170325704E-3,
+    9.621911155035976733706E-3,
+    -4.219773343731191721664E-2,
+    -1.665386113944413519335E-1,
+    -4.200263503402112910504E-2,
+    6.558780715202536547116E-1,
+    5.772156649015328608727E-1,
+    -1.000000000000000000000E0,
+};
+
+fn polevll80(x: f80, p: []const f80) f80 {
+    @setFloatMode(.strict);
+    var ans = p[0];
+    for (p[1..]) |c| {
+        ans = ans * x + c;
+    }
+    return ans;
+}
+
+fn stirf80(x: f80) f80 {
+    @setFloatMode(.strict);
+    const MAXSTIR: f80 = 1024.0;
+    const SQTPI: f80 = 2.50662827463100050242E0;
+    var w = 1.0 / x;
+    if (x > 1024.0) {
+        w = (((((6.97281375836585777429E-5 * w + 7.84039221720066627474E-4) * w -
+            2.29472093621399176955E-4) * w -
+            2.68132716049382716049E-3) * w +
+            3.47222222222222222222E-3) * w +
+            8.33333333333333333333E-2) * w + 1.0;
+    } else {
+        w = 1.0 + w * polevll80(w, &tgammal80_STIR);
+    }
+    var y: f80 = @floatCast(expl(@floatCast(x)));
+    const lx = log_pure(f128, @as(f128, x));
+    if (x > MAXSTIR) {
+        const v: f80 = @floatCast(exp_pure(f128, @as(f128, 0.5 * x - 0.25) * lx));
+        y = v * (v / y);
+    } else {
+        y = @as(f80, @floatCast(exp_pure(f128, @as(f128, x - 0.5) * lx))) / y;
+    }
+    return SQTPI * y * w;
+}
+
+fn tgammal80(x_: f80) f80 {
+    @setFloatMode(.strict);
+    const MAXGAML: f80 = 1755.455;
+    const PIL: f80 = 3.1415926535897932384626;
+    var x = x_;
+    if (!math.isFinite(x)) return x + math.inf(f80);
+
+    var q = @abs(x);
+    if (q > 13.0) {
+        var z: f80 = undefined;
+        if (x < 0.0) {
+            var p = @floor(q);
+            z = q - p;
+            if (z == 0.0) return 0.0 / z;
+            if (q > MAXGAML) {
+                z = 0.0;
+            } else {
+                if (z > 0.5) {
+                    p += 1.0;
+                    z = q - p;
+                }
+                z = q * @as(f80, @floatCast(sinl(@floatCast(PIL * z))));
+                z = @abs(z) * stirf80(q);
+                z = PIL / z;
+            }
+            if (0.5 * p == @floor(q * 0.5)) z = -z;
+        } else if (x > MAXGAML) {
+            z = x * 0x1p16383;
+        } else {
+            z = stirf80(x);
+        }
+        return z;
+    }
+
+    var z: f80 = 1.0;
+    while (x >= 3.0) {
+        x -= 1.0;
+        z *= x;
+    }
+    while (x < -0.03125) {
+        z /= x;
+        x += 1.0;
+    }
+    if (x <= 0.03125) {
+        if (x == 0.0 and z != 1.0) return x / x;
+        if (x < 0.0) {
+            x = -x;
+            return z / (x * polevll80(x, &tgammal80_SN));
+        } else {
+            return z / (x * polevll80(x, &tgammal80_S));
+        }
+    }
+    while (x < 2.0) {
+        z /= x;
+        x += 1.0;
+    }
+    if (x == 2.0) return z;
+
+    x -= 2.0;
+    const p = polevll80(x, &tgammal80_P);
+    q = polevll80(x, &tgammal80_Q);
+    return z * p / q;
+}
+
+fn tgammal(x: c_longdouble) callconv(.c) c_longdouble {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64, 128 => @floatCast(tgamma(@floatCast(x))),
+        80 => @floatCast(tgammal80(@floatCast(x))),
+        else => unreachable,
+    };
+}
+
+// migrated from musl/src/math/lgammal.c
+const lgammal80_pi: f80 = 3.14159265358979323846264;
+const lgammal80_a0: f80 = -6.343246574721079391729402781192128239938E2;
+const lgammal80_a1: f80 = 1.856560238672465796768677717168371401378E3;
+const lgammal80_a2: f80 = 2.404733102163746263689288466865843408429E3;
+const lgammal80_a3: f80 = 8.804188795790383497379532868917517596322E2;
+const lgammal80_a4: f80 = 1.135361354097447729740103745999661157426E2;
+const lgammal80_a5: f80 = 3.766956539107615557608581581190400021285E0;
+const lgammal80_b0: f80 = 8.214973713960928795704317259806842490498E3;
+const lgammal80_b1: f80 = 1.026343508841367384879065363925870888012E4;
+const lgammal80_b2: f80 = 4.553337477045763320522762343132210919277E3;
+const lgammal80_b3: f80 = 8.506975785032585797446253359230031874803E2;
+const lgammal80_b4: f80 = 6.042447899703295436820744186992189445813E1;
+const lgammal80_tc: f80 = 1.4616321449683623412626595423257213284682E0;
+const lgammal80_tf: f80 = -1.2148629053584961146050602565082954242826E-1;
+const lgammal80_tt: f80 = 3.3649914684731379602768989080467587736363E-18;
+const lgammal80_g0: f80 = 3.645529916721223331888305293534095553827E-18;
+const lgammal80_g1: f80 = 5.126654642791082497002594216163574795690E3;
+const lgammal80_g2: f80 = 8.828603575854624811911631336122070070327E3;
+const lgammal80_g3: f80 = 5.464186426932117031234820886525701595203E3;
+const lgammal80_g4: f80 = 1.455427403530884193180776558102868592293E3;
+const lgammal80_g5: f80 = 1.541735456969245924860307497029155838446E2;
+const lgammal80_g6: f80 = 4.335498275274822298341872707453445815118E0;
+const lgammal80_h0: f80 = 1.059584930106085509696730443974495979641E4;
+const lgammal80_h1: f80 = 2.147921653490043010629481226937850618860E4;
+const lgammal80_h2: f80 = 1.643014770044524804175197151958100656728E4;
+const lgammal80_h3: f80 = 5.869021995186925517228323497501767586078E3;
+const lgammal80_h4: f80 = 9.764244777714344488787381271643502742293E2;
+const lgammal80_h5: f80 = 6.442485441570592541741092969581997002349E1;
+const lgammal80_u0: f80 = -8.886217500092090678492242071879342025627E1;
+const lgammal80_u1: f80 = 6.840109978129177639438792958320783599310E2;
+const lgammal80_u2: f80 = 2.042626104514127267855588786511809932433E3;
+const lgammal80_u3: f80 = 1.911723903442667422201651063009856064275E3;
+const lgammal80_u4: f80 = 7.447065275665887457628865263491667767695E2;
+const lgammal80_u5: f80 = 1.132256494121790736268471016493103952637E2;
+const lgammal80_u6: f80 = 4.484398885516614191003094714505960972894E0;
+const lgammal80_v0: f80 = 1.150830924194461522996462401210374632929E3;
+const lgammal80_v1: f80 = 3.399692260848747447377972081399737098610E3;
+const lgammal80_v2: f80 = 3.786631705644460255229513563657226008015E3;
+const lgammal80_v3: f80 = 1.966450123004478374557778781564114347876E3;
+const lgammal80_v4: f80 = 4.741359068914069299837355438370682773122E2;
+const lgammal80_v5: f80 = 4.508989649747184050907206782117647852364E1;
+const lgammal80_s0: f80 = 1.454726263410661942989109455292824853344E6;
+const lgammal80_s1: f80 = -3.901428390086348447890408306153378922752E6;
+const lgammal80_s2: f80 = -6.573568698209374121847873064292963089438E6;
+const lgammal80_s3: f80 = -3.319055881485044417245964508099095984643E6;
+const lgammal80_s4: f80 = -7.094891568758439227560184618114707107977E5;
+const lgammal80_s5: f80 = -6.263426646464505837422314539808112478303E4;
+const lgammal80_s6: f80 = -1.684926520999477529949915657519454051529E3;
+const lgammal80_r0: f80 = -1.883978160734303518163008696712983134698E7;
+const lgammal80_r1: f80 = -2.815206082812062064902202753264922306830E7;
+const lgammal80_r2: f80 = -1.600245495251915899081846093343626358398E7;
+const lgammal80_r3: f80 = -4.310526301881305003489257052083370058799E6;
+const lgammal80_r4: f80 = -5.563807682263923279438235987186184968542E5;
+const lgammal80_r5: f80 = -3.027734654434169996032905158145259713083E4;
+const lgammal80_r6: f80 = -4.501995652861105629217250715790764371267E2;
+const lgammal80_w0: f80 = 4.189385332046727417803E-1;
+const lgammal80_w1: f80 = 8.333333333333331447505E-2;
+const lgammal80_w2: f80 = -2.777777777750349603440E-3;
+const lgammal80_w3: f80 = 7.936507795855070755671E-4;
+const lgammal80_w4: f80 = -5.952345851765688514613E-4;
+const lgammal80_w5: f80 = 8.412723297322498080632E-4;
+const lgammal80_w6: f80 = -1.880801938119376907179E-3;
+const lgammal80_w7: f80 = 4.885026142432270781165E-3;
+
+fn sinl80Kernel(x: f80) f80 {
+    @setFloatMode(.strict);
+    const S1: f80 = -0.166666666666666666671;
+    const S2: f64 = 0.0083333333333333332;
+    const S3: f64 = -0.00019841269841269427;
+    const S4: f64 = 0.0000027557319223597490;
+    const S5: f64 = -0.000000025052108218074604;
+    const S6: f64 = 1.6059006598854211e-10;
+    const S7: f64 = -7.6429779983024564e-13;
+    const S8: f64 = 2.6174587166648325e-15;
+    const z = x * x;
+    const v = z * x;
+    const r = S2 + z * (S3 + z * (S4 + z * (S5 + z * (S6 + z * (S7 + z * S8)))));
+    return x + v * (S1 + z * r);
+}
+
+fn cosl80Kernel(x: f80) f80 {
+    @setFloatMode(.strict);
+    const C1: f80 = 0.0416666666666666666136;
+    const C2: f64 = -0.0013888888888888874;
+    const C3: f64 = 0.000024801587301571716;
+    const C4: f64 = -0.00000027557319215507120;
+    const C5: f64 = 0.0000000020876754400407278;
+    const C6: f64 = -1.1470297442401303e-11;
+    const C7: f64 = 4.7383039476436467e-14;
+    const z = x * x;
+    const r = z * (C1 + z * (C2 + z * (C3 + z * (C4 + z * (C5 + z * (C6 + z * C7))))));
+    const hz = 0.5 * z;
+    const w = 1.0 - hz;
+    return w + (((1.0 - w) - hz) + z * r);
+}
+
+fn lgammal80_sin_pi(x_: f80) f80 {
+    @setFloatMode(.strict);
+    var x = x_;
+    x *= 0.5;
+    x = 2.0 * (x - @floor(x));
+    var n: c_int = @intFromFloat(x * 4.0);
+    n = @divTrunc(n + 1, 2);
+    x -= @as(f80, @floatFromInt(n)) * 0.5;
+    x *= lgammal80_pi;
+    return switch (n) {
+        0, 4 => sinl80Kernel(x),
+        1 => cosl80Kernel(x),
+        2 => sinl80Kernel(-x),
+        3 => -cosl80Kernel(x),
+        else => unreachable,
+    };
+}
+
+fn lgammal80_r(x_: f80, signgamp: *c_int) f80 {
+    const bits: u80 = @bitCast(x_);
+    const se: u16 = @truncate(bits >> 64);
+    const m: u64 = @truncate(bits);
+    const ix: u32 = (@as(u32, se & 0x7fff) << 16) | @as(u32, @truncate(m >> 48));
+    const sign = (se >> 15) != 0;
+
+    var x = x_;
+    var r: f80 = undefined;
+    var nadj: f80 = undefined;
+    signgamp.* = 1;
+
+    if (ix >= 0x7fff0000) return x * x;
+    if (ix < 0x3fc08000) {
+        if (sign) {
+            signgamp.* = -1;
+            x = -x;
+        }
+        return -@as(f80, @floatCast(logl(@floatCast(x))));
+    }
+    if (sign) {
+        x = -x;
+        var t = lgammal80_sin_pi(x);
+        if (t == 0.0) return 1.0 / (x - x);
+        if (t > 0.0)
+            signgamp.* = -1
+        else
+            t = -t;
+        nadj = @floatCast(logl(@floatCast(lgammal80_pi / (t * x))));
+    }
+
+    if ((ix == 0x3fff8000 or ix == 0x40008000) and m == 0) {
+        r = 0;
+    } else if (ix < 0x40008000) {
+        var y: f80 = undefined;
+        var i: c_int = undefined;
+        if (ix <= 0x3ffee666) {
+            r = -@as(f80, @floatCast(logl(@floatCast(x))));
+            if (ix >= 0x3ffebb4a) {
+                y = x - 1.0;
+                i = 0;
+            } else if (ix >= 0x3ffced33) {
+                y = x - (lgammal80_tc - 1.0);
+                i = 1;
+            } else {
+                y = x;
+                i = 2;
+            }
+        } else {
+            r = 0.0;
+            if (ix >= 0x3fffdda6) {
+                y = x - 2.0;
+                i = 0;
+            } else if (ix >= 0x3fff9da6) {
+                y = x - lgammal80_tc;
+                i = 1;
+            } else {
+                y = x - 1.0;
+                i = 2;
+            }
+        }
+        switch (i) {
+            0 => {
+                const p1 = lgammal80_a0 + y * (lgammal80_a1 + y * (lgammal80_a2 + y * (lgammal80_a3 + y * (lgammal80_a4 + y * lgammal80_a5))));
+                const p2 = lgammal80_b0 + y * (lgammal80_b1 + y * (lgammal80_b2 + y * (lgammal80_b3 + y * (lgammal80_b4 + y))));
+                r += 0.5 * y + y * p1 / p2;
+            },
+            1 => {
+                const p1 = lgammal80_g0 + y * (lgammal80_g1 + y * (lgammal80_g2 + y * (lgammal80_g3 + y * (lgammal80_g4 + y * (lgammal80_g5 + y * lgammal80_g6)))));
+                const p2 = lgammal80_h0 + y * (lgammal80_h1 + y * (lgammal80_h2 + y * (lgammal80_h3 + y * (lgammal80_h4 + y * (lgammal80_h5 + y)))));
+                const p = lgammal80_tt + y * p1 / p2;
+                r += lgammal80_tf + p;
+            },
+            2 => {
+                const p1 = y * (lgammal80_u0 + y * (lgammal80_u1 + y * (lgammal80_u2 + y * (lgammal80_u3 + y * (lgammal80_u4 + y * (lgammal80_u5 + y * lgammal80_u6))))));
+                const p2 = lgammal80_v0 + y * (lgammal80_v1 + y * (lgammal80_v2 + y * (lgammal80_v3 + y * (lgammal80_v4 + y * (lgammal80_v5 + y)))));
+                r += -0.5 * y + p1 / p2;
+            },
+            else => unreachable,
+        }
+    } else if (ix < 0x40028000) {
+        const i: c_int = @intFromFloat(x);
+        const y = x - @as(f80, @floatFromInt(i));
+        const p = y * (lgammal80_s0 + y * (lgammal80_s1 + y * (lgammal80_s2 + y * (lgammal80_s3 + y * (lgammal80_s4 + y * (lgammal80_s5 + y * lgammal80_s6))))));
+        const q = lgammal80_r0 + y * (lgammal80_r1 + y * (lgammal80_r2 + y * (lgammal80_r3 + y * (lgammal80_r4 + y * (lgammal80_r5 + y * (lgammal80_r6 + y))))));
+        r = 0.5 * y + p / q;
+        var z: f80 = 1.0;
+        if (i >= 3) {
+            z *= y + 2.0;
+            if (i >= 4) z *= y + 3.0;
+            if (i >= 5) z *= y + 4.0;
+            if (i >= 6) z *= y + 5.0;
+            if (i >= 7) z *= y + 6.0;
+            r += @as(f80, @floatCast(logl(@floatCast(z))));
+        }
+    } else if (ix < 0x40418000) {
+        const t: f80 = @floatCast(logl(@floatCast(x)));
+        const z = 1.0 / x;
+        const y = z * z;
+        const w = lgammal80_w0 + z * (lgammal80_w1 + y * (lgammal80_w2 + y * (lgammal80_w3 + y * (lgammal80_w4 + y * (lgammal80_w5 + y * (lgammal80_w6 + y * lgammal80_w7))))));
+        r = (x - 0.5) * (t - 1.0) + w;
+    } else {
+        r = x * (@as(f80, @floatCast(logl(@floatCast(x)))) - 1.0);
+    }
+    if (sign) r = nadj - r;
+    return r;
+}
+
+fn lgammal_r_(x: c_longdouble, signgamp: *c_int) callconv(.c) c_longdouble {
+    return switch (@typeInfo(c_longdouble).float.bits) {
+        64, 128 => @floatCast(lgamma_r(@floatCast(x), signgamp)),
+        80 => @floatCast(lgammal80_r(@floatCast(x), signgamp)),
+        else => unreachable,
+    };
+}
+
+fn lgammal_(x: c_longdouble) callconv(.c) c_longdouble {
+    return lgammal_r_(x, &__signgam);
 }
