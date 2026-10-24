@@ -2378,12 +2378,13 @@ fn buildComponentShimFixup(
     const memory_export_name = core_exports.memory_name orelse return error.MissingCoreExportMemory;
     const realloc_export_name = core_exports.realloc_name orelse return error.MissingCabiRealloc;
 
-    // The shim/fixup path does not yet emit top-level world func
-    // externs (`named_func`). Func imports are already rejected before
-    // path selection; any func extern reaching here is an export this
-    // path can't lift — reject cleanly rather than silently drop it.
-    // (Top-level func exports with only simple sigs take the fast path.)
-    if (decoded.func_externs.len > 0) return error.UnsupportedShape;
+    // The shim/fixup path lifts top-level world func exports whose
+    // signature consists of simple inline scalars (matching the fast
+    // path). Func imports are already rejected before path selection;
+    // non-simple top-level func exports are rejected cleanly.
+    for (decoded.func_externs) |fext| {
+        if (!fext.is_export or !topLevelFuncSigIsSimple(fext.sig)) return error.UnsupportedShape;
+    }
 
     // ── Phase 1: re-collect import shapes (same as the fast path).
     const resource_registry = try ResourceRegistry.init(ar, decoded);
@@ -4061,6 +4062,39 @@ fn buildComponentShimFixup(
         try ext_export_start.append(ar, .{ .ext = ext, .start = start });
     }
 
+    const CapturedTopFunc = struct {
+        name: []const u8,
+        func_type_idx: u32,
+        core_func_alias_idx: u32,
+        is_async: bool,
+    };
+    var captured_top_funcs = std.ArrayList(CapturedTopFunc).empty;
+    for (decoded.func_externs) |fext| {
+        if (!fext.is_export) continue;
+        if (!topLevelFuncSigIsSimple(fext.sig)) return error.UnsupportedShape;
+
+        try types.append(ar, .{ .func = fext.sig });
+        try Section.appendType(&order, ar, types.items.len);
+        const func_type_idx = comp_type_idx;
+        comp_type_idx += 1;
+
+        try aliases.append(ar, .{ .instance_export = .{
+            .sort = .{ .core = .func },
+            .instance_idx = main_core_inst_idx,
+            .name = fext.name,
+        } });
+        try Section.appendAlias(&order, ar, aliases.items.len);
+        const cf_idx = core_func_idx;
+        core_func_idx += 1;
+
+        try captured_top_funcs.append(ar, .{
+            .name = fext.name,
+            .func_type_idx = func_type_idx,
+            .core_func_alias_idx = cf_idx,
+            .is_async = fext.sig.is_async,
+        });
+    }
+
     const lifts_start: u32 = @intCast(canons.items.len);
     for (captured_funcs.items) |cf| {
         var opts = try wabt.component.adapter.adapter.buildCanonLiftOpts(
@@ -4077,6 +4111,17 @@ fn buildComponentShimFixup(
             ext_opts[opts.len] = .async_;
             opts = ext_opts;
         }
+        try canons.append(ar, .{ .lift = .{
+            .core_func_idx = cf.core_func_alias_idx,
+            .type_idx = cf.func_type_idx,
+            .opts = opts,
+        } });
+    }
+    for (captured_top_funcs.items) |cf| {
+        const opts: []const ctypes.CanonOpt = if (cf.is_async)
+            try ar.dupe(ctypes.CanonOpt, &.{.async_})
+        else
+            &.{};
         try canons.append(ar, .{ .lift = .{
             .core_func_idx = cf.core_func_alias_idx,
             .type_idx = cf.func_type_idx,
@@ -4171,6 +4216,16 @@ fn buildComponentShimFixup(
             .name = es.ext.qualified_name,
             .desc = .{ .instance = 0 },
             .sort_idx = .{ .sort = .instance, .idx = inst_idx },
+        });
+    }
+
+    for (captured_top_funcs.items) |cf| {
+        const cfi = comp_func_idx;
+        comp_func_idx += 1;
+        try exports.append(ar, .{
+            .name = cf.name,
+            .desc = .{ .func = 0 },
+            .sort_idx = .{ .sort = .func, .idx = cfi },
         });
     }
 

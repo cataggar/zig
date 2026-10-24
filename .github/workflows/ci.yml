@@ -94,26 +94,79 @@ jobs:
             -target wasm32-wasi .ci-tmp/hello.zig -femit-bin=.ci-tmp/hello.wasm
           wasmtime run .ci-tmp/hello.wasm
 
-      - name: Run vendored wabt component tests (when present)
+      - name: Run vendored wabt component tests
         run: |
-          if [ -f src/link/Wasm/component/root.zig ]; then
-            .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
-              -target wasm32-wasi --test-cmd wasmtime --test-cmd-bin \
-              src/link/Wasm/component/root.zig
-          fi
+          .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasi --test-cmd wasmtime --test-cmd-bin \
+            src/link/Wasm/component/root.zig
+          .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip2 --test-cmd wasmtime --test-cmd-bin \
+            src/link/Wasm/component/root.zig
 
-      - name: Verify wasm32-wasip2 target (when present)
+      - name: Run std.os.wasi.p2 unit tests
         run: |
-          if grep -q 'wasip2,' lib/std/Target.zig; then
-            .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
-              -target wasm32-wasip2 .ci-tmp/hello.zig -femit-bin=.ci-tmp/hello-p2.wasm
-            wasmtime run .ci-tmp/hello-p2.wasm
-            .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
-              -target wasm32-wasip2 -mexec-model=reactor .ci-tmp/hello.zig -femit-bin=.ci-tmp/hello-p2-reactor.wasm
-            ls -lh .ci-tmp/hello-p2.wasm .ci-tmp/hello-p2-reactor.wasm
-            if [ -f test/wasip2_e2e.zig ]; then
-              .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
-                -target wasm32-wasip2 test/wasip2_e2e.zig -femit-bin=.ci-tmp/wasip2_e2e.wasm
-              wasmtime run .ci-tmp/wasip2_e2e.wasm
-            fi
-          fi
+          mkdir -p .ci-tmp
+          cp lib/std/os/wasi/p2.zig .ci-tmp/p2_test.zig
+          .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip2 --test-cmd wasmtime --test-cmd-bin \
+            .ci-tmp/p2_test.zig
+
+      - name: Verify wasm32-wasip2 E2E (Debug, ReleaseSmall, and zig test)
+        run: |
+          mkdir -p .ci-tmp
+          .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip2 test/wasip2_e2e.zig -femit-bin=.ci-tmp/wasip2_e2e.wasm
+          cmp -n 8 <(printf '\x00asm\x0d\x00\x01\x00') .ci-tmp/wasip2_e2e.wasm
+          wasmtime run --dir=.ci-tmp --env TEST_ENV_KEY=wasip2_val .ci-tmp/wasip2_e2e.wasm arg_one arg_two
+
+          .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip2 -OReleaseSmall test/wasip2_e2e.zig -femit-bin=.ci-tmp/wasip2_e2e_small.wasm
+          cmp -n 8 <(printf '\x00asm\x0d\x00\x01\x00') .ci-tmp/wasip2_e2e_small.wasm
+          wasmtime run --dir=.ci-tmp --env TEST_ENV_KEY=wasip2_val .ci-tmp/wasip2_e2e_small.wasm arg_one arg_two
+
+          .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip2 --test-cmd wasmtime --test-cmd=--dir=. --test-cmd-bin \
+            test/wasip2_e2e.zig
+
+      - name: Verify custom WIT reactor and Preview 1 adapter-spliced components
+        run: |
+          mkdir -p .ci-tmp
+          cat << 'EOF' > .ci-tmp/adder.wit
+          package example:math@0.1.0;
+
+          world adder {
+              export add: func(a: s32, b: s32) -> s32;
+          }
+          EOF
+          cat << 'EOF' > .ci-tmp/adder.zig
+          export fn add(a: i32, b: i32) i32 {
+              return a + b;
+          }
+          EOF
+          .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip2 -mexec-model=reactor \
+            -fwit-path=.ci-tmp/adder.wit -fwit-world=adder \
+            .ci-tmp/adder.zig -femit-bin=.ci-tmp/adder.wasm
+          cmp -n 8 <(printf '\x00asm\x0d\x00\x01\x00') .ci-tmp/adder.wasm
+          out=$(wasmtime run --invoke 'add(40, 2)' .ci-tmp/adder.wasm)
+          test "$out" = "42"
+
+          cat << 'EOF' > .ci-tmp/p1_guest.zig
+          extern "wasi_snapshot_preview1" fn random_get(buf: [*]u8, buf_len: usize) callconv(.c) u16;
+          extern "wasi_snapshot_preview1" fn proc_exit(code: u32) callconv(.c) noreturn;
+
+          export fn _start() void {
+              var buf: [16]u8 = @splat(0);
+              if (random_get(&buf, buf.len) != 0) @trap();
+              var any_nonzero = false;
+              for (buf) |b| {
+                  if (b != 0) any_nonzero = true;
+              }
+              if (!any_nonzero) @trap();
+              proc_exit(0);
+          }
+          EOF
+          .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip2 .ci-tmp/p1_guest.zig -femit-bin=.ci-tmp/p1_guest.wasm
+          cmp -n 8 <(printf '\x00asm\x0d\x00\x01\x00') .ci-tmp/p1_guest.wasm
+          wasmtime run .ci-tmp/p1_guest.wasm
