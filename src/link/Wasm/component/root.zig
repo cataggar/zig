@@ -254,6 +254,95 @@ fn collectLiveMethodsForCore(
     };
 }
 
+fn parseQualifiedInterfaceRef(qualified: []const u8) ?wit.ast.InterfaceRef {
+    const slash = std.mem.indexOfScalar(u8, qualified, '/') orelse return null;
+    const pkg_part = qualified[0..slash];
+    const colon = std.mem.indexOfScalar(u8, pkg_part, ':') orelse return null;
+    const ns = pkg_part[0..colon];
+    const pkg_name = pkg_part[colon + 1 ..];
+    const rest = qualified[slash + 1 ..];
+    if (std.mem.indexOfScalar(u8, rest, '@')) |at| {
+        return .{
+            .package = .{ .namespace = ns, .name = pkg_name, .version = rest[at + 1 ..] },
+            .name = rest[0..at],
+        };
+    }
+    return .{
+        .package = .{ .namespace = ns, .name = pkg_name, .version = null },
+        .name = rest,
+    };
+}
+
+fn encodeWorldForCore(
+    arena: Allocator,
+    wit_source: []const u8,
+    world_name: []const u8,
+    core_iface: *const adapter.core_imports.CoreInterface,
+) ![]u8 {
+    var wasi_imports: std.ArrayList([]const u8) = .empty;
+    for (core_iface.imports) |imp| {
+        if (std.mem.startsWith(u8, imp.module_name, "wasi:")) {
+            try appendUniqueString(arena, &wasi_imports, imp.module_name);
+        }
+    }
+    if (wasi_imports.items.len == 0) {
+        return encodeWorldFromSource(arena, wit_source, world_name);
+    }
+
+    const doc = wit.parser.parse(arena, wit_source, null) catch {
+        return encodeWorldFromSource(arena, wit_source, world_name);
+    };
+    const short_target = shortWorldName(world_name);
+    var found_world_idx: ?usize = null;
+    for (doc.items, 0..) |item, i| {
+        if (item == .world and
+            (std.mem.eql(u8, item.world.name, world_name) or
+                std.mem.eql(u8, item.world.name, short_target)))
+        {
+            found_world_idx = i;
+            break;
+        }
+    }
+    const world_idx = found_world_idx orelse {
+        return encodeWorldFromSource(arena, wit_source, world_name);
+    };
+
+    const orig_world = doc.items[world_idx].world;
+    var new_world_items: std.ArrayList(wit.ast.WorldItem) = .empty;
+    try new_world_items.appendSlice(arena, orig_world.items);
+
+    var added_any = false;
+    for (wasi_imports.items) |mod_name| {
+        const qref = parseQualifiedInterfaceRef(mod_name) orelse continue;
+        try new_world_items.append(arena, .{
+            .import = .{ .interface_ref = .{ .ref = qref } },
+        });
+        added_any = true;
+    }
+    if (!added_any) {
+        return encodeWorldFromSource(arena, wit_source, world_name);
+    }
+
+    const mutable_items = try arena.dupe(wit.ast.TopLevelItem, doc.items);
+    mutable_items[world_idx] = .{
+        .world = .{
+            .docs = orig_world.docs,
+            .name = orig_world.name,
+            .items = try new_world_items.toOwnedSlice(arena),
+        },
+    };
+    const augmented_doc: wit.ast.Document = .{
+        .package = doc.package,
+        .items = mutable_items,
+    };
+    const resolver = wit.resolver.finishWithEmbedded(arena, augmented_doc, &.{}) catch {
+        return encodeWorldFromSource(arena, wit_source, world_name);
+    };
+    return encodeWorldFromResolver(arena, resolver, world_name) catch {
+        return encodeWorldFromSource(arena, wit_source, world_name);
+    };
+}
+
 fn pruneEncodedWorldForCore(
     arena: Allocator,
     raw_payload: []const u8,
@@ -355,7 +444,7 @@ pub fn linkComponent(
             .reactor => .{ bundled_wit.cli_imports, "imports" },
         };
 
-        const raw_payload = try encodeWorldFromSource(ar, wit_src, world_name);
+        const raw_payload = try encodeWorldForCore(ar, wit_src, world_name, core_iface);
         const final_payload = pruneEncodedWorldForCore(ar, raw_payload, core_iface);
         const section_name = try std.fmt.allocPrint(ar, "component-type:{s}", .{shortWorldName(world_name)});
         working_core = try embedCustomSection(ar, core_wasm, section_name, final_payload);
@@ -625,7 +714,52 @@ test "linkComponent: pure P2 command, custom WIT reactor, and preview1 fallback"
     defer testing.allocator.free(adder_comp);
     try testing.expectEqualSlices(u8, "\x00asm\x0d\x00\x01\x00", adder_comp[0..8]);
 
-    // 3. Preview1 command fallback via `linkComponent`.
+    // 3. Custom WIT world with top-level `export add: func(a: s32, b: s32) -> s32;`
+    //    where the core module also imports `wasi:io/poll@0.2.6#[resource-drop]pollable`
+    //    (e.g. from Zig's Debug panic handler). Exercises `encodeWorldForCore`
+    //    auto-importing `wasi:*` interfaces into custom worlds.
+    const top_func_wit =
+        \\package example:math@0.1.0;
+        \\
+        \\world adder {
+        \\  export add: func(a: s32, b: s32) -> s32;
+        \\}
+    ;
+    const top_func_core = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        // type section: 2 types: 0 = (i32) -> (), 1 = (i32, i32) -> i32
+        0x01, 0x0b, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
+        0x02, 0x7f, 0x7f, 0x01, 0x7f,
+        // import section: 1 import: "wasi:io/poll@0.2.6" "[resource-drop]pollable" (func type 0)
+        0x02, 46,   0x01,
+        18,   'w',  'a',  's',  'i',  ':',  'i',  'o',
+        '/',  'p',  'o',  'l',  'l',  '@',  '0',  '.',
+        '2',  '.',  '6',  23,   '[',  'r',  'e',  's',
+        'o',  'u',  'r',  'c',  'e',  '-',  'd',  'r',
+        'o',  'p',  ']',  'p',  'o',  'l',  'l',  'a',
+        'b',  'l',  'e',  0x00, 0x00,
+        // function section: 1 defined func (type 1)
+        0x03, 0x02, 0x01,
+        0x01,
+        // memory section: 1 memory (min 1 page)
+        0x05, 0x03, 0x01, 0x00, 0x01,
+        // export section: "memory" (mem 0) + "add" (func 1)
+        0x07, 16,
+        0x02, 6,    'm',  'e',  'm',  'o',  'r',  'y',
+        0x02, 0x00, 3,    'a',  'd',  'd',  0x00, 0x01,
+        // code section: local.get 0; local.get 1; i32.add; end
+        0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20,
+        0x01, 0x6a, 0x0b,
+    };
+    const top_func_comp = try linkComponent(testing.allocator, &top_func_core, .{
+        .exec_model = .reactor,
+        .wit_source = top_func_wit,
+        .wit_world = "adder",
+    });
+    defer testing.allocator.free(top_func_comp);
+    try testing.expectEqualSlices(u8, "\x00asm\x0d\x00\x01\x00", top_func_comp[0..8]);
+
+    // 4. Preview1 command fallback via `linkComponent`.
     const p1_core = [_]u8{
         0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
         0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
