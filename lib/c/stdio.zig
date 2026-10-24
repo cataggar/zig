@@ -209,6 +209,9 @@ inline fn cVaArg(ap: *VaList, comptime T: type) T {
         va.overflow_arg_area = @ptrFromInt(aligned + 16);
         return v;
     }
+    if (builtin.cpu.arch == .riscv32 and @sizeOf(T) > 8) {
+        return @cVaArg(ap, *align(1) const T).*;
+    }
     return @cVaArg(ap, T);
 }
 
@@ -1657,13 +1660,19 @@ fn fmt_fp(f: ?*FILE, y_in: c_longdouble, w: c_int, p_in: c_int, fl_in: c_uint, t
         pl = 0;
     }
 
-    if (!std.math.isFinite(y)) {
+    const is_unnormal_f80 = @typeInfo(c_longdouble).float.bits == 80 and blk: {
+        const ux: u80 = @bitCast(y);
+        const exp: u16 = @truncate((ux >> 64) & 0x7fff);
+        const msb: u1 = @truncate(ux >> 63);
+        break :blk exp != 0 and msb == 0;
+    };
+    if (!std.math.isFinite(y) or is_unnormal_f80) {
         const lower_inf: [*]const u8 = "inf";
         const upper_inf: [*]const u8 = "INF";
         const lower_nan: [*]const u8 = "nan";
         const upper_nan: [*]const u8 = "NAN";
         var sptr: [*]const u8 = if ((t & 32) != 0) lower_inf else upper_inf;
-        if (std.math.isNan(y)) sptr = if ((t & 32) != 0) lower_nan else upper_nan;
+        if (std.math.isNan(y) or is_unnormal_f80) sptr = if ((t & 32) != 0) lower_nan else upper_nan;
         pf_pad(f, ' ', w, 3 + pl, fl & ~ZERO_PAD_BIT);
         pf_out(f, prefix, @intCast(pl));
         pf_out(f, sptr, 3);

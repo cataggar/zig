@@ -890,7 +890,7 @@ fn __wasilibc_open_nomode(path: [*:0]const u8, oflag: c_int) callconv(.c) c_int 
     return __wasilibc_nocwd_openat_nomode(dirfd, relative_path, oflag);
 }
 
-fn openImpl(path: [*:0]const u8, oflag: c_int) callconv(.c) c_int {
+fn openImpl(path: [*:0]const u8, oflag: c_int, _: c_int) callconv(.c) c_int {
     return __wasilibc_open_nomode(path, oflag);
 }
 
@@ -1141,7 +1141,7 @@ fn wasilibcRenameNewatImpl(from: [*:0]const u8, todirfd: c_int, to: [*:0]const u
 // =========================================================================
 fn openatImpl(dirfd: c_int, pathname: [*:0]const u8, flags: c_int, mode: c_int) callconv(.c) c_int {
     _ = mode;
-    if (dirfd == AT_FDCWD or pathname[0] == '/') return openImpl(pathname, flags);
+    if (dirfd == AT_FDCWD or pathname[0] == '/') return __wasilibc_open_nomode(pathname, flags);
     return __wasilibc_nocwd_openat_nomode(dirfd, pathname, flags);
 }
 
@@ -1270,7 +1270,7 @@ fn wasilibcDeinitializeEnvironImpl() callconv(.c) void {
 }
 
 fn wasilibcMaybeReinitializeEnvironEagerlyImpl() callconv(.c) void {
-    // Weak version: does nothing. Overridden by environ.c equivalent.
+    wasilibcInitializeEnvironImpl();
 }
 
 fn wasilibcInitializeEnvironEagerly() callconv(.c) void {
@@ -1289,6 +1289,7 @@ extern fn __main_argc_argv(argc: usize, argv: [*:null]?[*:0]u8) c_int;
 fn wasmCallDtorsImpl() callconv(.c) void {}
 
 fn mainVoidImpl() callconv(.c) c_int {
+    wasilibcEnsureEnvironImpl();
     var argv_buf_size: usize = 0;
     var argc: usize = 0;
     var err = wasi.args_sizes_get(&argc, &argv_buf_size);
@@ -1693,5 +1694,11 @@ comptime {
         @export(&__wasilibc_environ, .{ .name = "_environ", .linkage = .weak, .visibility = .hidden });
         @export(&__wasilibc_environ, .{ .name = "environ", .linkage = .weak, .visibility = .hidden });
         @export(&wasilibc_cwd, .{ .name = "__wasilibc_cwd", .linkage = .weak, .visibility = .hidden });
+
+        asm (
+            \\.section .init_array.50,"",@
+            \\.p2align 2, 0x0
+            \\.int32 __wasilibc_initialize_environ_eagerly
+        );
     }
 }

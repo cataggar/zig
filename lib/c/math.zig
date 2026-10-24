@@ -1012,7 +1012,6 @@ comptime {
         symbol(&cbrtf, "cbrtf");
         symbol(&cbrtl_, "cbrtl");
         symbol(&cosh, "cosh");
-        symbol(&cosl, "cosl");
         symbol(&erfl, "erfl");
         symbol(&erfcl, "erfcl");
         symbol(&exp10, "exp10");
@@ -1069,12 +1068,9 @@ comptime {
         symbol(&pow10, "pow10");
         symbol(&pow10f, "pow10f");
         symbol(&pow10l, "pow10l");
-        symbol(&sincosl, "sincosl");
         symbol(&sinh_, "sinh");
         symbol(&sinhf, "sinhf");
-        symbol(&sinl, "sinl");
         symbol(&tanh, "tanh");
-        symbol(&tanl, "tanl");
         symbol(&tgamma, "tgamma");
         symbol(&tgammaf, "tgammaf");
         symbol(&tgammal, "tgammal");
@@ -1183,6 +1179,7 @@ comptime {
 
 fn acosWithFlags(comptime T: type, x: T) T {
     @setFloatMode(.strict);
+    if (math.isNan(x)) return x + x;
     if (@abs(x) > 1.0) {
         std.math.raiseInvalid();
         return math.nan(T);
@@ -1544,14 +1541,6 @@ fn asinl(x: c_longdouble) callconv(.c) c_longdouble {
 
 fn atanhf(x: f32) callconv(.c) f32 {
     return atanhGeneric(f32, x);
-}
-
-fn cosl(x: c_longdouble) callconv(.c) c_longdouble {
-    return switch (@typeInfo(c_longdouble).float.bits) {
-        64 => math.cos(@as(f64, @bitCast(x))),
-        80 => x87Cos(x),
-        else => math.cos(x),
-    };
 }
 
 fn expm1(x_: f64) callconv(.c) f64 {
@@ -2032,11 +2021,6 @@ fn significandf(x: f32) callconv(.c) f32 {
     return math.scalbn(x, if (e == std.math.minInt(i32)) 0 else -e);
 }
 
-fn sincosl(x: c_longdouble, sin_ptr: *c_longdouble, cos_ptr: *c_longdouble) callconv(.c) void {
-    sin_ptr.* = sinl(x);
-    cos_ptr.* = cosl(x);
-}
-
 fn sinhf(x: f32) callconv(.c) f32 {
     @setFloatMode(.strict);
     const ux: u32 = @bitCast(x);
@@ -2070,132 +2054,6 @@ fn expo2f(x: f32, sign: f32) f32 {
     const kln2: f32 = 0x1.45c778p+7;
     const scale: f32 = @bitCast(@as(u32, (0x7f + k / 2) << 23));
     return math.exp(x - kln2) * (sign * scale) * scale;
-}
-
-fn sinl(x: c_longdouble) callconv(.c) c_longdouble {
-    return switch (@typeInfo(c_longdouble).float.bits) {
-        64 => math.sin(@as(f64, @bitCast(x))),
-        80 => x87Sin(x),
-        else => math.sin(x),
-    };
-}
-
-fn tanl(x: c_longdouble) callconv(.c) c_longdouble {
-    return switch (@typeInfo(c_longdouble).float.bits) {
-        64 => math.tan(@as(f64, @bitCast(x))),
-        80 => x87Tan(x),
-        else => math.tan(x),
-    };
-}
-
-fn x87Cos(x: c_longdouble) c_longdouble {
-    if (math.isNan(x)) return x + x;
-    if (!math.isFinite(x)) {
-        std.math.raiseInvalid();
-        return math.nan(c_longdouble);
-    }
-    return switch (builtin.target.cpu.arch) {
-        .x86, .x86_64 => blk: {
-            var input = x;
-            var r: c_longdouble = undefined;
-            if (comptime builtin.target.cpu.arch == .x86_64) {
-                asm volatile (
-                    \\fldt (%%rax)
-                    \\fcos
-                    \\fstpt (%%rcx)
-                    :
-                    : [in] "{rax}" (&input),
-                      [out] "{rcx}" (&r),
-                    : .{ .memory = true, .st0 = true });
-            } else {
-                asm volatile (
-                    \\fldt (%%eax)
-                    \\fcos
-                    \\fstpt (%%ecx)
-                    :
-                    : [in] "{eax}" (&input),
-                      [out] "{ecx}" (&r),
-                    : .{ .memory = true, .st0 = true });
-            }
-            break :blk r;
-        },
-        else => math.cos(x),
-    };
-}
-
-fn x87Sin(x: c_longdouble) c_longdouble {
-    if (math.isNan(x)) return x + x;
-    if (!math.isFinite(x)) {
-        std.math.raiseInvalid();
-        return math.nan(c_longdouble);
-    }
-    return switch (builtin.target.cpu.arch) {
-        .x86, .x86_64 => blk: {
-            var input = x;
-            var r: c_longdouble = undefined;
-            if (comptime builtin.target.cpu.arch == .x86_64) {
-                asm volatile (
-                    \\fldt (%%rax)
-                    \\fsin
-                    \\fstpt (%%rcx)
-                    :
-                    : [in] "{rax}" (&input),
-                      [out] "{rcx}" (&r),
-                    : .{ .memory = true, .st0 = true });
-            } else {
-                asm volatile (
-                    \\fldt (%%eax)
-                    \\fsin
-                    \\fstpt (%%ecx)
-                    :
-                    : [in] "{eax}" (&input),
-                      [out] "{ecx}" (&r),
-                    : .{ .memory = true, .st0 = true });
-            }
-            break :blk r;
-        },
-        else => math.sin(x),
-    };
-}
-
-fn x87Tan(x: c_longdouble) c_longdouble {
-    if (math.isNan(x)) return x + x;
-    if (!math.isFinite(x)) {
-        std.math.raiseInvalid();
-        return math.nan(c_longdouble);
-    }
-    return switch (builtin.target.cpu.arch) {
-        .x86, .x86_64 => blk: {
-            var input = x;
-            var r: c_longdouble = undefined;
-            var one: c_longdouble = undefined;
-            if (comptime builtin.target.cpu.arch == .x86_64) {
-                asm volatile (
-                    \\fldt (%%rax)
-                    \\fptan
-                    \\fstpt (%%rdx)
-                    \\fstpt (%%rcx)
-                    :
-                    : [in] "{rax}" (&input),
-                      [out] "{rcx}" (&r),
-                      [one] "{rdx}" (&one),
-                    : .{ .memory = true, .st0 = true, .st1 = true });
-            } else {
-                asm volatile (
-                    \\fldt (%%eax)
-                    \\fptan
-                    \\fstpt (%%edx)
-                    \\fstpt (%%ecx)
-                    :
-                    : [in] "{eax}" (&input),
-                      [out] "{ecx}" (&r),
-                      [one] "{edx}" (&one),
-                    : .{ .memory = true, .st0 = true, .st1 = true });
-            }
-            break :blk r;
-        },
-        else => math.tan(x),
-    };
 }
 
 fn exp2l_ld80(x: f80) f80 {
@@ -2584,7 +2442,36 @@ fn powf(x: f32, y: f32) callconv(.c) f32 {
 }
 
 fn asinf(x: f32) callconv(.c) f32 {
-    return math.asin(x);
+    @setFloatMode(.strict);
+    const pio2: f64 = 1.570796326794896558e+00;
+    const pS0: f32 = 1.6666586697e-01;
+    const pS1: f32 = -4.2743422091e-02;
+    const pS2: f32 = -8.6563630030e-03;
+    const qS1: f32 = -7.0662963390e-01;
+
+    const hx: u32 = @bitCast(x);
+    const ix = hx & 0x7fff_ffff;
+    if (ix >= 0x3f80_0000) {
+        if (ix == 0x3f80_0000) {
+            return @floatCast(@as(f64, @floatCast(x)) * pio2 + 0x1.0p-120);
+        }
+        return 0.0 / (x - x);
+    }
+    if (ix < 0x3f00_0000) {
+        if (ix < 0x3980_0000 and ix >= 0x0080_0000) {
+            forceEval(f32, x + 0x1p120);
+            return x;
+        }
+        const xv = fpBarrierValue(f32, x);
+        const z = xv * xv;
+        const r = z * (pS0 + z * (pS1 + z * pS2)) / (1.0 + z * qS1);
+        return xv + xv * r;
+    }
+    const z = (1.0 - @abs(x)) * 0.5;
+    const s: f64 = @floatCast(@sqrt(z));
+    const r = z * (pS0 + z * (pS1 + z * pS2)) / (1.0 + z * qS1);
+    const res: f32 = @floatCast(pio2 - 2.0 * (s + s * @as(f64, @floatCast(r))));
+    return if (hx >> 31 != 0) -res else res;
 }
 
 fn fdim_(x: f64, y: f64) callconv(.c) f64 {
@@ -3169,6 +3056,12 @@ fn sinh_(x_: f64) callconv(.c) f64 {
         if (w < 0x3ff00000) {
             if (w < 0x3ff00000 - (26 << 20))
                 return x_;
+            if (w >= 0x3ff00000 - (24 << 20)) {
+                mem.doNotOptimizeAway(t);
+                const tf: f128 = expm1_wide(f128, @floatCast(absx));
+                const hf: f128 = @floatCast(h);
+                return @floatCast(hf * (2.0 * tf - tf * tf / (tf + 1.0)));
+            }
             return h * (2.0 * t - t * t / (t + 1.0));
         }
         return h * (t + t / (t + 1.0));
@@ -5460,7 +5353,7 @@ fn tgammal80(x_: f80) f80 {
                     p += 1.0;
                     z = q - p;
                 }
-                z = q * @as(f80, @floatCast(sinl(@floatCast(PIL * z))));
+                z = q * math.sin(PIL * z);
                 z = @abs(z) * stirf80(q);
                 z = PIL / z;
             }

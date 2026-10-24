@@ -158,10 +158,10 @@ jobs:
             brew install zstd || true
           fi
           "$ZIG" build \
+            --zig-lib=lib \
             --prefix "$PKG" \
             --search-prefix "$LLVM_PREFIX" \
             $EXTRA_PREFIX \
-            --zig-lib-dir lib \
             --maxrss 8000000000 \
             -Denable-llvm \
             -Dstatic-llvm \
@@ -181,9 +181,9 @@ jobs:
           $VERSION = "${{ inputs.tag }}"
           $PKG = "zig-${{ matrix.target }}-$VERSION"
           & $env:ZIG build `
+            --zig-lib=lib `
             --prefix $PKG `
             --search-prefix $env:LLVM_PREFIX `
-            --zig-lib-dir lib `
             --maxrss 8000000000 `
             -Denable-llvm `
             -Dstatic-llvm `

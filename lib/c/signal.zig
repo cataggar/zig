@@ -269,6 +269,11 @@ fn castFlags(comptime T: type, flags: c_int) T {
     };
 }
 
+const KernelSigaction = extern struct {
+    ksa: linux.k_sigaction,
+    unused: ?*anyopaque = null,
+};
+
 fn fillKernelSigaction(ksa: *linux.k_sigaction, sa: *const c_sigaction) void {
     ksa.handler = @ptrCast(sa.handler);
     ksa.flags = castFlags(@TypeOf(ksa.flags), sa.flags);
@@ -285,8 +290,8 @@ fn __get_handler_set(set: *sigset_t) callconv(.c) void {
 }
 
 fn __libc_sigaction(sig: c_int, sa: ?*const c_sigaction, old: ?*c_sigaction) callconv(.c) c_int {
-    var ksa: linux.k_sigaction = undefined;
-    var ksa_old: linux.k_sigaction = undefined;
+    var ksa: KernelSigaction = std.mem.zeroes(KernelSigaction);
+    var ksa_old: KernelSigaction = std.mem.zeroes(KernelSigaction);
 
     if (sa) |act| {
         if (handlerValue(act.handler) > 1 and sig > 0 and @as(c_uint, @intCast(sig)) < NSIG) {
@@ -302,7 +307,7 @@ fn __libc_sigaction(sig: c_int, sa: ?*const c_sigaction, old: ?*c_sigaction) cal
                 @atomicStore(c_int, &__eintr_valid_flag, 1, .seq_cst);
             }
         }
-        fillKernelSigaction(&ksa, act);
+        fillKernelSigaction(&ksa.ksa, act);
     }
 
     const ksa_arg = if (sa != null) @intFromPtr(&ksa) else 0;
@@ -311,9 +316,9 @@ fn __libc_sigaction(sig: c_int, sa: ?*const c_sigaction, old: ?*c_sigaction) cal
     const ret = errno(rc);
     if (ret == 0) {
         if (old) |o| {
-            o.handler = @ptrCast(ksa_old.handler);
-            o.flags = @bitCast(@as(c_uint, @truncate(ksa_old.flags)));
-            copyKernelMaskToLibc(&o.mask, &ksa_old.mask);
+            o.handler = @ptrCast(ksa_old.ksa.handler);
+            o.flags = @bitCast(@as(c_uint, @truncate(ksa_old.ksa.flags)));
+            copyKernelMaskToLibc(&o.mask, &ksa_old.ksa.mask);
         }
     }
     return ret;

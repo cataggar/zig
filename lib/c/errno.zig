@@ -18,10 +18,10 @@ comptime {
 
 // ── __errno_location ───────────────────────────────────────────────────
 
-threadlocal var errno_val: c_int = 0;
+const env = @import("env.zig");
 
 fn __errno_location() callconv(.c) *c_int {
-    return &errno_val;
+    return &env.pthread_self_ptr().errno_val;
 }
 
 // ── strerror ───────────────────────────────────────────────────────────
