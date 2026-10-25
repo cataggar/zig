@@ -14,7 +14,7 @@ vector: Vector,
 /// queried and heap-allocated at runtime.
 pub const Vector = switch (native_os) {
     .windows => []const u16, // WTF-16 encoded
-    .wasi, .wasip2 => switch (builtin.link_libc) {
+    .wasi, .wasip2, .wasip3 => switch (builtin.link_libc) {
         false => void,
         true => []const [*:0]const u8,
     },
@@ -26,7 +26,7 @@ pub const Vector = switch (native_os) {
 pub const Iterator = struct {
     const Inner = switch (native_os) {
         .windows => Windows,
-        .wasi, .wasip2 => if (builtin.link_libc) Posix else Wasi,
+        .wasi, .wasip2, .wasip3 => if (builtin.link_libc) Posix else Wasi,
         else => Posix,
     };
 

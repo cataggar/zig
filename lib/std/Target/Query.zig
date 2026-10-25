@@ -770,4 +770,21 @@ test parse {
         defer std.testing.allocator.free(text);
         try std.testing.expectEqualSlices(u8, "wasm32-wasip2", text);
     }
+    {
+        const query = try Query.parse(.{
+            .arch_os_abi = "wasm32-wasip3",
+        });
+        const target = try std.zig.system.resolveTargetQuery(io, query);
+
+        try std.testing.expect(target.cpu.arch == .wasm32);
+        try std.testing.expect(target.os.tag == .wasip3);
+        try std.testing.expect(target.os.tag.isWasi());
+        try std.testing.expect(target.os.version_range.semver.min.major == 0);
+        try std.testing.expect(target.os.version_range.semver.min.minor == 3);
+        try std.testing.expect(target.abi == .none);
+
+        const text = try query.zigTriple(std.testing.allocator);
+        defer std.testing.allocator.free(text);
+        try std.testing.expectEqualSlices(u8, "wasm32-wasip3", text);
+    }
 }

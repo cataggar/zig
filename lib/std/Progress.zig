@@ -554,12 +554,12 @@ var default_draw_buffer: [4096]u8 = undefined;
 var debug_start_trace = std.debug.Trace.init;
 
 pub const have_ipc = switch (builtin.os.tag) {
-    .wasi, .wasip2, .freestanding => false,
+    .wasi, .wasip2, .wasip3, .freestanding => false,
     else => true,
 };
 
 const noop_impl = builtin.single_threaded or switch (builtin.os.tag) {
-    .wasi, .wasip2, .freestanding => true,
+    .wasi, .wasip2, .wasip3, .freestanding => true,
     else => false,
 } or switch (builtin.zig_backend) {
     else => false,

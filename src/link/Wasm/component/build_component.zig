@@ -318,7 +318,7 @@ fn rewriteSigForInstanceBody(
             break :n .{ .named = dst };
         },
     };
-    return .{ .params = params, .results = results };
+    return .{ .params = params, .results = results, .is_async = sig.is_async };
 }
 
 // ── Resource built-in intrinsic imports (cataggar/wabt#248) ─────────
@@ -914,7 +914,7 @@ fn parseStreamCancelField(field: []const u8) ?StreamCancelField {
 /// rebase to resolve.
 fn instProvidesType(decls: []const ctypes.Decl) bool {
     for (decls) |d| switch (d) {
-        .@"export" => |e| if (e.desc == .type) return true,
+        .@"export" => |e| if (e.desc == .type and e.desc.type == .eq) return true,
         else => {},
     };
     return false;
@@ -1137,10 +1137,14 @@ fn coreNeedsAsyncMemOpShim(ar: std.mem.Allocator, core_bytes: []const u8) bool {
         for (oi.interface.imports) |im| {
             if (im.kind != .func) continue;
             if (std.mem.startsWith(u8, im.module_name, "[stream]") and
-                (std.mem.eql(u8, im.field_name, "read") or std.mem.eql(u8, im.field_name, "write")))
+                (std.mem.eql(u8, im.field_name, "read") or
+                    std.mem.eql(u8, im.field_name, "write") or
+                    std.mem.indexOfScalar(u8, im.module_name, '#') != null))
                 return true;
             if (std.mem.startsWith(u8, im.module_name, "[future]") and
-                (std.mem.eql(u8, im.field_name, "read") or std.mem.eql(u8, im.field_name, "write")))
+                (std.mem.eql(u8, im.field_name, "read") or
+                    std.mem.eql(u8, im.field_name, "write") or
+                    std.mem.indexOfScalar(u8, im.module_name, '#') != null))
                 return true;
             if (std.mem.startsWith(u8, im.module_name, "[waitable-set]") and
                 (std.mem.eql(u8, im.field_name, "wait") or std.mem.eql(u8, im.field_name, "poll")))
@@ -1195,9 +1199,13 @@ pub fn buildComponent(alloc: std.mem.Allocator, core_bytes: []const u8) ![]u8 {
         ext_slots: []const metadata_decode.TypeSlot,
         inst_decls: []const ctypes.Decl,
     };
+    var any_func_needs_opts = false;
     var import_shapes = std.ArrayList(ImportShape).empty;
     for (decoded.externs) |ext| {
         if (ext.is_export) continue;
+        if (instProvidesType(ext.inst_decls)) {
+            any_func_needs_opts = true;
+        }
         var rs = std.ArrayList([]const u8).empty;
         for (ext.type_slots) |slot| switch (slot) {
             .sub_resource => |name| try rs.append(ar, name),
@@ -1226,13 +1234,16 @@ pub fn buildComponent(alloc: std.mem.Allocator, core_bytes: []const u8) ![]u8 {
     // reproducer's wire output bit-identical, and avoiding the
     // forward-reference cycle on `(memory main_inst …)` aliases
     // that the shim/fixup pattern exists to break.
-    var any_func_needs_opts = false;
     for (import_shapes.items) |shape| {
         const resolver = wabt.component.adapter.abi.TypeResolver{
             .inst_decls = shape.inst_decls,
             .world_decls = decoded.world_decls,
         };
         for (shape.funcs) |fn_ref| {
+            if (fn_ref.sig.is_async) {
+                any_func_needs_opts = true;
+                break;
+            }
             const ftr = wabt.component.adapter.abi.FuncTypeRef{
                 .func = fn_ref.sig,
                 .resolver = resolver,
@@ -1253,6 +1264,13 @@ pub fn buildComponent(alloc: std.mem.Allocator, core_bytes: []const u8) ![]u8 {
     if (!any_func_needs_opts) {
         outer: for (decoded.externs) |ext| {
             if (!ext.is_export) continue;
+            for (ext.type_slots) |ts| switch (ts) {
+                .export_eq => |e| if (e.target < ext.type_slots.len and ext.type_slots[e.target] == .typedef) {
+                    any_func_needs_opts = true;
+                    break :outer;
+                },
+                else => {},
+            };
             const resolver = wabt.component.adapter.abi.TypeResolver{
                 .inst_decls = ext.inst_decls,
                 .world_decls = decoded.world_decls,
@@ -1661,7 +1679,9 @@ pub fn buildComponent(alloc: std.mem.Allocator, core_bytes: []const u8) ![]u8 {
         if (core_imports.extract(ar, stripped_core)) |oi| {
             for (oi.interface.imports) |im| {
                 if (im.kind != .func) continue;
-                if (!isAsyncIntrinsicModule(im.module_name)) continue;
+                if (!isAsyncIntrinsicModule(im.module_name) and
+                    !(std.mem.startsWith(u8, im.module_name, "[export]") and
+                        std.mem.startsWith(u8, im.field_name, "[task-return]"))) continue;
                 var gi: ?usize = null;
                 for (groups.items, 0..) |grp, k| {
                     if (std.mem.eql(u8, grp.module, im.module_name)) {
@@ -1686,39 +1706,46 @@ pub fn buildComponent(alloc: std.mem.Allocator, core_bytes: []const u8) ![]u8 {
         for (groups.items) |grp| {
             var bundle_exports = std.ArrayList(ctypes.CoreInlineExport).empty;
 
-            if (std.mem.startsWith(u8, grp.module, "[task-return]")) {
-                // `[task-return]<iface>#<fn>` → result types of that export.
-                const export_ref = grp.module["[task-return]".len..];
-                const hash = std.mem.lastIndexOfScalar(u8, export_ref, '#') orelse
-                    return error.UnsupportedAsyncIntrinsic;
-                const iface_name = export_ref[0..hash];
-                const fn_name = export_ref[hash + 1 ..];
+            if (std.mem.startsWith(u8, grp.module, "[task-return]") or
+                std.mem.startsWith(u8, grp.module, "[export]"))
+            {
+                const is_export_mod = std.mem.startsWith(u8, grp.module, "[export]");
                 const ctx = AsyncTypeCtx{ .ar = ar, .types = &types, .order = &order, .comp_type_idx = &comp_type_idx };
-                var results: ctypes.FuncType.ResultList = .none;
-                var found_export = false;
-                find: for (decoded.externs) |ext| {
-                    if (!ext.is_export) continue;
-                    if (!std.mem.eql(u8, ext.qualified_name, iface_name)) continue;
-                    for (ext.funcs) |fn_ref| {
-                        if (!std.mem.eql(u8, fn_ref.name, fn_name)) continue;
-                        results = switch (fn_ref.sig.results) {
-                            .none => .none,
-                            .unnamed => |v| .{ .unnamed = try lift_types.transcribeValType(ar, ctx, ext.type_slots, v) },
-                            .named => |named| n: {
-                                const dst = try ar.alloc(ctypes.NamedValType, named.len);
-                                for (named, 0..) |nv, k| dst[k] = .{
-                                    .name = nv.name,
-                                    .type = try lift_types.transcribeValType(ar, ctx, ext.type_slots, nv.type),
-                                };
-                                break :n .{ .named = dst };
-                            },
-                        };
-                        found_export = true;
-                        break :find;
-                    }
-                }
-                if (!found_export) return error.UnsupportedAsyncIntrinsic;
                 for (grp.fields.items) |field| {
+                    const iface_name: []const u8, const fn_name: []const u8 = if (is_export_mod) blk: {
+                        if (!std.mem.startsWith(u8, field, "[task-return]"))
+                            return error.UnsupportedAsyncIntrinsic;
+                        break :blk .{ grp.module["[export]".len..], field["[task-return]".len..] };
+                    } else blk: {
+                        const export_ref = grp.module["[task-return]".len..];
+                        const hash = std.mem.lastIndexOfScalar(u8, export_ref, '#') orelse
+                            return error.UnsupportedAsyncIntrinsic;
+                        break :blk .{ export_ref[0..hash], export_ref[hash + 1 ..] };
+                    };
+                    var results: ctypes.FuncType.ResultList = .none;
+                    var found_export = false;
+                    find: for (decoded.externs) |ext| {
+                        if (!ext.is_export) continue;
+                        if (!std.mem.eql(u8, ext.qualified_name, iface_name)) continue;
+                        for (ext.funcs) |fn_ref| {
+                            if (!std.mem.eql(u8, fn_ref.name, fn_name)) continue;
+                            results = switch (fn_ref.sig.results) {
+                                .none => .none,
+                                .unnamed => |v| .{ .unnamed = try lift_types.transcribeValType(ar, ctx, ext.type_slots, v) },
+                                .named => |named| n: {
+                                    const dst = try ar.alloc(ctypes.NamedValType, named.len);
+                                    for (named, 0..) |nv, k| dst[k] = .{
+                                        .name = nv.name,
+                                        .type = try lift_types.transcribeValType(ar, ctx, ext.type_slots, nv.type),
+                                    };
+                                    break :n .{ .named = dst };
+                                },
+                            };
+                            found_export = true;
+                            break :find;
+                        }
+                    }
+                    if (!found_export) return error.UnsupportedAsyncIntrinsic;
                     try canons.append(ar, .{ .task_return = .{ .results = results, .opts = &.{} } });
                     try order.append(ar, .{ .kind = .canon, .start = @intCast(canons.items.len - 1), .count = 1 });
                     try bundle_exports.append(ar, .{ .name = field, .sort_idx = .{ .sort = .func, .idx = core_func_idx } });
@@ -2490,12 +2517,22 @@ fn buildComponentShimFixup(
     {
         var expected = std.ArrayList(ExpectedImportSig).empty;
         for (import_shapes.items, 0..) |shape, i| {
-            for (wired_by_shape[i]) |w| try expected.append(ar, .{
-                .module = shape.qualified_name,
-                .field = w.fn_ref.name,
-                .params = w.slot_params,
-                .results = w.slot_results,
-            });
+            for (wired_by_shape[i]) |w| {
+                try expected.append(ar, .{
+                    .module = shape.qualified_name,
+                    .field = w.fn_ref.name,
+                    .params = w.slot_params,
+                    .results = w.slot_results,
+                });
+                if (w.fn_ref.sig.is_async) {
+                    try expected.append(ar, .{
+                        .module = shape.qualified_name,
+                        .field = try std.fmt.allocPrint(ar, "[async-lower]{s}", .{w.fn_ref.name}),
+                        .params = w.slot_params,
+                        .results = w.slot_results,
+                    });
+                }
+            }
         }
         try validateGuestImportSigs(alloc, stripped_core, expected.items);
     }
@@ -2524,6 +2561,8 @@ fn buildComponentShimFixup(
         is_mem_op: bool,
         mem_op_slot: u32 = 0,
         satisfy_core_idx: u32 = 0,
+        export_ref: []const u8 = "",
+        results: ctypes.FuncType.ResultList = .none,
     };
     const AsyncFamily = enum { task_return, stream, future, error_context, waitable_set, waitable, backpressure, task, subtask, context, yield };
     const AsyncGroup = struct {
@@ -2552,7 +2591,9 @@ fn buildComponentShimFixup(
         var modfields = std.ArrayList(std.ArrayList([]const u8)).empty;
         for (oi.interface.imports) |im| {
             if (im.kind != .func) continue;
-            if (!isAsyncIntrinsicModule(im.module_name)) continue;
+            if (!isAsyncIntrinsicModule(im.module_name) and
+                !(std.mem.startsWith(u8, im.module_name, "[export]") and
+                    std.mem.startsWith(u8, im.field_name, "[task-return]"))) continue;
             var gi: ?usize = null;
             for (modnames.items, 0..) |m, k| if (std.mem.eql(u8, m, im.module_name)) {
                 gi = k;
@@ -2568,15 +2609,24 @@ fn buildComponentShimFixup(
         for (modnames.items, 0..) |module, mi| {
             const fsrc = modfields.items[mi].items;
             const fields = try ar.alloc(AsyncField, fsrc.len);
-            if (std.mem.startsWith(u8, module, "[task-return]")) {
-                const export_ref = module["[task-return]".len..];
+            if (std.mem.startsWith(u8, module, "[task-return]") or
+                std.mem.startsWith(u8, module, "[export]"))
+            {
                 // #280: a result whose lowering touches memory (string/list,
                 // e.g. http's `result<response, error-code>`) makes task.return
                 // a mem-op needing `(memory)` — routed via the shim/fixup like
                 // stream.write. A flat result (e.g. wasi:cli/run) stays no-mem.
-                const needs_mem = taskReturnNeedsMemory(decoded.externs, decoded.world_decls, export_ref);
                 for (fsrc, 0..) |f, k| {
-                    fields[k] = .{ .name = f, .is_mem_op = needs_mem };
+                    const export_ref = if (std.mem.startsWith(u8, module, "[export]")) blk: {
+                        if (!std.mem.startsWith(u8, f, "[task-return]"))
+                            return error.UnsupportedAsyncIntrinsic;
+                        break :blk try std.fmt.allocPrint(ar, "{s}#{s}", .{
+                            module["[export]".len..],
+                            f["[task-return]".len..],
+                        });
+                    } else module["[task-return]".len..];
+                    const needs_mem = taskReturnNeedsMemory(decoded.externs, decoded.world_decls, export_ref);
+                    fields[k] = .{ .name = f, .is_mem_op = needs_mem, .export_ref = export_ref };
                     if (needs_mem) {
                         fields[k].mem_op_slot = @intCast(async_memop_slots.items.len);
                         // The shim slot's core sig is the task.return import's
@@ -2600,7 +2650,7 @@ fn buildComponentShimFixup(
                     .module = module,
                     .family = .task_return,
                     .elem = .u8,
-                    .export_ref = export_ref,
+                    .export_ref = if (fields.len > 0) fields[0].export_ref else "",
                     .fields = fields,
                 });
             } else if (std.mem.startsWith(u8, module, "[stream]")) {
@@ -3134,6 +3184,25 @@ fn buildComponentShimFixup(
             return self.type_owner.get(name);
         }
 
+        pub fn lookupType(self: @This(), slot: u32) ?u32 {
+            for (self.ext_slots) |ts| switch (ts) {
+                .export_eq => |e| if (e.target == slot) {
+                    return self.local_named_idx.get(e.name);
+                },
+                else => {},
+            };
+            return null;
+        }
+
+        pub fn cacheType(self: @This(), slot: u32, idx: u32) lift_types.Error!void {
+            for (self.ext_slots) |ts| switch (ts) {
+                .export_eq => |e| if (e.target == slot) {
+                    try self.local_named_idx.put(self.ar, e.name, idx);
+                },
+                else => {},
+            };
+        }
+
         /// Hoist a locally-defined named value type — e.g. a `record`
         /// declared in this exported interface and referenced by name (as in
         /// `option<pet>`). The interface body exports it as
@@ -3556,59 +3625,59 @@ fn buildComponentShimFixup(
                 }
             },
             .task_return => {
-                const export_ref = grp.export_ref;
-                const hash = std.mem.lastIndexOfScalar(u8, export_ref, '#') orelse
-                    return error.UnsupportedAsyncIntrinsic;
-                const iface_name = export_ref[0..hash];
-                const fn_name = export_ref[hash + 1 ..];
-                var results: ctypes.FuncType.ResultList = .none;
-                var found_export = false;
-                find2: for (decoded.externs) |ext| {
-                    if (!ext.is_export) continue;
-                    if (!std.mem.eql(u8, ext.qualified_name, iface_name)) continue;
-                    // #280: resource-aware so a `result<response, error-code>`
-                    // (handler.handle) aliases the `response` resource instead
-                    // of leaking a metadata-local slot index.
-                    const er = HandleResolver{
-                        .ar = ar,
-                        .resource_iface = ext.qualified_name,
-                        .world_decls = decoded.world_decls,
-                        .ext_slots = ext.type_slots,
-                        .types = &types,
-                        .aliases = &aliases,
-                        .resources = &resource_registry,
-                        .import_inst_idx_for = &import_inst_idx_for,
-                        .resource_alias_idx = &resource_alias_idx,
-                        .type_owner = &type_owner,
-                        .type_alias_idx = &type_alias_idx,
-                        .local_named_idx = &local_named_idx,
-                        .exported_resource_type_idx = &exported_resource_type_idx,
-                        .own_handle_idx = &own_handle_idx,
-                        .borrow_handle_idx = &borrow_handle_idx,
-                        .comp_type_idx = &comp_type_idx,
-                        .order = &order,
-                    };
-                    for (ext.funcs) |fn_ref| {
-                        if (!std.mem.eql(u8, fn_ref.name, fn_name)) continue;
-                        results = switch (fn_ref.sig.results) {
-                            .none => .none,
-                            .unnamed => |v| .{ .unnamed = try er.rewriteValType(v) },
-                            .named => |named| nb: {
-                                const dst = try ar.alloc(ctypes.NamedValType, named.len);
-                                for (named, 0..) |nv, kk| dst[kk] = .{
-                                    .name = nv.name,
-                                    .type = try er.rewriteValType(nv.type),
-                                };
-                                break :nb .{ .named = dst };
-                            },
-                        };
-                        found_export = true;
-                        break :find2;
-                    }
-                }
-                if (!found_export) return error.UnsupportedAsyncIntrinsic;
-                grp.results = results;
                 for (grp.fields) |*field| {
+                    const export_ref = field.export_ref;
+                    const hash = std.mem.lastIndexOfScalar(u8, export_ref, '#') orelse
+                        return error.UnsupportedAsyncIntrinsic;
+                    const iface_name = export_ref[0..hash];
+                    const fn_name = export_ref[hash + 1 ..];
+                    var results: ctypes.FuncType.ResultList = .none;
+                    var found_export = false;
+                    find2: for (decoded.externs) |ext| {
+                        if (!ext.is_export) continue;
+                        if (!std.mem.eql(u8, ext.qualified_name, iface_name)) continue;
+                        // #280: resource-aware so a `result<response, error-code>`
+                        // (handler.handle) aliases the `response` resource instead
+                        // of leaking a metadata-local slot index.
+                        const er = HandleResolver{
+                            .ar = ar,
+                            .resource_iface = ext.qualified_name,
+                            .world_decls = decoded.world_decls,
+                            .ext_slots = ext.type_slots,
+                            .types = &types,
+                            .aliases = &aliases,
+                            .resources = &resource_registry,
+                            .import_inst_idx_for = &import_inst_idx_for,
+                            .resource_alias_idx = &resource_alias_idx,
+                            .type_owner = &type_owner,
+                            .type_alias_idx = &type_alias_idx,
+                            .local_named_idx = &local_named_idx,
+                            .exported_resource_type_idx = &exported_resource_type_idx,
+                            .own_handle_idx = &own_handle_idx,
+                            .borrow_handle_idx = &borrow_handle_idx,
+                            .comp_type_idx = &comp_type_idx,
+                            .order = &order,
+                        };
+                        for (ext.funcs) |fn_ref| {
+                            if (!std.mem.eql(u8, fn_ref.name, fn_name)) continue;
+                            results = switch (fn_ref.sig.results) {
+                                .none => .none,
+                                .unnamed => |v| .{ .unnamed = try er.rewriteValType(v) },
+                                .named => |named| nb: {
+                                    const dst = try ar.alloc(ctypes.NamedValType, named.len);
+                                    for (named, 0..) |nv, kk| dst[kk] = .{
+                                        .name = nv.name,
+                                        .type = try er.rewriteValType(nv.type),
+                                    };
+                                    break :nb .{ .named = dst };
+                                },
+                            };
+                            found_export = true;
+                            break :find2;
+                        }
+                    }
+                    if (!found_export) return error.UnsupportedAsyncIntrinsic;
+                    field.results = results;
                     if (field.is_mem_op) {
                         // #280: memory-needing task.return → real `(memory)`
                         // canon emitted in the fixup (Phase 4f.2).
@@ -3695,21 +3764,27 @@ fn buildComponentShimFixup(
             const wired = wired_by_shape[i];
             const drops = intrinsics_by_shape[i];
             if (wired.len == 0 and drops.len == 0) continue;
-            const bundle_exports = try ar.alloc(ctypes.CoreInlineExport, wired.len + drops.len);
-            for (wired, 0..) |w, fi| {
-                bundle_exports[fi] = .{
+            var bundle_exports = std.ArrayList(ctypes.CoreInlineExport).empty;
+            for (wired) |w| {
+                try bundle_exports.append(ar, .{
                     .name = w.fn_ref.name,
                     .sort_idx = .{ .sort = .func, .idx = stub_cursor },
-                };
+                });
+                if (w.fn_ref.sig.is_async) {
+                    try bundle_exports.append(ar, .{
+                        .name = try std.fmt.allocPrint(ar, "[async-lower]{s}", .{w.fn_ref.name}),
+                        .sort_idx = .{ .sort = .func, .idx = stub_cursor },
+                    });
+                }
                 stub_cursor += 1;
             }
             for (drops, 0..) |d, di| {
-                bundle_exports[wired.len + di] = .{
+                try bundle_exports.append(ar, .{
                     .name = d.field,
                     .sort_idx = .{ .sort = .func, .idx = intrinsic_core_idx_by_shape[i][di] },
-                };
+                });
             }
-            try core_instances.append(ar, .{ .exports = bundle_exports });
+            try core_instances.append(ar, .{ .exports = try bundle_exports.toOwnedSlice(ar) });
             const bundle_inst_idx: u32 = @intCast(core_instances.items.len - 1);
             try bundle_for_main_args.append(ar, .{
                 .name = shape.qualified_name,
@@ -3874,7 +3949,7 @@ fn buildComponentShimFixup(
                             .{ .memory = memory_core_idx },
                             .{ .string_encoding = .utf8 },
                         });
-                        break :blk .{ .task_return = .{ .results = grp.results, .opts = opts } };
+                        break :blk .{ .task_return = .{ .results = field.results, .opts = opts } };
                     },
                     .backpressure => unreachable, // backpressure.inc/dec are never mem-op
                     .task => unreachable, // task.cancel is never mem-op

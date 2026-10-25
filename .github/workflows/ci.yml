@@ -123,6 +123,10 @@ jobs:
           .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
             -target wasm32-wasip2 --test-cmd wasmtime --test-cmd-bin \
             src/link/Wasm/component/root.zig
+          .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip3 \
+            --test-cmd wasmtime --test-cmd=-W --test-cmd=component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y --test-cmd=-S --test-cmd=p3=y --test-cmd-bin \
+            src/link/Wasm/component/root.zig
 
       - name: Run std.os.wasi.p2 unit tests
         run: |
@@ -131,6 +135,15 @@ jobs:
           .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
             -target wasm32-wasip2 --test-cmd wasmtime --test-cmd-bin \
             .ci-tmp/p2_test.zig
+
+      - name: Run std.os.wasi.p3 unit tests
+        run: |
+          mkdir -p .ci-tmp
+          cp lib/std/os/wasi/p3.zig .ci-tmp/p3_test.zig
+          .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip3 \
+            --test-cmd wasmtime --test-cmd=-W --test-cmd=component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y --test-cmd=-S --test-cmd=p3=y --test-cmd-bin \
+            .ci-tmp/p3_test.zig
 
       - name: Verify wasm32-wasip2 E2E (Debug, ReleaseSmall, and zig test)
         run: |
@@ -148,6 +161,39 @@ jobs:
           .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
             -target wasm32-wasip2 --test-cmd wasmtime --test-cmd=--dir=. --test-cmd-bin \
             test/wasip2_e2e.zig
+
+      - name: Verify wasm32-wasip3 E2E (Debug, ReleaseSmall, zig test, and -lc)
+        run: |
+          mkdir -p .ci-tmp
+          .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip3 test/wasip3_e2e.zig -femit-bin=.ci-tmp/wasip3_e2e.wasm
+          cmp -n 8 <(printf '\x00asm\x0d\x00\x01\x00') .ci-tmp/wasip3_e2e.wasm
+          wasmtime run -W component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y -S p3=y --dir=.ci-tmp --env TEST_ENV_KEY=wasip3_val .ci-tmp/wasip3_e2e.wasm arg_one arg_two
+
+          .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip3 -OReleaseSmall test/wasip3_e2e.zig -femit-bin=.ci-tmp/wasip3_e2e_small.wasm
+          cmp -n 8 <(printf '\x00asm\x0d\x00\x01\x00') .ci-tmp/wasip3_e2e_small.wasm
+          wasmtime run -W component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y -S p3=y --dir=.ci-tmp --env TEST_ENV_KEY=wasip3_val .ci-tmp/wasip3_e2e_small.wasm arg_one arg_two
+
+          .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip3 \
+            --test-cmd wasmtime --test-cmd=-W --test-cmd=component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y --test-cmd=-S --test-cmd=p3=y --test-cmd=--dir=. --test-cmd-bin \
+            test/wasip3_e2e.zig
+
+          .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip3 -lc .ci-tmp/hello_libc.zig -femit-bin=.ci-tmp/hello_libc_p3.wasm
+          cmp -n 8 <(printf '\x00asm\x0d\x00\x01\x00') .ci-tmp/hello_libc_p3.wasm
+          wasmtime run -W component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y -S p3=y .ci-tmp/hello_libc_p3.wasm
+
+          wasmtime compile -W component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y \
+            -o .ci-tmp/wasip3_e2e.cwasm .ci-tmp/wasip3_e2e.wasm
+          wasmtime run --allow-precompiled -W component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y -S p3=y \
+            --dir=.ci-tmp --env TEST_ENV_KEY=wasip3_val .ci-tmp/wasip3_e2e.cwasm arg_one arg_two
+
+          .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip3 -lc \
+            --test-cmd wasmtime --test-cmd=-W --test-cmd=component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y --test-cmd=-S --test-cmd=p3=y --test-cmd=--dir=. --test-cmd-bin \
+            test/c.zig
 
       - name: Verify custom WIT reactor and Preview 1 adapter-spliced components
         run: |

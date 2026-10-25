@@ -12,7 +12,7 @@ const Allocator = std.mem.Allocator;
 
 pub const Id = switch (native_os) {
     .windows => std.os.windows.HANDLE,
-    .wasi, .wasip2 => void,
+    .wasi, .wasip2, .wasip3 => void,
     else => std.posix.pid_t,
 };
 

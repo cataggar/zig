@@ -19,7 +19,7 @@ comptime {
     // decls there get run.
     _ = root;
 
-    if (native_os == .wasip2 and !builtin.link_libc and !@hasDecl(root, "cabi_realloc")) {
+    if ((native_os == .wasip2 or native_os == .wasip3) and !builtin.link_libc and !@hasDecl(root, "cabi_realloc")) {
         @export(&cabiRealloc, .{ .name = "cabi_realloc" });
     }
 
@@ -83,6 +83,24 @@ comptime {
                         }
                         if (!@hasDecl(root, "wasi:cli/run@0.2.0#run")) {
                             @export(&startWasip2Command, .{ .name = "wasi:cli/run@0.2.0#run" });
+                        }
+                        if (!@hasDecl(root, "_start")) {
+                            @export(&startWasip2Preview1, .{ .name = "_start" });
+                        }
+                    }
+                },
+            }
+        } else if (native_os == .wasip3) {
+            switch (builtin.wasi_exec_model) {
+                .reactor => {
+                    if (!@hasDecl(root, "_initialize") and @hasDecl(root, "main")) {
+                        @export(&startWasi, .{ .name = "_initialize" });
+                    }
+                },
+                .command => {
+                    if (@hasDecl(root, "main")) {
+                        if (!@hasDecl(root, "wasi:cli/run@0.3.0#run")) {
+                            @export(&startWasip3Command, .{ .name = "wasi:cli/run@0.3.0#run" });
                         }
                         if (!@hasDecl(root, "_start")) {
                             @export(&startWasip2Preview1, .{ .name = "_start" });
@@ -157,6 +175,13 @@ fn startWasi() callconv(.c) void {
 fn startWasip2Command() callconv(.c) i32 {
     const status = @call(.always_inline, callMain, .{ {}, std.process.Environ.Block.global });
     return if (status == 0) 0 else 1;
+}
+
+extern "[task-return]wasi:cli/run@0.3.0#run" fn @"task-return"(result: i32) callconv(.c) void;
+
+fn startWasip3Command() callconv(.c) void {
+    const status = @call(.always_inline, callMain, .{ {}, std.process.Environ.Block.global });
+    @"task-return"(if (status == 0) 0 else 1);
 }
 
 fn startWasip2Preview1() callconv(.c) void {
@@ -817,7 +842,7 @@ fn main(c_argc: c_int, c_argv: [*][*:0]c_char, c_envp: [*:null]?[*:0]c_char) cal
 fn mainWithoutEnv(c_argc: c_int, c_argv: [*][*:0]c_char) callconv(.c) c_int {
     const argv = @as([*][*:0]u8, @ptrCast(c_argv))[0..@intCast(c_argc)];
     const environ: [:null]?[*:0]u8 = switch (builtin.os.tag) {
-        .wasi, .emscripten => environ: {
+        .wasi, .wasip2, .wasip3, .emscripten => environ: {
             const c_environ = std.c.environ;
             var env_count: usize = 0;
             while (c_environ[env_count] != null) : (env_count += 1) {}

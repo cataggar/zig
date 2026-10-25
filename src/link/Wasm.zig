@@ -2489,6 +2489,7 @@ const PreloadedStrings = struct {
     _initialize: String,
     _start: String,
     @"wasi:cli/run@0.2.6#run": String,
+    @"wasi:cli/run@0.3.0#run": String,
     memory: String,
     env: String,
 };
@@ -2617,6 +2618,7 @@ pub const ZcuImportIndex = enum(u32) {
         const nav_index = index.ptr(wasm).*;
         const ext = ip.indexToKey(ip.getNav(nav_index).resolved.?.value).@"extern";
         const lib_name = ext.lib_name.toSlice(ip) orelse return .none;
+        if (mem.eql(u8, lib_name, "c")) return .none;
         return wasm.getExistingString(lib_name).?.toOptional();
     }
 
@@ -3854,7 +3856,9 @@ pub fn prelink(wasm: *Wasm, prog_node: std.Progress.Node) link.Error!void {
                 import.flags.exported = true;
                 wasm.entry_resolution = import.resolution;
             }
-        } else if (entry_name == wasm.preloaded_strings.@"wasi:cli/run@0.2.6#run") {
+        } else if (entry_name == wasm.preloaded_strings.@"wasi:cli/run@0.2.6#run" or
+            entry_name == wasm.preloaded_strings.@"wasi:cli/run@0.3.0#run")
+        {
             if (wasm.object_function_imports.getPtr(wasm.preloaded_strings._start)) |import| {
                 if (import.resolution != .unresolved) {
                     import.flags.exported = true;
@@ -4317,6 +4321,7 @@ fn defaultEntrySymbolName(
         .reactor => preloaded_strings._initialize,
         .command => switch (os_tag) {
             .wasip2 => preloaded_strings.@"wasi:cli/run@0.2.6#run",
+            .wasip3 => preloaded_strings.@"wasi:cli/run@0.3.0#run",
             else => preloaded_strings._start,
         },
     };

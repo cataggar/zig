@@ -54,7 +54,7 @@ else switch (native_os) {
         // https://github.com/pspdev/newlib/blob/9e0a073634ad73e8e088f2e071c55a9fe5d39709/newlib/libc/sys/psp/sys/dirent.h#L19
         pub const NAME_MAX = 255;
     },
-    .wasi, .wasip2 => @import("posix/wasi.zig"),
+    .wasi, .wasip2, .wasip3 => @import("posix/wasi.zig"),
     else => struct {
         pub const pid_t = void;
         pub const pollfd = void;
@@ -1526,6 +1526,7 @@ pub fn ptrace(request: u32, pid: pid_t, addr: usize, data: usize) PtraceError!vo
         .windows,
         .wasi,
         .wasip2,
+        .wasip3,
         .emscripten,
         .haiku,
         .illumos,

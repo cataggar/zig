@@ -419,7 +419,7 @@ fn mainArgs(
         .targets => {
             dev.check(.targets_command);
             const self_exe_path = switch (native_os) {
-                .wasi, .wasip2 => {},
+                .wasi, .wasip2, .wasip3 => {},
                 else => process.executablePathAlloc(io, arena) catch |err| fatal("unable to find zig self exe path: {t}", .{err}),
             };
             var dirs: std.zig.Directories = .init(arena, io, .{
@@ -453,7 +453,7 @@ fn mainArgs(
         .env => {
             dev.check(.env_command);
             const self_exe_path = switch (native_os) {
-                .wasi, .wasip2 => args[0],
+                .wasi, .wasip2, .wasip3 => args[0],
                 else => process.executablePathAlloc(io, arena) catch |err| fatal("unable to find zig self exe path: {t}", .{err}),
             };
             var dirs: std.zig.Directories = .init(arena, io, .{
@@ -3323,7 +3323,7 @@ fn buildOutputType(
     }
 
     const self_exe_path = switch (native_os) {
-        .wasi, .wasip2 => {},
+        .wasi, .wasip2, .wasip3 => {},
         else => process.executablePathAlloc(io, arena) catch |err| fatal("unable to find zig self exe path: {t}", .{err}),
     };
 
@@ -3658,7 +3658,7 @@ fn buildOutputType(
         .dirs = dirs,
         .thread_limit = thread_limit,
         .self_exe_path = switch (native_os) {
-            .wasi, .wasip2 => null,
+            .wasi, .wasip2, .wasip3 => null,
             else => self_exe_path,
         },
         .config = create_module.resolved_options,
@@ -3899,7 +3899,7 @@ fn buildOutputType(
         dev.checkAny(&.{ .run_command, .test_command });
 
         const self_exe_path_or_argv0 = switch (native_os) {
-            .wasi, .wasip2 => all_args[0], // Will error because of `!process.can_spawn`
+            .wasi, .wasip2, .wasip3 => all_args[0], // Will error because of `!process.can_spawn`
             else => self_exe_path,
         };
 
@@ -4411,7 +4411,7 @@ fn serve(
     out: *Io.Writer,
     test_exec_args: []const ?[]const u8,
     self_exe_path: switch (native_os) {
-        .wasi, .wasip2 => void,
+        .wasi, .wasip2, .wasip3 => void,
         else => []const u8,
     },
     arg_mode: ArgMode,
@@ -4802,7 +4802,7 @@ fn runOrTestHotSwap(
     gpa: Allocator,
     test_exec_args: []const ?[]const u8,
     self_exe_path: switch (native_os) {
-        .wasi, .wasip2 => void,
+        .wasi, .wasip2, .wasip3 => void,
         else => []const u8,
     },
     arg_mode: ArgMode,
@@ -4813,7 +4813,7 @@ fn runOrTestHotSwap(
     const lf = comp.bin_file.?;
 
     const self_exe_path_or_argv0 = switch (native_os) {
-        .wasi, .wasip2 => all_args[0], // Will error because of `!process.can_spawn`
+        .wasi, .wasip2, .wasip3 => all_args[0], // Will error because of `!process.can_spawn`
         else => self_exe_path,
     };
 

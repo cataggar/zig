@@ -351,7 +351,7 @@ test "getrlimit and setrlimit" {
 
 test "sigrtmin/max" {
     if (native_os.isDarwin() or switch (native_os) {
-        .wasi, .wasip2, .windows, .openbsd, .dragonfly => true,
+        .wasi, .wasip2, .wasip3, .windows, .openbsd, .dragonfly => true,
         else => false,
     }) return error.SkipZigTest;
 

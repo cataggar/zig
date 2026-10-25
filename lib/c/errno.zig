@@ -5,7 +5,7 @@ const linux = std.os.linux;
 const symbol = @import("../c.zig").symbol;
 
 comptime {
-    if (builtin.target.isMuslLibC() and builtin.os.tag != .wasi) {
+    if (builtin.target.isMuslLibC() and !builtin.os.tag.isWasi()) {
         symbol(&__errno_location, "__errno_location");
         symbol(&__errno_location, "___errno_location");
     }

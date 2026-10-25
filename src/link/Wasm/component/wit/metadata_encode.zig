@@ -966,8 +966,25 @@ fn addImplicitImports(
         }
     };
 
+    var non_exports = std.ArrayList(ast.WorldItem).empty;
+    var exports_only = std.ArrayList(ast.WorldItem).empty;
     for (original) |it| {
-        try Helper.visit(ar, resolver, ctx_pkg, items, &seen, it, gpa, diag, world_name);
+        if (it != .@"export") try Helper.visit(ar, resolver, ctx_pkg, &non_exports, &seen, it, gpa, diag, world_name);
+    }
+    for (original) |it| {
+        if (it == .@"export") try Helper.visit(ar, resolver, ctx_pkg, &exports_only, &seen, it, gpa, diag, world_name);
+    }
+    for (non_exports.items) |it| {
+        if (it != .@"export") try items.append(ar, it);
+    }
+    for (exports_only.items) |it| {
+        if (it != .@"export") try items.append(ar, it);
+    }
+    for (non_exports.items) |it| {
+        if (it == .@"export") try items.append(ar, it);
+    }
+    for (exports_only.items) |it| {
+        if (it == .@"export") try items.append(ar, it);
     }
 }
 

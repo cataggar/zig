@@ -320,7 +320,7 @@ fn readlinkatWasi(fd: c_int, path: [*]const u8, buf: [*]u8, bufsize: usize) call
 }
 
 fn linkatWasi(fd1: c_int, path1: [*]const u8, fd2: c_int, path2: [*]const u8, flag: c_int) callconv(.c) c_int {
-    const AT_SYMLINK_FOLLOW = 0x400;
+    const AT_SYMLINK_FOLLOW = 0x2;
     const path1_len = cStrLen(path1);
     const path2_len = cStrLen(path2);
     var lookup_flags = wasi.lookupflags_t{};
@@ -352,7 +352,7 @@ fn faccessatWasi(fd: c_int, path: [*]const u8, amode: c_int, flag: c_int) callco
     const R_OK = 4;
     const W_OK = 2;
     const X_OK = 1;
-    const AT_EACCESS = 0x200;
+    const AT_EACCESS = 0x0;
 
     if ((amode & ~@as(c_int, F_OK | R_OK | W_OK | X_OK)) != 0 or
         (flag & ~@as(c_int, AT_EACCESS)) != 0)
@@ -403,7 +403,7 @@ fn faccessatWasi(fd: c_int, path: [*]const u8, amode: c_int, flag: c_int) callco
 }
 
 fn unlinkatWasi(fd: c_int, path: [*:0]const u8, flag: c_int) callconv(.c) c_int {
-    const AT_REMOVEDIR = 0x200;
+    const AT_REMOVEDIR = 0x4;
     if ((flag & AT_REMOVEDIR) != 0)
         return __wasilibc_rmdirat(fd, path);
     return __wasilibc_unlinkat(fd, path);
@@ -656,7 +656,7 @@ fn fstatWasi(fd: c_int, buf: *std.c.Stat) callconv(.c) c_int {
 }
 
 fn fstatatWasi(fd: c_int, path: [*]const u8, buf: *std.c.Stat, flag: c_int) callconv(.c) c_int {
-    const AT_SYMLINK_NOFOLLOW = 0x100;
+    const AT_SYMLINK_NOFOLLOW = 0x1;
     const path_len = cStrLen(path);
     var lookup_flags = wasi.lookupflags_t{};
     if ((flag & AT_SYMLINK_NOFOLLOW) == 0)
@@ -723,7 +723,7 @@ fn utimensatWasi(fd: c_int, path: [*]const u8, times: ?[*]const std.c.timespec, 
         flags = .{ .ATIM_NOW = true, .MTIM_NOW = true };
     }
 
-    const AT_SYMLINK_NOFOLLOW = 0x100;
+    const AT_SYMLINK_NOFOLLOW = 0x1;
     const path_len = cStrLen(path);
     var lookup_flags = wasi.lookupflags_t{};
     if ((flag & AT_SYMLINK_NOFOLLOW) == 0)
@@ -739,8 +739,8 @@ fn utimensatWasi(fd: c_int, path: [*]const u8, times: ?[*]const std.c.timespec, 
 }
 
 fn recvWasi(socket: c_int, buffer: [*]u8, length: usize, flags_arg: c_int) callconv(.c) isize {
-    const MSG_PEEK = 0x2;
-    const MSG_WAITALL = 0x100;
+    const MSG_PEEK = 0x1;
+    const MSG_WAITALL = 0x2;
     if ((flags_arg & ~@as(c_int, MSG_PEEK | MSG_WAITALL)) != 0) {
         setErrno(.OPNOTSUPP);
         return -1;
@@ -794,7 +794,7 @@ fn shutdownWasi(socket: c_int, how: c_int) callconv(.c) c_int {
 }
 
 fn getsockoptWasi(socket: c_int, level: c_int, option_name: c_int, option_value: ?[*]u8, option_len: ?*u32) callconv(.c) c_int {
-    const SOL_SOCKET = 1;
+    const SOL_SOCKET = 0x7fffffff;
     const SO_TYPE = 3;
 
     if (level != SOL_SOCKET) {

@@ -271,7 +271,7 @@ pub fn tripleForTarget(allocator: Allocator, target: *const std.Target) ![]const
         .amdpal => "amdpal",
         .hermit => "hermit",
         .hurd => "hurd",
-        .wasi, .wasip2 => "wasi",
+        .wasi, .wasip2, .wasip3 => "wasi",
         .emscripten => "emscripten",
         .macos => "macosx",
         .ios, .maccatalyst => "ios",
@@ -343,7 +343,7 @@ pub fn tripleForTarget(allocator: Allocator, target: *const std.Target) ![]const
         .musl => switch (target.os.tag) {
             // For WASI/Emscripten, "musl" refers to the libc, not really the ABI.
             // "unknown" provides better compatibility with LLVM-based tooling for these targets.
-            .wasi, .wasip2, .emscripten => "unknown",
+            .wasi, .wasip2, .wasip3, .emscripten => "unknown",
             else => "musl",
         },
         .muslabin32 => "muslabin32",
