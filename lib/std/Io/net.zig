@@ -48,7 +48,7 @@ pub const Protocol = enum(u32) {
 /// first release to support them.
 pub const has_unix_sockets = switch (native_os) {
     .windows => builtin.os.version_range.windows.isAtLeast(.win10_rs4) orelse false,
-    .wasi, .wasip2 => false,
+    .wasi, .wasip2, .wasip3 => false,
     else => true,
 };
 

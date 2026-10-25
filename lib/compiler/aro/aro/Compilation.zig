@@ -507,7 +507,7 @@ fn generateSystemDefines(comp: *Compilation, w: *Io.Writer) !void {
 
             try w.print("#define __ENVIRONMENT_OS_VERSION_MIN_REQUIRED__ {s}\n", .{version_str});
         },
-        .wasi, .wasip2 => try define(w, "__wasi__"),
+        .wasi, .wasip2, .wasip3 => try define(w, "__wasi__"),
         .emscripten => try define(w, "__EMSCRIPTEN__"),
         .serenity => try define(w, "__serenity__"),
         .@"switch" => try define(w, "__SWITCH__"),

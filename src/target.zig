@@ -54,7 +54,8 @@ pub fn libCxxNeedsLibUnwind(target: *const std.Target) bool {
         .visionos,
         .freestanding,
         .wasi,
-        .wasip2, // Wasm/WASI currently doesn't offer support for libunwind, so don't link it.
+        .wasip2,
+        .wasip3, // Wasm/WASI currently doesn't offer support for libunwind, so don't link it.
         => false,
 
         .windows => target.abi.isGnu(),
@@ -367,7 +368,7 @@ pub fn clangSupportsStackProtector(target: *const std.Target) bool {
 }
 
 pub fn libcProvidesStackProtector(target: *const std.Target) bool {
-    return !target.isMinGW() and target.os.tag != .wasi and !target.cpu.arch.isSpirV();
+    return !target.isMinGW() and !target.os.tag.isWasi() and !target.cpu.arch.isSpirV();
 }
 
 /// Returns true if `@returnAddress()` is supported by the target and has a

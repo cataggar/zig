@@ -254,13 +254,13 @@ pub fn getBaseAddress() usize {
 /// process image. If this is `false` then calling `replace` or `replaceFile`
 /// functions will return `error.OperationUnsupported`.
 pub const can_replace = switch (native_os) {
-    .windows, .haiku, .wasi, .wasip2 => false,
+    .windows, .haiku, .wasi, .wasip2, .wasip3 => false,
     else => true,
 };
 
 /// Tells whether spawning child processes is supported.
 pub const can_spawn = switch (native_os) {
-    .wasi, .wasip2, .ios, .tvos, .visionos, .watchos => false,
+    .wasi, .wasip2, .wasip3, .ios, .tvos, .visionos, .watchos => false,
     else => true,
 };
 
@@ -856,7 +856,7 @@ pub fn abort() noreturn {
         exit(127); // Pid 1 might not be signalled in some containers.
     }
     switch (native_os) {
-        .uefi, .wasi, .wasip2, .emscripten, .cuda, .amdhsa, .other, .freestanding => @trap(),
+        .uefi, .wasi, .wasip2, .wasip3, .emscripten, .cuda, .amdhsa, .other, .freestanding => @trap(),
         else => posix.system.abort(),
     }
 }
@@ -867,7 +867,7 @@ pub fn exit(status: u8) noreturn {
         std.c.exit(status);
     } else switch (native_os) {
         .windows => windows.ntdll.RtlExitUserProcess(status),
-        .wasi, .wasip2 => std.os.wasi.proc_exit(status),
+        .wasi, .wasip2, .wasip3 => std.os.wasi.proc_exit(status),
         .linux => {
             if (!builtin.single_threaded) std.os.linux.exit_group(status);
             posix.system.exit(status);

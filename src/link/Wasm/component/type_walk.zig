@@ -305,7 +305,7 @@ pub fn cloneTypeDef(
                     break :named .{ .named = dst };
                 },
             };
-            break :blk .{ .func = .{ .params = params, .results = results } };
+            break :blk .{ .func = .{ .params = params, .results = results, .is_async = f.is_async } };
         },
         .component => return error.UnsupportedAdapterShape,
         .instance => |i| .{ .instance = .{ .decls = try cloneInstanceBody(arena, i.decls, type_remap, depth + 1) } },

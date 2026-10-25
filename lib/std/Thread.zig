@@ -268,6 +268,7 @@ pub const Id = switch (native_os) {
     .haiku,
     .wasi,
     .wasip2,
+    .wasip3,
     .serenity,
     => u32,
     .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => u64,
@@ -1748,7 +1749,7 @@ pub fn maybeAttachSignalStack() void {
         // TODO: Windows vectored exception handlers always run on the main stack, but we could use
         // some target-specific inline assembly to swap the stack pointer.
         .windows => return,
-        .wasi, .wasip2 => return,
+        .wasi, .wasip2, .wasip3 => return,
         else => {},
     }
     const global = struct {

@@ -23,8 +23,10 @@ pub const iovec_t = std.posix.iovec;
 pub const ciovec_t = std.posix.iovec_const;
 
 pub const p2 = @import("wasi/p2.zig");
+pub const p3 = @import("wasi/p3.zig");
 
 const use_p2 = builtin.os.tag == .wasip2 and !builtin.link_libc;
+const use_p3 = builtin.os.tag == .wasip3;
 
 const preview1 = struct {
     pub extern "wasi_snapshot_preview1" fn args_get(argv: [*][*:0]u8, argv_buf: [*]u8) errno_t;
@@ -86,63 +88,63 @@ const preview1 = struct {
     pub extern "wasi_snapshot_preview1" fn sock_shutdown(sock: fd_t, how: sdflags_t) errno_t;
 };
 
-pub const args_get = if (use_p2) p2.args_get else preview1.args_get;
-pub const args_sizes_get = if (use_p2) p2.args_sizes_get else preview1.args_sizes_get;
+pub const args_get = if (use_p3) p3.args_get else if (use_p2) p2.args_get else preview1.args_get;
+pub const args_sizes_get = if (use_p3) p3.args_sizes_get else if (use_p2) p2.args_sizes_get else preview1.args_sizes_get;
 
-pub const clock_res_get = if (use_p2) p2.clock_res_get else preview1.clock_res_get;
-pub const clock_time_get = if (use_p2) p2.clock_time_get else preview1.clock_time_get;
+pub const clock_res_get = if (use_p3) p3.clock_res_get else if (use_p2) p2.clock_res_get else preview1.clock_res_get;
+pub const clock_time_get = if (use_p3) p3.clock_time_get else if (use_p2) p2.clock_time_get else preview1.clock_time_get;
 
-pub const environ_get = if (use_p2) p2.environ_get else preview1.environ_get;
-pub const environ_sizes_get = if (use_p2) p2.environ_sizes_get else preview1.environ_sizes_get;
+pub const environ_get = if (use_p3) p3.environ_get else if (use_p2) p2.environ_get else preview1.environ_get;
+pub const environ_sizes_get = if (use_p3) p3.environ_sizes_get else if (use_p2) p2.environ_sizes_get else preview1.environ_sizes_get;
 
-pub const fd_advise = if (use_p2) p2.fd_advise else preview1.fd_advise;
-pub const fd_allocate = if (use_p2) p2.fd_allocate else preview1.fd_allocate;
-pub const fd_close = if (use_p2) p2.fd_close else preview1.fd_close;
-pub const fd_datasync = if (use_p2) p2.fd_datasync else preview1.fd_datasync;
-pub const fd_pread = if (use_p2) p2.fd_pread else preview1.fd_pread;
-pub const fd_pwrite = if (use_p2) p2.fd_pwrite else preview1.fd_pwrite;
-pub const fd_read = if (use_p2) p2.fd_read else preview1.fd_read;
-pub const fd_readdir = if (use_p2) p2.fd_readdir else preview1.fd_readdir;
-pub const fd_renumber = if (use_p2) p2.fd_renumber else preview1.fd_renumber;
-pub const fd_seek = if (use_p2) p2.fd_seek else preview1.fd_seek;
-pub const fd_sync = if (use_p2) p2.fd_sync else preview1.fd_sync;
-pub const fd_tell = if (use_p2) p2.fd_tell else preview1.fd_tell;
-pub const fd_write = if (use_p2) p2.fd_write else preview1.fd_write;
+pub const fd_advise = if (use_p3) p3.fd_advise else if (use_p2) p2.fd_advise else preview1.fd_advise;
+pub const fd_allocate = if (use_p3) p3.fd_allocate else if (use_p2) p2.fd_allocate else preview1.fd_allocate;
+pub const fd_close = if (use_p3) p3.fd_close else if (use_p2) p2.fd_close else preview1.fd_close;
+pub const fd_datasync = if (use_p3) p3.fd_datasync else if (use_p2) p2.fd_datasync else preview1.fd_datasync;
+pub const fd_pread = if (use_p3) p3.fd_pread else if (use_p2) p2.fd_pread else preview1.fd_pread;
+pub const fd_pwrite = if (use_p3) p3.fd_pwrite else if (use_p2) p2.fd_pwrite else preview1.fd_pwrite;
+pub const fd_read = if (use_p3) p3.fd_read else if (use_p2) p2.fd_read else preview1.fd_read;
+pub const fd_readdir = if (use_p3) p3.fd_readdir else if (use_p2) p2.fd_readdir else preview1.fd_readdir;
+pub const fd_renumber = if (use_p3) p3.fd_renumber else if (use_p2) p2.fd_renumber else preview1.fd_renumber;
+pub const fd_seek = if (use_p3) p3.fd_seek else if (use_p2) p2.fd_seek else preview1.fd_seek;
+pub const fd_sync = if (use_p3) p3.fd_sync else if (use_p2) p2.fd_sync else preview1.fd_sync;
+pub const fd_tell = if (use_p3) p3.fd_tell else if (use_p2) p2.fd_tell else preview1.fd_tell;
+pub const fd_write = if (use_p3) p3.fd_write else if (use_p2) p2.fd_write else preview1.fd_write;
 
-pub const fd_fdstat_get = if (use_p2) p2.fd_fdstat_get else preview1.fd_fdstat_get;
-pub const fd_fdstat_set_flags = if (use_p2) p2.fd_fdstat_set_flags else preview1.fd_fdstat_set_flags;
-pub const fd_fdstat_set_rights = if (use_p2) p2.fd_fdstat_set_rights else preview1.fd_fdstat_set_rights;
+pub const fd_fdstat_get = if (use_p3) p3.fd_fdstat_get else if (use_p2) p2.fd_fdstat_get else preview1.fd_fdstat_get;
+pub const fd_fdstat_set_flags = if (use_p3) p3.fd_fdstat_set_flags else if (use_p2) p2.fd_fdstat_set_flags else preview1.fd_fdstat_set_flags;
+pub const fd_fdstat_set_rights = if (use_p3) p3.fd_fdstat_set_rights else if (use_p2) p2.fd_fdstat_set_rights else preview1.fd_fdstat_set_rights;
 
-pub const fd_filestat_get = if (use_p2) p2.fd_filestat_get else preview1.fd_filestat_get;
-pub const fd_filestat_set_size = if (use_p2) p2.fd_filestat_set_size else preview1.fd_filestat_set_size;
-pub const fd_filestat_set_times = if (use_p2) p2.fd_filestat_set_times else preview1.fd_filestat_set_times;
+pub const fd_filestat_get = if (use_p3) p3.fd_filestat_get else if (use_p2) p2.fd_filestat_get else preview1.fd_filestat_get;
+pub const fd_filestat_set_size = if (use_p3) p3.fd_filestat_set_size else if (use_p2) p2.fd_filestat_set_size else preview1.fd_filestat_set_size;
+pub const fd_filestat_set_times = if (use_p3) p3.fd_filestat_set_times else if (use_p2) p2.fd_filestat_set_times else preview1.fd_filestat_set_times;
 
-pub const fd_prestat_get = if (use_p2) p2.fd_prestat_get else preview1.fd_prestat_get;
-pub const fd_prestat_dir_name = if (use_p2) p2.fd_prestat_dir_name else preview1.fd_prestat_dir_name;
+pub const fd_prestat_get = if (use_p3) p3.fd_prestat_get else if (use_p2) p2.fd_prestat_get else preview1.fd_prestat_get;
+pub const fd_prestat_dir_name = if (use_p3) p3.fd_prestat_dir_name else if (use_p2) p2.fd_prestat_dir_name else preview1.fd_prestat_dir_name;
 
-pub const path_create_directory = if (use_p2) p2.path_create_directory else preview1.path_create_directory;
-pub const path_filestat_get = if (use_p2) p2.path_filestat_get else preview1.path_filestat_get;
-pub const path_filestat_set_times = if (use_p2) p2.path_filestat_set_times else preview1.path_filestat_set_times;
-pub const path_link = if (use_p2) p2.path_link else preview1.path_link;
-pub const path_open = if (use_p2) p2.path_open else preview1.path_open;
-pub const path_readlink = if (use_p2) p2.path_readlink else preview1.path_readlink;
-pub const path_remove_directory = if (use_p2) p2.path_remove_directory else preview1.path_remove_directory;
-pub const path_rename = if (use_p2) p2.path_rename else preview1.path_rename;
-pub const path_symlink = if (use_p2) p2.path_symlink else preview1.path_symlink;
-pub const path_unlink_file = if (use_p2) p2.path_unlink_file else preview1.path_unlink_file;
+pub const path_create_directory = if (use_p3) p3.path_create_directory else if (use_p2) p2.path_create_directory else preview1.path_create_directory;
+pub const path_filestat_get = if (use_p3) p3.path_filestat_get else if (use_p2) p2.path_filestat_get else preview1.path_filestat_get;
+pub const path_filestat_set_times = if (use_p3) p3.path_filestat_set_times else if (use_p2) p2.path_filestat_set_times else preview1.path_filestat_set_times;
+pub const path_link = if (use_p3) p3.path_link else if (use_p2) p2.path_link else preview1.path_link;
+pub const path_open = if (use_p3) p3.path_open else if (use_p2) p2.path_open else preview1.path_open;
+pub const path_readlink = if (use_p3) p3.path_readlink else if (use_p2) p2.path_readlink else preview1.path_readlink;
+pub const path_remove_directory = if (use_p3) p3.path_remove_directory else if (use_p2) p2.path_remove_directory else preview1.path_remove_directory;
+pub const path_rename = if (use_p3) p3.path_rename else if (use_p2) p2.path_rename else preview1.path_rename;
+pub const path_symlink = if (use_p3) p3.path_symlink else if (use_p2) p2.path_symlink else preview1.path_symlink;
+pub const path_unlink_file = if (use_p3) p3.path_unlink_file else if (use_p2) p2.path_unlink_file else preview1.path_unlink_file;
 
-pub const poll_oneoff = if (use_p2) p2.poll_oneoff else preview1.poll_oneoff;
+pub const poll_oneoff = if (use_p3) p3.poll_oneoff else if (use_p2) p2.poll_oneoff else preview1.poll_oneoff;
 
-pub const proc_exit = if (use_p2) p2.proc_exit else preview1.proc_exit;
+pub const proc_exit = if (use_p3) p3.proc_exit else if (use_p2) p2.proc_exit else preview1.proc_exit;
 
-pub const random_get = if (use_p2) p2.random_get else preview1.random_get;
+pub const random_get = if (use_p3) p3.random_get else if (use_p2) p2.random_get else preview1.random_get;
 
-pub const sched_yield = if (use_p2) p2.sched_yield else preview1.sched_yield;
+pub const sched_yield = if (use_p3) p3.sched_yield else if (use_p2) p2.sched_yield else preview1.sched_yield;
 
-pub const sock_accept = if (use_p2) p2.sock_accept else preview1.sock_accept;
-pub const sock_recv = if (use_p2) p2.sock_recv else preview1.sock_recv;
-pub const sock_send = if (use_p2) p2.sock_send else preview1.sock_send;
-pub const sock_shutdown = if (use_p2) p2.sock_shutdown else preview1.sock_shutdown;
+pub const sock_accept = if (use_p3) p3.sock_accept else if (use_p2) p2.sock_accept else preview1.sock_accept;
+pub const sock_recv = if (use_p3) p3.sock_recv else if (use_p2) p2.sock_recv else preview1.sock_recv;
+pub const sock_send = if (use_p3) p3.sock_send else if (use_p2) p2.sock_send else preview1.sock_send;
+pub const sock_shutdown = if (use_p3) p3.sock_shutdown else if (use_p2) p2.sock_shutdown else preview1.sock_shutdown;
 
 // As defined in the wasi_snapshot_preview1 spec file:
 // https://github.com/WebAssembly/WASI/blob/master/phases/snapshot/witx/typenames.witx
@@ -536,4 +538,5 @@ pub const whence_t = enum(u8) { SET, CUR, END };
 
 test {
     _ = p2;
+    _ = p3;
 }

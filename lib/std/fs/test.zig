@@ -425,7 +425,7 @@ test "openDir cwd parent '..'" {
 
 test "openDir non-cwd parent '..'" {
     switch (native_os) {
-        .wasi, .wasip2, .netbsd, .openbsd => return error.SkipZigTest,
+        .wasi, .wasip2, .wasip3, .netbsd, .openbsd => return error.SkipZigTest,
         else => {},
     }
 
@@ -2250,7 +2250,7 @@ test "change ownership" {
 
 test "invalid UTF-8/WTF-8 paths" {
     const expected_err = switch (native_os) {
-        .wasi, .wasip2 => error.BadPathName,
+        .wasi, .wasip2, .wasip3 => error.BadPathName,
         .windows => error.BadPathName,
         else => return error.SkipZigTest,
     };

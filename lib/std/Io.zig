@@ -321,7 +321,7 @@ pub const Operation = union(enum) {
     };
 
     pub const DeviceIoControl = switch (builtin.os.tag) {
-        .wasi, .wasip2 => noreturn,
+        .wasi, .wasip2, .wasip3 => noreturn,
         .windows => struct {
             file: File,
             code: std.os.windows.CTL_CODE,

@@ -2423,6 +2423,7 @@ pub const TargetQuery = struct {
         emscripten,
         wasi,
         wasip2,
+        wasip3,
         amdhsa,
         amdpal,
         cuda,

@@ -318,7 +318,7 @@ fn rewriteSigForInstanceBody(
             break :n .{ .named = dst };
         },
     };
-    return .{ .params = params, .results = results };
+    return .{ .params = params, .results = results, .is_async = sig.is_async };
 }
 
 // ── Resource built-in intrinsic imports (cataggar/wabt#248) ─────────
@@ -914,7 +914,7 @@ fn parseStreamCancelField(field: []const u8) ?StreamCancelField {
 /// rebase to resolve.
 fn instProvidesType(decls: []const ctypes.Decl) bool {
     for (decls) |d| switch (d) {
-        .@"export" => |e| if (e.desc == .type) return true,
+        .@"export" => |e| if (e.desc == .type and e.desc.type == .eq) return true,
         else => {},
     };
     return false;
@@ -1137,10 +1137,14 @@ fn coreNeedsAsyncMemOpShim(ar: std.mem.Allocator, core_bytes: []const u8) bool {
         for (oi.interface.imports) |im| {
             if (im.kind != .func) continue;
             if (std.mem.startsWith(u8, im.module_name, "[stream]") and
-                (std.mem.eql(u8, im.field_name, "read") or std.mem.eql(u8, im.field_name, "write")))
+                (std.mem.eql(u8, im.field_name, "read") or
+                    std.mem.eql(u8, im.field_name, "write") or
+                    std.mem.indexOfScalar(u8, im.module_name, '#') != null))
                 return true;
             if (std.mem.startsWith(u8, im.module_name, "[future]") and
-                (std.mem.eql(u8, im.field_name, "read") or std.mem.eql(u8, im.field_name, "write")))
+                (std.mem.eql(u8, im.field_name, "read") or
+                    std.mem.eql(u8, im.field_name, "write") or
+                    std.mem.indexOfScalar(u8, im.module_name, '#') != null))
                 return true;
             if (std.mem.startsWith(u8, im.module_name, "[waitable-set]") and
                 (std.mem.eql(u8, im.field_name, "wait") or std.mem.eql(u8, im.field_name, "poll")))
@@ -1195,9 +1199,13 @@ pub fn buildComponent(alloc: std.mem.Allocator, core_bytes: []const u8) ![]u8 {
         ext_slots: []const metadata_decode.TypeSlot,
         inst_decls: []const ctypes.Decl,
     };
+    var any_func_needs_opts = false;
     var import_shapes = std.ArrayList(ImportShape).empty;
     for (decoded.externs) |ext| {
         if (ext.is_export) continue;
+        if (instProvidesType(ext.inst_decls)) {
+            any_func_needs_opts = true;
+        }
         var rs = std.ArrayList([]const u8).empty;
         for (ext.type_slots) |slot| switch (slot) {
             .sub_resource => |name| try rs.append(ar, name),
@@ -1226,13 +1234,16 @@ pub fn buildComponent(alloc: std.mem.Allocator, core_bytes: []const u8) ![]u8 {
     // reproducer's wire output bit-identical, and avoiding the
     // forward-reference cycle on `(memory main_inst …)` aliases
     // that the shim/fixup pattern exists to break.
-    var any_func_needs_opts = false;
     for (import_shapes.items) |shape| {
         const resolver = wabt.component.adapter.abi.TypeResolver{
             .inst_decls = shape.inst_decls,
             .world_decls = decoded.world_decls,
         };
         for (shape.funcs) |fn_ref| {
+            if (fn_ref.sig.is_async) {
+                any_func_needs_opts = true;
+                break;
+            }
             const ftr = wabt.component.adapter.abi.FuncTypeRef{
                 .func = fn_ref.sig,
                 .resolver = resolver,
@@ -1661,7 +1672,9 @@ pub fn buildComponent(alloc: std.mem.Allocator, core_bytes: []const u8) ![]u8 {
         if (core_imports.extract(ar, stripped_core)) |oi| {
             for (oi.interface.imports) |im| {
                 if (im.kind != .func) continue;
-                if (!isAsyncIntrinsicModule(im.module_name)) continue;
+                if (!isAsyncIntrinsicModule(im.module_name) and
+                    !(std.mem.startsWith(u8, im.module_name, "[export]") and
+                        std.mem.startsWith(u8, im.field_name, "[task-return]"))) continue;
                 var gi: ?usize = null;
                 for (groups.items, 0..) |grp, k| {
                     if (std.mem.eql(u8, grp.module, im.module_name)) {
@@ -1686,39 +1699,46 @@ pub fn buildComponent(alloc: std.mem.Allocator, core_bytes: []const u8) ![]u8 {
         for (groups.items) |grp| {
             var bundle_exports = std.ArrayList(ctypes.CoreInlineExport).empty;
 
-            if (std.mem.startsWith(u8, grp.module, "[task-return]")) {
-                // `[task-return]<iface>#<fn>` → result types of that export.
-                const export_ref = grp.module["[task-return]".len..];
-                const hash = std.mem.lastIndexOfScalar(u8, export_ref, '#') orelse
-                    return error.UnsupportedAsyncIntrinsic;
-                const iface_name = export_ref[0..hash];
-                const fn_name = export_ref[hash + 1 ..];
+            if (std.mem.startsWith(u8, grp.module, "[task-return]") or
+                std.mem.startsWith(u8, grp.module, "[export]"))
+            {
+                const is_export_mod = std.mem.startsWith(u8, grp.module, "[export]");
                 const ctx = AsyncTypeCtx{ .ar = ar, .types = &types, .order = &order, .comp_type_idx = &comp_type_idx };
-                var results: ctypes.FuncType.ResultList = .none;
-                var found_export = false;
-                find: for (decoded.externs) |ext| {
-                    if (!ext.is_export) continue;
-                    if (!std.mem.eql(u8, ext.qualified_name, iface_name)) continue;
-                    for (ext.funcs) |fn_ref| {
-                        if (!std.mem.eql(u8, fn_ref.name, fn_name)) continue;
-                        results = switch (fn_ref.sig.results) {
-                            .none => .none,
-                            .unnamed => |v| .{ .unnamed = try lift_types.transcribeValType(ar, ctx, ext.type_slots, v) },
-                            .named => |named| n: {
-                                const dst = try ar.alloc(ctypes.NamedValType, named.len);
-                                for (named, 0..) |nv, k| dst[k] = .{
-                                    .name = nv.name,
-                                    .type = try lift_types.transcribeValType(ar, ctx, ext.type_slots, nv.type),
-                                };
-                                break :n .{ .named = dst };
-                            },
-                        };
-                        found_export = true;
-                        break :find;
-                    }
-                }
-                if (!found_export) return error.UnsupportedAsyncIntrinsic;
                 for (grp.fields.items) |field| {
+                    const iface_name: []const u8, const fn_name: []const u8 = if (is_export_mod) blk: {
+                        if (!std.mem.startsWith(u8, field, "[task-return]"))
+                            return error.UnsupportedAsyncIntrinsic;
+                        break :blk .{ grp.module["[export]".len..], field["[task-return]".len..] };
+                    } else blk: {
+                        const export_ref = grp.module["[task-return]".len..];
+                        const hash = std.mem.lastIndexOfScalar(u8, export_ref, '#') orelse
+                            return error.UnsupportedAsyncIntrinsic;
+                        break :blk .{ export_ref[0..hash], export_ref[hash + 1 ..] };
+                    };
+                    var results: ctypes.FuncType.ResultList = .none;
+                    var found_export = false;
+                    find: for (decoded.externs) |ext| {
+                        if (!ext.is_export) continue;
+                        if (!std.mem.eql(u8, ext.qualified_name, iface_name)) continue;
+                        for (ext.funcs) |fn_ref| {
+                            if (!std.mem.eql(u8, fn_ref.name, fn_name)) continue;
+                            results = switch (fn_ref.sig.results) {
+                                .none => .none,
+                                .unnamed => |v| .{ .unnamed = try lift_types.transcribeValType(ar, ctx, ext.type_slots, v) },
+                                .named => |named| n: {
+                                    const dst = try ar.alloc(ctypes.NamedValType, named.len);
+                                    for (named, 0..) |nv, k| dst[k] = .{
+                                        .name = nv.name,
+                                        .type = try lift_types.transcribeValType(ar, ctx, ext.type_slots, nv.type),
+                                    };
+                                    break :n .{ .named = dst };
+                                },
+                            };
+                            found_export = true;
+                            break :find;
+                        }
+                    }
+                    if (!found_export) return error.UnsupportedAsyncIntrinsic;
                     try canons.append(ar, .{ .task_return = .{ .results = results, .opts = &.{} } });
                     try order.append(ar, .{ .kind = .canon, .start = @intCast(canons.items.len - 1), .count = 1 });
                     try bundle_exports.append(ar, .{ .name = field, .sort_idx = .{ .sort = .func, .idx = core_func_idx } });
@@ -2552,7 +2572,9 @@ fn buildComponentShimFixup(
         var modfields = std.ArrayList(std.ArrayList([]const u8)).empty;
         for (oi.interface.imports) |im| {
             if (im.kind != .func) continue;
-            if (!isAsyncIntrinsicModule(im.module_name)) continue;
+            if (!isAsyncIntrinsicModule(im.module_name) and
+                !(std.mem.startsWith(u8, im.module_name, "[export]") and
+                    std.mem.startsWith(u8, im.field_name, "[task-return]"))) continue;
             var gi: ?usize = null;
             for (modnames.items, 0..) |m, k| if (std.mem.eql(u8, m, im.module_name)) {
                 gi = k;
@@ -2568,8 +2590,17 @@ fn buildComponentShimFixup(
         for (modnames.items, 0..) |module, mi| {
             const fsrc = modfields.items[mi].items;
             const fields = try ar.alloc(AsyncField, fsrc.len);
-            if (std.mem.startsWith(u8, module, "[task-return]")) {
-                const export_ref = module["[task-return]".len..];
+            if (std.mem.startsWith(u8, module, "[task-return]") or
+                std.mem.startsWith(u8, module, "[export]"))
+            {
+                const export_ref = if (std.mem.startsWith(u8, module, "[export]")) blk: {
+                    if (fsrc.len == 0 or !std.mem.startsWith(u8, fsrc[0], "[task-return]"))
+                        return error.UnsupportedAsyncIntrinsic;
+                    break :blk try std.fmt.allocPrint(ar, "{s}#{s}", .{
+                        module["[export]".len..],
+                        fsrc[0]["[task-return]".len..],
+                    });
+                } else module["[task-return]".len..];
                 // #280: a result whose lowering touches memory (string/list,
                 // e.g. http's `result<response, error-code>`) makes task.return
                 // a mem-op needing `(memory)` — routed via the shim/fixup like

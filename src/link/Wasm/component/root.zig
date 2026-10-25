@@ -95,21 +95,27 @@ pub const wasi_preview1_reactor_wasm: []const u8 = build_component.builtin_adapt
 
 pub const wasi_canon = wit.wasi_canon;
 
-/// Canonical bundled WIT sources for standard WASI 0.2 worlds.
+/// Canonical bundled WIT sources for standard WASI 0.2 and 0.3 worlds.
 pub const bundled_wit = struct {
     pub const cli_command_0_2_6: []const u8 = @embedFile("wit/wasi-canon/0.2.6/cli/command.wit");
     pub const cli_command_0_2_12: []const u8 = @embedFile("wit/wasi-canon/0.2.12/cli/command.wit");
+    pub const cli_command_0_3_0: []const u8 = @embedFile("wit/wasi-canon/0.3.0/cli/command.wit");
     pub const cli_imports_0_2_6: []const u8 = @embedFile("wit/wasi-canon/0.2.6/cli/imports.wit");
     pub const cli_imports_0_2_12: []const u8 = @embedFile("wit/wasi-canon/0.2.12/cli/imports.wit");
+    pub const cli_imports_0_3_0: []const u8 = @embedFile("wit/wasi-canon/0.3.0/cli/imports.wit");
     pub const http_proxy_0_2_6: []const u8 = @embedFile("wit/wasi-canon/0.2.6/http/proxy.wit");
     pub const http_proxy_0_2_12: []const u8 = @embedFile("wit/wasi-canon/0.2.12/http/proxy.wit");
+    pub const http_worlds_0_3_0: []const u8 = @embedFile("wit/wasi-canon/0.3.0/http/worlds.wit");
     pub const cli_command: []const u8 = cli_command_0_2_6;
     pub const cli_imports: []const u8 = cli_imports_0_2_6;
     pub const http_proxy: []const u8 = http_proxy_0_2_6;
 };
 
+pub const WasiVersion = enum { p2, p3 };
+
 pub const LinkComponentOptions = struct {
     exec_model: std.builtin.WasiExecModel = .command,
+    wasi_version: WasiVersion = .p2,
     wit_source: ?[]const u8 = null,
     wit_world: ?[]const u8 = null,
     custom_adapter_bytes: ?[]const u8 = null,
@@ -199,6 +205,23 @@ fn extractResourceName(field_name: []const u8) ?[]const u8 {
     return null;
 }
 
+fn parseAsyncChannelFuncRef(module_name: []const u8) ?struct { iface: []const u8, func_name: []const u8 } {
+    const spec = if (std.mem.startsWith(u8, module_name, "[stream]"))
+        module_name["[stream]".len..]
+    else if (std.mem.startsWith(u8, module_name, "[future]"))
+        module_name["[future]".len..]
+    else
+        return null;
+    const h1 = std.mem.indexOfScalar(u8, spec, '#') orelse return null;
+    const tail = spec[h1 + 1 ..];
+    const h2 = std.mem.lastIndexOfScalar(u8, tail, '#') orelse return null;
+    if (h1 == 0 or h2 == 0) return null;
+    return .{
+        .iface = spec[0..h1],
+        .func_name = tail[0..h2],
+    };
+}
+
 fn collectLiveMethodsForCore(
     arena: Allocator,
     core_iface: *const adapter.core_imports.CoreInterface,
@@ -216,6 +239,12 @@ fn collectLiveMethodsForCore(
         {
             continue;
         }
+        if (std.mem.startsWith(u8, imp.module_name, "[")) {
+            if (parseAsyncChannelFuncRef(imp.module_name)) |ref| {
+                try appendUniqueString(arena, &ns_list, ref.iface);
+            }
+            continue;
+        }
         try appendUniqueString(arena, &ns_list, imp.module_name);
     }
 
@@ -224,6 +253,17 @@ fn collectLiveMethodsForCore(
         var type_exports: std.ArrayList([]const u8) = .empty;
 
         for (core_iface.imports) |imp| {
+            if (std.mem.startsWith(u8, imp.module_name, "[")) {
+                if (parseAsyncChannelFuncRef(imp.module_name)) |ref| {
+                    if (std.mem.eql(u8, ref.iface, ns)) {
+                        try appendUniqueString(arena, &methods, ref.func_name);
+                        if (extractResourceName(ref.func_name)) |rname| {
+                            try appendUniqueString(arena, &type_exports, rname);
+                        }
+                    }
+                }
+                continue;
+            }
             if (!std.mem.eql(u8, imp.module_name, ns)) continue;
             try appendUniqueString(arena, &methods, imp.field_name);
             if (extractResourceName(imp.field_name)) |rname| {
@@ -283,6 +323,21 @@ fn encodeWorldForCore(
     for (core_iface.imports) |imp| {
         if (std.mem.startsWith(u8, imp.module_name, "wasi:")) {
             try appendUniqueString(arena, &wasi_imports, imp.module_name);
+        } else if (parseAsyncChannelFuncRef(imp.module_name)) |ref| {
+            if (std.mem.startsWith(u8, ref.iface, "wasi:")) {
+                var is_exported_iface = false;
+                for (core_iface.exports) |exp| {
+                    if (exp.kind == .func and std.mem.startsWith(u8, exp.name, ref.iface) and
+                        exp.name.len > ref.iface.len and exp.name[ref.iface.len] == '#')
+                    {
+                        is_exported_iface = true;
+                        break;
+                    }
+                }
+                if (!is_exported_iface) {
+                    try appendUniqueString(arena, &wasi_imports, ref.iface);
+                }
+            }
         }
     }
     if (wasi_imports.items.len == 0) {
@@ -390,6 +445,7 @@ pub fn linkComponent(
 
     var imports_preview1 = false;
     var imports_other = false;
+    var imports_p3 = false;
     for (core_iface.imports) |imp| {
         if (std.mem.eql(u8, imp.module_name, "wasi_snapshot_preview1")) {
             imports_preview1 = true;
@@ -397,26 +453,36 @@ pub fn linkComponent(
             !std.mem.eql(u8, imp.module_name, "__main_module__"))
         {
             imports_other = true;
+            if (std.mem.indexOf(u8, imp.module_name, "@0.3.") != null) {
+                imports_p3 = true;
+            }
         }
     }
 
     var exports_wasi_run = false;
+    var exports_wasi_run_p3 = false;
     var exports_start = false;
     for (core_iface.exports) |exp| {
         if (exp.kind != .func) continue;
         if (std.mem.startsWith(u8, exp.name, "wasi:cli/run@")) {
             exports_wasi_run = true;
+            if (std.mem.startsWith(u8, exp.name, "wasi:cli/run@0.3.")) {
+                exports_wasi_run_p3 = true;
+            }
         } else if (std.mem.eql(u8, exp.name, "_start")) {
             exports_start = true;
         }
     }
+
+    const is_p3 = (opts.wasi_version == .p3) or exports_wasi_run_p3 or imports_p3;
 
     const existing_meta = try wit.metadata_decode.extractFromCoreWasm(core_wasm);
     const has_embedded_world = (existing_meta != null);
 
     const use_adapter_splice = (opts.custom_adapter_bytes != null) or
         imports_preview1 or
-        (opts.exec_model == .command and
+        (!is_p3 and
+            opts.exec_model == .command and
             opts.wit_source == null and
             opts.wit_world == null and
             !has_embedded_world and
@@ -432,16 +498,25 @@ pub fn linkComponent(
             src,
             try selectWorldNameFromSource(ar, src, opts.wit_world, opts.exec_model),
         } else if (opts.wit_world) |w| blk: {
-            if (std.mem.indexOf(u8, w, "proxy") != null or std.mem.indexOf(u8, w, "http") != null) {
+            const world_is_p3 = is_p3 or std.mem.indexOf(u8, w, "0.3.") != null;
+            if (std.mem.indexOf(u8, w, "proxy") != null or
+                std.mem.indexOf(u8, w, "http") != null or
+                std.mem.indexOf(u8, w, "service") != null or
+                std.mem.indexOf(u8, w, "middleware") != null)
+            {
+                if (world_is_p3 or std.mem.indexOf(u8, w, "service") != null or std.mem.indexOf(u8, w, "middleware") != null) {
+                    const effective_w = if (std.mem.eql(u8, w, "proxy") or std.mem.eql(u8, w, "http")) "service" else w;
+                    break :blk .{ bundled_wit.http_worlds_0_3_0, effective_w };
+                }
                 break :blk .{ bundled_wit.http_proxy, w };
             } else if (std.mem.eql(u8, w, "imports") or std.mem.startsWith(u8, w, "wasi:cli/imports")) {
-                break :blk .{ bundled_wit.cli_imports, w };
+                break :blk .{ if (world_is_p3) bundled_wit.cli_imports_0_3_0 else bundled_wit.cli_imports, w };
             } else {
-                break :blk .{ bundled_wit.cli_command, w };
+                break :blk .{ if (world_is_p3) bundled_wit.cli_command_0_3_0 else bundled_wit.cli_command, w };
             }
         } else switch (opts.exec_model) {
-            .command => .{ bundled_wit.cli_command, "command" },
-            .reactor => .{ bundled_wit.cli_imports, "imports" },
+            .command => .{ if (is_p3) bundled_wit.cli_command_0_3_0 else bundled_wit.cli_command, "command" },
+            .reactor => .{ if (is_p3) bundled_wit.cli_imports_0_3_0 else bundled_wit.cli_imports, "imports" },
         };
 
         const raw_payload = try encodeWorldForCore(ar, wit_src, world_name, core_iface);
@@ -779,4 +854,76 @@ test "linkComponent: pure P2 command, custom WIT reactor, and preview1 fallback"
     });
     defer testing.allocator.free(p1_comp);
     try testing.expectEqualSlices(u8, "\x00asm\x0d\x00\x01\x00", p1_comp[0..8]);
+}
+
+test "WASI 0.3.0: encodeWorldFromSource and linkComponent P3 command" {
+    const testing = std.testing;
+
+    // 1. Encode bundled `wasi:cli/command@0.3.0` (both short and qualified world names).
+    const cli_p3_payload = try encodeWorldFromSource(
+        testing.allocator,
+        bundled_wit.cli_command_0_3_0,
+        "command",
+    );
+    defer testing.allocator.free(cli_p3_payload);
+    try testing.expect(cli_p3_payload.len > 8);
+    try testing.expectEqualSlices(u8, "\x00asm\x0d\x00\x01\x00", cli_p3_payload[0..8]);
+
+    var cli_p3_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer cli_p3_arena.deinit();
+    const cli_p3_meta = try wit.metadata_decode.decode(cli_p3_arena.allocator(), cli_p3_payload);
+    try testing.expect(cli_p3_meta.externs.len >= 2);
+
+    const cli_p3_qual_payload = try encodeWorldFromSource(
+        testing.allocator,
+        bundled_wit.cli_command_0_3_0,
+        "wasi:cli/command",
+    );
+    defer testing.allocator.free(cli_p3_qual_payload);
+    try testing.expectEqualSlices(u8, cli_p3_payload, cli_p3_qual_payload);
+
+    // 2. Minimal P3 command core module importing
+    // `"[export]wasi:cli/run@0.3.0" "[task-return]run"` ((i32) -> ()) and
+    // exporting `"memory"` (mem 0) + `"wasi:cli/run@0.3.0#run"` (() -> ()).
+    const pure_p3_core = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        // type section: 2 types: 0 = (i32) -> (), 1 = () -> ()
+        0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
+        0x00, 0x00,
+        // import section: 1 import: "[export]wasi:cli/run@0.3.0" "[task-return]run" (func type 0)
+        0x02, 47,   0x01, 26,   '[',  'e',  'x',  'p',
+        'o',  'r',  't',  ']',  'w',  'a',  's',  'i',
+        ':',  'c',  'l',  'i',  '/',  'r',  'u',  'n',
+        '@',  '0',  '.',  '3',  '.',  '0',  16,   '[',
+        't',  'a',  's',  'k',  '-',  'r',  'e',  't',
+        'u',  'r',  'n',  ']',  'r',  'u',  'n',  0x00,
+        0x00,
+        // function section: 1 defined func (type 1)
+        0x03, 0x02, 0x01, 0x01,
+        // memory section: 1 memory (min 1 page)
+        0x05, 0x03, 0x01, 0x00, 0x01,
+        // export section: "memory" (mem 0) + "wasi:cli/run@0.3.0#run" (func 1)
+        0x07, 35,   0x02, 6,    'm',  'e',  'm',  'o',
+        'r',  'y',  0x02, 0x00, 22,   'w',  'a',  's',
+        'i',  ':',  'c',  'l',  'i',  '/',  'r',  'u',
+        'n',  '@',  '0',  '.',  '3',  '.',  '0',  '#',
+        'r',  'u',  'n',  0x00, 0x01,
+        // code section: i32.const 0; call 0; end
+        0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x00, 0x10,
+        0x00, 0x0b,
+    };
+
+    const p3_comp = try linkComponent(testing.allocator, &pure_p3_core, .{
+        .wasi_version = .p3,
+        .exec_model = .command,
+    });
+    defer testing.allocator.free(p3_comp);
+    try testing.expect(p3_comp.len > 8);
+    try testing.expectEqualSlices(u8, "\x00asm\x0d\x00\x01\x00", p3_comp[0..8]);
+
+    var p3_arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer p3_arena.deinit();
+    const p3_loaded = try loader.load(p3_comp, p3_arena.allocator());
+    try testing.expectEqual(@as(usize, 0), p3_loaded.imports.len);
+    try testing.expectEqual(@as(usize, 1), p3_loaded.exports.len);
 }

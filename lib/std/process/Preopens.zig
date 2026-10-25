@@ -10,13 +10,13 @@ const Allocator = std.mem.Allocator;
 map: Map,
 
 pub const empty: Preopens = switch (native_os) {
-    .wasi, .wasip2 => .{ .map = .empty },
+    .wasi, .wasip2, .wasip3 => .{ .map = .empty },
     else => .{ .map = {} },
 };
 
 pub const Map = switch (native_os) {
     // Indexed by file descriptor number.
-    .wasi, .wasip2 => std.array_hash_map.String(void),
+    .wasi, .wasip2, .wasip3 => std.array_hash_map.String(void),
     else => void,
 };
 
@@ -27,7 +27,7 @@ pub const Resource = union(enum) {
 
 pub fn get(p: *const Preopens, name: []const u8) ?Resource {
     switch (native_os) {
-        .wasi, .wasip2 => {
+        .wasi, .wasip2, .wasip3 => {
             const index = p.map.getIndex(name) orelse return null;
             if (index <= 2) return .{ .file = .{
                 .handle = @intCast(index),

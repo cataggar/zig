@@ -1524,7 +1524,7 @@ pub const Directories = struct {
         local_cache_strat: LocalCacheStrategy,
         preopens: std.process.Preopens,
         self_exe_path: switch (builtin.target.os.tag) {
-            .wasi, .wasip2 => void,
+            .wasi, .wasip2, .wasip3 => void,
             else => []const u8,
         },
         environ_map: *const std.process.Environ.Map,
@@ -1710,7 +1710,7 @@ pub fn resolveGlobalCacheDir(arena: Allocator, environ_map: *const std.process.E
     const app_name = "zig";
 
     switch (builtin.os.tag) {
-        .wasi, .wasip2 => @compileError("on WASI the global cache dir must be resolved with preopens"),
+        .wasi, .wasip2, .wasip3 => @compileError("on WASI the global cache dir must be resolved with preopens"),
         .windows => {
             const local_app_data_dir = EnvVar.LOCALAPPDATA.get(environ_map) orelse
                 return error.AppDataDirUnavailable;

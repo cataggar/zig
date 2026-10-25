@@ -63,6 +63,7 @@ pub const Os = struct {
         emscripten,
         wasi,
         wasip2,
+        wasip3,
 
         amdhsa,
         amdpal,
@@ -101,7 +102,7 @@ pub const Os = struct {
 
         pub inline fn isWasi(tag: Tag) bool {
             return switch (tag) {
-                .wasi, .wasip2 => true,
+                .wasi, .wasip2, .wasip3 => true,
                 else => false,
             };
         }
@@ -216,6 +217,7 @@ pub const Os = struct {
 
                 .wasi,
                 .wasip2,
+                .wasip3,
 
                 .amdhsa,
                 .amdpal,
@@ -687,6 +689,12 @@ pub const Os = struct {
                         .max = .{ .major = 0, .minor = 3, .patch = 0 },
                     },
                 },
+                .wasip3 => .{
+                    .semver = .{
+                        .min = .{ .major = 0, .minor = 3, .patch = 0 },
+                        .max = .{ .major = 0, .minor = 3, .patch = 0 },
+                    },
+                },
 
                 .amdhsa => .{
                     .semver = .{
@@ -992,6 +1000,7 @@ pub const Abi = enum {
             .vulkan,
             .tios,
             .wasip2,
+            .wasip3,
             => .none,
         };
     }
@@ -2301,7 +2310,11 @@ pub inline fn isOpenBSDLibC(target: *const Target) bool {
 }
 
 pub inline fn isWasiLibC(target: *const Target) bool {
-    return target.os.tag == .wasi and target.abi.isMusl();
+    return switch (target.os.tag) {
+        .wasi => target.abi.isMusl(),
+        .wasip2, .wasip3 => target.abi == .none or target.abi.isMusl(),
+        else => false,
+    };
 }
 
 /// Does this target require linking libc? This may be the case if the target has an unstable
@@ -2353,6 +2366,7 @@ pub fn requiresLibC(target: *const Target) bool {
         .hurd,
         .wasi,
         .wasip2,
+        .wasip3,
         .uefi,
         .opencl,
         .opengl,
@@ -2519,6 +2533,7 @@ pub const DynamicLinker = struct {
             .emscripten,
             .wasi,
             .wasip2,
+            .wasip3,
 
             .amdhsa,
             .amdpal,
@@ -2954,6 +2969,7 @@ pub const DynamicLinker = struct {
             .emscripten,
             .wasi,
             .wasip2,
+            .wasip3,
 
             .amdhsa,
             .amdpal,
@@ -3342,6 +3358,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) ?u16 {
 
         .wasi,
         .wasip2,
+        .wasip3,
         .emscripten,
         => switch (target.cpu.arch) {
             .mips64,
@@ -3874,4 +3891,18 @@ test "wasm32-wasip2 target query and properties" {
     try std.testing.expectEqual(@as(u32, 2), default_os.version_range.semver.min.minor);
     try std.testing.expectEqual(Abi.none, Abi.default(.wasm32, .wasip2));
     try std.testing.expectEqualSlices(u8, ".wasm", Os.Tag.wasip2.exeFileExt(.wasm32));
+
+    const query_p3 = try Query.parse(.{
+        .arch_os_abi = "wasm32-wasip3",
+    });
+    try std.testing.expectEqual(Cpu.Arch.wasm32, query_p3.cpu_arch.?);
+    try std.testing.expectEqual(Os.Tag.wasip3, query_p3.os_tag.?);
+    try std.testing.expect(query_p3.os_tag.?.isWasi());
+
+    const default_os_p3 = Os.Tag.wasip3.defaultVersionRange(.wasm32, .none);
+    try std.testing.expectEqual(@as(u32, 0), default_os_p3.version_range.semver.min.major);
+    try std.testing.expectEqual(@as(u32, 3), default_os_p3.version_range.semver.min.minor);
+    try std.testing.expectEqual(@as(u32, 0), default_os_p3.version_range.semver.min.patch);
+    try std.testing.expectEqual(Abi.none, Abi.default(.wasm32, .wasip3));
+    try std.testing.expectEqualSlices(u8, ".wasm", Os.Tag.wasip3.exeFileExt(.wasm32));
 }

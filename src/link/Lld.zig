@@ -184,6 +184,7 @@ const Wasm = struct {
             .reactor => "_initialize",
             .command => switch (target.os.tag) {
                 .wasip2 => "wasi:cli/run@0.2.6#run",
+                .wasip3 => "wasi:cli/run@0.3.0#run",
                 else => "_start",
             },
         };
@@ -1569,7 +1570,7 @@ fn wasmLink(lld: *Lld, arena: Allocator) !void {
             (comp.config.output_mode == .Lib and comp.config.link_mode == .dynamic);
 
         if (comp.config.link_libc and is_exe_or_dyn_lib) {
-            if (target.os.tag == .wasi) {
+            if (target.os.tag.isWasi()) {
                 try argv.append(try comp.crtFileAsString(
                     arena,
                     wasi_libc.execModelCrtFileFullName(comp.config.wasi_exec_model),

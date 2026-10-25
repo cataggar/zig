@@ -956,7 +956,7 @@ pub fn fd_renumber(from: wasi.fd_t, to: wasi.fd_t) callconv(.c) wasi.errno_t {
     if (to < 3) return .BADF;
     const to_idx: usize = @intCast(to);
     if (to_idx >= max_fds) return .BADF;
-    if (from_entry.is_preopen or fd_table[to_idx].is_preopen) return .NOTSUP;
+    if (from_entry.is_preopen or fd_table[to_idx].is_preopen) return .OPNOTSUPP;
 
     if (fd_table[to_idx].in_use) {
         @"[resource-drop]descriptor"(fd_table[to_idx].handle);

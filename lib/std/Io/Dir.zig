@@ -31,7 +31,7 @@ pub const path = std.fs.path;
 /// * On other platforms, `[]u8` file paths are opaque sequences of bytes with
 ///   no particular encoding.
 pub const max_path_bytes = switch (native_os) {
-    .linux, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .freebsd, .openbsd, .netbsd, .dragonfly, .haiku, .illumos, .plan9, .emscripten, .wasi, .wasip2, .serenity => std.posix.PATH_MAX,
+    .linux, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .freebsd, .openbsd, .netbsd, .dragonfly, .haiku, .illumos, .plan9, .emscripten, .wasi, .wasip2, .wasip3, .serenity => std.posix.PATH_MAX,
     // Each WTF-16LE code unit may be expanded to 3 WTF-8 bytes.
     // If it would require 4 WTF-8 bytes, then there would be a surrogate
     // pair in the WTF-16LE, and we (over)account 3 bytes for it that way.
@@ -62,7 +62,7 @@ pub const max_name_bytes = switch (native_os) {
     // For WASI, the MAX_NAME will depend on the host OS, so it needs to be
     // as large as the largest max_name_bytes (Windows) in order to work on any host OS.
     // TODO determine if this is a reasonable approach
-    .wasi, .wasip2 => std.os.windows.NAME_MAX * 3,
+    .wasi, .wasip2, .wasip3 => std.os.windows.NAME_MAX * 3,
     else => if (@hasDecl(root, "os") and @hasDecl(root.os, "NAME_MAX"))
         root.os.NAME_MAX
     else
@@ -88,7 +88,7 @@ pub const Entry = struct {
 pub fn cwd() Dir {
     const cwdFn = std.Options.cwd orelse return switch (native_os) {
         .windows => .{ .handle = std.os.windows.peb().ProcessParameters.CurrentDirectory.Handle },
-        .wasi, .wasip2 => .{ .handle = 3 }, // Expect the first preopen to be current working directory.
+        .wasi, .wasip2, .wasip3 => .{ .handle = 3 }, // Expect the first preopen to be current working directory.
         else => .{ .handle = std.posix.AT.FDCWD },
     };
     return cwdFn();
@@ -114,7 +114,7 @@ pub const Reader = struct {
             const reserved_len = std.mem.alignForward(usize, max_name_bytes, info_align) - max_info_len;
             break :len std.mem.alignForward(usize, reserved_len, info_align) + max_info_len;
         },
-        .wasi, .wasip2 => @sizeOf(std.os.wasi.dirent_t) +
+        .wasi, .wasip2, .wasip3 => @sizeOf(std.os.wasi.dirent_t) +
             std.mem.alignForward(usize, max_name_bytes, @alignOf(std.os.wasi.dirent_t)),
         .openbsd => std.c.S.BLKSIZE,
         else => if (builtin.link_libc) @sizeOf(std.c.dirent) else std.mem.alignForward(usize, max_name_bytes, @alignOf(usize)),

@@ -508,7 +508,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
 
     if (entry_name.unwrap()) |name| {
         if (wasm.entry_resolution == .unresolved) {
-            if (target.os.tag == .wasip2 and comp.config.wasi_exec_model == .reactor and
+            if ((target.os.tag == .wasip2 or target.os.tag == .wasip3) and comp.config.wasi_exec_model == .reactor and
                 name == wasm.preloaded_strings._initialize)
             {
                 wasm.entry_name = .none;
@@ -1758,7 +1758,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
         builder.write(&file_writer.interface) catch |err| switch (err) {
             error.WriteFailed => return file_writer.err.?,
         };
-    } else if (!is_obj and target.os.tag == .wasip2) {
+    } else if (!is_obj and (target.os.tag == .wasip2 or target.os.tag == .wasip3)) {
         const wit_source = if (wasm.wit_path) |wit_path|
             readWitPathAlloc(io, gpa, wit_path) catch |err|
                 return diags.fail("failed to read WIT path '{s}': {s}", .{ wit_path, @errorName(err) })
@@ -1780,6 +1780,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
 
         const component_bytes = Wasm.component.linkComponent(gpa, binary_bytes.items, .{
             .exec_model = exec_model,
+            .wasi_version = if (target.os.tag == .wasip3) .p3 else .p2,
             .wit_source = wit_source,
             .wit_world = wasm.wit_world,
             .custom_adapter_bytes = custom_adapter_bytes,

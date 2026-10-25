@@ -589,8 +589,10 @@ pub fn classifyFunc(ftr: FuncTypeRef) Classification {
         },
     }
 
+    const max_flat_params = if (ft.is_async) MAX_FLAT_ASYNC_PARAMS else MAX_FLAT_PARAMS;
     const need_memory =
         params_have_string_or_list_via_memory or
+        params_flat > max_flat_params or
         results_flat > MAX_FLAT_RESULTS or
         results_have_string_or_list or
         // An async-lowered call writes its result through a caller-supplied
@@ -599,7 +601,7 @@ pub fn classifyFunc(ftr: FuncTypeRef) Classification {
 
     const need_realloc = results_have_string_or_list;
 
-    const class: Class = if (need_memory or params_flat > MAX_FLAT_PARAMS)
+    const class: Class = if (need_memory or params_flat > max_flat_params)
         .indirect
     else
         .direct;
