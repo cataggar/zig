@@ -103,14 +103,14 @@ pub const TypeResolver = struct {
     /// body. Returns null if the idx points outside what's
     /// resolvable here (treat as scalar handle by the caller).
     pub fn resolveLocal(self: TypeResolver, idx: u32) ?ctypes.TypeDef {
-        return resolveTypeIdxIn(self.inst_decls, idx, self.world_decls);
+        return resolveTypeIdxIn(self.inst_decls, idx, self.world_decls, 0);
     }
 
     /// Resolve a type idx in the world scope. Used when an outer
     /// alias points at a world-body type idx and we want to follow
     /// it to its definition.
     pub fn resolveWorld(self: TypeResolver, idx: u32) ?ctypes.TypeDef {
-        return resolveTypeIdxIn(self.world_decls, idx, &.{});
+        return resolveTypeIdxIn(self.world_decls, idx, &.{}, 0);
     }
 
     /// Like `resolveLocal`, but also reports the decls scope in which
@@ -124,7 +124,7 @@ pub const TypeResolver = struct {
     /// canon-lower opts (`realloc`/`string-encoding`) that go with it
     /// (#234).
     pub fn resolveLocalScoped(self: TypeResolver, idx: u32) ?ResolvedType {
-        return resolveTypeIdxInScoped(self.inst_decls, idx, self.world_decls);
+        return resolveTypeIdxInScoped(self.inst_decls, idx, self.world_decls, 0);
     }
 };
 
@@ -139,7 +139,9 @@ fn resolveTypeIdxInScoped(
     decls: []const ctypes.Decl,
     target: u32,
     outer_decls: []const ctypes.Decl,
+    depth: u32,
 ) ?ResolvedType {
+    if (depth > 32) return null;
     var cursor: u32 = 0;
     for (decls) |d| {
         switch (d) {
@@ -154,13 +156,13 @@ fn resolveTypeIdxInScoped(
                     .outer => |o| o.sort,
                 };
                 if (sort == .type) {
-                    if (cursor == target) return resolveAliasScoped(a, outer_decls);
+                    if (cursor == target) return resolveAliasScoped(a, outer_decls, depth + 1);
                     cursor += 1;
                 }
             },
             .@"export" => |e| switch (e.desc) {
                 .type => |bound| {
-                    if (cursor == target) return resolveTypeBoundScoped(bound, decls, outer_decls);
+                    if (cursor == target) return resolveTypeBoundScoped(bound, decls, outer_decls, depth + 1);
                     cursor += 1;
                 },
                 else => {},
@@ -171,13 +173,13 @@ fn resolveTypeIdxInScoped(
     return null;
 }
 
-fn resolveAliasScoped(a: ctypes.Alias, outer_decls: []const ctypes.Decl) ?ResolvedType {
+fn resolveAliasScoped(a: ctypes.Alias, outer_decls: []const ctypes.Decl, depth: u32) ?ResolvedType {
     return switch (a) {
         .outer => |o| if (o.sort == .type)
-            resolveTypeIdxInScoped(outer_decls, o.idx, outer_decls)
+            resolveTypeIdxInScoped(outer_decls, o.idx, outer_decls, depth + 1)
         else
             null,
-        .instance_export => |ie| resolveInstanceTypeExportScoped(outer_decls, ie.instance_idx, ie.name),
+        .instance_export => |ie| resolveInstanceTypeExportScoped(outer_decls, ie.instance_idx, ie.name, depth + 1),
     };
 }
 
@@ -185,13 +187,14 @@ fn resolveInstanceTypeExportScoped(
     world_decls: []const ctypes.Decl,
     instance_idx: u32,
     name: []const u8,
+    depth: u32,
 ) ?ResolvedType {
-    const inst_decls = findInstanceBodyAtIdx(world_decls, instance_idx) orelse return null;
+    const inst_decls = findInstanceBodyAtIdx(world_decls, instance_idx, depth + 1) orelse return null;
     for (inst_decls) |d| switch (d) {
         .@"export" => |e| {
             if (e.desc != .type) continue;
             if (!std.mem.eql(u8, e.name, name)) continue;
-            return resolveTypeBoundScoped(e.desc.type, inst_decls, world_decls);
+            return resolveTypeBoundScoped(e.desc.type, inst_decls, world_decls, depth + 1);
         },
         else => {},
     };
@@ -202,9 +205,10 @@ fn resolveTypeBoundScoped(
     bound: ctypes.TypeBound,
     decls: []const ctypes.Decl,
     outer_decls: []const ctypes.Decl,
+    depth: u32,
 ) ?ResolvedType {
     return switch (bound) {
-        .eq => |idx| resolveTypeIdxInScoped(decls, idx, outer_decls),
+        .eq => |idx| resolveTypeIdxInScoped(decls, idx, outer_decls, depth + 1),
         .sub_resource => ResolvedType{ .td = .{ .resource = .{} }, .inst_decls = decls },
     };
 }
@@ -216,7 +220,9 @@ fn resolveTypeIdxIn(
     decls: []const ctypes.Decl,
     target: u32,
     outer_decls: []const ctypes.Decl,
+    depth: u32,
 ) ?ctypes.TypeDef {
+    if (depth > 32) return null;
     var cursor: u32 = 0;
     for (decls) |d| {
         switch (d) {
@@ -234,7 +240,7 @@ fn resolveTypeIdxIn(
                 };
                 if (sort == .type) {
                     if (cursor == target) {
-                        return resolveAlias(a, outer_decls);
+                        return resolveAlias(a, outer_decls, depth + 1);
                     }
                     cursor += 1;
                 }
@@ -245,7 +251,7 @@ fn resolveTypeIdxIn(
                 switch (e.desc) {
                     .type => |bound| {
                         if (cursor == target) {
-                            return resolveTypeBound(bound, decls, outer_decls);
+                            return resolveTypeBound(bound, decls, outer_decls, depth + 1);
                         }
                         cursor += 1;
                     },
@@ -258,10 +264,10 @@ fn resolveTypeIdxIn(
     return null;
 }
 
-fn resolveAlias(a: ctypes.Alias, outer_decls: []const ctypes.Decl) ?ctypes.TypeDef {
+fn resolveAlias(a: ctypes.Alias, outer_decls: []const ctypes.Decl, depth: u32) ?ctypes.TypeDef {
     return switch (a) {
         .outer => |o| if (o.sort == .type)
-            resolveOuterType(outer_decls, o.idx)
+            resolveOuterType(outer_decls, o.idx, depth + 1)
         else
             null,
         // `(alias export <inst-idx> <name> (type T))` resolves into
@@ -269,28 +275,28 @@ fn resolveAlias(a: ctypes.Alias, outer_decls: []const ctypes.Decl) ?ctypes.TypeD
         // type export. Used heavily by WASI types that pull other
         // namespaces' types in (e.g. wasi:filesystem/types
         // pulling datetime from wasi:clocks/wall-clock).
-        .instance_export => |ie| resolveInstanceTypeExport(outer_decls, ie.instance_idx, ie.name),
+        .instance_export => |ie| resolveInstanceTypeExport(outer_decls, ie.instance_idx, ie.name, depth + 1),
     };
 }
 
 /// Resolve a type idx in the OUTER (world) scope, including any
 /// alias chains that resolve to other parts of the same world. The
 /// outer scope is its own "outer" — there is no further outer here.
-fn resolveOuterType(outer_decls: []const ctypes.Decl, target: u32) ?ctypes.TypeDef {
-    return resolveTypeIdxIn(outer_decls, target, outer_decls);
+fn resolveOuterType(outer_decls: []const ctypes.Decl, target: u32, depth: u32) ?ctypes.TypeDef {
+    return resolveTypeIdxIn(outer_decls, target, outer_decls, depth + 1);
 }
 
 /// At the world level, locate the instance type body backing the
 /// instance at `instance_idx` in the world's instance indexspace,
 /// then look up `name` as a type export in that body and resolve
 /// its bound back to a `TypeDef`.
-fn resolveInstanceTypeExport(world_decls: []const ctypes.Decl, instance_idx: u32, name: []const u8) ?ctypes.TypeDef {
-    const inst_decls = findInstanceBodyAtIdx(world_decls, instance_idx) orelse return null;
+fn resolveInstanceTypeExport(world_decls: []const ctypes.Decl, instance_idx: u32, name: []const u8, depth: u32) ?ctypes.TypeDef {
+    const inst_decls = findInstanceBodyAtIdx(world_decls, instance_idx, depth + 1) orelse return null;
     for (inst_decls) |d| switch (d) {
         .@"export" => |e| {
             if (e.desc != .type) continue;
             if (!std.mem.eql(u8, e.name, name)) continue;
-            return resolveTypeBound(e.desc.type, inst_decls, world_decls);
+            return resolveTypeBound(e.desc.type, inst_decls, world_decls, depth + 1);
         },
         else => {},
     };
@@ -302,13 +308,13 @@ fn resolveInstanceTypeExport(world_decls: []const ctypes.Decl, instance_idx: u32
 /// instance imports + instance type defs (and instance-typed
 /// exports / aliases, for completeness) per the spec's instance
 /// indexspace ordering.
-fn findInstanceBodyAtIdx(world_decls: []const ctypes.Decl, target: u32) ?[]const ctypes.Decl {
+fn findInstanceBodyAtIdx(world_decls: []const ctypes.Decl, target: u32, depth: u32) ?[]const ctypes.Decl {
     var cursor: u32 = 0;
     for (world_decls) |d| switch (d) {
         .import => |im| {
             if (im.desc == .instance) {
                 if (cursor == target) {
-                    const td = resolveOuterType(world_decls, im.desc.instance) orelse return null;
+                    const td = resolveOuterType(world_decls, im.desc.instance, depth + 1) orelse return null;
                     if (td != .instance) return null;
                     return td.instance.decls;
                 }
@@ -324,9 +330,10 @@ fn resolveTypeBound(
     bound: ctypes.TypeBound,
     decls: []const ctypes.Decl,
     outer_decls: []const ctypes.Decl,
+    depth: u32,
 ) ?ctypes.TypeDef {
     return switch (bound) {
-        .eq => |idx| resolveTypeIdxIn(decls, idx, outer_decls),
+        .eq => |idx| resolveTypeIdxIn(decls, idx, outer_decls, depth + 1),
         .sub_resource => ctypes.TypeDef{ .resource = .{} },
     };
 }
@@ -343,7 +350,7 @@ pub fn findFuncImport(
     const inst_decls = try findInstanceTypeBody(world.body_decls, inst_type_idx);
     const func_type_idx = (try findFuncExportTypeIdx(inst_decls, func_name)) orelse
         return error.FuncNotFound;
-    const td = resolveTypeIdxIn(inst_decls, func_type_idx, world.body_decls) orelse
+    const td = resolveTypeIdxIn(inst_decls, func_type_idx, world.body_decls, 0) orelse
         return error.UnsupportedShape;
     if (td != .func) return error.NotAFuncExport;
     return .{
@@ -359,7 +366,7 @@ fn findInstanceTypeBody(
     world_decls: []const ctypes.Decl,
     inst_type_idx: u32,
 ) Error![]const ctypes.Decl {
-    const td = resolveTypeIdxIn(world_decls, inst_type_idx, &.{}) orelse
+    const td = resolveTypeIdxIn(world_decls, inst_type_idx, &.{}, 0) orelse
         return error.UnsupportedShape;
     if (td != .instance) return error.UnsupportedShape;
     return td.instance.decls;
@@ -675,15 +682,16 @@ pub fn classifyFuncLift(ftr: FuncTypeRef) LiftOpts {
         },
     }
 
+    const params_spill = params_flat > MAX_FLAT_PARAMS;
     const need_memory =
         params_need_memory or results_need_memory or
-        params_flat > MAX_FLAT_PARAMS or results_flat > MAX_FLAT_RESULTS;
+        params_spill or results_flat > MAX_FLAT_RESULTS;
 
     return .{
         .memory = need_memory,
-        .realloc = params_need_realloc,
+        .realloc = params_need_realloc or params_spill,
         .string_encoding = any_string,
-        .needs_post_return = results_need_cleanup,
+        .needs_post_return = results_need_cleanup and !ft.is_async,
     };
 }
 

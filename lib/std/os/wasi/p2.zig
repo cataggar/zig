@@ -687,6 +687,14 @@ pub fn fd_filestat_get(fd: wasi.fd_t, buf: *wasi.filestat_t) callconv(.c) wasi.e
     @"[method]descriptor.stat"(entry.handle, &ret);
     if (ret[0] != 0) return errorCodeToErrno(ret[8]);
     writeFilestatFromDescriptorStat(&ret, buf);
+
+    var hash_ret: [24]u8 align(8) = @splat(0);
+    @"[method]descriptor.metadata-hash"(entry.handle, &hash_ret);
+    if (hash_ret[0] == 0) {
+        const lower = std.mem.readInt(u64, hash_ret[8..16], .little);
+        const upper = std.mem.readInt(u64, hash_ret[16..24], .little);
+        buf.ino = lower ^ upper;
+    }
     return .SUCCESS;
 }
 
@@ -919,9 +927,19 @@ pub fn fd_readdir(
             continue;
         }
 
+        const name_ptr: [*]const u8 = @ptrFromInt(name_addr);
+        var d_ino: u64 = 0;
+        var hash_ret: [24]u8 align(8) = @splat(0);
+        @"[method]descriptor.metadata-hash-at"(entry.handle, 0, name_ptr, name_len, &hash_ret);
+        if (hash_ret[0] == 0) {
+            const lower = std.mem.readInt(u64, hash_ret[8..16], .little);
+            const upper = std.mem.readInt(u64, hash_ret[16..24], .little);
+            d_ino = lower ^ upper;
+        }
+
         var dirent_bytes: [24]u8 = @splat(0);
         std.mem.writeInt(u64, dirent_bytes[0..8], idx + 1, .little);
-        std.mem.writeInt(u64, dirent_bytes[8..16], 0, .little);
+        std.mem.writeInt(u64, dirent_bytes[8..16], d_ino, .little);
         std.mem.writeInt(u32, dirent_bytes[16..20], @intCast(name_len), .little);
         dirent_bytes[20] = @backingInt(descriptorTypeToFiletype(dtype));
 
@@ -933,7 +951,6 @@ pub fn fd_readdir(
 
         const copy_name = @min(name_len, buf_len - used);
         if (copy_name > 0) {
-            const name_ptr: [*]const u8 = @ptrFromInt(name_addr);
             @memcpy(buf[used..][0..copy_name], name_ptr[0..copy_name]);
             used += copy_name;
         }
@@ -1031,7 +1048,13 @@ pub fn fd_write(
 
         const err = writeOutputStreamIovs(stream, iovs, iovs_len, nwritten);
         if (err == .SUCCESS) {
-            entry.position += nwritten.*;
+            var stat_ret: [104]u8 align(8) = @splat(0);
+            @"[method]descriptor.stat"(entry.handle, &stat_ret);
+            if (stat_ret[0] == 0) {
+                entry.position = std.mem.readInt(u64, stat_ret[24..32], .little);
+            } else {
+                entry.position += nwritten.*;
+            }
         }
         return err;
     }
@@ -1045,6 +1068,7 @@ pub fn fd_write(
 
 pub fn path_create_directory(fd: wasi.fd_t, path: [*]const u8, path_len: usize) callconv(.c) wasi.errno_t {
     const entry = getFdEntry(fd) orelse return .BADF;
+    if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
     var ret: [8]u8 align(4) = @splat(0);
     @"[method]descriptor.create-directory-at"(entry.handle, path, path_len, &ret);
     return descriptorErrorOnlyResult(&ret);
@@ -1058,11 +1082,20 @@ pub fn path_filestat_get(
     buf: *wasi.filestat_t,
 ) callconv(.c) wasi.errno_t {
     const entry = getFdEntry(fd) orelse return .BADF;
+    if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
     const path_flags = translateLookupFlags(flags);
     var ret: [104]u8 align(8) = @splat(0);
     @"[method]descriptor.stat-at"(entry.handle, path_flags, path, path_len, &ret);
     if (ret[0] != 0) return errorCodeToErrno(ret[8]);
     writeFilestatFromDescriptorStat(&ret, buf);
+
+    var hash_ret: [24]u8 align(8) = @splat(0);
+    @"[method]descriptor.metadata-hash-at"(entry.handle, path_flags, path, path_len, &hash_ret);
+    if (hash_ret[0] == 0) {
+        const lower = std.mem.readInt(u64, hash_ret[8..16], .little);
+        const upper = std.mem.readInt(u64, hash_ret[16..24], .little);
+        buf.ino = lower ^ upper;
+    }
     return .SUCCESS;
 }
 
@@ -1076,6 +1109,7 @@ pub fn path_filestat_set_times(
     fstflags: wasi.fstflags_t,
 ) callconv(.c) wasi.errno_t {
     const entry = getFdEntry(fd) orelse return .BADF;
+    if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
     const ts = decodeFstTimestamps(st_atim, st_mtim, fstflags) orelse return .INVAL;
     const path_flags = translateLookupFlags(flags);
     var ret: [8]u8 align(4) = @splat(0);
@@ -1106,6 +1140,8 @@ pub fn path_link(
 ) callconv(.c) wasi.errno_t {
     const old_entry = getFdEntry(old_fd) orelse return .BADF;
     const new_entry = getFdEntry(new_fd) orelse return .BADF;
+    if (!std.unicode.utf8ValidateSlice(old_path[0..old_path_len])) return .ILSEQ;
+    if (!std.unicode.utf8ValidateSlice(new_path[0..new_path_len])) return .ILSEQ;
     const path_flags = translateLookupFlags(old_flags);
     var ret: [8]u8 align(4) = @splat(0);
     @"[method]descriptor.link-at"(
@@ -1134,6 +1170,7 @@ pub fn path_open(
 ) callconv(.c) wasi.errno_t {
     _ = fs_rights_inheriting;
     const dir_entry = getFdEntry(dirfd) orelse return .BADF;
+    if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
     const slot_idx = allocUserFdSlot() orelse return .MFILE;
 
     const path_flags = translateLookupFlags(dirflags);
@@ -1188,6 +1225,7 @@ pub fn path_readlink(
 ) callconv(.c) wasi.errno_t {
     bufused.* = 0;
     const entry = getFdEntry(fd) orelse return .BADF;
+    if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
     var ret: [12]u8 align(4) = @splat(0);
     @"[method]descriptor.readlink-at"(entry.handle, path, path_len, &ret);
     if (ret[0] != 0) return errorCodeToErrno(ret[4]);
@@ -1208,6 +1246,7 @@ pub fn path_readlink(
 
 pub fn path_remove_directory(fd: wasi.fd_t, path: [*]const u8, path_len: usize) callconv(.c) wasi.errno_t {
     const entry = getFdEntry(fd) orelse return .BADF;
+    if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
     var ret: [8]u8 align(4) = @splat(0);
     @"[method]descriptor.remove-directory-at"(entry.handle, path, path_len, &ret);
     return descriptorErrorOnlyResult(&ret);
@@ -1223,6 +1262,8 @@ pub fn path_rename(
 ) callconv(.c) wasi.errno_t {
     const old_entry = getFdEntry(old_fd) orelse return .BADF;
     const new_entry = getFdEntry(new_fd) orelse return .BADF;
+    if (!std.unicode.utf8ValidateSlice(old_path[0..old_path_len])) return .ILSEQ;
+    if (!std.unicode.utf8ValidateSlice(new_path[0..new_path_len])) return .ILSEQ;
     var ret: [8]u8 align(4) = @splat(0);
     @"[method]descriptor.rename-at"(
         old_entry.handle,
@@ -1244,6 +1285,8 @@ pub fn path_symlink(
     new_path_len: usize,
 ) callconv(.c) wasi.errno_t {
     const entry = getFdEntry(fd) orelse return .BADF;
+    if (!std.unicode.utf8ValidateSlice(old_path[0..old_path_len])) return .ILSEQ;
+    if (!std.unicode.utf8ValidateSlice(new_path[0..new_path_len])) return .ILSEQ;
     var ret: [8]u8 align(4) = @splat(0);
     @"[method]descriptor.symlink-at"(entry.handle, old_path, old_path_len, new_path, new_path_len, &ret);
     return descriptorErrorOnlyResult(&ret);
@@ -1251,6 +1294,7 @@ pub fn path_symlink(
 
 pub fn path_unlink_file(fd: wasi.fd_t, path: [*]const u8, path_len: usize) callconv(.c) wasi.errno_t {
     const entry = getFdEntry(fd) orelse return .BADF;
+    if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
     var ret: [8]u8 align(4) = @splat(0);
     @"[method]descriptor.unlink-file-at"(entry.handle, path, path_len, &ret);
     return descriptorErrorOnlyResult(&ret);
@@ -1335,11 +1379,21 @@ pub fn sched_yield() callconv(.c) wasi.errno_t {
     return .SUCCESS;
 }
 
+fn validateSocketFd(sock: wasi.fd_t) wasi.errno_t {
+    if (sock < 0) return .BADF;
+    if (sock <= 2) return .NOTSOCK;
+    const entry = getFdEntry(sock) orelse return .BADF;
+    var type_ret: [8]u8 align(4) = @splat(0);
+    @"[method]descriptor.get-type"(entry.handle, &type_ret);
+    if (type_ret[0] != 0) return errorCodeToErrno(type_ret[1]);
+    if (type_ret[1] != 7) return .NOTSOCK;
+    return .OPNOTSUPP;
+}
+
 pub fn sock_accept(sock: wasi.fd_t, flags: wasi.fdflags_t, fd: *wasi.fd_t) callconv(.c) wasi.errno_t {
-    _ = sock;
     _ = flags;
     _ = fd;
-    return .OPNOTSUPP;
+    return validateSocketFd(sock);
 }
 
 pub fn sock_recv(
@@ -1350,13 +1404,12 @@ pub fn sock_recv(
     ro_datalen: *usize,
     ro_flags: *wasi.roflags_t,
 ) callconv(.c) wasi.errno_t {
-    _ = sock;
     _ = ri_data;
     _ = ri_data_len;
     _ = ri_flags;
     ro_datalen.* = 0;
     ro_flags.* = 0;
-    return .OPNOTSUPP;
+    return validateSocketFd(sock);
 }
 
 pub fn sock_send(
@@ -1366,18 +1419,16 @@ pub fn sock_send(
     si_flags: wasi.siflags_t,
     so_datalen: *usize,
 ) callconv(.c) wasi.errno_t {
-    _ = sock;
     _ = si_data;
     _ = si_data_len;
     _ = si_flags;
     so_datalen.* = 0;
-    return .OPNOTSUPP;
+    return validateSocketFd(sock);
 }
 
 pub fn sock_shutdown(sock: wasi.fd_t, how: wasi.sdflags_t) callconv(.c) wasi.errno_t {
-    _ = sock;
     _ = how;
-    return .OPNOTSUPP;
+    return validateSocketFd(sock);
 }
 
 // ============================================================================

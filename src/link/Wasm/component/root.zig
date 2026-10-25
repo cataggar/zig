@@ -265,8 +265,12 @@ fn collectLiveMethodsForCore(
                 continue;
             }
             if (!std.mem.eql(u8, imp.module_name, ns)) continue;
-            try appendUniqueString(arena, &methods, imp.field_name);
-            if (extractResourceName(imp.field_name)) |rname| {
+            const canonical_field = if (std.mem.startsWith(u8, imp.field_name, "[async-lower]"))
+                imp.field_name["[async-lower]".len..]
+            else
+                imp.field_name;
+            try appendUniqueString(arena, &methods, canonical_field);
+            if (extractResourceName(canonical_field)) |rname| {
                 try appendUniqueString(arena, &type_exports, rname);
             }
         }
@@ -364,7 +368,6 @@ fn encodeWorldForCore(
 
     const orig_world = doc.items[world_idx].world;
     var new_world_items: std.ArrayList(wit.ast.WorldItem) = .empty;
-    try new_world_items.appendSlice(arena, orig_world.items);
 
     var added_any = false;
     for (wasi_imports.items) |mod_name| {
@@ -377,6 +380,8 @@ fn encodeWorldForCore(
     if (!added_any) {
         return encodeWorldFromSource(arena, wit_source, world_name);
     }
+
+    try new_world_items.appendSlice(arena, orig_world.items);
 
     const mutable_items = try arena.dupe(wit.ast.TopLevelItem, doc.items);
     mutable_items[world_idx] = .{
@@ -927,3 +932,170 @@ test "WASI 0.3.0: encodeWorldFromSource and linkComponent P3 command" {
     try testing.expectEqual(@as(usize, 0), p3_loaded.imports.len);
     try testing.expectEqual(@as(usize, 1), p3_loaded.exports.len);
 }
+
+test "WASI 0.3.0: custom WIT async world with record/variant/result, multi-task-return, and MAX_FLAT_ASYNC_PARAMS spill" {
+    const testing = std.testing;
+
+    const custom_wit =
+        \\package example:custom-p3@0.1.0;
+        \\
+        \\interface host-ops {
+        \\  record point {
+        \\    x: s32,
+        \\    y: s32,
+        \\  }
+        \\  variant op {
+        \\    translate(point),
+        \\    scale(s32),
+        \\    negate,
+        \\  }
+        \\  async-combine6: async func(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32) -> u32;
+        \\}
+        \\
+        \\interface calc {
+        \\  use host-ops.{point, op};
+        \\  sync-add: func(a: u32, b: u32) -> u32;
+        \\  async-add: async func(a: u32, b: u32) -> u32;
+        \\  async-eval: async func(p: point, action: op) -> result<point, s32>;
+        \\  async-sum17: async func(
+        \\    p1: u32, p2: u32, p3: u32, p4: u32,
+        \\    p5: u32, p6: u32, p7: u32, p8: u32,
+        \\    p9: u32, p10: u32, p11: u32, p12: u32,
+        \\    p13: u32, p14: u32, p15: u32, p16: u32,
+        \\    p17: u32
+        \\  ) -> u32;
+        \\}
+        \\
+        \\world custom-p3 {
+        \\  export calc;
+        \\  import host-ops;
+        \\}
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    // Build a synthetic core module that imports:
+    //   - "example:custom-p3/host-ops@0.1.0" "[async-lower]async-combine6": (i32) -> i32
+    //   - "[export]example:custom-p3/calc@0.1.0" "[task-return]async-add": (i32) -> ()
+    //   - "[export]example:custom-p3/calc@0.1.0" "[task-return]async-eval": (i32, i32, i32) -> ()
+    //   - "[export]example:custom-p3/calc@0.1.0" "[task-return]async-sum17": (i32) -> ()
+    // and exports:
+    //   - "memory", "cabi_realloc"
+    //   - "example:custom-p3/calc@0.1.0#sync-add": (i32, i32) -> i32
+    //   - "example:custom-p3/calc@0.1.0#async-add": (i32, i32) -> i32
+    //   - "example:custom-p3/calc@0.1.0#async-eval": (i32, i32, i32, i32, i32) -> i32
+    //   - "example:custom-p3/calc@0.1.0#async-sum17": (i32) -> i32
+    const H = struct {
+        fn appendU32(a: Allocator, buf: *std.ArrayList(u8), v: u32) !void {
+            var val = v;
+            while (true) {
+                var byte: u8 = @intCast(val & 0x7f);
+                val >>= 7;
+                if (val != 0) byte |= 0x80;
+                try buf.append(a, byte);
+                if (val == 0) break;
+            }
+        }
+        fn appendStr(a: Allocator, buf: *std.ArrayList(u8), s: []const u8) !void {
+            try appendU32(a, buf, @intCast(s.len));
+            try buf.appendSlice(a, s);
+        }
+        fn appendSec(a: Allocator, out: *std.ArrayList(u8), id: u8, body: []const u8) !void {
+            try out.append(a, id);
+            try appendU32(a, out, @intCast(body.len));
+            try out.appendSlice(a, body);
+        }
+    };
+
+    var core = std.ArrayList(u8).empty;
+    try core.appendSlice(ar, "\x00asm\x01\x00\x00\x00");
+
+    // Section 1: Type section (6 func types)
+    {
+        var sec = std.ArrayList(u8).empty;
+        try sec.appendSlice(ar, &.{
+            6,
+            0x60, 1, 0x7f, 1, 0x7f, // 0: (i32) -> i32
+            0x60, 1, 0x7f, 0, // 1: (i32) -> ()
+            0x60, 3, 0x7f, 0x7f, 0x7f, 0, // 2: (i32, i32, i32) -> ()
+            0x60, 4, 0x7f, 0x7f, 0x7f, 0x7f, 1, 0x7f, // 3: (i32x4) -> i32
+            0x60, 2, 0x7f, 0x7f, 1, 0x7f, // 4: (i32, i32) -> i32
+            0x60, 5, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 1, 0x7f, // 5: (i32x5) -> i32
+        });
+        try H.appendSec(ar, &core, 1, sec.items);
+    }
+
+    // Section 2: Import section (4 func imports)
+    {
+        var sec = std.ArrayList(u8).empty;
+        try H.appendU32(ar, &sec, 4);
+        const imps = [_]struct { m: []const u8, f: []const u8, ty: u8 }{
+            .{ .m = "example:custom-p3/host-ops@0.1.0", .f = "[async-lower]async-combine6", .ty = 4 },
+            .{ .m = "[export]example:custom-p3/calc@0.1.0", .f = "[task-return]async-add", .ty = 1 },
+            .{ .m = "[export]example:custom-p3/calc@0.1.0", .f = "[task-return]async-eval", .ty = 2 },
+            .{ .m = "[export]example:custom-p3/calc@0.1.0", .f = "[task-return]async-sum17", .ty = 1 },
+        };
+        for (imps) |im| {
+            try H.appendStr(ar, &sec, im.m);
+            try H.appendStr(ar, &sec, im.f);
+            try sec.appendSlice(ar, &.{ 0x00, im.ty });
+        }
+        try H.appendSec(ar, &core, 2, sec.items);
+    }
+
+    // Section 3: Function section (5 defined funcs: indices 4..8)
+    try H.appendSec(ar, &core, 3, &.{ 5, 3, 4, 4, 5, 0 });
+
+    // Section 5: Memory section (1 memory, min 1 page)
+    try H.appendSec(ar, &core, 5, &.{ 1, 0x00, 1 });
+
+    // Section 7: Export section
+    {
+        var sec = std.ArrayList(u8).empty;
+        try H.appendU32(ar, &sec, 6);
+        try H.appendStr(ar, &sec, "memory");
+        try sec.appendSlice(ar, &.{ 0x02, 0 });
+        const exps = [_]struct { n: []const u8, idx: u8 }{
+            .{ .n = "cabi_realloc", .idx = 4 },
+            .{ .n = "example:custom-p3/calc@0.1.0#sync-add", .idx = 5 },
+            .{ .n = "example:custom-p3/calc@0.1.0#async-add", .idx = 6 },
+            .{ .n = "example:custom-p3/calc@0.1.0#async-eval", .idx = 7 },
+            .{ .n = "example:custom-p3/calc@0.1.0#async-sum17", .idx = 8 },
+        };
+        for (exps) |ex| {
+            try H.appendStr(ar, &sec, ex.n);
+            try sec.appendSlice(ar, &.{ 0x00, ex.idx });
+        }
+        try H.appendSec(ar, &core, 7, sec.items);
+    }
+
+    // Section 10: Code section (5 bodies returning 0)
+    {
+        var sec = std.ArrayList(u8).empty;
+        try H.appendU32(ar, &sec, 5);
+        for (0..5) |_| {
+            try sec.appendSlice(ar, &.{ 4, 0, 0x41, 0x00, 0x0b });
+        }
+        try H.appendSec(ar, &core, 10, sec.items);
+    }
+
+    const comp_bytes = try linkComponent(testing.allocator, core.items, .{
+        .wasi_version = .p3,
+        .exec_model = .reactor,
+        .wit_source = custom_wit,
+        .wit_world = "custom-p3",
+    });
+    defer testing.allocator.free(comp_bytes);
+
+    try testing.expect(comp_bytes.len > 8);
+    try testing.expectEqualSlices(u8, "\x00asm\x0d\x00\x01\x00", comp_bytes[0..8]);
+
+    const loaded = try loader.load(comp_bytes, ar);
+    try testing.expectEqual(@as(usize, 1), loaded.imports.len);
+    try testing.expectEqualStrings("example:custom-p3/host-ops@0.1.0", loaded.imports[0].name);
+    try testing.expectEqual(@as(usize, 1), loaded.exports.len);
+    try testing.expectEqualStrings("example:custom-p3/calc@0.1.0", loaded.exports[0].name);
+}
+

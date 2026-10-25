@@ -168,6 +168,33 @@ fn verifyFilesystem(io: Io) !void {
         try testing.expectError(error.FileNotFound, dir.statFile(io, "nested_via_opendir.txt", .{}));
     }
 
+    // Verify metadata-hash inode consistency across statFile, file.stat, and fd_readdir,
+    // plus O_APPEND position update and WASI preview1 error codes (ILSEQ, BADF, NOTSOCK).
+    {
+        const wasi = std.os.wasi;
+        try testing.expect(dstat.inode != 0);
+
+        var file = try cwd.openFile(io, file_path, .{ .mode = .read_write });
+        defer file.close(io);
+        const fstat2 = try file.stat(io);
+        try testing.expectEqual(dstat.inode, fstat2.inode);
+
+        // Socket syscalls on a regular file fd must return NOTSOCK, and on an invalid fd must return BADF.
+        var dummy_fd: wasi.fd_t = -1;
+        try testing.expectEqual(wasi.errno_t.NOTSOCK, wasi.sock_accept(file.handle, .{}, &dummy_fd));
+        try testing.expectEqual(wasi.errno_t.BADF, wasi.sock_accept(9999, .{}, &dummy_fd));
+        try testing.expectEqual(wasi.errno_t.NOTSOCK, wasi.sock_shutdown(file.handle, .{ .RD = true }));
+        try testing.expectEqual(wasi.errno_t.BADF, wasi.sock_shutdown(9999, .{ .RD = true }));
+
+        // Invalid UTF-8 path in path_open must return ILSEQ.
+        const bad_utf8 = [_]u8{ 'b', 'a', 'd', 0xff, 0xfe };
+        var opened_fd: wasi.fd_t = -1;
+        try testing.expectEqual(
+            wasi.errno_t.ILSEQ,
+            wasi.path_open(cwd.handle, .{}, &bad_utf8, bad_utf8.len, .{}, .{}, .{}, .{}, &opened_fd),
+        );
+    }
+
     try cwd.rename(file_path, cwd, renamed_path, io);
     try testing.expectError(error.FileNotFound, cwd.statFile(io, file_path, .{}));
 

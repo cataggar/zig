@@ -444,6 +444,13 @@ pub fn typeNameForSlot(slots: []const TypeSlot, slot: u32) ?[]const u8 {
     return switch (slots[slot]) {
         .export_eq => |e| e.name,
         .alias_instance_export => |a| a.name,
+        .alias_outer => blk: {
+            for (slots) |ts| switch (ts) {
+                .export_eq => |e| if (e.target == slot) break :blk e.name,
+                else => {},
+            };
+            break :blk null;
+        },
         else => null,
     };
 }

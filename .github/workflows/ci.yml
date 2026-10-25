@@ -185,6 +185,16 @@ jobs:
           cmp -n 8 <(printf '\x00asm\x0d\x00\x01\x00') .ci-tmp/hello_libc_p3.wasm
           wasmtime run -W component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y -S p3=y .ci-tmp/hello_libc_p3.wasm
 
+          wasmtime compile -W component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y \
+            -o .ci-tmp/wasip3_e2e.cwasm .ci-tmp/wasip3_e2e.wasm
+          wasmtime run --allow-precompiled -W component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y -S p3=y \
+            --dir=.ci-tmp --env TEST_ENV_KEY=wasip3_val .ci-tmp/wasip3_e2e.cwasm arg_one arg_two
+
+          .ci-bootstrap/zig-wasm test --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip3 -lc \
+            --test-cmd wasmtime --test-cmd=-W --test-cmd=component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y --test-cmd=-S --test-cmd=p3=y --test-cmd=--dir=. --test-cmd-bin \
+            test/c.zig
+
       - name: Verify custom WIT reactor and Preview 1 adapter-spliced components
         run: |
           mkdir -p .ci-tmp

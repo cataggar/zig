@@ -326,10 +326,15 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                         .exported = !is_hidden,
                     },
                 });
-                if (is_hidden) {
-                    try wasm.hidden_function_exports.put(gpa, nav_export.name, function_index);
-                } else {
-                    try wasm.function_exports.put(gpa, nav_export.name, function_index);
+                const already_defined = !is_obj and opts.linkage == .weak and
+                    (wasm.hidden_function_exports.contains(nav_export.name) or
+                        wasm.function_exports.contains(nav_export.name));
+                if (!already_defined) {
+                    if (is_hidden) {
+                        try wasm.hidden_function_exports.put(gpa, nav_export.name, function_index);
+                    } else {
+                        try wasm.function_exports.put(gpa, nav_export.name, function_index);
+                    }
                 }
                 _ = f.function_imports.swapRemove(nav_export.name);
 

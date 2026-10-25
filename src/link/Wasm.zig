@@ -2618,6 +2618,7 @@ pub const ZcuImportIndex = enum(u32) {
         const nav_index = index.ptr(wasm).*;
         const ext = ip.indexToKey(ip.getNav(nav_index).resolved.?.value).@"extern";
         const lib_name = ext.lib_name.toSlice(ip) orelse return .none;
+        if (mem.eql(u8, lib_name, "c")) return .none;
         return wasm.getExistingString(lib_name).?.toOptional();
     }
 

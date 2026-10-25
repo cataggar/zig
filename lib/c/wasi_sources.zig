@@ -57,8 +57,8 @@ fn setErrno(val: anytype) void {
 
 const PAGESIZE: usize = 65536;
 const AT_FDCWD: c_int = -2;
-const AT_SYMLINK_NOFOLLOW: c_int = 0x100;
-const O_WRONLY: c_int = 1;
+const AT_SYMLINK_NOFOLLOW: c_int = 0x1;
+const O_WRONLY: c_int = 0x10000000;
 const O_CLOEXEC: c_int = 0;
 const O_NOCTTY: c_int = 0;
 const ENOENT: c_int = @backingInt(wasi.errno_t.NOENT);
@@ -74,7 +74,7 @@ const ENOTSOCK: c_int = @backingInt(wasi.errno_t.NOTSOCK);
 const EIO: c_int = @backingInt(wasi.errno_t.IO);
 const AF_UNSPEC: c_int = 0;
 const SOCK_NONBLOCK: c_int = 0x00004000;
-const SOCK_CLOEXEC: c_int = 0x00080000;
+const SOCK_CLOEXEC: c_int = 0x00002000;
 
 // =========================================================================
 // abort.c
@@ -293,14 +293,14 @@ fn wasilibcNocwdUnlinkatImpl(fd: c_int, path: [*:0]const u8) callconv(.c) c_int 
 // =========================================================================
 // __wasilibc_dt.c
 // =========================================================================
-const DT_UNKNOWN: c_int = 0;
-const DT_FIFO: c_int = 1;
-const DT_CHR: c_int = 2;
-const DT_DIR: c_int = 4;
-const DT_BLK: c_int = 6;
-const DT_REG: c_int = 8;
-const DT_LNK: c_int = 10;
-const DT_SOCK: c_int = 12;
+const DT_UNKNOWN: c_int = @backingInt(wasi.filetype_t.UNKNOWN);
+const DT_BLK: c_int = @backingInt(wasi.filetype_t.BLOCK_DEVICE);
+const DT_CHR: c_int = @backingInt(wasi.filetype_t.CHARACTER_DEVICE);
+const DT_DIR: c_int = @backingInt(wasi.filetype_t.DIRECTORY);
+const DT_REG: c_int = @backingInt(wasi.filetype_t.REGULAR_FILE);
+const DT_FIFO: c_int = @backingInt(wasi.filetype_t.SOCKET_STREAM);
+const DT_LNK: c_int = @backingInt(wasi.filetype_t.SYMBOLIC_LINK);
+const DT_SOCK: c_int = 20;
 
 const S_IFDIR: c_int = 0o040000;
 const S_IFCHR: c_int = 0o020000;
