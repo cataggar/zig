@@ -838,6 +838,15 @@ pub const Block = struct {
         return zcu.namespacePtr(block.namespace).fileScope(zcu).mod.?;
     }
 
+    pub fn strip(block: *const Block) bool {
+        var block_it = block;
+        while (true) {
+            if (block_it.ownerModule().strip) return true;
+            const inlining = block_it.inlining orelse return false;
+            block_it = inlining.call_block;
+        }
+    }
+
     fn trackZir(block: *Block, inst: Zir.Inst.Index) Allocator.Error!InternPool.TrackedInst.Index {
         const pt = block.sema.pt;
         const comp = pt.zcu.comp;
@@ -5839,7 +5848,7 @@ fn zirSwitchContinue(sema: *Sema, start_block: *Block, inst: Zir.Inst.Index) Com
 }
 
 fn zirDbgStmt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!void {
-    if (block.isComptime() or block.ownerModule().strip) return;
+    if (block.isComptime() or block.strip()) return;
 
     const inst_data = sema.code.instructions.items(.data)[@backingInt(inst)].dbg_stmt;
 
@@ -5865,7 +5874,7 @@ fn zirDbgStmt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!voi
 }
 
 fn zirDbgEmptyStmt(_: *Sema, block: *Block, _: Zir.Inst.Index) CompileError!void {
-    if (block.isComptime() or block.ownerModule().strip) return;
+    if (block.isComptime() or block.strip()) return;
     _ = try block.addNoOp(.dbg_empty_stmt);
 }
 
@@ -5888,7 +5897,7 @@ fn addDbgVar(
     air_tag: Air.Inst.Tag,
     name: []const u8,
 ) CompileError!void {
-    if (block.isComptime() or block.ownerModule().strip) return;
+    if (block.isComptime() or block.strip()) return;
 
     const pt = sema.pt;
     const zcu = pt.zcu;
@@ -7278,13 +7287,7 @@ fn analyzeCall(
         sema.inst_map.putAssumeCapacityNoClobber(fn_zir_info.param_body[arg_idx], arg);
     }
 
-    const need_debug_scope = !block.isComptime() and !block.is_typeof and !block.ownerModule().strip;
     const block_inst: Air.Inst.Index = @fromBackingInt(@intCast(sema.air_instructions.len));
-    try sema.air_instructions.append(gpa, .{
-        .tag = if (need_debug_scope) .dbg_inline_block else .block,
-        .data = undefined,
-    });
-
     var inlining: Block.Inlining = .{
         .call_block = block,
         .call_src = call_src,
@@ -7320,6 +7323,12 @@ fn analyzeCall(
 
     defer child_block.instructions.deinit(gpa);
     defer inlining.merges.deinit(gpa);
+
+    const need_debug_scope = !child_block.isComptime() and !child_block.is_typeof and !child_block.strip();
+    try sema.air_instructions.append(gpa, .{
+        .tag = if (need_debug_scope) .dbg_inline_block else .block,
+        .data = undefined,
+    });
 
     if (!inlining.has_comptime_args) {
         var block_it = block;
