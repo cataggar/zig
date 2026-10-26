@@ -437,6 +437,22 @@
             .amount = .amount,
         } } },
     },
+    // C6.2.10 ADR
+    .{
+        .pattern = "ADR <Xd>, .",
+        .symbols = .{
+            .Xd = .{ .reg = .{ .format = .{ .general = .doubleword } } },
+        },
+        .encode = .{ .adr, .Xd, 0 },
+    },
+    .{
+        .pattern = "ADR <Xd>, #<label>",
+        .symbols = .{
+            .Xd = .{ .reg = .{ .format = .{ .general = .doubleword } } },
+            .label = .{ .imm = .{ .type = .{ .signedness = .signed, .bits = 21 } } },
+        },
+        .encode = .{ .adr, .Xd, .label },
+    },
     // C6.2.13 AND (shifted register)
     .{
         .pattern = "AND <Wd>, <Wn>, <Wm>",
@@ -922,6 +938,13 @@
     // C6.2.126 HINT
     .{
         .pattern = "HINT #<imm>",
+        .symbols = .{
+            .imm = .{ .imm = .{ .type = .{ .signedness = .unsigned, .bits = 7 } } },
+        },
+        .encode = .{ .hint, .imm },
+    },
+    .{
+        .pattern = "HINT <imm>",
         .symbols = .{
             .imm = .{ .imm = .{ .type = .{ .signedness = .unsigned, .bits = 7 } } },
         },

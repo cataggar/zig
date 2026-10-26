@@ -293,14 +293,34 @@ pub fn generateLazySymbol(
             w.writeByte(0) catch unreachable;
         }
     } else if (Type.fromInterned(lazy_sym.ty).zigTypeTag(zcu) == .@"enum") {
-        alignment.* = .@"1";
-        const enum_ty = Type.fromInterned(lazy_sym.ty);
-        const tag_names = enum_ty.enumFields(zcu);
-        for (0..tag_names.len) |tag_index| {
-            const tag_name = tag_names.get(ip)[tag_index].toSlice(ip);
-            try w.rebase(w.end, tag_name.len + 1);
-            w.writeAll(tag_name) catch unreachable;
-            w.writeByte(0) catch unreachable;
+        if (target.cpu.arch == .aarch64) {
+            alignment.* = .@"4";
+            const enum_ty = Type.fromInterned(lazy_sym.ty);
+            const tag_names = enum_ty.enumFields(zcu);
+            const strings_start: u32 = @intCast(4 * (tag_names.len + 1));
+            var string_index = strings_start;
+            try w.rebase(w.end, string_index);
+            for (0..tag_names.len) |tag_index| {
+                w.writeInt(u32, string_index, endian) catch unreachable;
+                string_index += @intCast(tag_names.get(ip)[tag_index].toSlice(ip).len + 1);
+            }
+            w.writeInt(u32, string_index, endian) catch unreachable;
+            try w.rebase(w.end, string_index - strings_start);
+            for (0..tag_names.len) |tag_index| {
+                const tag_name = tag_names.get(ip)[tag_index].toSlice(ip);
+                w.writeAll(tag_name) catch unreachable;
+                w.writeByte(0) catch unreachable;
+            }
+        } else {
+            alignment.* = .@"1";
+            const enum_ty = Type.fromInterned(lazy_sym.ty);
+            const tag_names = enum_ty.enumFields(zcu);
+            for (0..tag_names.len) |tag_index| {
+                const tag_name = tag_names.get(ip)[tag_index].toSlice(ip);
+                try w.rebase(w.end, tag_name.len + 1);
+                w.writeAll(tag_name) catch unreachable;
+                w.writeByte(0) catch unreachable;
+            }
         }
     } else {
         return zcu.codegenFailType(lazy_sym.ty, "TODO implement generateLazySymbol for {s} {f}", .{

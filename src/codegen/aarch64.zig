@@ -7,7 +7,13 @@ pub const Select = @import("aarch64/Select.zig");
 
 pub fn legalizeFeatures(_: *const std.Target) *const Air.Legalize.Features {
     return comptime &.initMany(&.{
+        .expand_div_ceil,
+        .expand_div_ceil_optimized,
         .expand_bit_cast_safe,
+        .expand_packed_load,
+        .expand_packed_store,
+        .expand_packed_agg_field_val,
+        .expand_packed_aggregate_init,
         .expand_array_splat,
         .expand_array_to_vector,
     });
@@ -160,7 +166,7 @@ pub fn generate(
         switch (ret_vi.value.parent(&isel)) {
             .unallocated, .stack_slot => {},
             .value, .constant => unreachable,
-            .address => |address_vi| try address_vi.liveIn(
+            .address => |address_vi| try address_vi.defLiveIn(
                 &isel,
                 address_vi.hint(&isel).?,
                 comptime &.initFill(.free),
@@ -171,7 +177,10 @@ pub fn generate(
     isel.verify(true);
 
     const prologue = isel.instructions.items.len;
-    const epilogue = try isel.layout(param_it, is_sysv_var_args, saved_gra_len, saved_vra_len, mod);
+    const epilogue = if (func_type.cc == .naked)
+        prologue
+    else
+        try isel.layout(param_it, is_sysv_var_args, saved_gra_len, saved_vra_len, mod);
 
     try isel.instructions.shrinkToLen(gpa);
     try isel.literals.shrinkToLen(gpa);

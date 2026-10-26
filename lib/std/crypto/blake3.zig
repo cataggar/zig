@@ -14,7 +14,7 @@ const Vec16 = @Vector(16, u32);
 const chunk_length = 1024;
 const max_depth = 54;
 
-const simd_degree = std.simd.suggestVectorLength(u32) orelse 1;
+const simd_degree = if (@import("builtin").zig_backend == .stage2_aarch64) 1 else (std.simd.suggestVectorLength(u32) orelse 1);
 const max_simd_degree = simd_degree;
 const max_simd_degree_or_2 = if (max_simd_degree > 2) max_simd_degree else 2;
 

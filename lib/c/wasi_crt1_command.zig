@@ -33,7 +33,11 @@ export fn _start() callconv(.c) void {
 
 fn startWasip3Command() callconv(.c) void {
     const r = runMain();
-    @"task-return"(if (r == 0) 0 else 1);
+    if (r == 0) {
+        @"task-return"(0);
+    } else {
+        std.os.wasi.proc_exit(@bitCast(r));
+    }
 }
 
 fn cabiRealloc(old_ptr: ?[*]u8, old_len: usize, alignment: usize, new_len: usize) callconv(.c) ?[*]u8 {

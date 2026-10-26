@@ -152,12 +152,19 @@ pub fn clone() callconv(.naked) u64 {
 pub const restore = restore_rt;
 
 pub fn restore_rt() callconv(.naked) noreturn {
-    asm volatile (
-        \\ mov w8, %[number]
-        \\ svc #0
-        :
-        : [number] "i" (@backingInt(SYS.rt_sigreturn)),
-    );
+    if (@import("builtin").zig_backend == .stage2_aarch64) {
+        asm volatile (
+            \\ movz w8, #139
+            \\ svc #0
+        );
+    } else {
+        asm volatile (
+            \\ mov w8, %[number]
+            \\ svc #0
+            :
+            : [number] "i" (@backingInt(SYS.rt_sigreturn)),
+        );
+    }
 }
 
 pub const VDSO = struct {
