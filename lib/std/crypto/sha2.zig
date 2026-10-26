@@ -200,7 +200,7 @@ fn Sha2x32(comptime iv: Iv32, digest_bits: comptime_int) type {
             if (!@inComptime()) {
                 const V4u32 = @Vector(4, u32);
                 switch (builtin.cpu.arch) {
-                    .aarch64 => if (builtin.zig_backend != .stage2_c and comptime builtin.cpu.has(.aarch64, .sha2)) {
+                    .aarch64 => if (builtin.zig_backend != .stage2_c and builtin.zig_backend != .stage2_aarch64 and comptime builtin.cpu.has(.aarch64, .sha2)) {
                         var x: V4u32 = d.s[0..4].*;
                         var y: V4u32 = d.s[4..8].*;
                         const s_v = @as(*[16]V4u32, @ptrCast(&s));

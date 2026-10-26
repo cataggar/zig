@@ -2473,11 +2473,11 @@ fn makeSteps(
     const top_level_steps = &maker.scanned_config.top_level_steps;
     const c = &maker.scanned_config.configuration;
 
-    if (maker.web_server) |ws| ws.startBuild();
+    if (!builtin.single_threaded) if (maker.web_server) |ws| ws.startBuild();
 
-    if (maker.protocol_server) |s| {
+    if (!builtin.single_threaded) if (maker.protocol_server) |s| {
         try s.serveBodylessMessage(.bsp_build_started);
-    }
+    };
 
     {
         // Collect the initial set of tasks (those with no outstanding dependencies) into a buffer,
@@ -2504,18 +2504,18 @@ fn makeSteps(
         try group.await(io);
     }
 
-    if (maker.web_server) |ws| {
+    if (!builtin.single_threaded) if (maker.web_server) |ws| {
         if (fuzz) |mode| if (mode != .forever) fatal(
             "error: limited fuzzing is not implemented yet for --webui",
             .{},
         );
 
         ws.finishBuild(.{ .fuzz = fuzz != null });
-    }
+    };
 
-    if (maker.protocol_server) |s| {
+    if (!builtin.single_threaded) if (maker.protocol_server) |s| {
         try s.serveBodylessMessage(.bsp_build_completed);
-    }
+    };
 
     assert(maker.memory_blocked_steps.items.len == 0);
 
@@ -2775,8 +2775,8 @@ fn makeStep(
         const step_prog_node = root_prog_node.start(step_name, 0);
         defer step_prog_node.end();
 
-        if (maker.web_server) |ws| ws.updateStepStatus(step_index, .wip);
-        if (maker.protocol_server) |s| {
+        if (!builtin.single_threaded) if (maker.web_server) |ws| ws.updateStepStatus(step_index, .wip);
+        if (!builtin.single_threaded) if (maker.protocol_server) |s| {
             maker.protocol_server_mutex.lockUncancelable(io);
             defer maker.protocol_server_mutex.unlock(io);
 
@@ -2784,7 +2784,7 @@ fn makeStep(
                 .bsp_step_started,
                 @backingInt(step_index),
             ) catch @panic("TODO propagate error when failing to send protocol message");
-        }
+        };
 
         const new_state: Step.State = for (deps) |dep_index| {
             const dep_make_step = maker.stepByIndex(dep_index);
@@ -2830,10 +2830,10 @@ fn makeStep(
             => true,
         };
 
-        if (maker.web_server) |ws| {
+        if (!builtin.single_threaded) if (maker.web_server) |ws| {
             ws.updateStepStatus(step_index, if (success) .success else .failure);
-        }
-        if (maker.protocol_server) |s| {
+        };
+        if (!builtin.single_threaded) if (maker.protocol_server) |s| {
             // https://codeberg.org/ziglang/zig/issues/36938
             maker.protocol_server_mutex.lockUncancelable(io);
             defer maker.protocol_server_mutex.unlock(io);
@@ -2849,7 +2849,7 @@ fn makeStep(
             };
             serveBuildStepCompleted(maker, step_index, status, s) catch |err|
                 std.debug.panic("TODO propagate error when failing to send protocol message: {t}", .{err});
-        }
+        };
 
         if (!success) std.Progress.setStatus(.failure_working);
     }

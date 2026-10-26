@@ -284,7 +284,7 @@ pub fn make(
     };
     if (start_ts) |*ts| {
         const duration = ts.untilNow(io, .awake);
-        maker.web_server.?.updateTimeReportGeneric(step_index, duration);
+        if (!builtin.single_threaded) maker.web_server.?.updateTimeReportGeneric(step_index, duration);
     }
 
     make_result catch |err| switch (err) {
@@ -710,7 +710,7 @@ fn zigProcessUpdate(step_index: Configuration.Step.Index, maker: *Maker, zp: *Zi
                     }
                 }
             },
-            .time_report => if (maker.web_server) |ws| {
+            .time_report => if (!builtin.single_threaded) if (maker.web_server) |ws| {
                 const tr = body_r.takeStruct(std.zig.Server.Message.TimeReport, .little) catch unreachable;
                 ws.updateTimeReportCompile(.{
                     .compile_step = step_index,

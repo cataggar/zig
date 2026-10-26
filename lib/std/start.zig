@@ -181,7 +181,11 @@ extern "[task-return]wasi:cli/run@0.3.0#run" fn @"task-return"(result: i32) call
 
 fn startWasip3Command() callconv(.c) void {
     const status = @call(.always_inline, callMain, .{ {}, std.process.Environ.Block.global });
-    @"task-return"(if (status == 0) 0 else 1);
+    if (status == 0) {
+        @"task-return"(0);
+    } else {
+        std.os.wasi.proc_exit(status);
+    }
 }
 
 fn startWasip2Preview1() callconv(.c) void {
@@ -259,7 +263,10 @@ fn _start() callconv(.naked) noreturn {
     // This is the first userspace frame. Prevent DWARF-based unwinders from unwinding further. We
     // prevent FP-based unwinders from unwinding further by zeroing the register below.
     if (builtin.unwind_tables != .none or !builtin.strip_debug_info) asm volatile (switch (native_arch) {
-            .aarch64, .aarch64_be => ".cfi_undefined lr",
+            .aarch64, .aarch64_be => if (builtin.zig_backend == .stage2_aarch64)
+                ""
+            else
+                ".cfi_undefined lr",
             .alpha => ".cfi_undefined $26",
             .arc, .arceb => ".cfi_undefined blink",
             .arm, .armeb, .thumb, .thumbeb => "", // https://github.com/llvm/llvm-project/issues/115891
@@ -330,7 +337,19 @@ fn _start() callconv(.naked) noreturn {
         unreachable;
     }
 
-    asm volatile (switch (native_arch) {
+    if ((native_arch == .aarch64 or native_arch == .aarch64_be) and builtin.zig_backend == .stage2_aarch64) {
+        asm volatile (
+            \\ mov x29, #0
+            \\ mov x30, #0
+            \\ mov x0, sp
+            \\ ubfm x9, x0, #4, #63
+            \\ ubfm x9, x9, #60, #59
+            \\ mov sp, x9
+            \\ br x1
+            :
+            : [posixCallMainAndExit] "{x1}" (&posixCallMainAndExit),
+        );
+    } else asm volatile (switch (native_arch) {
             .x86_64 =>
             \\ xorl %%ebp, %%ebp
             \\ movq %%rsp, %%rdi
