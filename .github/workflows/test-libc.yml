@@ -98,7 +98,7 @@ jobs:
   test:
     name: "${{ matrix.name }}"
     needs: build-stage4
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && !matrix.qemu && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
