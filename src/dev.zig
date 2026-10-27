@@ -213,6 +213,8 @@ pub const Env = enum {
                 .stdio_listen,
                 .wasm_backend,
                 .wasm_linker,
+                .version_command,
+                .env_command,
                 => true,
                 else => Env.sema.supports(feature),
             },

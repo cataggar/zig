@@ -12133,16 +12133,16 @@ pub const Value = struct {
                             0 => unreachable,
                             1...64 => unreachable,
                             65...64 * Value.max_parts => |bits| if (offset == 0 and size == ty_size) {
-                                const parts_len = @divCeil(bits, 64);
-                                vi.setParts(isel, @intCast(parts_len));
+                                const parts_len: Value.PartsLen = @intCast(@divCeil(bits, 64));
+                                vi.setParts(isel, parts_len);
                                 for (0..parts_len) |part_index| _ = vi.addPart(isel, 8 * part_index, 8);
                             },
                             64 * Value.max_parts + 1...64 * Value.max_parts * Value.max_parts => |bits| if (size > 8) {
                                 const total_size = 8 * @divCeil(bits, 64);
                                 const effective_size = @min(size, total_size -| offset);
                                 const sub_part_size = @max(8, std.math.ceilPowerOfTwoAssert(u64, @divCeil(effective_size, Value.max_parts)));
-                                const parts_len = @divCeil(effective_size, sub_part_size);
-                                vi.setParts(isel, @intCast(parts_len));
+                                const parts_len: Value.PartsLen = @intCast(@divCeil(effective_size, sub_part_size));
+                                vi.setParts(isel, parts_len);
                                 for (0..parts_len) |part_index| {
                                     const part_offset = sub_part_size * part_index;
                                     _ = vi.addPart(isel, part_offset, @min(sub_part_size, effective_size - part_offset));
@@ -12218,8 +12218,8 @@ pub const Value = struct {
                             const elem_size = elem_ty.abiSize(zcu);
                             if (ty.isVector(zcu) and ty.bitSize(zcu) != array_len * elem_size * 8) {
                                 if (offset == 0 and size == ty_size and size > 8 and size <= 8 * Value.max_parts) {
-                                    const parts_len = @divCeil(size, 8);
-                                    vi.setParts(isel, @intCast(parts_len));
+                                    const parts_len: Value.PartsLen = @intCast(@divCeil(size, 8));
+                                    vi.setParts(isel, parts_len);
                                     for (0..parts_len) |part_index| _ = vi.addPart(isel, 8 * part_index, @min(8, size - 8 * part_index));
                                 } else return isel.fail("Value.FieldPartIterator.next({f})", .{isel.fmtType(ty)});
                             } else {

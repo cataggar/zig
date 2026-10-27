@@ -178,6 +178,9 @@ const Wasm = struct {
     export_symbol_names: []const []const u8,
     /// When true, will allow undefined symbols
     import_symbols: bool,
+    wit_path: ?[]const u8,
+    wit_world: ?[]const u8,
+    wasi_adapter_path: ?[]const u8,
     fn init(comp: *Compilation, options: link.File.OpenOptions) !Wasm {
         const target = &comp.root_mod.resolved_target.result;
         const default_entry_name: []const u8 = switch (comp.config.wasi_exec_model) {
@@ -203,6 +206,9 @@ const Wasm = struct {
             .global_base = options.global_base,
             .export_symbol_names = options.export_symbol_names,
             .import_symbols = options.import_symbols,
+            .wit_path = options.wit_path,
+            .wit_world = options.wit_world,
+            .wasi_adapter_path = options.wasi_adapter_path,
         };
     }
 };
@@ -1525,6 +1531,10 @@ fn wasmLink(lld: *Lld, arena: Allocator) !void {
             try argv.append(arg);
         }
 
+        if (target.os.tag == .wasip2 or target.os.tag == .wasip3) {
+            try argv.append("--export-if-defined=cabi_realloc");
+        }
+
         if (comp.config.rdynamic) {
             try argv.append("--export-dynamic");
         }
@@ -1628,6 +1638,49 @@ fn wasmLink(lld: *Lld, arena: Allocator) !void {
 
         try spawnLld(comp, arena, argv.items);
 
+        if (target.os.tag == .wasip2 or target.os.tag == .wasip3) {
+            const core_wasm_bytes = Io.Dir.cwd().readFileAlloc(io, full_out_path, gpa, .unlimited) catch |err|
+                return diags.fail("failed to read core wasm '{s}': {s}", .{ full_out_path, @errorName(err) });
+            defer gpa.free(core_wasm_bytes);
+
+            const wit_source = if (wasm.wit_path) |wit_path|
+                readWitPathAlloc(io, gpa, wit_path) catch |err|
+                    return diags.fail("failed to read WIT path '{s}': {s}", .{ wit_path, @errorName(err) })
+            else
+                null;
+            defer if (wit_source) |s| gpa.free(s);
+
+            const custom_adapter_bytes = if (wasm.wasi_adapter_path) |adapter_path|
+                Io.Dir.cwd().readFileAlloc(io, adapter_path, gpa, .unlimited) catch |err|
+                    return diags.fail("failed to read WASI adapter file '{s}': {s}", .{ adapter_path, @errorName(err) })
+            else
+                null;
+            defer if (custom_adapter_bytes) |b| gpa.free(b);
+
+            const exec_model: std.builtin.WasiExecModel = if (comp.config.output_mode == .Lib)
+                .reactor
+            else
+                comp.config.wasi_exec_model;
+
+            const component_bytes = wasm_component.linkComponent(gpa, core_wasm_bytes, .{
+                .exec_model = exec_model,
+                .wasi_version = if (target.os.tag == .wasip3) .p3 else .p2,
+                .wit_source = wit_source,
+                .wit_world = wasm.wit_world,
+                .custom_adapter_bytes = custom_adapter_bytes,
+            }) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return diags.fail("failed to build WASI component: {s}", .{@errorName(err)}),
+            };
+            defer gpa.free(component_bytes);
+
+            Io.Dir.cwd().writeFile(io, .{
+                .sub_path = full_out_path,
+                .data = component_bytes,
+            }) catch |err|
+                return diags.fail("failed to write WASI component '{s}': {s}", .{ full_out_path, @errorName(err) });
+        }
+
         // Give +x to the .wasm file if it is an executable and the OS is WASI.
         // Some systems may be configured to execute such binaries directly. Even if that
         // is not the case, it means we will get "exec format error" when trying to run
@@ -1693,6 +1746,53 @@ fn spawnLld(comp: *Compilation, arena: Allocator, argv: []const []const u8) !voi
     if (result.stderr.len > 0) log.warn("unexpected LLD stderr:\n{s}", .{result.stderr});
 }
 
+fn readWitPathAlloc(io: Io, gpa: Allocator, wit_path: []const u8) ![]u8 {
+    return Io.Dir.cwd().readFileAlloc(io, wit_path, gpa, .unlimited) catch |err| switch (err) {
+        error.IsDir => {
+            var dir = try Io.Dir.cwd().openDir(io, wit_path, .{ .iterate = true });
+            defer dir.close(io);
+            var it = dir.iterate();
+            var names: std.ArrayList([]u8) = .empty;
+            defer {
+                for (names.items) |n| gpa.free(n);
+                names.deinit(gpa);
+            }
+            while (try it.next(io)) |entry| {
+                if (entry.kind == .file and mem.endsWith(u8, entry.name, ".wit")) {
+                    const duped_name = try gpa.dupe(u8, entry.name);
+                    errdefer gpa.free(duped_name);
+                    try names.append(gpa, duped_name);
+                }
+            }
+            if (names.items.len == 0) return error.FileNotFound;
+            mem.sort([]u8, names.items, {}, struct {
+                fn lessThan(_: void, a: []u8, b: []u8) bool {
+                    return mem.lessThan(u8, a, b);
+                }
+            }.lessThan);
+            const WitSource = wasm_component.wit.resolver.WitSource;
+            var sources: std.ArrayList(WitSource) = .empty;
+            defer {
+                for (sources.items) |s| gpa.free(s.text);
+                sources.deinit(gpa);
+            }
+            for (names.items) |name| {
+                const text = try dir.readFileAlloc(io, name, gpa, .unlimited);
+                errdefer gpa.free(text);
+                try sources.append(gpa, .{
+                    .path = name,
+                    .text = text,
+                });
+            }
+            const combined = try wasm_component.wit.resolver.combineWitSources(gpa, sources.items, wit_path, null);
+            for (combined.paths) |p| gpa.free(p);
+            gpa.free(combined.paths);
+            return combined.text;
+        },
+        else => return err,
+    };
+}
+
 const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
@@ -1710,6 +1810,7 @@ const freebsd = @import("../libs/freebsd.zig");
 const glibc = @import("../libs/glibc.zig");
 const netbsd = @import("../libs/netbsd.zig");
 const openbsd = @import("../libs/openbsd.zig");
+const wasm_component = @import("Wasm/component/root.zig");
 const wasi_libc = @import("../libs/wasi_libc.zig");
 const link = @import("../link.zig");
 const lldMain = @import("../main.zig").lldMain;
