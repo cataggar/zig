@@ -57,10 +57,11 @@ pub const debug = crash_report.debug;
 
 var preopens: std.process.Preopens = .empty;
 pub fn wasi_cwd() Io.Dir {
-    // Expect the first preopen to be current working directory.
-    const cwd_fd: std.posix.fd_t = 3;
-    assert(mem.eql(u8, preopens.map.keys()[cwd_fd], "."));
-    return .{ .handle = cwd_fd };
+    const resource = preopens.get(".") orelse fatal("preopen not found: \".\"", .{});
+    return switch (resource) {
+        .dir => |d| d,
+        .file => fatal("preopen \".\" is not a directory", .{}),
+    };
 }
 
 const fatal = std.process.fatal;
@@ -213,13 +214,13 @@ pub fn main(init: std.process.Init.Minimal) anyerror!void {
 
     var environ_map = init.environ.createMap(arena) catch |err| fatal("failed to parse environment: {t}", .{err});
 
+    if (native_os.isWasi()) {
+        preopens = try .init(arena);
+    }
+
     if (tracy.enable_allocation) {
         var tracy_allocator: tracy.Allocator = .{ .parent_allocator = gpa };
         return mainArgs(tracy_allocator.interface(), arena, io, args, &environ_map);
-    }
-
-    if (native_os.isWasi()) {
-        preopens = try .init(arena);
     }
 
     return mainArgs(gpa, arena, io, args, &environ_map);

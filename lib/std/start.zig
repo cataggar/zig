@@ -19,7 +19,10 @@ comptime {
     // decls there get run.
     _ = root;
 
-    if ((native_os == .wasip2 or native_os == .wasip3) and !builtin.link_libc and !@hasDecl(root, "cabi_realloc")) {
+    if ((native_os == .wasip2 or native_os == .wasip3) and
+        (builtin.output_mode == .Exe or (builtin.output_mode == .Lib and builtin.link_mode == .dynamic)) and
+        !builtin.link_libc and !@hasDecl(root, "cabi_realloc"))
+    {
         @export(&cabiRealloc, .{ .name = "cabi_realloc" });
     }
 
