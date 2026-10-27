@@ -54,7 +54,7 @@ jobs:
           # (pthread atomic swap) is deferred; libwinpthread still
           # ships with the target.
 
-    runs-on: ${{ matrix.runs-on }}
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && matrix.runs-on == 'ubuntu-latest' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || matrix.runs-on }}
     steps:
       - name: Free disk space (macOS)
         if: runner.os == 'macOS'
