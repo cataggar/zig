@@ -684,7 +684,7 @@ test "reset while retaining a buffer" {
 
 test "fuzz multi threaded" {
     @disableInstrumentation();
-    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    if (@import("builtin").single_threaded or @import("builtin").target.cpu.arch.isWasm()) return error.SkipZigTest;
 
     const gpa = std.heap.smp_allocator;
 

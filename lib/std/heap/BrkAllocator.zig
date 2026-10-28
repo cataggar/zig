@@ -1,5 +1,5 @@
-//! Supports single-threaded targets that have a sbrk-like primitive which includes
-//! Linux and WebAssembly.
+//! Supports targets that have a sbrk-like primitive which includes
+//! WebAssembly and single-threaded Linux.
 //!
 //! On Linux, assumes exclusive access to the brk syscall.
 const BrkAllocator = @This();
@@ -12,9 +12,10 @@ const assert = std.debug.assert;
 const math = std.math;
 
 comptime {
-    if (!builtin.single_threaded) @compileError("unsupported");
+    if (!builtin.single_threaded and !builtin.cpu.arch.isWasm()) @compileError("unsupported");
 }
 
+mutex: if (builtin.single_threaded) void else std.atomic.Mutex = if (builtin.single_threaded) {} else .unlocked,
 next_addrs: [size_class_count]usize = @splat(0),
 /// For each size class, points to the freed pointer.
 frees: [size_class_count]usize = @splat(0),
@@ -23,6 +24,20 @@ big_frees: [big_size_class_count]usize = @splat(0),
 prev_brk: usize = 0,
 
 var global: BrkAllocator = .{};
+
+fn lock() void {
+    if (!builtin.single_threaded) {
+        while (!global.mutex.tryLock()) {
+            std.atomic.spinLoopHint();
+        }
+    }
+}
+
+fn unlock() void {
+    if (!builtin.single_threaded) {
+        global.mutex.unlock();
+    }
+}
 
 pub const vtable: Allocator.VTable = .{
     .alloc = alloc,
@@ -54,6 +69,8 @@ fn alloc(ctx: *anyopaque, len: usize, alignment: Alignment, return_address: usiz
     const actual_len = @max(len +| @sizeOf(usize), alignment.toByteUnits());
     const slot_size = math.ceilPowerOfTwo(usize, actual_len) catch return null;
     const class = math.log2(slot_size) - min_class;
+    lock();
+    defer unlock();
     if (class < size_class_count) {
         const addr = a: {
             const top_free_ptr = global.frees[class];
@@ -134,6 +151,8 @@ fn free(
     const slot_size = math.ceilPowerOfTwoAssert(usize, actual_len);
     const class = math.log2(slot_size) - min_class;
     const addr = @intFromPtr(buf.ptr);
+    lock();
+    defer unlock();
     if (class < size_class_count) {
         const node: *usize = @ptrFromInt(addr + (slot_size - @sizeOf(usize)));
         node.* = global.frees[class];
