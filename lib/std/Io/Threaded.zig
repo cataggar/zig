@@ -359,7 +359,11 @@ pub const NullFile = switch (native_os) {
             _ = this;
         }
     },
-    else => struct {
+    else => if (posix.fd_t == void) struct {
+        fn deinit(this: @This()) void {
+            _ = this;
+        }
+    } else struct {
         fd: posix.fd_t = -1,
 
         fn deinit(this: *@This()) void {

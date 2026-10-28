@@ -49,7 +49,16 @@ else switch (native_os) {
         pub const blksize_t = u32;
         pub const ino_t = u64;
         pub const IFNAMESIZE = {};
+        pub const IOV_MAX = {};
         pub const SIG = void;
+        pub const Sigaction = void;
+        pub const STDIN_FILENO = 0;
+        pub const STDOUT_FILENO = 1;
+        pub const STDERR_FILENO = 2;
+        pub const cmsghdr = void;
+        pub const cmsg_align = {};
+        pub const flock = {};
+        pub const getrandom = {};
 
         // https://github.com/pspdev/newlib/blob/9e0a073634ad73e8e088f2e071c55a9fe5d39709/newlib/libc/sys/psp/sys/dirent.h#L19
         pub const NAME_MAX = 255;
@@ -66,7 +75,16 @@ else switch (native_os) {
         pub const blksize_t = void;
         pub const ino_t = void;
         pub const IFNAMESIZE = {};
+        pub const IOV_MAX = {};
         pub const SIG = void;
+        pub const Sigaction = void;
+        pub const STDIN_FILENO = {};
+        pub const STDOUT_FILENO = {};
+        pub const STDERR_FILENO = {};
+        pub const cmsghdr = void;
+        pub const cmsg_align = {};
+        pub const flock = {};
+        pub const getrandom = {};
     },
 };
 
