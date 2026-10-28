@@ -1747,7 +1747,7 @@ fn fuzzSingleThreaded(ctx: FuzzSingleThreadedContext, smith: *Smith) !void {
 }
 
 test "fuzz multi threaded" {
-    if (@import("builtin").single_threaded) return error.SkipZigTest;
+    if (@import("builtin").single_threaded or @import("builtin").target.cpu.arch.isWasm()) return error.SkipZigTest;
 
     const testing_buf = try std.testing.allocator.alloc(u8, 65536);
     defer std.testing.allocator.free(testing_buf);

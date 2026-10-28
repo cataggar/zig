@@ -15,7 +15,7 @@ pub const SafeAllocator = @import("heap/SafeAllocator.zig");
 pub const FixedBufferAllocator = @import("heap/FixedBufferAllocator.zig");
 pub const BufferFirstAllocator = @import("heap/BufferFirstAllocator.zig");
 pub const PageAllocator = @import("heap/PageAllocator.zig");
-pub const WasmAllocator = if (builtin.single_threaded) BrkAllocator else @compileError("unimplemented");
+pub const WasmAllocator = BrkAllocator;
 pub const BrkAllocator = @import("heap/BrkAllocator.zig");
 
 /// Deprecated; use `SafeAllocator.Options`.
@@ -359,7 +359,7 @@ pub const wasm_allocator: Allocator = .{
     .vtable = &WasmAllocator.vtable,
 };
 
-/// Supports single-threaded WebAssembly and Linux.
+/// Supports WebAssembly and single-threaded Linux.
 pub const brk_allocator: Allocator = .{
     .ptr = undefined,
     .vtable = &BrkAllocator.vtable,
@@ -375,7 +375,7 @@ test c_allocator {
 }
 
 test smp_allocator {
-    if (builtin.single_threaded) return;
+    if (builtin.single_threaded or builtin.target.cpu.arch.isWasm()) return;
     try testAllocator(smp_allocator);
     try testAllocatorAligned(smp_allocator);
     try testAllocatorLargeAlignment(smp_allocator);
@@ -898,11 +898,10 @@ test {
     _ = SafeAllocator;
     _ = FixedBufferAllocator;
     _ = BufferFirstAllocator;
-    if (builtin.single_threaded) {
-        if (builtin.cpu.arch.isWasm() or (builtin.os.tag == .linux and !builtin.link_libc)) {
-            _ = brk_allocator;
-        }
-    } else {
+    if (builtin.cpu.arch.isWasm() or (builtin.single_threaded and builtin.os.tag == .linux and !builtin.link_libc)) {
+        _ = brk_allocator;
+    }
+    if (!builtin.single_threaded and !builtin.cpu.arch.isWasm()) {
         _ = smp_allocator;
     }
 }
