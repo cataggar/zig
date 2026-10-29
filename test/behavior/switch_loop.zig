@@ -589,3 +589,110 @@ test "switch loop on large types" {
     try S.doTheTest(0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FF00, 0xFFFF_FFFF_FFFF_FFFF_FFFF_4550);
     try comptime S.doTheTest(0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FF00, 0xFFFF_FFFF_FFFF_FFFF_FFFF_4550);
 }
+
+test "switch loop returning slice in tuple literal under high register pressure" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+
+    const S = struct {
+        const Info = struct {
+            intent: [8]u8 = "abcdefgh".*,
+            extra: [32]u8 = @splat(0),
+        };
+        const State = enum { start, fallback, done };
+        const Pair = packed struct(u128) { lo: u64, hi: u64 };
+
+        var vals: [14]u64 = .{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14 };
+        var opt_info: ?Info = Info{};
+
+        noinline fn makePair(lo: u64, hi: u64) callconv(.c) Pair {
+            return .{ .lo = lo, .hi = hi };
+        }
+
+        fn check(init: State, b: bool) !void {
+            const x0 = vals[0];
+            const x1 = vals[1];
+            const x2 = vals[2];
+            const x3 = vals[3];
+            const x4 = vals[4];
+            const x5 = vals[5];
+            const x6 = vals[6];
+            const x7 = vals[7];
+            const x8 = vals[8];
+            const x9 = vals[9];
+            const x10 = vals[10];
+            const x11 = vals[11];
+            const x12 = vals[12];
+            const x13 = vals[13];
+
+            const t = .{
+                x0,
+                x1,
+                x2,
+                x3,
+                x4,
+                x5,
+                x6,
+                x7,
+                x8,
+                x9,
+                x10,
+                x11,
+                x12,
+                x13,
+                loop: switch (init) {
+                    .start => if (b) if (opt_info) |v| break :loop v.intent[0..] else continue :loop .fallback else continue :loop .done,
+                    .fallback => "-",
+                    .done => "-",
+                },
+            };
+            try expect(t[0] + t[1] + t[2] + t[3] + t[4] + t[5] + t[6] + t[7] + t[8] + t[9] + t[10] + t[11] + t[12] + t[13] == 105);
+            if (b) {
+                try expect(std.mem.eql(u8, t[14], "abcdefgh"));
+            } else {
+                try expect(std.mem.eql(u8, t[14], "-"));
+            }
+        }
+
+        noinline fn checkPair(p: Pair) callconv(.c) u64 {
+            const x0 = vals[0];
+            const x1 = vals[1];
+            const x2 = vals[2];
+            const x3 = vals[3];
+            const x4 = vals[4];
+            const x5 = vals[5];
+            const x6 = vals[6];
+            const x7 = vals[7];
+            const x8 = vals[8];
+            const x9 = vals[9];
+            const x10 = vals[10];
+            const x11 = x10 +% 1;
+            const t = .{
+                x0,
+                x1,
+                x2,
+                x3,
+                x4,
+                x5,
+                x6,
+                x7,
+                x8,
+                x9,
+                x10,
+                x11,
+                loop: switch (p) {
+                    .{ .lo = 0, .hi = 0 } => continue :loop .{ .lo = 3, .hi = 4 },
+                    .{ .lo = 3, .hi = 4 } => @as(u64, 42),
+                    else => @as(u64, 0),
+                },
+            };
+            return t[0] + t[1] + t[2] + t[3] + t[4] + t[5] + t[6] + t[7] + t[8] + t[9] + t[10] + t[11] + t[12];
+        }
+    };
+
+    try S.check(.start, false);
+    try S.check(.start, true);
+    try expect(S.checkPair(S.makePair(0, 0)) == 120);
+}
