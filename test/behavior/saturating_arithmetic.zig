@@ -135,6 +135,67 @@ test "saturating subtraction 128bit" {
     try comptime S.doTheTest();
 }
 
+test "signed saturating add and sub i8, i16, i32, i64, i96" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+
+    const S = struct {
+        fn checkType(comptime T: type) !void {
+            const min = minInt(T);
+            const max = maxInt(T);
+
+            try testSatAdd(T, 0, 0, 0);
+            try testSatAdd(T, -3, 10, 7);
+            try testSatAdd(T, 3, -10, -7);
+            try testSatAdd(T, -3, -10, -13);
+            try testSatAdd(T, max - 1, 1, max);
+            try testSatAdd(T, max, 0, max);
+            try testSatAdd(T, max, 1, max);
+            try testSatAdd(T, max, max, max);
+            try testSatAdd(T, max - 5, 10, max);
+            try testSatAdd(T, min + 1, -1, min);
+            try testSatAdd(T, min, 0, min);
+            try testSatAdd(T, min, -1, min);
+            try testSatAdd(T, min, min, min);
+            try testSatAdd(T, min + 5, -10, min);
+            try testSatAdd(T, min, max, -1);
+
+            try testSatSub(T, 0, 0, 0);
+            try testSatSub(T, 10, 3, 7);
+            try testSatSub(T, -3, 10, -13);
+            try testSatSub(T, -3, -10, 7);
+            try testSatSub(T, max, max, 0);
+            try testSatSub(T, min, min, 0);
+            try testSatSub(T, max - 1, -1, max);
+            try testSatSub(T, max, 0, max);
+            try testSatSub(T, max, -1, max);
+            try testSatSub(T, max, min, max);
+            try testSatSub(T, 0, min, max);
+            try testSatSub(T, max - 5, -10, max);
+            try testSatSub(T, min + 1, 1, min);
+            try testSatSub(T, min, 0, min);
+            try testSatSub(T, min, 1, min);
+            try testSatSub(T, min, max, min);
+            try testSatSub(T, -1, max, min);
+            try testSatSub(T, -2, max, min);
+            try testSatSub(T, min + 5, 10, min);
+        }
+
+        fn doTheTest() !void {
+            inline for (.{ i8, i16, i32, i64, i96 }) |T| {
+                try checkType(T);
+            }
+            try testSatAdd(i96, (@as(i96, 1) << 64) - 1, 1, @as(i96, 1) << 64);
+            try testSatSub(i96, @as(i96, 1) << 64, 1, (@as(i96, 1) << 64) - 1);
+        }
+    };
+
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}
+
 fn testSatMul(comptime T: type, a: T, b: T, expected: T) !void {
     const res: T = a *| b;
     try expect(res == expected);

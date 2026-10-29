@@ -1826,3 +1826,54 @@ test "bitcast vector to array of smaller vectors" {
     const input: u8x64 = @bitCast([2]u8x32{ @splat(1), @splat(2) });
     try S.doTheTest(input);
 }
+
+test "pass 8-byte, 16-byte, and 32-byte vectors by value as function parameters" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+
+    const S = struct {
+        noinline fn checkVec4u16(v: @Vector(4, u16), expected0: u16, expected3: u16) !void {
+            const arr: [4]u16 = v;
+            try expect(arr[0] == expected0);
+            try expect(arr[3] == expected3);
+        }
+
+        noinline fn checkVec8u16(v: @Vector(8, u16), expected0: u16, expected7: u16) !void {
+            const arr: [8]u16 = v;
+            try expect(arr[0] == expected0);
+            try expect(arr[7] == expected7);
+        }
+
+        noinline fn checkVec16u16(v: @Vector(16, u16), expected0: u16, expected8: u16, expected15: u16) !void {
+            const arr: [16]u16 = v;
+            try expect(arr[0] == expected0);
+            try expect(arr[8] == expected8);
+            try expect(arr[15] == expected15);
+        }
+
+        fn doTheTest() !void {
+            const c4: @Vector(4, u16) = .{ 10, 20, 30, 40 };
+            try checkVec4u16(c4, 10, 40);
+            var v4: @Vector(4, u16) = [4]u16{ 100, 200, 300, 400 };
+            _ = &v4;
+            try checkVec4u16(v4, 100, 400);
+
+            const c8: @Vector(8, u16) = .{ 1, 2, 3, 4, 5, 6, 7, 8 };
+            try checkVec8u16(c8, 1, 8);
+            var v8: @Vector(8, u16) = [8]u16{ 11, 22, 33, 44, 55, 66, 77, 88 };
+            _ = &v8;
+            try checkVec8u16(v8, 11, 88);
+
+            const c16: @Vector(16, u16) = .{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
+            try checkVec16u16(c16, 1, 9, 16);
+            var v16: @Vector(16, u16) = [16]u16{ 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116 };
+            _ = &v16;
+            try checkVec16u16(v16, 101, 109, 116);
+        }
+    };
+
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}

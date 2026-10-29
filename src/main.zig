@@ -158,7 +158,7 @@ pub fn log(
 const use_safe_allocator = build_options.debug_gpa or
     (!native_os.isWasi() and !builtin.link_libc and switch (builtin.mode) {
         .debug, .safe => true,
-        .fast, .small => false,
+        .fast, .small => builtin.single_threaded,
     });
 
 var safe_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{

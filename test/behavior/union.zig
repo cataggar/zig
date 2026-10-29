@@ -2295,3 +2295,69 @@ test "union with function body field" {
     try std.testing.expect(y.f == U.foo);
     y.f();
 }
+
+test "16-byte union(enum) with 12-byte payload passed by value" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+
+    const S = struct {
+        const Payload12 = struct {
+            x: u32,
+            y: u32,
+            z: u32,
+        };
+
+        const U = union(enum) {
+            a: Payload12,
+            b: u32,
+            c,
+        };
+
+        comptime {
+            assert(@sizeOf(Payload12) == 12);
+            assert(@sizeOf(U) == 16);
+        }
+
+        noinline fn checkA(u: U, ex: u32, ey: u32, ez: u32) !void {
+            switch (u) {
+                .a => |p| {
+                    try expect(p.x == ex);
+                    try expect(p.y == ey);
+                    try expect(p.z == ez);
+                },
+                else => return error.TestFailed,
+            }
+        }
+
+        noinline fn checkB(u: U, eb: u32) !void {
+            switch (u) {
+                .b => |v| try expect(v == eb),
+                else => return error.TestFailed,
+            }
+        }
+
+        noinline fn checkC(u: U) !void {
+            switch (u) {
+                .c => {},
+                else => return error.TestFailed,
+            }
+        }
+
+        fn doTheTest() !void {
+            var u: U = .{ .a = .{ .x = 0x11223344, .y = 0x55667788, .z = 0x99aabbcc } };
+            _ = &u;
+            try checkA(u, 0x11223344, 0x55667788, 0x99aabbcc);
+
+            u = .{ .b = 0xdeadbeef };
+            try checkB(u, 0xdeadbeef);
+
+            u = .c;
+            try checkC(u);
+        }
+    };
+
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}

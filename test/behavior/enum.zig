@@ -1479,3 +1479,59 @@ test "convert from/to backing int" {
     try E.doTheTest(.b);
     try comptime E.doTheTest(.b);
 }
+
+test "@tagName on u64-backed enum" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+
+    const S = struct {
+        const Contiguous = enum(u64) {
+            alpha,
+            beta,
+            gamma,
+            delta,
+        };
+
+        const NonContiguous = enum(u64) {
+            zero = 0,
+            small = 42,
+            over32 = 0x1_0000_0000,
+            max = std.math.maxInt(u64),
+        };
+
+        noinline fn getContiguousName(e: Contiguous) []const u8 {
+            return @tagName(e);
+        }
+
+        noinline fn getNonContiguousName(e: NonContiguous) []const u8 {
+            return @tagName(e);
+        }
+
+        fn doTheTest() !void {
+            var c: Contiguous = .alpha;
+            _ = &c;
+            try expect(mem.eql(u8, getContiguousName(c), "alpha"));
+            c = .beta;
+            try expect(mem.eql(u8, getContiguousName(c), "beta"));
+            c = .gamma;
+            try expect(mem.eql(u8, getContiguousName(c), "gamma"));
+            c = .delta;
+            try expect(mem.eql(u8, getContiguousName(c), "delta"));
+
+            var nc: NonContiguous = .zero;
+            _ = &nc;
+            try expect(mem.eql(u8, getNonContiguousName(nc), "zero"));
+            nc = .small;
+            try expect(mem.eql(u8, getNonContiguousName(nc), "small"));
+            nc = .over32;
+            try expect(mem.eql(u8, getNonContiguousName(nc), "over32"));
+            nc = .max;
+            try expect(mem.eql(u8, getNonContiguousName(nc), "max"));
+        }
+    };
+
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}
