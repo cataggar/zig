@@ -177487,14 +177487,14 @@ fn airSwitchDispatch(self: *CodeGen, inst: Air.Inst.Index) !void {
         const src_mcv = try self.resolveInst(br.operand);
 
         if (self.reuseOperandAdvanced(inst, br.operand, 0, src_mcv, br.block_inst)) {
-            try self.getValue(block_tracking.short, br.block_inst);
             // .long = .none to avoid merging operand and block result stack frames.
             const current_tracking: InstTracking = .{ .long = .none, .short = src_mcv };
             try current_tracking.materializeUnsafe(self, br.block_inst, block_tracking.*);
-            for (current_tracking.getRegs()) |src_reg| self.register_manager.freeReg(src_reg);
-        } else {
+            try self.freeValue(src_mcv, .{});
             try self.getValue(block_tracking.short, br.block_inst);
+        } else {
             try self.genCopy(block_ty, block_tracking.short, try self.resolveInst(br.operand), .{});
+            try self.getValue(block_tracking.short, br.block_inst);
         }
     }
 
@@ -177625,7 +177625,6 @@ fn airBr(self: *CodeGen, inst: Air.Inst.Index) !void {
         if (self.reuseOperandAdvanced(inst, br.operand, 0, src_mcv, br.block_inst)) {
             if (first_br) break :result src_mcv;
 
-            try self.getValue(block_tracking.short, br.block_inst);
             try InstTracking.materializeUnsafe(
                 // .long = .none to avoid merging operand and block result stack frames.
                 .{ .long = .none, .short = src_mcv },
@@ -177634,15 +177633,19 @@ fn airBr(self: *CodeGen, inst: Air.Inst.Index) !void {
                 block_tracking.*,
             );
             try self.freeValue(src_mcv, .{});
+            try self.getValue(block_tracking.short, br.block_inst);
             break :result block_tracking.short;
         }
 
-        const dst_mcv = if (first_br) try self.allocRegOrMem(br.block_inst, true) else dst: {
+        if (first_br) {
+            const dst_mcv = try self.allocRegOrMem(br.block_inst, true);
+            try self.genCopy(block_ty, dst_mcv, try self.resolveInst(br.operand), .{});
+            break :result dst_mcv;
+        } else {
+            try self.genCopy(block_ty, block_tracking.short, try self.resolveInst(br.operand), .{});
             try self.getValue(block_tracking.short, br.block_inst);
-            break :dst block_tracking.short;
-        };
-        try self.genCopy(block_ty, dst_mcv, try self.resolveInst(br.operand), .{});
-        break :result dst_mcv;
+            break :result block_tracking.short;
+        }
     };
 
     // Process operand death so that it is properly accounted for in the State below.
