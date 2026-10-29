@@ -35,6 +35,8 @@ pub const rewrite_extern_names = @import("rewrite_extern_names.zig");
 pub const resource_intrinsics = @import("resource_intrinsics.zig");
 pub const type_walk = @import("type_walk.zig");
 pub const build_component = @import("build_component.zig");
+pub const Optimizer = @import("Optimizer.zig");
+pub const optimizeCoreModule = Optimizer.optimize;
 
 pub const wit = struct {
     pub const ast = @import("wit/ast.zig");
@@ -559,6 +561,7 @@ test {
     _ = resource_intrinsics;
     _ = type_walk;
     _ = build_component;
+    _ = Optimizer;
     _ = wit.ast;
     _ = wit.lexer;
     _ = wit.parser;
@@ -896,26 +899,28 @@ test "WASI 0.3.0: encodeWorldFromSource and linkComponent P3 command" {
         0x01, 0x08, 0x02, 0x60, 0x01, 0x7f, 0x00, 0x60,
         0x00, 0x00,
         // import section: 1 import: "[export]wasi:cli/run@0.3.0" "[task-return]run" (func type 0)
-        0x02, 47,   0x01, 26,   '[',  'e',  'x',  'p',
-        'o',  'r',  't',  ']',  'w',  'a',  's',  'i',
-        ':',  'c',  'l',  'i',  '/',  'r',  'u',  'n',
-        '@',  '0',  '.',  '3',  '.',  '0',  16,   '[',
-        't',  'a',  's',  'k',  '-',  'r',  'e',  't',
-        'u',  'r',  'n',  ']',  'r',  'u',  'n',  0x00,
-        0x00,
+        0x02, 47,   0x01, 26,   '[',  'e',
+        'x',  'p',  'o',  'r',  't',  ']',  'w',  'a',
+        's',  'i',  ':',  'c',  'l',  'i',  '/',  'r',
+        'u',  'n',  '@',  '0',  '.',  '3',  '.',  '0',
+        16,   '[',  't',  'a',  's',  'k',  '-',  'r',
+        'e',  't',  'u',  'r',  'n',  ']',  'r',  'u',
+        'n',  0x00, 0x00,
         // function section: 1 defined func (type 1)
         0x03, 0x02, 0x01, 0x01,
         // memory section: 1 memory (min 1 page)
-        0x05, 0x03, 0x01, 0x00, 0x01,
+        0x05,
+        0x03, 0x01, 0x00, 0x01,
         // export section: "memory" (mem 0) + "wasi:cli/run@0.3.0#run" (func 1)
-        0x07, 35,   0x02, 6,    'm',  'e',  'm',  'o',
-        'r',  'y',  0x02, 0x00, 22,   'w',  'a',  's',
-        'i',  ':',  'c',  'l',  'i',  '/',  'r',  'u',
-        'n',  '@',  '0',  '.',  '3',  '.',  '0',  '#',
-        'r',  'u',  'n',  0x00, 0x01,
+        0x07, 35,   0x02, 6,
+        'm',  'e',  'm',  'o',  'r',  'y',  0x02, 0x00,
+        22,   'w',  'a',  's',  'i',  ':',  'c',  'l',
+        'i',  '/',  'r',  'u',  'n',  '@',  '0',  '.',
+        '3',  '.',  '0',  '#',  'r',  'u',  'n',  0x00,
+        0x01,
         // code section: i32.const 0; call 0; end
-        0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x00, 0x10,
-        0x00, 0x0b,
+        0x0a, 0x08, 0x01, 0x06, 0x00, 0x41, 0x00,
+        0x10, 0x00, 0x0b,
     };
 
     const p3_comp = try linkComponent(testing.allocator, &pure_p3_core, .{
@@ -1099,3 +1104,71 @@ test "WASI 0.3.0: custom WIT async world with record/variant/result, multi-task-
     try testing.expectEqualStrings("example:custom-p3/calc@0.1.0", loaded.exports[0].name);
 }
 
+test "optimizeCoreModule + linkComponent: prunes dead stubs and folds constants in WASI P2 component" {
+    const testing = std.testing;
+
+    // Core P2 command module with 6 dead `(func unreachable)` stubs (indices 0..5)
+    // and exported `wasi:cli/run@0.2.6#run` at index 6 containing foldable constants:
+    // `(i32.sub (i32.add (i32.const 10) (i32.const 20)) (i32.const 30))` -> `i32.const 0`.
+    const unopt_core = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        // type section: 2 types: 0 = () -> (), 1 = () -> i32
+        0x01, 0x08, 0x02, 0x60, 0x00, 0x00, 0x60, 0x00,
+        0x01, 0x7f,
+        // function section: 7 funcs (types 0x6, 1)
+        0x03, 0x08, 0x07, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01,
+        // memory section: 1 memory (min 1 page)
+        0x05, 0x03, 0x01, 0x00,
+        0x01,
+        // export section: "memory" (mem 0) + "wasi:cli/run@0.2.6#run" (func 6)
+        0x07, 35,   0x02, 6,    'm',  'e',  'm',
+        'o',  'r',  'y',  0x02, 0x00, 22,   'w',  'a',
+        's',  'i',  ':',  'c',  'l',  'i',  '/',  'r',
+        'u',  'n',  '@',  '0',  '.',  '2',  '.',  '6',
+        '#',  'r',  'u',  'n',  0x00, 0x06,
+        // code section: 6 dead unreachable bodies + 1 foldable body
+        0x0a, 36,
+        0x07,
+        0x03, 0x00, 0x00, 0x0b, // func 0: unreachable; end
+        0x03, 0x00, 0x00, 0x0b, // func 1: unreachable; end
+        0x03, 0x00, 0x00, 0x0b, // func 2: unreachable; end
+        0x03, 0x00, 0x00, 0x0b, // func 3: unreachable; end
+        0x03, 0x00, 0x00, 0x0b, // func 4: unreachable; end
+        0x03, 0x00, 0x00, 0x0b, // func 5: unreachable; end
+        0x0a, 0x00, 0x41, 10,
+        0x41, 20,   0x6a, 0x41,
+        30, 0x6b, 0x0b, // func 6: (10 + 20) - 30
+    };
+
+    const unopt_comp = try linkComponent(testing.allocator, &unopt_core, .{
+        .exec_model = .command,
+    });
+    defer testing.allocator.free(unopt_comp);
+
+    const opt_core = try optimizeCoreModule(testing.allocator, &unopt_core, .{
+        .custom_sections = .preserve,
+    });
+    defer testing.allocator.free(opt_core);
+    try testing.expect(opt_core.len < unopt_core.len);
+
+    var opt_mod = try binary.reader.readModule(testing.allocator, opt_core);
+    defer opt_mod.deinit();
+    try testing.expectEqual(@as(usize, 1), opt_mod.funcs.items.len);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x41, 0x00, 0x0b }, opt_mod.funcs.items[0].code_bytes);
+
+    const opt_comp = try linkComponent(testing.allocator, opt_core, .{
+        .exec_model = .command,
+    });
+    defer testing.allocator.free(opt_comp);
+
+    try testing.expect(opt_comp.len > 8);
+    try testing.expectEqualSlices(u8, "\x00asm\x0d\x00\x01\x00", opt_comp[0..8]);
+    try testing.expect(opt_comp.len < unopt_comp.len);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const loaded = try loader.load(opt_comp, arena.allocator());
+    try testing.expectEqual(@as(usize, 0), loaded.imports.len);
+    try testing.expectEqual(@as(usize, 1), loaded.exports.len);
+}

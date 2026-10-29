@@ -10,6 +10,7 @@ const Mir = @This();
 const InternPool = @import("../../InternPool.zig");
 const Wasm = @import("../../link/Wasm.zig");
 const Emit = @import("Emit.zig");
+pub const Optimize = @import("Optimize.zig");
 const Alignment = InternPool.Alignment;
 
 const builtin = @import("builtin");
@@ -1012,3 +1013,7 @@ pub const Intrinsic = enum(u32) {
     __mulo_limb64,
     __abs_limb64,
 };
+
+test {
+    _ = Optimize;
+}

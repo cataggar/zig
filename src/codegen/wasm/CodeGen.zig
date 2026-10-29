@@ -962,6 +962,106 @@ fn generateInner(cg: *CodeGen, any_returns: bool) InnerError!Mir {
     try cg.addTag(.end);
     try cg.addTag(.dbg_epilogue_begin);
 
+    try Mir.Optimize.optimize(
+        cg.gpa,
+        &cg.mir_instructions,
+        &cg.mir_extra,
+        &cg.error_name_table_ref_count,
+    );
+
+    if (cg.mir_indirect_function_set.count() > 0) {
+        cg.mir_indirect_function_set.clearRetainingCapacity();
+        for (
+            cg.mir_instructions.items(.tag),
+            cg.mir_instructions.items(.data),
+        ) |tag, data| {
+            if (tag == .func_ref) {
+                cg.mir_indirect_function_set.putAssumeCapacity(data.nav_index, {});
+            }
+        }
+    }
+
+    const sp_local = cg.initial_stack_value.local;
+    const bottom_stack_local = cg.bottom_stack_value.local;
+    const needs_stack_prologue = needs_prologue: {
+        if (cg.stack_size > 0) break :needs_prologue true;
+        const tags = cg.mir_instructions.items(.tag);
+        const datas = cg.mir_instructions.items(.data);
+        for (tags, datas, 0..) |tag, data, idx| {
+            switch (tag) {
+                .local_get, .local_set, .local_tee => {
+                    if (data.local == bottom_stack_local) break :needs_prologue true;
+                    if (data.local == sp_local) {
+                        if (tag != .local_get or idx + 1 >= tags.len or tags[idx + 1] != .global_set_sp) {
+                            break :needs_prologue true;
+                        }
+                    }
+                },
+                .global_set_sp => {
+                    if (idx == 0 or tags[idx - 1] != .local_get or datas[idx - 1].local != sp_local) {
+                        break :needs_prologue true;
+                    }
+                },
+                else => {},
+            }
+        }
+        break :needs_prologue false;
+    };
+
+    const prologue: Mir.Prologue = if (!needs_stack_prologue) blk: {
+        const tags = cg.mir_instructions.items(.tag);
+        const datas = cg.mir_instructions.items(.data);
+        var write_idx: usize = 0;
+        var read_idx: usize = 0;
+        while (read_idx < tags.len) {
+            if (read_idx + 1 < tags.len and
+                tags[read_idx] == .local_get and
+                datas[read_idx].local == sp_local and
+                tags[read_idx + 1] == .global_set_sp)
+            {
+                read_idx += 2;
+                continue;
+            }
+            if (write_idx != read_idx) {
+                tags[write_idx] = tags[read_idx];
+                datas[write_idx] = datas[read_idx];
+            }
+            write_idx += 1;
+            read_idx += 1;
+        }
+        cg.mir_instructions.len = write_idx;
+        break :blk .none;
+    } else .{
+        .sp_local = sp_local,
+        .flags = .{ .stack_alignment = cg.stack_alignment },
+        .stack_size = cg.stack_size,
+        .bottom_stack_local = bottom_stack_local,
+    };
+
+    {
+        var max_local_len: usize = if (needs_stack_prologue)
+            (bottom_stack_local - cg.wasm_param_count + 1)
+        else
+            0;
+        for (
+            cg.mir_instructions.items(.tag),
+            cg.mir_instructions.items(.data),
+        ) |tag, data| {
+            switch (tag) {
+                .local_get, .local_set, .local_tee => {
+                    if (data.local >= cg.wasm_param_count) {
+                        const needed: usize = data.local - cg.wasm_param_count + 1;
+                        if (needed > max_local_len) max_local_len = needed;
+                    }
+                },
+                else => {},
+            }
+        }
+        if (max_local_len < cg.mir_locals.items.len) {
+            cg.mir_locals.shrinkRetainingCapacity(max_local_len);
+        }
+    }
+
     try cg.mir_extra.shrinkToLen(cg.gpa);
     try cg.mir_locals.shrinkToLen(cg.gpa);
 
@@ -969,12 +1069,7 @@ fn generateInner(cg: *CodeGen, any_returns: bool) InnerError!Mir {
         .instructions = cg.mir_instructions.toOwnedSlice(),
         .extra = cg.mir_extra.toOwnedSliceAssert(),
         .locals = cg.mir_locals.toOwnedSliceAssert(),
-        .prologue = .{
-            .sp_local = cg.initial_stack_value.local,
-            .flags = .{ .stack_alignment = cg.stack_alignment },
-            .stack_size = cg.stack_size,
-            .bottom_stack_local = cg.bottom_stack_value.local,
-        },
+        .prologue = prologue,
         .uavs = cg.mir_uavs.move(),
         .indirect_function_set = cg.mir_indirect_function_set.move(),
         .func_tys = cg.mir_func_tys.move(),
@@ -8045,4 +8140,8 @@ fn typeOf(cg: *CodeGen, inst: Air.Inst.Ref) Type {
 fn typeOfIndex(cg: *CodeGen, inst: Air.Inst.Index) Type {
     const zcu = cg.pt.zcu;
     return cg.air.typeOfIndex(inst, &zcu.intern_pool);
+}
+
+test {
+    _ = Mir;
 }
