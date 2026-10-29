@@ -410,14 +410,14 @@ pub const ResolvConf = struct {
     timeout_seconds: u32,
     nameservers_buffer: [max_nameservers]IpAddress,
     nameservers_len: usize,
-    search_buffer: [max_len]u8,
+    search_buffer: [max_search_len]u8,
     search_len: usize,
 
     /// According to resolv.conf(5) there is a maximum of 3 nameservers in this
     /// file.
     pub const max_nameservers = 3;
+    pub const max_search_len = 4096;
 
-    /// Returns `error.StreamTooLong` if a line is longer than 512 bytes.
     pub fn init(io: Io) !ResolvConf {
         var rc: ResolvConf = .{
             .nameservers_buffer = undefined,
@@ -442,7 +442,7 @@ pub const ResolvConf = struct {
         };
         defer file.close(io);
 
-        var line_buf: [512]u8 = undefined;
+        var line_buf: [4096]u8 = undefined;
         var file_reader = file.reader(io, &line_buf);
         parse(&rc, io, &file_reader.interface) catch |err| switch (err) {
             error.ReadFailed => return file_reader.err.?,
@@ -455,43 +455,24 @@ pub const ResolvConf = struct {
     const Option = enum { ndots, attempts, timeout };
 
     pub fn parse(rc: *ResolvConf, io: Io, reader: *Io.Reader) !void {
-        while (reader.takeSentinel('\n')) |line_with_comment| {
-            const line = line: {
-                var split = std.mem.splitScalar(u8, line_with_comment, '#');
-                break :line split.first();
-            };
-            var line_it = std.mem.tokenizeAny(u8, line, " \t");
-
-            const token = line_it.next() orelse continue;
-            switch (std.meta.stringToEnum(Directive, token) orelse continue) {
-                .options => while (line_it.next()) |sub_tok| {
-                    var colon_it = std.mem.splitScalar(u8, sub_tok, ':');
-                    const name = colon_it.first();
-                    const value_txt = colon_it.next() orelse continue;
-                    const value = std.fmt.parseInt(u8, value_txt, 10) catch |err| switch (err) {
-                        error.Overflow => 255,
-                        error.InvalidCharacter => continue,
+        while (true) {
+            const raw_line = reader.takeDelimiter('\n') catch |err| switch (err) {
+                error.ReadFailed => |e| return e,
+                error.StreamTooLong => {
+                    const buffered = reader.buffered();
+                    const cutoff = if (std.mem.indexOfAny(u8, buffered, "#;")) |comment_idx|
+                        comment_idx
+                    else
+                        std.mem.lastIndexOfAny(u8, buffered, " \t\r") orelse 0;
+                    try parseLine(rc, io, buffered[0..cutoff]);
+                    _ = reader.discardDelimiterInclusive('\n') catch |er| switch (er) {
+                        error.EndOfStream => break,
+                        error.ReadFailed => |e| return e,
                     };
-                    switch (std.meta.stringToEnum(Option, name) orelse continue) {
-                        .ndots => rc.ndots = @min(value, 15),
-                        .attempts => rc.attempts = @min(value, 10),
-                        .timeout => rc.timeout_seconds = @min(value, 60),
-                    }
+                    continue;
                 },
-                .nameserver => {
-                    const ip_txt = line_it.next() orelse continue;
-                    try addNumeric(rc, io, ip_txt, 53);
-                },
-                .domain, .search => {
-                    const rest = line_it.rest();
-                    if (rest.len > rc.search_buffer.len) continue;
-                    @memcpy(rc.search_buffer[0..rest.len], rest);
-                    rc.search_len = rest.len;
-                },
-            }
-        } else |err| switch (err) {
-            error.EndOfStream => if (reader.bufferedLen() != 0) return error.EndOfStream,
-            else => |e| return e,
+            } orelse break;
+            try parseLine(rc, io, raw_line);
         }
 
         if (rc.nameservers_len == 0) {
@@ -499,9 +480,61 @@ pub const ResolvConf = struct {
         }
     }
 
+    fn parseLine(rc: *ResolvConf, io: Io, raw_line: []const u8) !void {
+        const line = raw_line[0 .. std.mem.indexOfAny(u8, raw_line, "#;") orelse raw_line.len];
+        var line_it = std.mem.tokenizeAny(u8, line, " \t\r");
+
+        const token = line_it.next() orelse return;
+        switch (std.meta.stringToEnum(Directive, token) orelse return) {
+            .options => while (line_it.next()) |sub_tok| {
+                var colon_it = std.mem.splitScalar(u8, sub_tok, ':');
+                const name = colon_it.first();
+                const value_txt = colon_it.next() orelse continue;
+                const value = std.fmt.parseInt(u8, value_txt, 10) catch |err| switch (err) {
+                    error.Overflow => 255,
+                    error.InvalidCharacter => continue,
+                };
+                switch (std.meta.stringToEnum(Option, name) orelse continue) {
+                    .ndots => rc.ndots = @min(value, 15),
+                    .attempts => rc.attempts = std.math.clamp(value, 1, 10),
+                    .timeout => rc.timeout_seconds = std.math.clamp(value, 1, 60),
+                }
+            },
+            .nameserver => {
+                const ip_txt = line_it.next() orelse return;
+                try addNumeric(rc, io, ip_txt, 53);
+            },
+            .domain, .search => copySearchList(rc, line_it.rest()),
+        }
+    }
+
+    fn copySearchList(rc: *ResolvConf, rest: []const u8) void {
+        var len: usize = 0;
+        var domains = std.mem.tokenizeAny(u8, rest, " \t\r");
+        while (domains.next()) |raw_domain| {
+            const domain = if (std.mem.endsWith(u8, raw_domain, "."))
+                raw_domain[0 .. raw_domain.len - 1]
+            else
+                raw_domain;
+            validate(domain) catch continue;
+            const sep: usize = @intFromBool(len != 0);
+            if (len + sep + domain.len > rc.search_buffer.len) break;
+            if (sep != 0) {
+                rc.search_buffer[len] = ' ';
+                len += 1;
+            }
+            @memcpy(rc.search_buffer[len..][0..domain.len], domain);
+            len += domain.len;
+        }
+        rc.search_len = len;
+    }
+
     fn addNumeric(rc: *ResolvConf, io: Io, name: []const u8, port: u16) !void {
         if (rc.nameservers_len < rc.nameservers_buffer.len) {
-            rc.nameservers_buffer[rc.nameservers_len] = try .resolve(io, name, port);
+            rc.nameservers_buffer[rc.nameservers_len] = IpAddress.resolve(io, name, port) catch |err| switch (err) {
+                error.Canceled => |e| return e,
+                else => return,
+            };
             rc.nameservers_len += 1;
         }
     }
@@ -509,29 +542,164 @@ pub const ResolvConf = struct {
     pub fn nameservers(rc: *const ResolvConf) []const IpAddress {
         return rc.nameservers_buffer[0..rc.nameservers_len];
     }
+
+    pub fn search(rc: *const ResolvConf) []const u8 {
+        return rc.search_buffer[0..rc.search_len];
+    }
 };
 
 test ResolvConf {
-    const input =
-        \\# Generated by resolvconf
-        \\nameserver 1.0.0.1
-        \\nameserver 1.1.1.1
-        \\nameserver fe80::e0e:76ff:fed4:cf22
-        \\options edns0
-        \\
-    ;
-    var reader: Io.Reader = .fixed(input);
+    {
+        const input =
+            \\# Generated by resolvconf
+            \\; Semicolon comment
+            \\nameserver 1.0.0.1
+            \\nameserver 1.1.1.1
+            \\nameserver fe80::e0e:76ff:fed4:cf22
+            \\options edns0
+        ;
+        var reader: Io.Reader = .fixed(input);
+        var rc: ResolvConf = .{
+            .nameservers_buffer = undefined,
+            .nameservers_len = 0,
+            .search_buffer = undefined,
+            .search_len = 0,
+            .ndots = 1,
+            .timeout_seconds = 5,
+            .attempts = 2,
+        };
+        try rc.parse(std.testing.io, &reader);
+        try std.testing.expectEqual(3, rc.nameservers().len);
+    }
 
-    var rc: ResolvConf = .{
-        .nameservers_buffer = undefined,
-        .nameservers_len = 0,
-        .search_buffer = undefined,
-        .search_len = 0,
-        .ndots = 1,
-        .timeout_seconds = 5,
-        .attempts = 2,
-    };
+    {
+        // WSL corporate search line > 512 bytes (and > 255 bytes).
+        const input =
+            "nameserver 10.255.255.254\n" ++
+            "search " ++
+            "corp.example.com " ++
+            "alpha.corp.example.com beta.corp.example.com gamma.corp.example.com " ++
+            "delta.corp.example.com epsilon.corp.example.com zeta.corp.example.com " ++
+            "eta.corp.example.com theta.corp.example.com iota.corp.example.com " ++
+            "kappa.corp.example.com lambda.corp.example.com mu.corp.example.com " ++
+            "nu.corp.example.com xi.corp.example.com omicron.corp.example.com " ++
+            "pi.corp.example.com rho.corp.example.com sigma.corp.example.com " ++
+            "tau.corp.example.com upsilon.corp.example.com phi.corp.example.com " ++
+            "chi.corp.example.com psi.corp.example.com omega.corp.example.com\n";
+        comptime assert(input.len > 512);
 
-    try rc.parse(std.testing.io, &reader);
-    try std.testing.expectEqual(3, rc.nameservers().len);
+        var reader: Io.Reader = .fixed(input);
+        var rc: ResolvConf = .{
+            .nameservers_buffer = undefined,
+            .nameservers_len = 0,
+            .search_buffer = undefined,
+            .search_len = 0,
+            .ndots = 1,
+            .timeout_seconds = 5,
+            .attempts = 2,
+        };
+        try rc.parse(std.testing.io, &reader);
+        try std.testing.expectEqual(1, rc.nameservers().len);
+        try std.testing.expect(rc.search_len > max_len);
+
+        var it = std.mem.tokenizeScalar(u8, rc.search(), ' ');
+        try std.testing.expectEqualStrings("corp.example.com", it.next().?);
+        var last: []const u8 = undefined;
+        var count: usize = 1;
+        while (it.next()) |s| {
+            try std.testing.expect(std.mem.endsWith(u8, s, ".corp.example.com"));
+            last = s;
+            count += 1;
+        }
+        try std.testing.expectEqual(25, count);
+        try std.testing.expectEqualStrings("omega.corp.example.com", last);
+    }
+
+    {
+        // Search list exceeding max_search_len truncates on a domain boundary
+        // and skips any individual domain exceeding max_len_without_root.
+        const overlong_domain: [max_len_without_root + 1]u8 = @splat('a');
+        const unit = "sub.corp.example.com ";
+        const repeats = (ResolvConf.max_search_len / unit.len) + 20;
+        const repeated_buf: [repeats][unit.len]u8 = @splat(unit.*);
+        const repeated: []const u8 = @ptrCast(&repeated_buf);
+        const input = "search " ++ &overlong_domain ++ " " ++ repeated ++ "\nnameserver 1.1.1.1\n";
+
+        var reader: Io.Reader = .fixed(input);
+        var rc: ResolvConf = .{
+            .nameservers_buffer = undefined,
+            .nameservers_len = 0,
+            .search_buffer = undefined,
+            .search_len = 0,
+            .ndots = 1,
+            .timeout_seconds = 5,
+            .attempts = 2,
+        };
+        try rc.parse(std.testing.io, &reader);
+        try std.testing.expectEqual(1, rc.nameservers().len);
+        try std.testing.expect(rc.search_len > 0);
+        try std.testing.expect(rc.search_len <= ResolvConf.max_search_len);
+
+        var it = std.mem.tokenizeScalar(u8, rc.search(), ' ');
+        var count: usize = 0;
+        while (it.next()) |s| : (count += 1) {
+            try std.testing.expectEqualStrings("sub.corp.example.com", s);
+        }
+        try std.testing.expect(count > 100);
+    }
+
+    {
+        // Over-long line exceeding a small Io.Reader buffer does not fail parse
+        // with error.StreamTooLong; retains complete buffered prefix tokens and
+        // continues parsing subsequent lines.
+        const long_comment: [200]u8 = @splat('x');
+        const input =
+            "search first.example.com second.example.com third.example.com fourth.example.com\n" ++
+            "# " ++ &long_comment ++ "\n" ++
+            "nameserver 9.9.9.9\n";
+        var fixed: Io.Reader = .fixed(input);
+        var small_buf: [48]u8 = undefined;
+        var limited = fixed.limited(.unlimited, &small_buf);
+        var rc: ResolvConf = .{
+            .nameservers_buffer = undefined,
+            .nameservers_len = 0,
+            .search_buffer = undefined,
+            .search_len = 0,
+            .ndots = 1,
+            .timeout_seconds = 5,
+            .attempts = 2,
+        };
+        try rc.parse(std.testing.io, &limited.interface);
+        try std.testing.expectEqual(1, rc.nameservers().len);
+        // The first 48 bytes of the search line are:
+        // "search first.example.com second.example.com thir"
+        // Cutoff at last whitespace retains the first two complete domains.
+        try std.testing.expectEqualStrings("first.example.com second.example.com", rc.search());
+    }
+
+    {
+        // Options clamping and malformed nameservers skipped.
+        const input =
+            \\nameserver not-an-ip
+            \\nameserver 8.8.8.8
+            \\nameserver 999.999.999.999
+            \\nameserver 8.8.4.4
+            \\options ndots:99 timeout:0 attempts:0
+        ;
+        var reader: Io.Reader = .fixed(input);
+        var rc: ResolvConf = .{
+            .nameservers_buffer = undefined,
+            .nameservers_len = 0,
+            .search_buffer = undefined,
+            .search_len = 0,
+            .ndots = 1,
+            .timeout_seconds = 5,
+            .attempts = 2,
+        };
+        try rc.parse(std.testing.io, &reader);
+        try std.testing.expectEqual(2, rc.nameservers().len);
+        try std.testing.expectEqual(15, rc.ndots);
+        try std.testing.expectEqual(1, rc.timeout_seconds);
+        try std.testing.expectEqual(1, rc.attempts);
+    }
 }

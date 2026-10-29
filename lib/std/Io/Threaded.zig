@@ -14676,7 +14676,7 @@ fn lookupDnsSearch(
 
     // Strip final dot for canon, fail if multiple trailing dots.
     if (std.mem.endsWith(u8, canon_name, ".")) canon_name.len -= 1;
-    if (std.mem.endsWith(u8, canon_name, ".")) return error.UnknownHostName;
+    if (canon_name.len == 0 or std.mem.endsWith(u8, canon_name, ".")) return error.UnknownHostName;
 
     // Name with search domain appended is set up in `canon_name`. This
     // both provides the desired default canonical name (if the requested
@@ -14684,12 +14684,15 @@ fn lookupDnsSearch(
     // full requested name to `lookupDns`.
     var local_buf: [HostName.max_len]u8 = undefined;
     const canon_buf = options.canonical_name_buffer orelse &local_buf;
-    @memcpy(canon_buf[0..canon_name.len], canon_name);
-    canon_buf[canon_name.len] = '.';
+    if (canon_name.len > HostName.max_len - 1 or canon_name.len > canon_buf.len) return error.UnknownHostName;
     var it = std.mem.tokenizeAny(u8, search, " \t");
     while (it.next()) |token| {
+        const candidate_len = canon_name.len + 1 + token.len;
+        if (candidate_len > HostName.max_len - 1 or candidate_len > canon_buf.len) continue;
+        @memcpy(canon_buf[0..canon_name.len], canon_name);
+        canon_buf[canon_name.len] = '.';
         @memcpy(canon_buf[canon_name.len + 1 ..][0..token.len], token);
-        const lookup_canon_name = canon_buf[0 .. canon_name.len + 1 + token.len];
+        const lookup_canon_name = canon_buf[0..candidate_len];
         if (t.lookupDns(lookup_canon_name, &rc, resolved, options)) |result| {
             return result;
         } else |err| switch (err) {
@@ -14698,6 +14701,7 @@ fn lookupDnsSearch(
         }
     }
 
+    @memcpy(canon_buf[0..canon_name.len], canon_name);
     const lookup_canon_name = canon_buf[0..canon_name.len];
     return t.lookupDns(lookup_canon_name, &rc, resolved, options);
 }
@@ -14896,12 +14900,12 @@ fn lookupDns(
         };
     }
 
+    if (addresses_len == 0) return error.NoAddressReturned;
     if (options.canonical_name_buffer != null) {
         try resolved.putOne(t_io, .{
             .canonical_name = canonical_name orelse .{ .bytes = lookup_canon_name },
         });
     }
-    if (addresses_len == 0) return error.NoAddressReturned;
 }
 
 fn lookupHosts(
