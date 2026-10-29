@@ -17,6 +17,7 @@ z_common_page_size: ?u64,
 z_max_page_size: ?u64,
 soname: ?[]const u8,
 entry_name: ?[]const u8,
+define_common: bool,
 
 ptr_width: PtrWidth,
 
@@ -299,6 +300,7 @@ pub fn createEmpty(
         .z_common_page_size = options.z_common_page_size,
         .z_max_page_size = options.z_max_page_size,
         .soname = options.soname,
+        .define_common = options.define_common,
         .dump_argv_list = .empty,
     };
     errdefer self.base.destroy();

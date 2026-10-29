@@ -985,7 +985,10 @@ pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
         const gpa = comp.gpa;
 
         const is_tls = sym.type(elf_file) == elf.STT_TLS;
-        const name = if (is_tls) ".tls_common" else ".common";
+        const name = if (is_tls)
+            (if (elf_file.base.isRelocatable()) ".tbss" else ".tls_common")
+        else
+            (if (elf_file.base.isRelocatable()) ".bss" else ".common");
         const name_offset = @as(u32, @intCast(self.strtab.items.len));
         try self.strtab.print(gpa, "{s}\x00", .{name});
 

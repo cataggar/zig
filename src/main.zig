@@ -37,6 +37,7 @@ const Module = @import("Module.zig");
 test {
     _ = @import("codegen.zig");
     _ = link.MappedFile;
+    _ = link.File.Lld;
 }
 
 const thread_stack_size = 60 << 20;
@@ -673,7 +674,10 @@ const compile_usage =
     \\    none                    Do not use any autodetected include paths
     \\
     \\Global Link Options:
-    \\  -T[script], --script [script]  Use a custom linker script
+    \\  -T[script], --script [script]  Use a custom linker script (may be specified multiple times)
+    \\  -dT [script], --default-script [script]  Use a default linker script processed after other args
+    \\  --define-common                Assign space to common symbols in relocatable links
+    \\  --no-define-common             Do not assign space to common symbols in relocatable links
     \\  --version-script [path]        Provide a version .map file
     \\  --undefined-version            Allow version scripts to refer to undefined symbols
     \\  --no-undefined-version         (default) Disallow version scripts from referring to undefined symbols
@@ -967,7 +971,9 @@ fn buildOutputType(
     var want_compiler_rt: ?bool = null;
     var zig_cc_explicitly_link_compiler_rt = false;
     var want_ubsan_rt: ?bool = null;
-    var linker_script: ?[]const u8 = null;
+    var linker_scripts: std.ArrayListUnmanaged([]const u8) = .empty;
+    var default_linker_script: ?[]const u8 = null;
+    var define_common: bool = false;
     var version_script: ?[]const u8 = null;
     var wit_path: ?[]const u8 = null;
     var wit_world: ?[]const u8 = null;
@@ -1339,7 +1345,13 @@ fn buildOutputType(
                     } else if (mem.eql(u8, arg, "-ObjC")) {
                         force_load_objc = true;
                     } else if (mem.eql(u8, arg, "-T") or mem.eql(u8, arg, "--script")) {
-                        linker_script = args_iter.nextOrFatal();
+                        try linker_scripts.append(arena, args_iter.nextOrFatal());
+                    } else if (mem.eql(u8, arg, "-dT") or mem.eql(u8, arg, "--default-script")) {
+                        default_linker_script = args_iter.nextOrFatal();
+                    } else if (mem.eql(u8, arg, "--define-common")) {
+                        define_common = true;
+                    } else if (mem.eql(u8, arg, "--no-define-common")) {
+                        define_common = false;
                     } else if (mem.eql(u8, arg, "-version-script") or mem.eql(u8, arg, "--version-script")) {
                         version_script = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "--undefined-version")) {
@@ -1844,7 +1856,13 @@ fn buildOutputType(
                     } else if (mem.eql(u8, arg, "--verbose-llvm-cpu-features")) {
                         verbose_llvm_cpu_features = true;
                     } else if (mem.cutPrefix(u8, arg, "-T")) |rest| {
-                        linker_script = rest;
+                        try linker_scripts.append(arena, rest);
+                    } else if (mem.cutPrefix(u8, arg, "--script=")) |rest| {
+                        try linker_scripts.append(arena, rest);
+                    } else if (mem.cutPrefix(u8, arg, "-dT")) |rest| {
+                        default_linker_script = rest;
+                    } else if (mem.cutPrefix(u8, arg, "--default-script=")) |rest| {
+                        default_linker_script = rest;
                     } else if (mem.cutPrefix(u8, arg, "-L")) |rest| {
                         try create_module.lib_dir_args.append(arena, rest);
                     } else if (mem.cutPrefix(u8, arg, "-F")) |rest| {
@@ -2453,7 +2471,10 @@ fn buildOutputType(
                             try cc_argv.appendSlice(arena, it.other_args);
                         }
                     },
-                    .linker_script => linker_script = it.only_arg,
+                    .linker_script => {
+                        try linker_args.append("-T");
+                        try linker_args.append(it.only_arg);
+                    },
                     .verbose => {
                         verbose_link = true;
                         // Have Clang print more infos, some tools such as CMake
@@ -2889,7 +2910,21 @@ fn buildOutputType(
                     // flag, and warn the user that it has no effect.
                     warn("auto-image-base options are unimplemented and ignored", .{});
                 } else if (mem.eql(u8, arg, "-T") or mem.eql(u8, arg, "--script")) {
-                    linker_script = linker_args_it.nextOrFatal();
+                    try linker_scripts.append(arena, linker_args_it.nextOrFatal());
+                } else if (mem.startsWith(u8, arg, "-T")) {
+                    try linker_scripts.append(arena, arg["-T".len..]);
+                } else if (mem.startsWith(u8, arg, "--script=")) {
+                    try linker_scripts.append(arena, arg["--script=".len..]);
+                } else if (mem.eql(u8, arg, "-dT") or mem.eql(u8, arg, "--default-script")) {
+                    default_linker_script = linker_args_it.nextOrFatal();
+                } else if (mem.startsWith(u8, arg, "-dT")) {
+                    default_linker_script = arg["-dT".len..];
+                } else if (mem.startsWith(u8, arg, "--default-script=")) {
+                    default_linker_script = arg["--default-script=".len..];
+                } else if (mem.eql(u8, arg, "-d") or mem.eql(u8, arg, "-dc") or mem.eql(u8, arg, "-dp") or mem.eql(u8, arg, "--define-common")) {
+                    define_common = true;
+                } else if (mem.eql(u8, arg, "--no-define-common")) {
+                    define_common = false;
                 } else if (mem.eql(u8, arg, "--eh-frame-hdr")) {
                     link_eh_frame_hdr = true;
                 } else if (mem.eql(u8, arg, "--no-eh-frame-hdr")) {
@@ -3654,6 +3689,11 @@ fn buildOutputType(
     create_module.rpath_list.clearRetainingCapacity();
     try create_module.rpath_list.appendSlice(arena, rpath_dedup.keys());
 
+    const linker_script_paths = try arena.alloc(Path, linker_scripts.items.len);
+    for (linker_scripts.items, linker_script_paths) |p, *out| {
+        out.* = .initCwd(p);
+    }
+
     var create_diag: Compilation.CreateDiagnostic = undefined;
     const comp = Compilation.create(gpa, arena, io, &create_diag, .{
         .dirs = dirs,
@@ -3689,7 +3729,9 @@ fn buildOutputType(
         .want_compiler_rt = if (zig_cc_explicitly_link_compiler_rt) true else want_compiler_rt,
         .want_ubsan_rt = want_ubsan_rt,
         .hash_style = hash_style,
-        .linker_script = if (linker_script) |p| .initCwd(p) else null,
+        .linker_scripts = linker_script_paths,
+        .default_linker_script = if (default_linker_script) |p| .initCwd(p) else null,
+        .define_common = define_common,
         .version_script = if (version_script) |p| .initCwd(p) else null,
         .linker_allow_undefined_version = linker_allow_undefined_version,
         .linker_enable_new_dtags = linker_enable_new_dtags,
