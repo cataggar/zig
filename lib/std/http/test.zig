@@ -1320,3 +1320,120 @@ test "boot failed connections from the pool" {
         try expectError(error.HttpConnectionClosing, client.fetch(.{ .location = .{ .uri = uri } }));
     }
 }
+
+test "CONNECT proxy upgrades tunnel to TLS for https and keys pool by target protocol" {
+    if (builtin.os.tag == .openbsd) return error.SkipZigTest; // https://codeberg.org/ziglang/zig/issues/30806
+    if (http.Client.disable_tls) return error.SkipZigTest;
+
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+
+    const test_server = try createTestServer(io, struct {
+        fn run(test_server: *TestServer) anyerror!void {
+            const net_server = &test_server.net_server;
+            var recv_buffer: [2048]u8 = undefined;
+            var send_buffer: [2048]u8 = undefined;
+
+            {
+                // Connection 1: plain HTTP over CONNECT tunnel, reused across two requests.
+                var stream = try net_server.accept(io);
+                defer stream.close(io);
+
+                var connection_br = stream.reader(io, &recv_buffer);
+                var connection_bw = stream.writer(io, &send_buffer);
+                var server = http.Server.init(&connection_br.interface, &connection_bw.interface);
+
+                const connect_req = try server.receiveHead();
+                try expectEqual(.CONNECT, connect_req.head.method);
+                try expectEqualStrings("example.com:443", connect_req.head.target);
+                try connection_bw.interface.writeAll("HTTP/1.1 200 Connection established\r\n\r\n");
+                try connection_bw.interface.flush();
+
+                server.reader.state = .ready;
+                var req1 = try server.receiveHead();
+                try expectEqual(.GET, req1.head.method);
+                try expectEqualStrings("/hello", req1.head.target);
+                try req1.respond("plain tunnel ok", .{});
+
+                var req2 = try server.receiveHead();
+                try expectEqual(.GET, req2.head.method);
+                try expectEqualStrings("/hello2", req2.head.target);
+                try req2.respond("plain tunnel reused", .{});
+            }
+
+            {
+                // Connection 2: HTTPS over CONNECT tunnel must not reuse the pooled .plain
+                // connection and must initiate a TLS handshake (ClientHello) after 200 OK.
+                var stream = try net_server.accept(io);
+                defer stream.close(io);
+
+                var connection_br = stream.reader(io, &recv_buffer);
+                var connection_bw = stream.writer(io, &send_buffer);
+                var server = http.Server.init(&connection_br.interface, &connection_bw.interface);
+
+                const connect_req = try server.receiveHead();
+                try expectEqual(.CONNECT, connect_req.head.method);
+                try expectEqualStrings("example.com:443", connect_req.head.target);
+                try connection_bw.interface.writeAll("HTTP/1.1 200 Connection established\r\n\r\n");
+                try connection_bw.interface.flush();
+
+                const first_bytes = try connection_br.interface.take(6);
+                try expectEqual(@as(u8, 0x16), first_bytes[0]); // TLS handshake record
+                try expectEqual(@as(u8, 0x03), first_bytes[1]); // TLS major version 3
+                try expectEqual(@as(u8, 0x01), first_bytes[5]); // ClientHello handshake type
+            }
+        }
+    });
+    defer test_server.destroy();
+
+    var proxy: http.Client.Proxy = .{
+        .protocol = .plain,
+        .host = .{ .bytes = "127.0.0.1" },
+        .port = test_server.port(),
+        .authorization = null,
+        .supports_connect = true,
+    };
+
+    var client: http.Client = .{
+        .allocator = gpa,
+        .io = io,
+        .http_proxy = &proxy,
+        .https_proxy = &proxy,
+        .now = .zero,
+    };
+    defer client.deinit();
+
+    {
+        var body: Io.Writer.Allocating = .init(gpa);
+        defer body.deinit();
+        const res = try client.fetch(.{
+            .location = .{ .url = "http://example.com:443/hello" },
+            .response_writer = &body.writer,
+        });
+        try expectEqual(.ok, res.status);
+        try expectEqualStrings("plain tunnel ok", body.written());
+    }
+    try expectEqual(@as(usize, 1), client.connection_pool.free_len);
+
+    {
+        var body: Io.Writer.Allocating = .init(gpa);
+        defer body.deinit();
+        const res = try client.fetch(.{
+            .location = .{ .url = "http://example.com:443/hello2" },
+            .response_writer = &body.writer,
+        });
+        try expectEqual(.ok, res.status);
+        try expectEqualStrings("plain tunnel reused", body.written());
+    }
+    try expectEqual(@as(usize, 1), client.connection_pool.free_len);
+
+    // Requesting https:// to the same host:port must open a new tunnel, negotiate TLS,
+    // return TlsInitializationFailed when the fake proxy closes the socket during the
+    // TLS handshake, and leave proxy.supports_connect intact without falling back to cleartext.
+    try expectError(
+        error.TlsInitializationFailed,
+        client.fetch(.{ .location = .{ .url = "https://example.com:443/" } }),
+    );
+    try expect(proxy.supports_connect);
+    try expectEqual(@as(usize, 1), client.connection_pool.free_len);
+}
