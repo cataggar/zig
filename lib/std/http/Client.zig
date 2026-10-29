@@ -1451,11 +1451,13 @@ pub fn connectTcpOptions(client: *Client, options: ConnectTcpOptions) ConnectTcp
     const proxied_host = options.proxied_host orelse host;
     const proxied_port = options.proxied_port orelse port;
 
-    if (try client.connection_pool.findConnection(io, .{
-        .host = proxied_host,
-        .port = proxied_port,
-        .protocol = protocol,
-    })) |conn| return conn;
+    if (options.proxied_host == null) {
+        if (try client.connection_pool.findConnection(io, .{
+            .host = host,
+            .port = port,
+            .protocol = protocol,
+        })) |conn| return conn;
+    }
 
     var stream = try host.connect(io, port, .{ .mode = .stream });
     errdefer stream.close(io);
@@ -1528,6 +1530,7 @@ pub fn connectProxied(
     proxy: *Proxy,
     proxied_host: HostName,
     proxied_port: u16,
+    protocol: Protocol,
 ) !*Connection {
     const io = client.io;
     if (!proxy.supports_connect) return error.TunnelNotSupported;
@@ -1535,11 +1538,13 @@ pub fn connectProxied(
     if (try client.connection_pool.findConnection(io, .{
         .host = proxied_host,
         .port = proxied_port,
-        .protocol = proxy.protocol,
+        .protocol = protocol,
     })) |node| return node;
 
     var maybe_valid = false;
-    (tunnel: {
+    const connection = (tunnel: {
+        if (protocol == .tls and proxy.protocol == .tls) break :tunnel error.TunnelNotSupported;
+
         const connection = try client.connectTcpOptions(.{
             .host = proxy.host,
             .port = proxy.port,
@@ -1580,12 +1585,38 @@ pub fn connectProxied(
 
         connection.closing = false;
 
-        return connection;
+        break :tunnel connection;
     }) catch {
         // something went wrong with the tunnel
         proxy.supports_connect = maybe_valid;
         return error.TunnelNotSupported;
     };
+
+    switch (protocol) {
+        .plain => return connection,
+        .tls => {
+            if (disable_tls) return error.TlsInitializationFailed;
+            const stream = connection.getStream();
+            {
+                client.connection_pool.mutex.lockUncancelable(io);
+                defer client.connection_pool.mutex.unlock(io);
+                client.connection_pool.used.remove(&connection.pool_node);
+            }
+            const plain: *Connection.Plain = @alignCast(@fieldParentPtr("connection", connection));
+            plain.destroy();
+            errdefer stream.close(io);
+
+            const tc = Connection.Tls.create(client, proxied_host, proxied_port, stream) catch |err| switch (err) {
+                error.OutOfMemory => |e| return e,
+                error.Unexpected => |e| return e,
+                error.Canceled => |e| return e,
+                else => return error.TlsInitializationFailed,
+            };
+            errdefer tc.destroy();
+            try client.connection_pool.addUsed(io, &tc.connection);
+            return &tc.connection;
+        },
+    }
 }
 
 pub const ConnectError = ConnectTcpError || RequestError;
@@ -1614,7 +1645,7 @@ pub fn connect(
     }
 
     if (proxy.supports_connect) tunnel: {
-        return connectProxied(client, proxy, host, port) catch |err| switch (err) {
+        return connectProxied(client, proxy, host, port, protocol) catch |err| switch (err) {
             error.TunnelNotSupported => break :tunnel,
             else => |e| return e,
         };
