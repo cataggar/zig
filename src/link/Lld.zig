@@ -75,7 +75,9 @@ pub const Elf = struct {
     entry_name: ?[]const u8,
     hash_style: HashStyle,
     image_base: u64,
-    linker_script: ?Cache.Path,
+    linker_scripts: []const Cache.Path,
+    default_linker_script: ?Cache.Path,
+    define_common: bool,
     version_script: ?Cache.Path,
     sort_section: ?SortSection,
     print_icf_sections: bool,
@@ -132,7 +134,9 @@ pub const Elf = struct {
                     .p64 => 0x1000000,
                 };
             },
-            .linker_script = options.linker_script,
+            .linker_scripts = options.linker_scripts,
+            .default_linker_script = options.default_linker_script,
+            .define_common = options.define_common,
             .version_script = options.version_script,
             .sort_section = options.sort_section,
             .print_icf_sections = options.print_icf_sections,
@@ -852,6 +856,9 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
             io,
             .{},
         );
+        if (elf.define_common) {
+            try defineCommonSymbolsInRelocatable(gpa, io, full_out_path);
+        }
     } else {
         // Create an LLD command line and invoke it.
         var argv = std.array_list.Managed([]const u8).init(gpa);
@@ -935,9 +942,18 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
 
         try argv.append(try arena.print("--image-base={d}", .{elf.image_base}));
 
-        if (elf.linker_script) |linker_script| {
-            try argv.append("-T");
-            try argv.append(try linker_script.toString(arena));
+        const default_script_overridden = if (elf.default_linker_script != null) blk: {
+            for (elf.linker_scripts) |script_path| {
+                if (isReplacementLinkerScript(io, gpa, script_path)) break :blk true;
+            }
+            break :blk false;
+        } else false;
+
+        if (elf.default_linker_script == null or default_script_overridden) {
+            for (elf.linker_scripts) |linker_script| {
+                try argv.append("-T");
+                try argv.append(try linker_script.toString(arena));
+            }
         }
 
         if (elf.sort_section) |how| {
@@ -1307,8 +1323,247 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
             try argv.append("-Bsymbolic");
         }
 
+        if (elf.default_linker_script) |default_linker_script| {
+            if (elf.linker_scripts.len == 0 or default_script_overridden) {
+                try argv.append("--default-script");
+                try argv.append(try default_linker_script.toString(arena));
+            } else {
+                try argv.append("-T");
+                try argv.append(try default_linker_script.toString(arena));
+                for (elf.linker_scripts) |linker_script| {
+                    try argv.append("-T");
+                    try argv.append(try linker_script.toString(arena));
+                }
+            }
+        }
+
         try spawnLld(comp, arena, argv.items);
+
+        if (is_obj and elf.define_common) {
+            try defineCommonSymbolsInRelocatable(gpa, io, full_out_path);
+        }
     }
+}
+
+fn isLinkerScriptIdentChar(c: u8) bool {
+    return std.ascii.isAlphanumeric(c) or c == '_' or c == '.';
+}
+
+/// Returns true if the linker script at `path` contains a top-level `SECTIONS`
+/// command without an `INSERT` (`INSERT BEFORE` / `INSERT AFTER`) directive,
+/// meaning it replaces the default linker script rather than augmenting it.
+fn isReplacementLinkerScript(io: Io, gpa: Allocator, path: Cache.Path) bool {
+    const bytes = path.root_dir.handle.readFileAlloc(io, path.sub_path, gpa, .limited(16 * 1024 * 1024)) catch return false;
+    defer gpa.free(bytes);
+
+    var has_sections = false;
+    var has_insert = false;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const c = bytes[i];
+        if (c == '/' and i + 1 < bytes.len and bytes[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < bytes.len and !(bytes[i] == '*' and bytes[i + 1] == '/')) : (i += 1) {}
+            i = @min(i + 2, bytes.len);
+            continue;
+        }
+        if (c == '#') {
+            while (i < bytes.len and bytes[i] != '\n') : (i += 1) {}
+            continue;
+        }
+        if (c == '"') {
+            i += 1;
+            while (i < bytes.len and bytes[i] != '"') : (i += 1) {
+                if (bytes[i] == '\\' and i + 1 < bytes.len) i += 1;
+            }
+            i = @min(i + 1, bytes.len);
+            continue;
+        }
+        if (isLinkerScriptIdentChar(c)) {
+            const start = i;
+            while (i < bytes.len and isLinkerScriptIdentChar(bytes[i])) : (i += 1) {}
+            const tok = bytes[start..i];
+            if (mem.eql(u8, tok, "SECTIONS")) {
+                has_sections = true;
+            } else if (mem.eql(u8, tok, "INSERT")) {
+                has_insert = true;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    return has_sections and !has_insert;
+}
+
+fn defineCommonSymbolsInRelocatable(gpa: Allocator, io: Io, path: []const u8) !void {
+    const bytes = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .unlimited);
+    defer gpa.free(bytes);
+
+    if (bytes.len < std.elf.EI_NIDENT) return;
+    if (!mem.eql(u8, bytes[0..4], std.elf.MAGIC)) return;
+
+    const endian: std.builtin.Endian = switch (bytes[std.elf.EI_DATA]) {
+        std.elf.ELFDATA2LSB => .little,
+        std.elf.ELFDATA2MSB => .big,
+        else => return,
+    };
+
+    const modified = switch (bytes[std.elf.EI_CLASS]) {
+        std.elf.ELFCLASS32 => defineCommonSymbolsInRelocatableImpl(
+            std.elf.Elf32_Ehdr,
+            std.elf.Elf32_Shdr,
+            std.elf.Elf32_Sym,
+            bytes,
+            endian,
+        ),
+        std.elf.ELFCLASS64 => defineCommonSymbolsInRelocatableImpl(
+            std.elf.Elf64_Ehdr,
+            std.elf.Elf64_Shdr,
+            std.elf.Elf64_Sym,
+            bytes,
+            endian,
+        ),
+        else => false,
+    };
+
+    if (modified) {
+        try Io.Dir.cwd().writeFile(io, .{
+            .sub_path = path,
+            .data = bytes,
+        });
+    }
+}
+
+fn defineCommonSymbolsInRelocatableImpl(
+    comptime Ehdr: type,
+    comptime Shdr: type,
+    comptime Sym: type,
+    bytes: []u8,
+    endian: std.builtin.Endian,
+) bool {
+    if (bytes.len < @sizeOf(Ehdr)) return false;
+    const ehdr = mem.bytesAsValue(Ehdr, bytes[0..@sizeOf(Ehdr)]);
+    if (mem.toNative(u16, @backingInt(ehdr.e_type), endian) != @backingInt(std.elf.ET.REL)) return false;
+
+    const shoff: usize = @intCast(mem.toNative(@TypeOf(ehdr.e_shoff), ehdr.e_shoff, endian));
+    const shnum: usize = mem.toNative(u16, ehdr.e_shnum, endian);
+    const shentsize: usize = mem.toNative(u16, ehdr.e_shentsize, endian);
+    if (shnum == 0 or shentsize < @sizeOf(Shdr)) return false;
+    if (shoff + shnum * shentsize > bytes.len) return false;
+
+    const shstrndx: usize = mem.toNative(u16, ehdr.e_shstrndx, endian);
+    if (shstrndx >= shnum) return false;
+    const shstr_shdr = mem.bytesAsValue(Shdr, bytes[shoff + shstrndx * shentsize ..][0..@sizeOf(Shdr)]);
+    const shstr_off: usize = @intCast(mem.toNative(@TypeOf(shstr_shdr.sh_offset), shstr_shdr.sh_offset, endian));
+    const shstr_size: usize = @intCast(mem.toNative(@TypeOf(shstr_shdr.sh_size), shstr_shdr.sh_size, endian));
+    if (shstr_off + shstr_size > bytes.len) return false;
+    const shstrtab = bytes[shstr_off .. shstr_off + shstr_size];
+
+    var symtab_shdr_opt: ?*align(1) Shdr = null;
+    var common_shndx: ?u16 = null;
+    var bss_shndx: ?u16 = null;
+    var fallback_nobits_shndx: ?u16 = null;
+
+    for (0..shnum) |idx| {
+        const shdr = mem.bytesAsValue(Shdr, bytes[shoff + idx * shentsize ..][0..@sizeOf(Shdr)]);
+        const sh_type = mem.toNative(u32, shdr.sh_type, endian);
+        if (sh_type == std.elf.SHT_SYMTAB) {
+            symtab_shdr_opt = shdr;
+        } else if (sh_type == std.elf.SHT_NOBITS) {
+            const sh_name: usize = mem.toNative(u32, shdr.sh_name, endian);
+            if (sh_name < shstrtab.len) {
+                const name = mem.sliceTo(shstrtab[sh_name..], 0);
+                if (mem.eql(u8, name, "COMMON")) {
+                    common_shndx = @intCast(idx);
+                } else if (mem.eql(u8, name, ".bss")) {
+                    bss_shndx = @intCast(idx);
+                } else if (fallback_nobits_shndx == null) {
+                    const sh_flags = mem.toNative(@TypeOf(shdr.sh_flags), shdr.sh_flags, endian);
+                    if ((sh_flags & std.elf.SHF_ALLOC) != 0 and (sh_flags & std.elf.SHF_WRITE) != 0) {
+                        fallback_nobits_shndx = @intCast(idx);
+                    }
+                }
+            }
+        }
+    }
+
+    const symtab_shdr = symtab_shdr_opt orelse return false;
+    const sym_off: usize = @intCast(mem.toNative(@TypeOf(symtab_shdr.sh_offset), symtab_shdr.sh_offset, endian));
+    const sym_size_bytes: usize = @intCast(mem.toNative(@TypeOf(symtab_shdr.sh_size), symtab_shdr.sh_size, endian));
+    const symentsize: usize = @intCast(mem.toNative(@TypeOf(symtab_shdr.sh_entsize), symtab_shdr.sh_entsize, endian));
+    if (symentsize < @sizeOf(Sym) or sym_off + sym_size_bytes > bytes.len) return false;
+    const sym_count = sym_size_bytes / symentsize;
+
+    var has_common_syms = false;
+    for (0..sym_count) |i| {
+        const sym = mem.bytesAsValue(Sym, bytes[sym_off + i * symentsize ..][0..@sizeOf(Sym)]);
+        if (mem.toNative(u16, sym.st_shndx, endian) == std.elf.SHN_COMMON) {
+            has_common_syms = true;
+            break;
+        }
+    }
+    if (!has_common_syms) return false;
+
+    const Word = @TypeOf(symtab_shdr.sh_size);
+    var target_shndx: u16 = undefined;
+    var offset: u64 = 0;
+
+    if (common_shndx != null and bss_shndx == null) {
+        target_shndx = common_shndx.?;
+        const common_shdr = mem.bytesAsValue(Shdr, bytes[shoff + @as(usize, target_shndx) * shentsize ..][0..@sizeOf(Shdr)]);
+        const sh_name: usize = mem.toNative(u32, common_shdr.sh_name, endian);
+        if (sh_name + 7 <= shstrtab.len and mem.eql(u8, shstrtab[sh_name .. sh_name + 7], "COMMON\x00")) {
+            @memcpy(shstrtab[sh_name .. sh_name + 7], ".bss\x00\x00\x00");
+        }
+        common_shdr.sh_size = mem.nativeTo(Word, 0, endian);
+        offset = 0;
+    } else if (bss_shndx != null and common_shndx != null) {
+        target_shndx = bss_shndx.?;
+        const bss_shdr = mem.bytesAsValue(Shdr, bytes[shoff + @as(usize, target_shndx) * shentsize ..][0..@sizeOf(Shdr)]);
+        const common_shdr = mem.bytesAsValue(Shdr, bytes[shoff + @as(usize, common_shndx.?) * shentsize ..][0..@sizeOf(Shdr)]);
+        offset = mem.toNative(Word, bss_shdr.sh_size, endian);
+        common_shdr.sh_size = mem.nativeTo(Word, 0, endian);
+    } else if (bss_shndx != null or fallback_nobits_shndx != null) {
+        target_shndx = bss_shndx orelse fallback_nobits_shndx.?;
+        var max_defined_end: u64 = 0;
+        for (0..sym_count) |i| {
+            const sym = mem.bytesAsValue(Sym, bytes[sym_off + i * symentsize ..][0..@sizeOf(Sym)]);
+            if (mem.toNative(u16, sym.st_shndx, endian) == target_shndx) {
+                const val: u64 = mem.toNative(Word, sym.st_value, endian);
+                const sz: u64 = mem.toNative(Word, sym.st_size, endian);
+                max_defined_end = @max(max_defined_end, val + sz);
+            }
+        }
+        offset = max_defined_end;
+    } else {
+        return false;
+    }
+
+    const target_shdr = mem.bytesAsValue(Shdr, bytes[shoff + @as(usize, target_shndx) * shentsize ..][0..@sizeOf(Shdr)]);
+    var max_align: u64 = @max(@as(u64, mem.toNative(Word, target_shdr.sh_addralign, endian)), 1);
+
+    for (0..sym_count) |i| {
+        const sym = mem.bytesAsValue(Sym, bytes[sym_off + i * symentsize ..][0..@sizeOf(Sym)]);
+        if (mem.toNative(u16, sym.st_shndx, endian) != std.elf.SHN_COMMON) continue;
+
+        const sym_align: u64 = @max(@as(u64, mem.toNative(Word, sym.st_value, endian)), 1);
+        const sym_size: u64 = mem.toNative(Word, sym.st_size, endian);
+        offset = mem.alignForward(u64, offset, sym_align);
+
+        sym.st_shndx = mem.nativeTo(u16, target_shndx, endian);
+        sym.st_value = mem.nativeTo(Word, @intCast(offset), endian);
+        if ((sym.st_info & 0xf) == std.elf.STT_NOTYPE) {
+            sym.st_info = (sym.st_info & 0xf0) | std.elf.STT_OBJECT;
+        }
+
+        offset += sym_size;
+        max_align = @max(max_align, sym_align);
+    }
+
+    const cur_size: u64 = mem.toNative(Word, target_shdr.sh_size, endian);
+    target_shdr.sh_size = mem.nativeTo(Word, @intCast(@max(cur_size, offset)), endian);
+    target_shdr.sh_addralign = mem.nativeTo(Word, @intCast(max_align), endian);
+    return true;
 }
 fn getLDMOption(target: *const std.Target) ?[]const u8 {
     // This should only return emulations understood by LLD's parseEmulation().
@@ -1817,3 +2072,341 @@ const lldMain = @import("../main.zig").lldMain;
 const target_util = @import("../target.zig");
 const trace = @import("../tracy.zig").trace;
 const Lld = @This();
+
+test "isReplacementLinkerScript" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const Helper = struct {
+        fn check(test_io: Io, test_gpa: Allocator, dir: Io.Dir, name: []const u8, contents: []const u8) !bool {
+            try dir.writeFile(test_io, .{
+                .sub_path = name,
+                .data = contents,
+            });
+            return isReplacementLinkerScript(test_io, test_gpa, .{
+                .root_dir = .{ .path = null, .handle = dir },
+                .sub_path = name,
+            });
+        }
+    };
+
+    try std.testing.expect(try Helper.check(
+        io,
+        gpa,
+        tmp.dir,
+        "full.lds",
+        "SECTIONS { .text : { *(.text) } }",
+    ));
+    try std.testing.expect(!try Helper.check(
+        io,
+        gpa,
+        tmp.dir,
+        "before.lds",
+        "SECTIONS { .uk_before : { KEEP(*(.uk_before)) } } INSERT BEFORE .text;",
+    ));
+    try std.testing.expect(!try Helper.check(
+        io,
+        gpa,
+        tmp.dir,
+        "after.lds",
+        "SECTIONS { .uk_after : { KEEP(*(.uk_after)) } } INSERT AFTER .text;",
+    ));
+    try std.testing.expect(!try Helper.check(
+        io,
+        gpa,
+        tmp.dir,
+        "block_comment.lds",
+        "/* SECTIONS { .text : { *(.text) } } */\nEXTERN(foo);",
+    ));
+    try std.testing.expect(!try Helper.check(
+        io,
+        gpa,
+        tmp.dir,
+        "line_comment.lds",
+        "# SECTIONS { .text : { *(.text) } }\nEXTERN(foo);",
+    ));
+    try std.testing.expect(!try Helper.check(
+        io,
+        gpa,
+        tmp.dir,
+        "string_literal.lds",
+        "OUTPUT_ARCH(\"SECTIONS\")\nEXTERN(\"SECTIONS\");",
+    ));
+}
+
+test "defineCommonSymbolsInRelocatable" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const TestElfBuilder = struct {
+        const SectionSpec = struct {
+            name_off: u32,
+            sh_type: u32,
+            sh_flags: u64 = 0,
+            sh_size: u64 = 0,
+            sh_addralign: u64 = 1,
+        };
+
+        fn buildRelocatable(
+            alloc: Allocator,
+            shstrtab: []const u8,
+            extra_sections: []const SectionSpec,
+            syms: []const std.elf.Elf64_Sym,
+        ) ![]u8 {
+            const ehdr_size = @sizeOf(std.elf.Elf64_Ehdr);
+            const shstr_off = ehdr_size;
+            const sym_off = mem.alignForward(usize, shstr_off + shstrtab.len, 8);
+            const sym_bytes_len = syms.len * @sizeOf(std.elf.Elf64_Sym);
+            const shoff = mem.alignForward(usize, sym_off + sym_bytes_len, 8);
+            // Sections: [0]=NULL, [1..1+extra_sections.len]=extra, [last-1]=.symtab, [last]=.shstrtab
+            const shnum = 1 + extra_sections.len + 2;
+            const total_len = shoff + shnum * @sizeOf(std.elf.Elf64_Shdr);
+
+            const buf = try alloc.alloc(u8, total_len);
+            @memset(buf, 0);
+
+            var ehdr: std.elf.Elf64_Ehdr = std.mem.zeroes(std.elf.Elf64_Ehdr);
+            @memcpy(ehdr.e_ident[0..4], std.elf.MAGIC);
+            ehdr.e_ident[std.elf.EI_CLASS] = std.elf.ELFCLASS64;
+            ehdr.e_ident[std.elf.EI_DATA] = std.elf.ELFDATA2LSB;
+            ehdr.e_ident[std.elf.EI.VERSION] = 1;
+            ehdr.e_type = @fromBackingInt(@intCast(mem.nativeTo(u16, @backingInt(std.elf.ET.REL), .little)));
+            ehdr.e_machine = @fromBackingInt(@intCast(mem.nativeTo(u16, @backingInt(std.elf.EM.X86_64), .little)));
+            ehdr.e_version = mem.nativeTo(u32, 1, .little);
+            ehdr.e_shoff = mem.nativeTo(u64, shoff, .little);
+            ehdr.e_ehsize = mem.nativeTo(u16, @sizeOf(std.elf.Elf64_Ehdr), .little);
+            ehdr.e_shentsize = mem.nativeTo(u16, @sizeOf(std.elf.Elf64_Shdr), .little);
+            ehdr.e_shnum = mem.nativeTo(u16, @intCast(shnum), .little);
+            ehdr.e_shstrndx = mem.nativeTo(u16, @intCast(shnum - 1), .little);
+            @memcpy(buf[0..ehdr_size], mem.asBytes(&ehdr));
+
+            @memcpy(buf[shstr_off .. shstr_off + shstrtab.len], shstrtab);
+
+            for (syms, 0..) |sym, i| {
+                const off = sym_off + i * @sizeOf(std.elf.Elf64_Sym);
+                @memcpy(buf[off .. off + @sizeOf(std.elf.Elf64_Sym)], mem.asBytes(&sym));
+            }
+
+            const writeShdr = struct {
+                fn call(b: []u8, base_shoff: usize, idx: usize, shdr: std.elf.Elf64_Shdr) void {
+                    const off = base_shoff + idx * @sizeOf(std.elf.Elf64_Shdr);
+                    @memcpy(b[off .. off + @sizeOf(std.elf.Elf64_Shdr)], mem.asBytes(&shdr));
+                }
+            }.call;
+
+            for (extra_sections, 0..) |sec, i| {
+                var shdr: std.elf.Elf64_Shdr = std.mem.zeroes(std.elf.Elf64_Shdr);
+                shdr.sh_name = mem.nativeTo(u32, sec.name_off, .little);
+                shdr.sh_type = mem.nativeTo(u32, sec.sh_type, .little);
+                shdr.sh_flags = mem.nativeTo(u64, sec.sh_flags, .little);
+                shdr.sh_size = mem.nativeTo(u64, sec.sh_size, .little);
+                shdr.sh_addralign = mem.nativeTo(u64, sec.sh_addralign, .little);
+                writeShdr(buf, shoff, 1 + i, shdr);
+            }
+
+            var symtab_shdr: std.elf.Elf64_Shdr = std.mem.zeroes(std.elf.Elf64_Shdr);
+            symtab_shdr.sh_type = mem.nativeTo(u32, std.elf.SHT_SYMTAB, .little);
+            symtab_shdr.sh_offset = mem.nativeTo(u64, sym_off, .little);
+            symtab_shdr.sh_size = mem.nativeTo(u64, sym_bytes_len, .little);
+            symtab_shdr.sh_addralign = mem.nativeTo(u64, 8, .little);
+            symtab_shdr.sh_entsize = mem.nativeTo(u64, @sizeOf(std.elf.Elf64_Sym), .little);
+            writeShdr(buf, shoff, shnum - 2, symtab_shdr);
+
+            var shstr_shdr: std.elf.Elf64_Shdr = std.mem.zeroes(std.elf.Elf64_Shdr);
+            shstr_shdr.sh_type = mem.nativeTo(u32, std.elf.SHT_STRTAB, .little);
+            shstr_shdr.sh_offset = mem.nativeTo(u64, shstr_off, .little);
+            shstr_shdr.sh_size = mem.nativeTo(u64, shstrtab.len, .little);
+            shstr_shdr.sh_addralign = mem.nativeTo(u64, 1, .little);
+            writeShdr(buf, shoff, shnum - 1, shstr_shdr);
+
+            return buf;
+        }
+
+        fn makeSym(shndx: u16, value: u64, size: u64, st_type: u4) std.elf.Elf64_Sym {
+            var sym: std.elf.Elf64_Sym = std.mem.zeroes(std.elf.Elf64_Sym);
+            sym.st_info = (@as(u8, std.elf.STB_GLOBAL) << 4) | st_type;
+            sym.st_shndx = mem.nativeTo(u16, shndx, .little);
+            sym.st_value = mem.nativeTo(u64, value, .little);
+            sym.st_size = mem.nativeTo(u64, size, .little);
+            return sym;
+        }
+
+        fn readShdr(bytes: []const u8, idx: usize) std.elf.Elf64_Shdr {
+            const ehdr = mem.bytesAsValue(std.elf.Elf64_Ehdr, bytes[0..@sizeOf(std.elf.Elf64_Ehdr)]);
+            const shoff: usize = @intCast(mem.toNative(u64, ehdr.e_shoff, .little));
+            const off = shoff + idx * @sizeOf(std.elf.Elf64_Shdr);
+            return mem.bytesToValue(std.elf.Elf64_Shdr, bytes[off .. off + @sizeOf(std.elf.Elf64_Shdr)]);
+        }
+
+        fn readSym(bytes: []const u8, symtab_shdr: std.elf.Elf64_Shdr, idx: usize) std.elf.Elf64_Sym {
+            const sym_off: usize = @intCast(mem.toNative(u64, symtab_shdr.sh_offset, .little));
+            const off = sym_off + idx * @sizeOf(std.elf.Elf64_Sym);
+            return mem.bytesToValue(std.elf.Elf64_Sym, bytes[off .. off + @sizeOf(std.elf.Elf64_Sym)]);
+        }
+    };
+
+    const shstrtab = "\x00COMMON\x00.bss\x00.symtab\x00.shstrtab\x00";
+    const common_name_off: u32 = 1;
+    const bss_name_off: u32 = 8;
+
+    // Case A: COMMON SHT_NOBITS section, no .bss section.
+    {
+        const obj_bytes = try TestElfBuilder.buildRelocatable(
+            gpa,
+            shstrtab,
+            &.{.{
+                .name_off = common_name_off,
+                .sh_type = std.elf.SHT_NOBITS,
+                .sh_flags = std.elf.SHF_ALLOC | std.elf.SHF_WRITE,
+                .sh_size = 16,
+                .sh_addralign = 8,
+            }},
+            &.{
+                std.mem.zeroes(std.elf.Elf64_Sym),
+                // common_a: size 4, align 4
+                TestElfBuilder.makeSym(std.elf.SHN_COMMON, 4, 4, std.elf.STT_NOTYPE),
+                // common_b: size 8, align 8
+                TestElfBuilder.makeSym(std.elf.SHN_COMMON, 8, 8, std.elf.STT_OBJECT),
+            },
+        );
+        defer gpa.free(obj_bytes);
+
+        try tmp.dir.writeFile(io, .{ .sub_path = "case_a.o", .data = obj_bytes });
+        const rel_path = try fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, "case_a.o" });
+        defer gpa.free(rel_path);
+
+        try defineCommonSymbolsInRelocatable(gpa, io, rel_path);
+
+        const out = try tmp.dir.readFileAlloc(io, "case_a.o", gpa, .unlimited);
+        defer gpa.free(out);
+
+        const bss_shdr = TestElfBuilder.readShdr(out, 1);
+        const shstr_shdr = TestElfBuilder.readShdr(out, 3);
+        const shstr_off: usize = @intCast(mem.toNative(u64, shstr_shdr.sh_offset, .little));
+        const sec_name = mem.sliceTo(out[shstr_off + mem.toNative(u32, bss_shdr.sh_name, .little) ..], 0);
+        try std.testing.expectEqualStrings(".bss", sec_name);
+        try std.testing.expectEqual(@as(u64, 16), mem.toNative(u64, bss_shdr.sh_size, .little));
+        try std.testing.expectEqual(@as(u64, 8), mem.toNative(u64, bss_shdr.sh_addralign, .little));
+
+        const symtab_shdr = TestElfBuilder.readShdr(out, 2);
+        const common_a = TestElfBuilder.readSym(out, symtab_shdr, 1);
+        const common_b = TestElfBuilder.readSym(out, symtab_shdr, 2);
+        try std.testing.expectEqual(@as(u16, 1), mem.toNative(u16, common_a.st_shndx, .little));
+        try std.testing.expectEqual(@as(u64, 0), mem.toNative(u64, common_a.st_value, .little));
+        try std.testing.expectEqual(@as(u4, std.elf.STT_OBJECT), common_a.st_type());
+        try std.testing.expectEqual(@as(u16, 1), mem.toNative(u16, common_b.st_shndx, .little));
+        try std.testing.expectEqual(@as(u64, 8), mem.toNative(u64, common_b.st_value, .little));
+    }
+
+    // Case B: both .bss (size 4) and COMMON exist.
+    {
+        const obj_bytes = try TestElfBuilder.buildRelocatable(
+            gpa,
+            shstrtab,
+            &.{
+                .{
+                    .name_off = bss_name_off,
+                    .sh_type = std.elf.SHT_NOBITS,
+                    .sh_flags = std.elf.SHF_ALLOC | std.elf.SHF_WRITE,
+                    .sh_size = 4,
+                    .sh_addralign = 4,
+                },
+                .{
+                    .name_off = common_name_off,
+                    .sh_type = std.elf.SHT_NOBITS,
+                    .sh_flags = std.elf.SHF_ALLOC | std.elf.SHF_WRITE,
+                    .sh_size = 16,
+                    .sh_addralign = 8,
+                },
+            },
+            &.{
+                std.mem.zeroes(std.elf.Elf64_Sym),
+                // existing .bss symbol at 0..4
+                TestElfBuilder.makeSym(1, 0, 4, std.elf.STT_OBJECT),
+                // common_a: size 4, align 4
+                TestElfBuilder.makeSym(std.elf.SHN_COMMON, 4, 4, std.elf.STT_OBJECT),
+                // common_b: size 8, align 8
+                TestElfBuilder.makeSym(std.elf.SHN_COMMON, 8, 8, std.elf.STT_OBJECT),
+            },
+        );
+        defer gpa.free(obj_bytes);
+
+        try tmp.dir.writeFile(io, .{ .sub_path = "case_b.o", .data = obj_bytes });
+        const rel_path = try fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, "case_b.o" });
+        defer gpa.free(rel_path);
+
+        try defineCommonSymbolsInRelocatable(gpa, io, rel_path);
+
+        const out = try tmp.dir.readFileAlloc(io, "case_b.o", gpa, .unlimited);
+        defer gpa.free(out);
+
+        const bss_shdr = TestElfBuilder.readShdr(out, 1);
+        const common_shdr = TestElfBuilder.readShdr(out, 2);
+        try std.testing.expectEqual(@as(u64, 16), mem.toNative(u64, bss_shdr.sh_size, .little));
+        try std.testing.expectEqual(@as(u64, 8), mem.toNative(u64, bss_shdr.sh_addralign, .little));
+        try std.testing.expectEqual(@as(u64, 0), mem.toNative(u64, common_shdr.sh_size, .little));
+
+        const symtab_shdr = TestElfBuilder.readShdr(out, 3);
+        const common_a = TestElfBuilder.readSym(out, symtab_shdr, 2);
+        const common_b = TestElfBuilder.readSym(out, symtab_shdr, 3);
+        try std.testing.expectEqual(@as(u16, 1), mem.toNative(u16, common_a.st_shndx, .little));
+        try std.testing.expectEqual(@as(u64, 4), mem.toNative(u64, common_a.st_value, .little));
+        try std.testing.expectEqual(@as(u16, 1), mem.toNative(u16, common_b.st_shndx, .little));
+        try std.testing.expectEqual(@as(u64, 8), mem.toNative(u64, common_b.st_value, .little));
+    }
+
+    // Case C: linker-script-merged .bss with existing defined symbol at 0..4 and no COMMON section.
+    {
+        const obj_bytes = try TestElfBuilder.buildRelocatable(
+            gpa,
+            shstrtab,
+            &.{.{
+                .name_off = bss_name_off,
+                .sh_type = std.elf.SHT_NOBITS,
+                .sh_flags = std.elf.SHF_ALLOC | std.elf.SHF_WRITE,
+                .sh_size = 16,
+                .sh_addralign = 8,
+            }},
+            &.{
+                std.mem.zeroes(std.elf.Elf64_Sym),
+                // existing .bss symbol at 0..4
+                TestElfBuilder.makeSym(1, 0, 4, std.elf.STT_OBJECT),
+                // common_a: size 4, align 4
+                TestElfBuilder.makeSym(std.elf.SHN_COMMON, 4, 4, std.elf.STT_OBJECT),
+                // common_b: size 8, align 8
+                TestElfBuilder.makeSym(std.elf.SHN_COMMON, 8, 8, std.elf.STT_OBJECT),
+            },
+        );
+        defer gpa.free(obj_bytes);
+
+        try tmp.dir.writeFile(io, .{ .sub_path = "case_c.o", .data = obj_bytes });
+        const rel_path = try fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, "case_c.o" });
+        defer gpa.free(rel_path);
+
+        try defineCommonSymbolsInRelocatable(gpa, io, rel_path);
+
+        const out = try tmp.dir.readFileAlloc(io, "case_c.o", gpa, .unlimited);
+        defer gpa.free(out);
+
+        const bss_shdr = TestElfBuilder.readShdr(out, 1);
+        try std.testing.expectEqual(@as(u64, 16), mem.toNative(u64, bss_shdr.sh_size, .little));
+        try std.testing.expectEqual(@as(u64, 8), mem.toNative(u64, bss_shdr.sh_addralign, .little));
+
+        const symtab_shdr = TestElfBuilder.readShdr(out, 2);
+        const bss_sym = TestElfBuilder.readSym(out, symtab_shdr, 1);
+        const common_a = TestElfBuilder.readSym(out, symtab_shdr, 2);
+        const common_b = TestElfBuilder.readSym(out, symtab_shdr, 3);
+        try std.testing.expectEqual(@as(u16, 1), mem.toNative(u16, bss_sym.st_shndx, .little));
+        try std.testing.expectEqual(@as(u64, 0), mem.toNative(u64, bss_sym.st_value, .little));
+        try std.testing.expectEqual(@as(u16, 1), mem.toNative(u16, common_a.st_shndx, .little));
+        try std.testing.expectEqual(@as(u64, 4), mem.toNative(u64, common_a.st_value, .little));
+        try std.testing.expectEqual(@as(u16, 1), mem.toNative(u16, common_b.st_shndx, .little));
+        try std.testing.expectEqual(@as(u64, 8), mem.toNative(u64, common_b.st_value, .little));
+    }
+}

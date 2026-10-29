@@ -292,7 +292,7 @@ pub fn setOutputSym(symbol: Symbol, elf_file: *Elf, out: *elf.Elf64_Sym) void {
     const st_shndx: u16 = blk: {
         if (symbol.flags.has_copy_rel) break :blk @intCast(elf_file.section_indexes.copy_rel.?);
         if (file_ptr == .shared_object or esym.st_shndx == elf.SHN_UNDEF) break :blk elf.SHN_UNDEF;
-        if (elf_file.base.isRelocatable() and esym.st_shndx == elf.SHN_COMMON) break :blk elf.SHN_COMMON;
+        if (elf_file.base.isRelocatable() and !elf_file.define_common and esym.st_shndx == elf.SHN_COMMON) break :blk elf.SHN_COMMON;
         if (symbol.mergeSubsection(elf_file)) |msub| break :blk @intCast(msub.mergeSection(elf_file).output_section_index);
         if (symbol.atom(elf_file) == null and file_ptr != .linker_defined) break :blk elf.SHN_ABS;
         break :blk @intCast(symbol.outputShndx(elf_file) orelse elf.SHN_UNDEF);

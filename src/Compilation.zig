@@ -1509,7 +1509,9 @@ pub const CreateOptions = struct {
     stack_report: bool = false,
     link_eh_frame_hdr: bool = false,
     link_emit_relocs: bool = false,
-    linker_script: ?Cache.Path = null,
+    linker_scripts: []const Cache.Path = &.{},
+    default_linker_script: ?Cache.Path = null,
+    define_common: bool = false,
     version_script: ?Cache.Path = null,
     linker_allow_undefined_version: bool = false,
     linker_enable_new_dtags: ?bool = null,
@@ -2199,7 +2201,9 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
         }
 
         const lf_open_opts: link.File.OpenOptions = .{
-            .linker_script = options.linker_script,
+            .linker_scripts = options.linker_scripts,
+            .default_linker_script = options.default_linker_script,
+            .define_common = options.define_common,
             .z_nodelete = options.linker_z_nodelete,
             .z_notext = options.linker_z_notext,
             .z_defs = options.linker_z_defs,
@@ -3427,7 +3431,12 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
 
     const opts = comp.cache_use.whole.lf_open_opts;
 
-    try man.addInputPathOptional(opts.linker_script, .{});
+    man.hash.add(opts.define_common);
+    try man.addInputPathOptional(opts.default_linker_script, .{});
+    man.hash.add(opts.linker_scripts.len);
+    for (opts.linker_scripts) |linker_script| {
+        _ = try man.addInputPath(linker_script, .{});
+    }
     try man.addInputPathOptional(opts.version_script, .{});
     man.hash.addOptionalBytes(opts.wit_path);
     man.hash.addOptionalBytes(opts.wit_world);

@@ -167,6 +167,11 @@ pub fn flushObject(elf_file: *Elf, comp: *Compilation) !void {
     try elf_file.resolveMergeSections();
     try elf_file.addCommentString();
     try elf_file.finalizeMergeSections();
+    if (elf_file.define_common) {
+        for (elf_file.objects.items) |index| {
+            try elf_file.file(index).?.object.convertCommonSymbols(elf_file);
+        }
+    }
     claimUnresolved(elf_file);
 
     try initSections(elf_file);
