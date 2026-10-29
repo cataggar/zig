@@ -84,6 +84,25 @@ test "optional error equality" {
             try testEql(anyerror, error.A, error.B, false);
             try testEql(anyerror, null, error.A, false);
             try testEql(anyerror, error.A, null, false);
+
+            const Err = error{ Foo, Bar };
+            var a: ?Err = error.Foo;
+            var b: ?Err = error.Bar;
+            var n: ?Err = null;
+            _ = .{ &a, &b, &n };
+            try expect(a == @as(?Err, error.Foo));
+            try expect(@as(?Err, error.Foo) == a);
+            try expect(a != @as(?Err, error.Bar));
+            try expect(@as(?Err, error.Bar) != a);
+            try expect(a != null);
+            try expect(null != a);
+            try expect(a == a);
+            try expect(a != b);
+            try expect(a != n);
+            try expect(n == null);
+            try expect(null == n);
+            try expect(n != @as(?Err, error.Foo));
+            try expect(@as(?Err, error.Foo) != n);
         }
     };
 
@@ -704,4 +723,50 @@ test "optional ptr payload alignment" {
     };
     var x: ?u32 = 10;
     try S.doTheTest(&x);
+}
+
+test "optional enum merged across branches with whole and part uses" {
+    const Index = enum(u32) {
+        none = std.math.maxInt(u32),
+        _,
+    };
+    const S = struct {
+        noinline fn fromOptional(opt: ?Index) u32 {
+            return if (opt) |i| @backingInt(i) else @backingInt(Index.none);
+        }
+        noinline fn makeVal(v: u32) !Index {
+            if (v == 0) return error.Zero;
+            return @fromBackingInt(@intCast(v));
+        }
+        noinline fn checkSplit(has_colon: bool, is_slice: bool, raw: u32) !u32 {
+            const sentinel: ?Index = if (has_colon) try makeVal(raw) else null;
+            if (is_slice) {
+                const packed_opt = fromOptional(sentinel);
+                if (sentinel != null) return packed_opt + 100;
+                return packed_opt;
+            } else {
+                if (sentinel == null) return 0;
+                return @backingInt(sentinel.?);
+            }
+        }
+        noinline fn checkMergeToWhole(has_colon: bool, is_slice: bool, raw: u32) !u32 {
+            const sentinel: ?Index = if (has_colon) try makeVal(raw) else null;
+            if (is_slice) {
+                if (sentinel == null) return 0;
+                return @backingInt(sentinel.?);
+            } else {
+                const packed_opt = fromOptional(sentinel);
+                if (sentinel != null) return packed_opt + 100;
+                return packed_opt;
+            }
+        }
+    };
+    try expectEqual(@as(u32, 142), try S.checkSplit(true, true, 42));
+    try expectEqual(@as(u32, std.math.maxInt(u32)), try S.checkSplit(false, true, 42));
+    try expectEqual(@as(u32, 42), try S.checkSplit(true, false, 42));
+    try expectEqual(@as(u32, 0), try S.checkSplit(false, false, 42));
+    try expectEqual(@as(u32, 42), try S.checkMergeToWhole(true, true, 42));
+    try expectEqual(@as(u32, 0), try S.checkMergeToWhole(false, true, 42));
+    try expectEqual(@as(u32, 142), try S.checkMergeToWhole(true, false, 42));
+    try expectEqual(@as(u32, std.math.maxInt(u32)), try S.checkMergeToWhole(false, false, 42));
 }
