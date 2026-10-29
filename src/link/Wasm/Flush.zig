@@ -1740,6 +1740,24 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
         try emitFeaturesSection(gpa, binary_bytes, target);
     }
 
+    if (!is_obj and !wasm.base.isStaticLib() and comp.config.debug_format == .strip) {
+        if (Wasm.component.Optimizer.optimize(gpa, binary_bytes.items, .{ .custom_sections = .preserve })) |opt_bytes| {
+            defer gpa.free(opt_bytes);
+            binary_bytes.clearRetainingCapacity();
+            try binary_bytes.appendSlice(gpa, opt_bytes);
+        } else |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedFeature,
+            error.UnsupportedOpcode,
+            error.CustomSectionsPresent,
+            error.ComponentNotSupported,
+            => {},
+            error.InvalidInput,
+            error.InvalidOutput,
+            => |e| return diags.fail("failed to optimize core wasm module: {s}", .{@errorName(e)}),
+        }
+    }
+
     // Finally, write the entire binary into the file.
     var file_writer = wasm.base.file.?.writer(io, &.{});
     if (wasm.base.isStaticLib()) {
