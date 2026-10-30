@@ -14,7 +14,7 @@ fn verifyTarget() !void {
     try testing.expectEqual(std.Target.Os.Tag.wasip3, builtin.os.tag);
     try testing.expectEqual(std.Target.Os.Tag.wasip3, builtin.target.os.tag);
     try testing.expect(builtin.os.tag.isWasi());
-    try testing.expectEqual(std.Target.Cpu.Arch.wasm32, builtin.cpu.arch);
+    try testing.expect(builtin.cpu.arch == .wasm32 or builtin.cpu.arch == .wasm64);
 }
 
 fn verifyCabiRealloc() !void {

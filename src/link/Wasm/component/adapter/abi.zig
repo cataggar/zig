@@ -717,6 +717,11 @@ pub fn liftNeedsOpts(lo: LiftOpts) bool {
 /// payload across cases (`join(t,t)=t`, `join(i32,f32)=i32`,
 /// otherwise `i64`).
 ///
+pub const LoweredCoreSig = struct {
+    params: []const wtypes.ValType,
+    results: []const wtypes.ValType,
+};
+
 /// Caveat: when results-flat > MAX_FLAT_RESULTS, the canon ABI
 /// passes results through a returned pointer, which means the core
 /// sig actually has 0 results and one extra `i32` param (the output
@@ -724,22 +729,31 @@ pub fn liftNeedsOpts(lo: LiftOpts) bool {
 pub fn lowerCoreSig(
     arena: Allocator,
     ftr: FuncTypeRef,
-) Error!struct {
-    params: []const wtypes.ValType,
-    results: []const wtypes.ValType,
-} {
+) Error!LoweredCoreSig {
+    return lowerCoreSigForArch(arena, ftr, false);
+}
+
+/// Like `lowerCoreSig`, but when `is_memory64` is true (`cm64`), pointer and
+/// length slots (`string`, `list`, spilled parameter pointers, and indirect
+/// result pointers) flatten to `i64` instead of `i32`.
+pub fn lowerCoreSigForArch(
+    arena: Allocator,
+    ftr: FuncTypeRef,
+    is_memory64: bool,
+) Error!LoweredCoreSig {
     const ft = ftr.func;
     const resolver = ftr.resolver;
+    const ptr_ty: wtypes.ValType = if (is_memory64) .i64 else .i32;
 
     var params = std.ArrayList(wtypes.ValType).empty;
-    for (ft.params) |p| try flattenSlots(arena, p.type, resolver, 0, &params);
+    for (ft.params) |p| try flattenSlots(arena, p.type, resolver, ptr_ty, 0, &params);
 
     var results = std.ArrayList(wtypes.ValType).empty;
     switch (ft.results) {
         .none => {},
-        .unnamed => |vt| try flattenSlots(arena, vt, resolver, 0, &results),
+        .unnamed => |vt| try flattenSlots(arena, vt, resolver, ptr_ty, 0, &results),
         .named => |list| for (list) |nv|
-            try flattenSlots(arena, nv.type, resolver, 0, &results),
+            try flattenSlots(arena, nv.type, resolver, ptr_ty, 0, &results),
     }
 
     if (ft.is_async) {
@@ -750,20 +764,25 @@ pub fn lowerCoreSig(
         // `flatten_functype`, async `lower`.)
         if (params.items.len > MAX_FLAT_ASYNC_PARAMS) {
             params.clearRetainingCapacity();
-            try params.append(arena, .i32);
+            try params.append(arena, ptr_ty);
         }
         const has_result = results.items.len > 0;
-        if (has_result) try params.append(arena, .i32); // result pointer
+        if (has_result) try params.append(arena, ptr_ty); // result pointer
         return .{
             .params = try params.toOwnedSlice(arena),
             .results = try arena.dupe(wtypes.ValType, &.{.i32}),
         };
     }
 
+    if (params.items.len > MAX_FLAT_PARAMS) {
+        params.clearRetainingCapacity();
+        try params.append(arena, ptr_ty);
+    }
+
     if (results.items.len > MAX_FLAT_RESULTS) {
         // Indirect result: callee writes into caller-supplied
         // pointer. Core sig becomes (params + ret_ptr) -> ().
-        try params.append(arena, .i32);
+        try params.append(arena, ptr_ty);
         results.clearRetainingCapacity();
     }
 
@@ -780,6 +799,7 @@ fn flattenSlots(
     arena: Allocator,
     vt: ctypes.ValType,
     resolver: TypeResolver,
+    ptr_ty: wtypes.ValType,
     depth: u32,
     out: *std.ArrayList(wtypes.ValType),
 ) Error!void {
@@ -795,12 +815,12 @@ fn flattenSlots(
         .own, .borrow => try out.append(arena, .i32),
         .error_context => try out.append(arena, .i32),
         .string => {
-            try out.append(arena, .i32);
-            try out.append(arena, .i32);
+            try out.append(arena, ptr_ty);
+            try out.append(arena, ptr_ty);
         },
         .list => {
-            try out.append(arena, .i32);
-            try out.append(arena, .i32);
+            try out.append(arena, ptr_ty);
+            try out.append(arena, ptr_ty);
         },
         .type_idx,
         .record,
@@ -812,7 +832,7 @@ fn flattenSlots(
         => |idx| {
             if (resolver.resolveLocalScoped(idx)) |r| {
                 const sub = TypeResolver{ .inst_decls = r.inst_decls, .world_decls = resolver.world_decls };
-                try flattenTypeDefSlots(arena, r.td, sub, depth + 1, out);
+                try flattenTypeDefSlots(arena, r.td, sub, ptr_ty, depth + 1, out);
             } else {
                 // Unresolvable (likely outer-aliased resource handle).
                 // Default depends on the leaf shape.
@@ -833,16 +853,17 @@ fn flattenTypeDefSlots(
     arena: Allocator,
     td: ctypes.TypeDef,
     resolver: TypeResolver,
+    ptr_ty: wtypes.ValType,
     depth: u32,
     out: *std.ArrayList(wtypes.ValType),
 ) Error!void {
     switch (td) {
-        .val => |vt| try flattenSlots(arena, vt, resolver, depth, out),
+        .val => |vt| try flattenSlots(arena, vt, resolver, ptr_ty, depth, out),
         .record => |r| {
-            for (r.fields) |f| try flattenSlots(arena, f.type, resolver, depth, out);
+            for (r.fields) |f| try flattenSlots(arena, f.type, resolver, ptr_ty, depth, out);
         },
         .tuple => |t| {
-            for (t.fields) |fty| try flattenSlots(arena, fty, resolver, depth, out);
+            for (t.fields) |fty| try flattenSlots(arena, fty, resolver, ptr_ty, depth, out);
         },
         .flags => |f| {
             const slots = (f.names.len + 31) / 32;
@@ -858,7 +879,7 @@ fn flattenTypeDefSlots(
             for (v.cases) |c| {
                 if (c.type) |vt| {
                     var case_slots = std.ArrayList(wtypes.ValType).empty;
-                    try flattenSlots(arena, vt, resolver, depth, &case_slots);
+                    try flattenSlots(arena, vt, resolver, ptr_ty, depth, &case_slots);
                     try joinInto(arena, &payload, case_slots.items);
                 }
             }
@@ -866,7 +887,7 @@ fn flattenTypeDefSlots(
         },
         .option => |o| {
             try out.append(arena, .i32);
-            try flattenSlots(arena, o.inner, resolver, depth, out);
+            try flattenSlots(arena, o.inner, resolver, ptr_ty, depth, out);
         },
         .result => |r| {
             try out.append(arena, .i32);
@@ -874,15 +895,15 @@ fn flattenTypeDefSlots(
             inline for (.{ r.ok, r.err }) |maybe_vt| {
                 if (maybe_vt) |vt| {
                     var case_slots = std.ArrayList(wtypes.ValType).empty;
-                    try flattenSlots(arena, vt, resolver, depth, &case_slots);
+                    try flattenSlots(arena, vt, resolver, ptr_ty, depth, &case_slots);
                     try joinInto(arena, &payload, case_slots.items);
                 }
             }
             try out.appendSlice(arena, payload.items);
         },
         .list => |l| {
-            try out.append(arena, .i32);
-            try out.append(arena, .i32);
+            try out.append(arena, ptr_ty);
+            try out.append(arena, ptr_ty);
             _ = l;
         },
         .resource => try out.append(arena, .i32),
@@ -1338,3 +1359,38 @@ test "lowerCoreSig: result with option<u64>-bearing variant widens joined slot t
     try testing.expectEqual(@as(usize, 0), sig.results.len);
     for (want, 0..) |w, idx| try testing.expectEqual(w, sig.params[idx]);
 }
+
+test "lowerCoreSigForArch: cm64 flattens string, list, indirect results, and async pointers to i64" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // func f(s: string) -> list<u8>
+    var inst_decls = try a.alloc(ctypes.Decl, 5);
+    inst_decls[0] = .{ .type = .{ .list = .{ .element = .u8 } } };
+    inst_decls[1] = .{ .type = .{ .func = .{
+        .params = &.{.{ .name = "s", .type = .string }},
+        .results = .{ .unnamed = .{ .type_idx = 0 } },
+    } } };
+    inst_decls[2] = .{ .@"export" = .{ .name = "f", .desc = .{ .func = 1 } } };
+    // async func af(s: string) -> u32
+    inst_decls[3] = .{ .type = .{ .func = .{
+        .params = &.{.{ .name = "s", .type = .string }},
+        .results = .{ .unnamed = .u32 },
+        .is_async = true,
+    } } };
+    inst_decls[4] = .{ .@"export" = .{ .name = "af", .desc = .{ .func = 2 } } };
+
+    const world = try buildSyntheticWorld(a, inst_decls, 1);
+
+    const ftr_f = try findFuncImport(world, 0, "f");
+    const sig_f = try lowerCoreSigForArch(a, ftr_f, true);
+    try testing.expectEqualSlices(wtypes.ValType, &.{ .i64, .i64, .i64 }, sig_f.params);
+    try testing.expectEqual(@as(usize, 0), sig_f.results.len);
+
+    const ftr_af = try findFuncImport(world, 0, "af");
+    const sig_af = try lowerCoreSigForArch(a, ftr_af, true);
+    try testing.expectEqualSlices(wtypes.ValType, &.{ .i64, .i64, .i64 }, sig_af.params);
+    try testing.expectEqualSlices(wtypes.ValType, &.{.i32}, sig_af.results);
+}
+

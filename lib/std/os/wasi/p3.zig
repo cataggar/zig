@@ -51,14 +51,14 @@ pub const subtask = struct {
 
 pub const stream_u8 = struct {
     pub extern "[stream]stream<u8>" fn new() u64;
-    pub extern "[stream]stream<u8>" fn read(readable: i32, ptr: [*]u8, len: usize) u32;
-    pub extern "[stream]stream<u8>" fn write(writable: i32, ptr: [*]const u8, len: usize) u32;
+    pub extern "[stream]stream<u8>" fn read(readable: i32, ptr: [*]u8, len: usize) usize;
+    pub extern "[stream]stream<u8>" fn write(writable: i32, ptr: [*]const u8, len: usize) usize;
     pub extern "[stream]stream<u8>" fn @"drop-readable"(readable: i32) void;
     pub extern "[stream]stream<u8>" fn @"drop-writable"(writable: i32) void;
 };
 
 pub const stream_dir_entry = struct {
-    pub extern "[stream]wasi:filesystem/types@0.3.0#[method]descriptor.read-directory#0" fn read(readable: i32, ptr: [*]CanonDirectoryEntry, len: usize) u32;
+    pub extern "[stream]wasi:filesystem/types@0.3.0#[method]descriptor.read-directory#0" fn read(readable: i32, ptr: [*]CanonDirectoryEntry, len: usize) usize;
     pub extern "[stream]wasi:filesystem/types@0.3.0#[method]descriptor.read-directory#0" fn @"drop-readable"(readable: i32) void;
 };
 
@@ -181,36 +181,64 @@ pub extern "wasi:filesystem/types@0.3.0" fn @"[method]descriptor.symlink-at"(par
 // ============================================================================
 
 pub const CanonString = extern struct {
-    ptr: [*]u8,
-    len: usize,
+    ptr: u32 = 0,
+    len: u32 = 0,
+
+    pub inline fn ptrSlice(self: CanonString) [*]u8 {
+        return @ptrFromInt(self.ptr);
+    }
 };
 
 pub const CanonStringList = extern struct {
-    ptr: [*]const CanonString,
-    len: usize,
+    ptr: u32 = 0,
+    len: u32 = 0,
+
+    pub inline fn ptrSlice(self: CanonStringList) [*]const CanonString {
+        return @ptrFromInt(self.ptr);
+    }
 };
 
 pub const CanonEnvPair = extern struct {
-    k_ptr: [*]u8,
-    k_len: usize,
-    v_ptr: [*]u8,
-    v_len: usize,
+    k_ptr: u32 = 0,
+    k_len: u32 = 0,
+    v_ptr: u32 = 0,
+    v_len: u32 = 0,
+
+    pub inline fn kPtrSlice(self: CanonEnvPair) [*]u8 {
+        return @ptrFromInt(self.k_ptr);
+    }
+
+    pub inline fn vPtrSlice(self: CanonEnvPair) [*]u8 {
+        return @ptrFromInt(self.v_ptr);
+    }
 };
 
 pub const CanonEnvList = extern struct {
-    ptr: [*]const CanonEnvPair,
-    len: usize,
+    ptr: u32 = 0,
+    len: u32 = 0,
+
+    pub inline fn ptrSlice(self: CanonEnvList) [*]const CanonEnvPair {
+        return @ptrFromInt(self.ptr);
+    }
 };
 
 pub const CanonPreopenEntry = extern struct {
     handle: i32,
-    name_ptr: [*]const u8,
-    name_len: usize,
+    name_ptr: u32 = 0,
+    name_len: u32 = 0,
+
+    pub inline fn namePtrSlice(self: CanonPreopenEntry) [*]const u8 {
+        return @ptrFromInt(self.name_ptr);
+    }
 };
 
 pub const CanonPreopenList = extern struct {
-    ptr: [*]const CanonPreopenEntry,
-    len: usize,
+    ptr: u32 = 0,
+    len: u32 = 0,
+
+    pub inline fn ptrSlice(self: CanonPreopenList) [*]const CanonPreopenEntry {
+        return @ptrFromInt(self.ptr);
+    }
 };
 
 pub const CanonInstant = extern struct {
@@ -224,10 +252,14 @@ pub const CanonDirectoryEntry = extern struct {
     _pad: [3]u8 = .{ 0, 0, 0 },
     dtype_opt_tag: u8 = 0,
     _pad2: [3]u8 = .{ 0, 0, 0 },
-    dtype_opt_ptr: usize = 0,
-    dtype_opt_len: usize = 0,
-    name_ptr: [*]u8,
-    name_len: usize,
+    dtype_opt_ptr: u32 = 0,
+    dtype_opt_len: u32 = 0,
+    name_ptr: u32 = 0,
+    name_len: u32 = 0,
+
+    pub inline fn namePtrSlice(self: CanonDirectoryEntry) [*]u8 {
+        return @ptrFromInt(self.name_ptr);
+    }
 };
 
 fn waitReady(waitable_handle: i32) u32 {
@@ -484,8 +516,8 @@ pub fn packSetTimesAtParams(
     var params: [64]u8 = @splat(0);
     std.mem.writeInt(i32, params[0..4], handle, .little);
     params[4] = @truncate(path_flags);
-    std.mem.writeInt(u32, params[8..12], @truncate(path_ptr), .little);
-    std.mem.writeInt(u32, params[12..16], @truncate(path_len), .little);
+    std.mem.writeInt(u32, params[8..12], @intCast(path_ptr), .little);
+    std.mem.writeInt(u32, params[12..16], @intCast(path_len), .little);
     params[16] = atim.tag;
     std.mem.writeInt(i64, params[24..32], atim.sec, .little);
     std.mem.writeInt(u32, params[32..36], atim.nsec, .little);
@@ -507,11 +539,11 @@ pub fn packLinkAtParams(
     var params: [28]u8 = @splat(0);
     std.mem.writeInt(i32, params[0..4], old_handle, .little);
     params[4] = @truncate(old_path_flags);
-    std.mem.writeInt(u32, params[8..12], @truncate(old_path_ptr), .little);
-    std.mem.writeInt(u32, params[12..16], @truncate(old_path_len), .little);
+    std.mem.writeInt(u32, params[8..12], @intCast(old_path_ptr), .little);
+    std.mem.writeInt(u32, params[12..16], @intCast(old_path_len), .little);
     std.mem.writeInt(i32, params[16..20], new_handle, .little);
-    std.mem.writeInt(u32, params[20..24], @truncate(new_path_ptr), .little);
-    std.mem.writeInt(u32, params[24..28], @truncate(new_path_len), .little);
+    std.mem.writeInt(u32, params[20..24], @intCast(new_path_ptr), .little);
+    std.mem.writeInt(u32, params[24..28], @intCast(new_path_len), .little);
     return params;
 }
 
@@ -526,8 +558,8 @@ pub fn packOpenAtParams(
     var params: [20]u8 = @splat(0);
     std.mem.writeInt(i32, params[0..4], handle, .little);
     params[4] = @truncate(path_flags);
-    std.mem.writeInt(u32, params[8..12], @truncate(path_ptr), .little);
-    std.mem.writeInt(u32, params[12..16], @truncate(path_len), .little);
+    std.mem.writeInt(u32, params[8..12], @intCast(path_ptr), .little);
+    std.mem.writeInt(u32, params[12..16], @intCast(path_len), .little);
     params[16] = @truncate(open_flags);
     params[17] = @truncate(desc_flags);
     return params;
@@ -543,11 +575,11 @@ pub fn packRenameAtParams(
 ) [24]u8 {
     var params: [24]u8 = @splat(0);
     std.mem.writeInt(i32, params[0..4], old_handle, .little);
-    std.mem.writeInt(u32, params[4..8], @truncate(old_path_ptr), .little);
-    std.mem.writeInt(u32, params[8..12], @truncate(old_path_len), .little);
+    std.mem.writeInt(u32, params[4..8], @intCast(old_path_ptr), .little);
+    std.mem.writeInt(u32, params[8..12], @intCast(old_path_len), .little);
     std.mem.writeInt(i32, params[12..16], new_handle, .little);
-    std.mem.writeInt(u32, params[16..20], @truncate(new_path_ptr), .little);
-    std.mem.writeInt(u32, params[20..24], @truncate(new_path_len), .little);
+    std.mem.writeInt(u32, params[16..20], @intCast(new_path_ptr), .little);
+    std.mem.writeInt(u32, params[20..24], @intCast(new_path_len), .little);
     return params;
 }
 
@@ -560,10 +592,10 @@ pub fn packSymlinkAtParams(
 ) [20]u8 {
     var params: [20]u8 = @splat(0);
     std.mem.writeInt(i32, params[0..4], handle, .little);
-    std.mem.writeInt(u32, params[4..8], @truncate(old_path_ptr), .little);
-    std.mem.writeInt(u32, params[8..12], @truncate(old_path_len), .little);
-    std.mem.writeInt(u32, params[12..16], @truncate(new_path_ptr), .little);
-    std.mem.writeInt(u32, params[16..20], @truncate(new_path_len), .little);
+    std.mem.writeInt(u32, params[4..8], @intCast(old_path_ptr), .little);
+    std.mem.writeInt(u32, params[8..12], @intCast(old_path_len), .little);
+    std.mem.writeInt(u32, params[12..16], @intCast(new_path_ptr), .little);
+    std.mem.writeInt(u32, params[16..20], @intCast(new_path_len), .little);
     return params;
 }
 
@@ -582,7 +614,7 @@ fn writeStreamU8Iovs(tx: i32, iovs: [*]const wasi.ciovec_t, iovs_len: usize) usi
         var off: usize = 0;
         while (off < iov.len) {
             var rc = stream_u8.write(tx, iov.base + off, iov.len - off);
-            if (rc == BLOCKED) {
+            if (@as(u32, @truncate(rc)) == BLOCKED) {
                 rc = waitReady(tx);
             }
             const status = rc & 0xf;
@@ -638,30 +670,31 @@ var fd_table: [max_fds]FdEntry = @splat(.{});
 var preopens_initialized: bool = false;
 var preopens_count: usize = 0;
 
-var cached_args: CanonStringList = .{ .ptr = undefined, .len = 0 };
+var cached_args: CanonStringList = .{ .ptr = 0, .len = 0 };
 var args_initialized: bool = false;
 
-var cached_env: CanonEnvList = .{ .ptr = undefined, .len = 0 };
+var cached_env: CanonEnvList = .{ .ptr = 0, .len = 0 };
 var env_initialized: bool = false;
 
 fn initPreopens() void {
     if (preopens_initialized) return;
     preopens_initialized = true;
 
-    var list: CanonPreopenList = .{ .ptr = undefined, .len = 0 };
+    var list: CanonPreopenList = .{ .ptr = 0, .len = 0 };
     @"get-directories"(&list);
 
-    const count = @min(list.len, max_fds - 3);
+    const count = @min(@as(usize, list.len), max_fds - 3);
     preopens_count = count;
+    const entries = list.ptrSlice();
     for (0..count) |i| {
-        const entry = list.ptr[i];
+        const entry = entries[i];
         fd_table[3 + i] = .{
             .in_use = true,
             .is_preopen = true,
             .append = false,
             .handle = entry.handle,
             .position = 0,
-            .preopen_name_ptr = entry.name_ptr,
+            .preopen_name_ptr = entry.namePtrSlice(),
             .preopen_name_len = entry.name_len,
         };
     }
@@ -699,9 +732,10 @@ fn ensureArgs() CanonStringList {
 
 pub fn args_sizes_get(argc: *usize, argv_buf_size: *usize) callconv(.c) wasi.errno_t {
     const list = ensureArgs();
+    const args = list.ptrSlice();
     var total_bytes: usize = 0;
     for (0..list.len) |i| {
-        total_bytes += list.ptr[i].len + 1;
+        total_bytes += args[i].len + 1;
     }
     argc.* = list.len;
     argv_buf_size.* = total_bytes;
@@ -710,12 +744,13 @@ pub fn args_sizes_get(argc: *usize, argv_buf_size: *usize) callconv(.c) wasi.err
 
 pub fn args_get(argv: [*][*:0]u8, argv_buf: [*]u8) callconv(.c) wasi.errno_t {
     const list = ensureArgs();
+    const args = list.ptrSlice();
     var buf_offset: usize = 0;
     for (0..list.len) |i| {
-        const arg = list.ptr[i];
+        const arg = args[i];
         const dst = argv_buf + buf_offset;
         if (arg.len > 0) {
-            @memcpy(dst[0..arg.len], arg.ptr[0..arg.len]);
+            @memcpy(dst[0..arg.len], arg.ptrSlice()[0..arg.len]);
         }
         dst[arg.len] = 0;
         argv[i] = @ptrCast(dst);
@@ -734,9 +769,10 @@ fn ensureEnv() CanonEnvList {
 
 pub fn environ_sizes_get(environ_count: *usize, environ_buf_size: *usize) callconv(.c) wasi.errno_t {
     const list = ensureEnv();
+    const pairs = list.ptrSlice();
     var total_bytes: usize = 0;
     for (0..list.len) |i| {
-        const pair = list.ptr[i];
+        const pair = pairs[i];
         total_bytes += pair.k_len + 1 + pair.v_len + 1;
     }
     environ_count.* = list.len;
@@ -746,16 +782,17 @@ pub fn environ_sizes_get(environ_count: *usize, environ_buf_size: *usize) callco
 
 pub fn environ_get(environ: [*][*:0]u8, environ_buf: [*]u8) callconv(.c) wasi.errno_t {
     const list = ensureEnv();
+    const pairs = list.ptrSlice();
     var buf_offset: usize = 0;
     for (0..list.len) |i| {
-        const pair = list.ptr[i];
+        const pair = pairs[i];
         const dst = environ_buf + buf_offset;
         if (pair.k_len > 0) {
-            @memcpy(dst[0..pair.k_len], pair.k_ptr[0..pair.k_len]);
+            @memcpy(dst[0..pair.k_len], pair.kPtrSlice()[0..pair.k_len]);
         }
         dst[pair.k_len] = '=';
         if (pair.v_len > 0) {
-            @memcpy(dst[pair.k_len + 1 ..][0..pair.v_len], pair.v_ptr[0..pair.v_len]);
+            @memcpy(dst[pair.k_len + 1 ..][0..pair.v_len], pair.vPtrSlice()[0..pair.v_len]);
         }
         dst[pair.k_len + 1 + pair.v_len] = 0;
         environ[i] = @ptrCast(dst);
@@ -967,7 +1004,7 @@ pub fn fd_pread(
         var off: usize = 0;
         while (off < iov.len) {
             var rc = stream_u8.read(rx, iov.base + off, iov.len - off);
-            if (rc == BLOCKED) {
+            if (@as(u32, @truncate(rc)) == BLOCKED) {
                 rc = waitReady(rx);
             }
             const status = rc & 0xf;
@@ -1061,7 +1098,7 @@ pub fn fd_read(
             const fut_handle = pair[1];
 
             var rc = stream_u8.read(rx, iov.base, iov.len);
-            if (rc == BLOCKED) {
+            if (@as(u32, @truncate(rc)) == BLOCKED) {
                 rc = waitReady(rx);
             }
             const status = rc & 0xf;
@@ -1113,7 +1150,7 @@ pub fn fd_readdir(
     while (true) {
         var dent: [1]CanonDirectoryEntry = undefined;
         var rc = stream_dir_entry.read(dir_stream, &dent, 1);
-        if (rc == BLOCKED) {
+        if (@as(u32, @truncate(rc)) == BLOCKED) {
             rc = waitReady(dir_stream);
         }
         const status = rc & 0xf;
@@ -1126,12 +1163,14 @@ pub fn fd_readdir(
         }
 
         const d = dent[0];
+        const d_name_ptr = d.namePtrSlice();
+        const d_name_len: usize = d.name_len;
         defer {
             if (d.dtype_disc == 7 and d.dtype_opt_tag != 0 and d.dtype_opt_len > 0) {
                 freeGuestSlice(@ptrFromInt(d.dtype_opt_ptr), d.dtype_opt_len);
             }
-            if (d.name_len > 0) {
-                freeGuestSlice(d.name_ptr, d.name_len);
+            if (d_name_len > 0) {
+                freeGuestSlice(d_name_ptr, d_name_len);
             }
         }
 
@@ -1142,9 +1181,9 @@ pub fn fd_readdir(
         }
 
         var d_ino: u64 = 0;
-        if (!std.mem.eql(u8, d.name_ptr[0..d.name_len], "..")) {
+        if (!std.mem.eql(u8, d_name_ptr[0..d_name_len], "..")) {
             var hash_ret: [24]u8 align(8) = @splat(0);
-            awaitAsyncCall(@"[method]descriptor.metadata-hash-at"(entry.handle, 0, d.name_ptr, d.name_len, &hash_ret));
+            awaitAsyncCall(@"[method]descriptor.metadata-hash-at"(entry.handle, 0, d_name_ptr, d_name_len, &hash_ret));
             if (hash_ret[0] == 0) {
                 const lower = std.mem.readInt(u64, hash_ret[8..16], .little);
                 const upper = std.mem.readInt(u64, hash_ret[16..24], .little);
@@ -1157,7 +1196,7 @@ pub fn fd_readdir(
         var dirent_bytes: [24]u8 = @splat(0);
         std.mem.writeInt(u64, dirent_bytes[0..8], idx + 1, .little);
         std.mem.writeInt(u64, dirent_bytes[8..16], d_ino, .little);
-        std.mem.writeInt(u32, dirent_bytes[16..20], @intCast(d.name_len), .little);
+        std.mem.writeInt(u32, dirent_bytes[16..20], d.name_len, .little);
         dirent_bytes[20] = @backingInt(descriptorTypeToFiletype(d.dtype_disc));
 
         const copy_hdr = @min(dirent_bytes.len, buf_len - used);
@@ -1166,9 +1205,9 @@ pub fn fd_readdir(
             used += copy_hdr;
         }
 
-        const copy_name = @min(d.name_len, buf_len - used);
+        const copy_name = @min(d_name_len, buf_len - used);
         if (copy_name > 0) {
-            @memcpy(buf[used..][0..copy_name], d.name_ptr[0..copy_name]);
+            @memcpy(buf[used..][0..copy_name], d_name_ptr[0..copy_name]);
             used += copy_name;
         }
 
@@ -1743,16 +1782,14 @@ test "writeFilestatFromDescriptorStat 0.3.0 layout" {
 }
 
 test "canonical ABI 0.3.0 struct layouts and spilled async parameter packing" {
-    if (@sizeOf(usize) == 4) {
-        try std.testing.expectEqual(@as(usize, 8), @sizeOf(CanonString));
-        try std.testing.expectEqual(@as(usize, 8), @sizeOf(CanonStringList));
-        try std.testing.expectEqual(@as(usize, 16), @sizeOf(CanonEnvPair));
-        try std.testing.expectEqual(@as(usize, 8), @sizeOf(CanonEnvList));
-        try std.testing.expectEqual(@as(usize, 12), @sizeOf(CanonPreopenEntry));
-        try std.testing.expectEqual(@as(usize, 8), @sizeOf(CanonPreopenList));
-        try std.testing.expectEqual(@as(usize, 24), @sizeOf(CanonDirectoryEntry));
-        try std.testing.expectEqual(@as(usize, 4), @alignOf(CanonDirectoryEntry));
-    }
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(CanonString));
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(CanonStringList));
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(CanonEnvPair));
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(CanonEnvList));
+    try std.testing.expectEqual(@as(usize, 12), @sizeOf(CanonPreopenEntry));
+    try std.testing.expectEqual(@as(usize, 8), @sizeOf(CanonPreopenList));
+    try std.testing.expectEqual(@as(usize, 24), @sizeOf(CanonDirectoryEntry));
+    try std.testing.expectEqual(@as(usize, 4), @alignOf(CanonDirectoryEntry));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(CanonInstant));
     try std.testing.expectEqual(@as(usize, 8), @alignOf(CanonInstant));
 

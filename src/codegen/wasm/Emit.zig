@@ -32,7 +32,7 @@ pub fn lower(emit: *Emit) Error!void {
     const is_wasm32 = target.cpu.arch == .wasm32;
 
     // Write the locals in the prologue of the function body.
-    try code.ensureUnusedCapacity(gpa, 5 + mir.locals.len * 6 + 38);
+    try code.ensureUnusedCapacity(gpa, 5 + mir.locals.len * 6 + 48);
 
     writeUleb128(code, @as(u32, @intCast(mir.locals.len)));
 
@@ -44,6 +44,9 @@ pub fn lower(emit: *Emit) Error!void {
     // Stack management section of function prologue.
     const stack_alignment = mir.prologue.flags.stack_alignment;
     if (stack_alignment.toByteUnits()) |align_bytes| {
+        const const_op: std.wasm.Opcode = if (is_wasm32) .i32_const else .i64_const;
+        const sub_op: std.wasm.Opcode = if (is_wasm32) .i32_sub else .i64_sub;
+        const and_op: std.wasm.Opcode = if (is_wasm32) .i32_and else .i64_and;
         // load stack pointer
         code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.global_get));
         try appendStackPointerGlobalIndex(wasm, code, is_obj);
@@ -51,19 +54,19 @@ pub fn lower(emit: *Emit) Error!void {
         code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.local_tee));
         writeUleb128(code, mir.prologue.sp_local);
         // get the total stack size
-        const aligned_stack: i32 = @intCast(stack_alignment.forward(mir.prologue.stack_size));
-        code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.i32_const));
+        const aligned_stack: i64 = @intCast(stack_alignment.forward(mir.prologue.stack_size));
+        code.appendAssumeCapacity(@backingInt(const_op));
         writeSleb128(code, aligned_stack);
         // subtract it from the current stack pointer
-        code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.i32_sub));
+        code.appendAssumeCapacity(@backingInt(sub_op));
         if (align_bytes != 16) {
             // Get negative stack alignment
-            const neg_stack_align = @as(i32, @intCast(align_bytes)) * -1;
-            code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.i32_const));
+            const neg_stack_align = @as(i64, @intCast(align_bytes)) * -1;
+            code.appendAssumeCapacity(@backingInt(const_op));
             writeSleb128(code, neg_stack_align);
             // Bitwise-and the value to get the new stack pointer to ensure the
             // pointers are aligned with the abi alignment.
-            code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.i32_and));
+            code.appendAssumeCapacity(@backingInt(and_op));
         }
         // The bottom will be used to calculate all stack pointer offsets.
         code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.local_tee));
@@ -170,7 +173,7 @@ pub fn lower(emit: *Emit) Error!void {
                 inst += 1;
                 continue :loop tags[inst];
             } else {
-                const addr: u32 = wasm.errorNameTableAddr();
+                const addr = wasm.errorNameTableAddr();
                 writeSleb128(code, addr);
 
                 inst += 1;
@@ -301,7 +304,7 @@ pub fn lower(emit: *Emit) Error!void {
                 });
                 appendSlebRelocPlaceholder(code, is_wasm32);
             } else {
-                const addr: u32 = wasm.tagIndexTableAddr(datas[inst].ip_index);
+                const addr = wasm.tagIndexTableAddr(datas[inst].ip_index);
                 writeSleb128(code, addr);
             }
 
@@ -1020,7 +1023,7 @@ fn uavRefExe(wasm: *Wasm, code: *ArrayList(u8), value: InternPool.Index, offset:
     code.appendAssumeCapacity(@backingInt(opcode));
 
     const addr = wasm.uavAddr(value);
-    writeSleb128(code, @as(u32, @intCast(@as(i64, addr) + offset)));
+    writeSleb128(code, @as(u64, @intCast(@as(i64, @intCast(addr)) + offset)));
 }
 
 fn navRefOff(wasm: *Wasm, code: *ArrayList(u8), data: Mir.NavRefOff, is_wasm32: bool) !void {
@@ -1046,7 +1049,7 @@ fn navRefOff(wasm: *Wasm, code: *ArrayList(u8), data: Mir.NavRefOff, is_wasm32: 
         appendSlebRelocPlaceholder(code, is_wasm32);
     } else {
         const addr = wasm.navAddr(data.nav_index);
-        writeSleb128(code, @as(u32, @intCast(@as(i64, addr) + data.offset)));
+        writeSleb128(code, @as(u64, @intCast(@as(i64, @intCast(addr)) + data.offset)));
     }
 }
 

@@ -1429,6 +1429,10 @@ pub fn buildComponent(alloc: std.mem.Allocator, core_bytes: []const u8) ![]u8 {
     // early with an actionable diff instead of a host load failure.
     {
         const abi = wabt.component.adapter.abi;
+        const fast_core_exports = probeCoreExports(stripped_core) catch CoreExports{
+            .memory_name = null,
+            .realloc_name = null,
+        };
         var expected = std.ArrayList(ExpectedImportSig).empty;
         for (import_shapes.items, 0..) |shape, i| {
             const resolver = abi.TypeResolver{
@@ -1436,7 +1440,11 @@ pub fn buildComponent(alloc: std.mem.Allocator, core_bytes: []const u8) ![]u8 {
                 .world_decls = decoded.world_decls,
             };
             for (wired_funcs_by_shape[i]) |fn_ref| {
-                const lowered = try abi.lowerCoreSig(ar, .{ .func = fn_ref.sig, .resolver = resolver });
+                const lowered = try abi.lowerCoreSigForArch(
+                    ar,
+                    .{ .func = fn_ref.sig, .resolver = resolver },
+                    fast_core_exports.is_memory64,
+                );
                 try expected.append(ar, .{
                     .module = shape.qualified_name,
                     .field = fn_ref.name,
@@ -2497,7 +2505,7 @@ fn buildComponentShimFixup(
         for (shape.funcs) |fn_ref| {
             const ftr = abi.FuncTypeRef{ .func = fn_ref.sig, .resolver = resolver };
             const cls = abi.classifyFunc(ftr);
-            const lowered = try abi.lowerCoreSig(ar, ftr);
+            const lowered = try abi.lowerCoreSigForArch(ar, ftr, core_exports.is_memory64);
             try list.append(ar, .{
                 .fn_ref = fn_ref,
                 .opts = cls.opts,
@@ -2581,8 +2589,11 @@ fn buildComponentShimFixup(
         /// resolution of the element to the right package.
         elem_owner: ?[]const u8 = null,
     };
-    const stream_rw_params = [_]wtypes.ValType{ .i32, .i32, .i32 };
-    const i32x2_params = [_]wtypes.ValType{ .i32, .i32 };
+    const ptr_ty: wtypes.ValType = if (core_exports.is_memory64) .i64 else .i32;
+    const stream_rw_params = [_]wtypes.ValType{ .i32, ptr_ty, ptr_ty };
+    const stream_rw_results = [_]wtypes.ValType{ptr_ty};
+    const handle_ptr_params = [_]wtypes.ValType{ .i32, ptr_ty };
+    const ptrx2_params = [_]wtypes.ValType{ ptr_ty, ptr_ty };
     const i32_results = [_]wtypes.ValType{.i32};
     var async_group_list = std.ArrayList(AsyncGroup).empty;
     var async_memop_slots = std.ArrayList(shim_mod.Slot).empty;
@@ -2665,7 +2676,7 @@ fn buildComponentShimFixup(
                     fields[k] = .{ .name = f, .is_mem_op = mem_op };
                     if (mem_op) {
                         fields[k].mem_op_slot = @intCast(async_memop_slots.items.len);
-                        try async_memop_slots.append(ar, .{ .params = &stream_rw_params, .results = &i32_results });
+                        try async_memop_slots.append(ar, .{ .params = &stream_rw_params, .results = &stream_rw_results });
                     }
                 }
                 try async_group_list.append(ar, .{
@@ -2692,7 +2703,7 @@ fn buildComponentShimFixup(
                         fields[k].mem_op_slot = @intCast(async_memop_slots.items.len);
                         // future.read/write lower to (handle, ptr)->i32 — no
                         // count param (a future carries a single value).
-                        try async_memop_slots.append(ar, .{ .params = &i32x2_params, .results = &i32_results });
+                        try async_memop_slots.append(ar, .{ .params = &handle_ptr_params, .results = &i32_results });
                     }
                 }
                 try async_group_list.append(ar, .{
@@ -2716,10 +2727,10 @@ fn buildComponentShimFixup(
                     fields[k] = .{ .name = f, .is_mem_op = is_new or is_dm };
                     if (is_new) {
                         fields[k].mem_op_slot = @intCast(async_memop_slots.items.len);
-                        try async_memop_slots.append(ar, .{ .params = &i32x2_params, .results = &i32_results });
+                        try async_memop_slots.append(ar, .{ .params = &ptrx2_params, .results = &i32_results });
                     } else if (is_dm) {
                         fields[k].mem_op_slot = @intCast(async_memop_slots.items.len);
-                        try async_memop_slots.append(ar, .{ .params = &i32x2_params, .results = &.{} });
+                        try async_memop_slots.append(ar, .{ .params = &handle_ptr_params, .results = &.{} });
                     }
                 }
                 try async_group_list.append(ar, .{
@@ -2740,7 +2751,7 @@ fn buildComponentShimFixup(
                     if (mem_op) {
                         fields[k].mem_op_slot = @intCast(async_memop_slots.items.len);
                         // waitable-set.wait/poll lower to (set, event-ptr)->i32.
-                        try async_memop_slots.append(ar, .{ .params = &i32x2_params, .results = &i32_results });
+                        try async_memop_slots.append(ar, .{ .params = &handle_ptr_params, .results = &i32_results });
                     }
                 }
                 try async_group_list.append(ar, .{
@@ -4387,7 +4398,17 @@ const CoreExports = struct {
     /// Name under which the core module exports its `cabi_realloc`
     /// func, or null if no func export with that name exists.
     realloc_name: ?[]const u8,
+    /// True iff the core module's linear memory uses 64-bit addressing (memory64 / cm64).
+    is_memory64: bool = false,
 };
+
+fn skipLeb(buf: []const u8, start: usize) !usize {
+    var i: usize = start;
+    while (i < buf.len) : (i += 1) {
+        if ((buf[i] & 0x80) == 0) return i + 1;
+    }
+    return error.LebTruncated;
+}
 
 fn probeCoreExports(core_bytes: []const u8) !CoreExports {
     if (core_bytes.len < 8) return error.InvalidCoreModule;
@@ -4395,6 +4416,7 @@ fn probeCoreExports(core_bytes: []const u8) !CoreExports {
 
     var memory_name: ?[]const u8 = null;
     var realloc_name: ?[]const u8 = null;
+    var is_memory64: bool = false;
 
     var i: usize = 8;
     while (i < core_bytes.len) {
@@ -4406,43 +4428,111 @@ fn probeCoreExports(core_bytes: []const u8) !CoreExports {
         const body = core_bytes[i .. i + sz.value];
         i += sz.value;
 
-        // Section ID 7 = export section.
-        if (id != 7) continue;
-
-        var p: usize = 0;
-        const n = try readU32Leb(body, p);
-        p += n.bytes_read;
-        var k: u32 = 0;
-        while (k < n.value) : (k += 1) {
-            const nl = try readU32Leb(body, p);
-            p += nl.bytes_read;
-            if (p + nl.value > body.len) return error.InvalidCoreModule;
-            const name = body[p .. p + nl.value];
-            p += nl.value;
-            if (p >= body.len) return error.InvalidCoreModule;
-            const kind = body[p];
-            p += 1;
-            const idx = try readU32Leb(body, p);
-            p += idx.bytes_read;
-            // export kinds: 0=func, 1=table, 2=memory, 3=global, 4=tag.
-            switch (kind) {
-                0 => if (std.mem.eql(u8, name, "cabi_realloc")) {
-                    realloc_name = name;
-                },
-                2 => if (memory_name == null) {
-                    // First memory export wins; canonical convention
-                    // is "memory" but a malformed name shouldn't trip
-                    // the probe — the canon.lower opt references the
-                    // memory by core-memory index, not by name.
-                    memory_name = name;
-                },
-                else => {},
-            }
+        switch (id) {
+            2 => {
+                // Section ID 2 = import section: check imported memory limits for memory64 flag (0x04).
+                var p: usize = 0;
+                const n = try readU32Leb(body, p);
+                p += n.bytes_read;
+                var k: u32 = 0;
+                while (k < n.value) : (k += 1) {
+                    const ml = try readU32Leb(body, p);
+                    p += ml.bytes_read;
+                    if (p + ml.value > body.len) return error.InvalidCoreModule;
+                    p += ml.value;
+                    const fl = try readU32Leb(body, p);
+                    p += fl.bytes_read;
+                    if (p + fl.value > body.len) return error.InvalidCoreModule;
+                    p += fl.value;
+                    if (p >= body.len) return error.InvalidCoreModule;
+                    const kind = body[p];
+                    p += 1;
+                    switch (kind) {
+                        0 => p = try skipLeb(body, p),
+                        1 => {
+                            if (p >= body.len) return error.InvalidCoreModule;
+                            const et = body[p];
+                            p += 1;
+                            if (et == 0x63 or et == 0x64) p = try skipLeb(body, p);
+                            const flags = try readU32Leb(body, p);
+                            p += flags.bytes_read;
+                            p = try skipLeb(body, p);
+                            if ((flags.value & 0x01) != 0) p = try skipLeb(body, p);
+                        },
+                        2 => {
+                            const flags = try readU32Leb(body, p);
+                            p += flags.bytes_read;
+                            if ((flags.value & 0x04) != 0) is_memory64 = true;
+                            p = try skipLeb(body, p);
+                            if ((flags.value & 0x01) != 0) p = try skipLeb(body, p);
+                            if ((flags.value & 0x08) != 0) p = try skipLeb(body, p);
+                        },
+                        3 => {
+                            if (p >= body.len) return error.InvalidCoreModule;
+                            const vt = body[p];
+                            p += 1;
+                            if (vt == 0x63 or vt == 0x64) p = try skipLeb(body, p);
+                            if (p >= body.len) return error.InvalidCoreModule;
+                            p += 1;
+                        },
+                        4 => {
+                            if (p >= body.len) return error.InvalidCoreModule;
+                            p += 1;
+                            p = try skipLeb(body, p);
+                        },
+                        else => return error.InvalidCoreModule,
+                    }
+                }
+            },
+            5 => {
+                // Section ID 5 = memory section: check first memory's limits flags for memory64 (0x04).
+                var p: usize = 0;
+                const n = try readU32Leb(body, p);
+                p += n.bytes_read;
+                if (n.value > 0) {
+                    const flags = try readU32Leb(body, p);
+                    if ((flags.value & 0x04) != 0) is_memory64 = true;
+                }
+            },
+            7 => {
+                // Section ID 7 = export section.
+                var p: usize = 0;
+                const n = try readU32Leb(body, p);
+                p += n.bytes_read;
+                var k: u32 = 0;
+                while (k < n.value) : (k += 1) {
+                    const nl = try readU32Leb(body, p);
+                    p += nl.bytes_read;
+                    if (p + nl.value > body.len) return error.InvalidCoreModule;
+                    const name = body[p .. p + nl.value];
+                    p += nl.value;
+                    if (p >= body.len) return error.InvalidCoreModule;
+                    const kind = body[p];
+                    p += 1;
+                    const idx = try readU32Leb(body, p);
+                    p += idx.bytes_read;
+                    // export kinds: 0=func, 1=table, 2=memory, 3=global, 4=tag.
+                    switch (kind) {
+                        0 => if (std.mem.eql(u8, name, "cabi_realloc")) {
+                            realloc_name = name;
+                        },
+                        2 => if (memory_name == null) {
+                            // First memory export wins; canonical convention
+                            // is "memory" but a malformed name shouldn't trip
+                            // the probe — the canon.lower opt references the
+                            // memory by core-memory index, not by name.
+                            memory_name = name;
+                        },
+                        else => {},
+                    }
+                }
+                break;
+            },
+            else => {},
         }
-        break;
     }
 
-    return .{ .memory_name = memory_name, .realloc_name = realloc_name };
+    return .{ .memory_name = memory_name, .realloc_name = realloc_name, .is_memory64 = is_memory64 };
 }
 
 fn readU32Leb(buf: []const u8, start: usize) !LebRead {
@@ -5986,6 +6076,32 @@ test "validateGuestImportSigs: all-i32 error-code import is rejected (#244)" {
         defer testing.allocator.free(core);
         try validateGuestImportSigs(testing.allocator, core, &.{});
     }
+}
+
+test "probeCoreExports: detects 64-bit linear memory (memory64 / cm64)" {
+    const core32 = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        // memory section: 1 memory, flags=0x00, initial=1
+        0x05, 0x03, 0x01, 0x00, 0x01,
+        // export section: 1 export "memory" (kind=2, idx=0)
+        0x07, 0x0a, 0x01, 0x06, 'm',  'e',  'm',  'o',
+        'r',  'y',  0x02, 0x00,
+    };
+    const exp32 = try probeCoreExports(&core32);
+    try testing.expectEqualStrings("memory", exp32.memory_name.?);
+    try testing.expect(!exp32.is_memory64);
+
+    const core64 = [_]u8{
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+        // memory section: 1 memory, flags=0x04 (is_64), initial=1
+        0x05, 0x03, 0x01, 0x04, 0x01,
+        // export section: 1 export "memory" (kind=2, idx=0)
+        0x07, 0x0a, 0x01, 0x06, 'm',  'e',  'm',  'o',
+        'r',  'y',  0x02, 0x00,
+    };
+    const exp64 = try probeCoreExports(&core64);
+    try testing.expectEqualStrings("memory", exp64.memory_name.?);
+    try testing.expect(exp64.is_memory64);
 }
 
 // ── #248: resource built-in intrinsic import wiring tests ───────────
