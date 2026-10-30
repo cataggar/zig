@@ -47,12 +47,6 @@ pub fn addCases(ctx: *LinkContext) void {
 
     if (ctx.includeTest("copy_reloc")) |case| case: {
         if (!ctx.link_libc) break :case;
-        if (ctx.target.result.abi.isMusl()) {
-            // TODO: Elf2 currently fails to link a dynamic executable on musl without PIC, citing
-            // illegal dynamic relocations. This is most likely due to Elf2 not yet supporting
-            // canonical PLT entries.
-            break :case;
-        }
 
         const lib = case.addLibrary(.dynamic, .{
             .name = "lib",
@@ -134,12 +128,6 @@ pub fn addCases(ctx: *LinkContext) void {
         }, .{ .sub_name = "lib" });
 
         if (!ctx.link_libc) break :case;
-        if (ctx.target.result.abi.isMusl()) {
-            // TODO: Elf2 currently fails to link a dynamic executable on musl without PIC, citing
-            // illegal dynamic relocations. This is most likely due to Elf2 not yet supporting
-            // canonical PLT entries.
-            break :case;
-        }
 
         // ...but in an executable, we statically resolve the value to 0:
         const exe = case.addExecutable(.{
@@ -208,12 +196,6 @@ pub fn addCases(ctx: *LinkContext) void {
 
     if (ctx.includeTest("dynamic_symbol_versions")) |case| case: {
         if (!ctx.link_libc) break :case;
-        if (ctx.target.result.abi.isMusl()) {
-            // TODO: Elf2 currently fails to link a dynamic executable on musl without PIC, citing
-            // illegal dynamic relocations. This is most likely due to Elf2 not yet supporting
-            // canonical PLT entries.
-            break :case;
-        }
 
         const libfoo = case.addLibrary(.dynamic, .{
             .name = "foo",
@@ -282,12 +264,23 @@ pub fn addCases(ctx: *LinkContext) void {
             "--only-symbol=do_stuff",
         }, .{ .sub_name = "call_explicit" });
         const run_call_explicit = case.addRunArtifact(call_explicit);
-        run_call_explicit.expectStdErrEqual(
-            \\explicit V1: 1
-            \\explicit V2: 2
-            \\explicit V3: 3
-            \\
-        );
+        if (ctx.target.result.abi.isMusl()) {
+            // musl's dynamic linker does not support GNU symbol versioning and will simply always
+            // bind to the default version.
+            run_call_explicit.expectStdErrEqual(
+                \\explicit V1: 3
+                \\explicit V2: 3
+                \\explicit V3: 3
+                \\
+            );
+        } else {
+            run_call_explicit.expectStdErrEqual(
+                \\explicit V1: 1
+                \\explicit V2: 2
+                \\explicit V3: 3
+                \\
+            );
+        }
 
         const call_both = case.addExecutable(.{
             .name = "call_both",
@@ -317,13 +310,25 @@ pub fn addCases(ctx: *LinkContext) void {
             "--only-symbol=do_stuff",
         }, .{ .sub_name = "call_both" });
         const run_call_both = case.addRunArtifact(call_both);
-        run_call_both.expectStdErrEqual(
-            \\default: 3
-            \\explicit V1: 1
-            \\explicit V2: 2
-            \\explicit V3: 3
-            \\
-        );
+        if (ctx.target.result.abi.isMusl()) {
+            // musl's dynamic linker does not support GNU symbol versioning and will simply always
+            // bind to the default version.
+            run_call_both.expectStdErrEqual(
+                \\default: 3
+                \\explicit V1: 3
+                \\explicit V2: 3
+                \\explicit V3: 3
+                \\
+            );
+        } else {
+            run_call_both.expectStdErrEqual(
+                \\default: 3
+                \\explicit V1: 1
+                \\explicit V2: 2
+                \\explicit V3: 3
+                \\
+            );
+        }
     }
 }
 
