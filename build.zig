@@ -907,7 +907,7 @@ fn addCompilerStep(b: *std.Build, options: AddCompilerModOptions) *std.Build.Ste
         // This number should never be raised. If the value is exceeded, then
         // it is considered a bug in the Zig project that building the
         // compiler takes more than 8G of memory.
-        .max_rss = 8_000_000_000,
+        .max_rss = 16_000_000_000,
         .root_module = addCompilerMod(b, options),
     });
     exe.stack_size = stack_size;
@@ -1051,9 +1051,15 @@ fn addStaticLlvmOptionsToModule(mod: *std.Build.Module, options: struct {
     // in a dependency on llvm::cfg::Update<llvm::BasicBlock*>::dump() which is
     // unavailable when LLVM is compiled in Release mode.
     const zig_cpp_cflags = exe_cflags ++ [_][]const u8{"-DNDEBUG=1"};
+    const wasi_cpp_cflags = zig_cpp_cflags ++ [_][]const u8{
+        "-D_WASI_EMULATED_MMAN",
+        "-D_WASI_EMULATED_SIGNAL",
+        "-D_WASI_EMULATED_PROCESS_CLOCKS",
+        "-D_WASI_EMULATED_GETPID",
+    };
     mod.addCSourceFiles(.{
         .files = &zig_cpp_sources,
-        .flags = &zig_cpp_cflags,
+        .flags = if (mod.resolved_target.?.result.os.tag.isWasi()) &wasi_cpp_cflags else &zig_cpp_cflags,
     });
 
     const lsl_options: std.Build.Module.LinkSystemLibraryOptions = .{ .use_pkg_config = .no };

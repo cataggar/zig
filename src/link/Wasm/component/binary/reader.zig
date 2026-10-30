@@ -710,6 +710,7 @@ const Reader = struct {
                 try self.module.tables.append(self.allocator, .{
                     .type = .{ .elem_type = indexed.vt, .limits = limits },
                     .type_idx = indexed.type_idx,
+                    .is_table64 = limits.is_64,
                 });
             }
         }

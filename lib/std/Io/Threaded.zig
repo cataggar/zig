@@ -11808,7 +11808,6 @@ fn clockResolution(userdata: ?*anyopaque, clock: Io.Clock) Io.Clock.ResolutionEr
             .cpu_process, .cpu_thread => return error.ClockUnavailable,
         },
         .wasi, .wasip2, .wasip3 => {
-            if (builtin.link_libc) return clockResolutionPosix(clock);
             var ns: std.os.wasi.timestamp_t = undefined;
             return switch (std.os.wasi.clock_res_get(clockToWasi(clock), &ns)) {
                 .SUCCESS => .fromNanoseconds(ns),
@@ -17924,7 +17923,7 @@ pub fn fallbackSeed(aslr_addr: ?*anyopaque, seed: *[Csprng.seed_len]u8) void {
     std.mem.writeInt(usize, seed[seed.len - @sizeOf(usize) ..][0..@sizeOf(usize)], @intFromPtr(aslr_addr), .native);
     const fallbackSeedImpl = switch (native_os) {
         .windows => fallbackSeedWindows,
-        .wasi, .wasip2, .wasip3 => if (builtin.link_libc) fallbackSeedPosix else fallbackSeedWasi,
+        .wasi, .wasip2, .wasip3 => fallbackSeedWasi,
         else => fallbackSeedPosix,
     };
     fallbackSeedImpl(seed);

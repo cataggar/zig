@@ -43,7 +43,7 @@ const Header = extern struct {
         index: u32,
     };
 
-    fn nameOrIndex(archive: Header) !NameOrIndex {
+    fn nameOrIndex(archive: *const Header) !NameOrIndex {
         const value = getValue(&archive.name);
         const slash_index = mem.findScalar(u8, value, '/') orelse return error.MalformedArchive;
         const len = value.len;
@@ -58,7 +58,7 @@ const Header = extern struct {
         }
     }
 
-    fn parsedSize(archive: Header) !u32 {
+    fn parsedSize(archive: *const Header) !u32 {
         const value = getValue(&archive.size);
         return std.fmt.parseInt(u32, value, 10);
     }
@@ -259,11 +259,12 @@ pub fn parse(gpa: Allocator, file_contents: []const u8) !Archive {
     }
 
     const long_file_names: RelativeSlice = s: {
+        if (pos + @sizeOf(Header) > file_contents.len) break :s .{ .off = 0, .len = 0 };
         const sub_header = mem.bytesAsValue(Header, file_contents[pos..][0..@sizeOf(Header)]);
-        pos += @sizeOf(Header);
 
-        if (!mem.eql(u8, &header.fmag, ARFMAG)) return error.BadHeaderDelimiter;
-        if (!mem.eql(u8, sub_header.name[0..2], "//")) return error.MissingTableName;
+        if (!mem.eql(u8, &sub_header.fmag, ARFMAG)) return error.BadHeaderDelimiter;
+        if (!mem.eql(u8, sub_header.name[0..2], "//")) break :s .{ .off = 0, .len = 0 };
+        pos += @sizeOf(Header);
         const table_size = try sub_header.parsedSize();
 
         break :s .{

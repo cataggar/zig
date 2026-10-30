@@ -452,7 +452,7 @@ fn coffLink(lld: *Lld, arena: Allocator) !void {
         // This is necessary because LLD does not behave properly as a library -
         // it calls exit() and does not reset all global data between invocations.
         const linker_command = "lld-link";
-        try argv.appendSlice(&[_][]const u8{ comp.self_exe_path.?, linker_command });
+        try argv.appendSlice(&[_][]const u8{ comp.self_exe_path orelse "zig", linker_command });
         try addCommonArgs(&argv, true);
 
         if (target.isMinGW()) {
@@ -867,7 +867,7 @@ fn elfLink(lld: *Lld, arena: Allocator) !void {
         // This is necessary because LLD does not behave properly as a library -
         // it calls exit() and does not reset all global data between invocations.
         const linker_command = "ld.lld";
-        try argv.appendSlice(&[_][]const u8{ comp.self_exe_path.?, linker_command });
+        try argv.appendSlice(&[_][]const u8{ comp.self_exe_path orelse "zig", linker_command });
         try addCommonArgs(&argv, false);
 
         if (is_obj) {
@@ -1710,7 +1710,7 @@ fn wasmLink(lld: *Lld, arena: Allocator) !void {
         // This is necessary because LLD does not behave properly as a library -
         // it calls exit() and does not reset all global data between invocations.
         const linker_command = "wasm-ld";
-        try argv.appendSlice(&[_][]const u8{ comp.self_exe_path.?, linker_command });
+        try argv.appendSlice(&[_][]const u8{ comp.self_exe_path orelse "zig", linker_command });
         try addCommonArgs(&argv, false);
 
         try argv.append("--error-limit=0");

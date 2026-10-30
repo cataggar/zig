@@ -1,0 +1,282 @@
+name: build-wazig-release
+
+on:
+  push:
+    tags:
+      - 'v*-wazig.*'
+      - 'v*-wazigl.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build and upload assets to (e.g. v0.17.0-wazig.1 or v0.17.0-wazigl.1)'
+        required: true
+        default: 'v0.17.0-wazig.1'
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  ZIG_VERSION: "0.17.0"
+  LLVM_VERSION: "22.1.8-p1"
+  GHR_VERSION: "v0.9.1"
+  WASMTIME_VERSION: "v50.0.1"
+
+jobs:
+  build-and-release:
+    name: "Build and release ${{ inputs.tag || github.ref_name }}"
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-latest' }}
+    steps:
+      - name: Determine release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          case "$TAG" in
+            *-wazigl.*)
+              FLAVOR="wazigl"
+              ;;
+            *-wazig.*)
+              FLAVOR="wazig"
+              ;;
+            *)
+              echo "ERROR: Tag '$TAG' must match *-wazig.* or *-wazigl.*"
+              exit 1
+              ;;
+          esac
+          VERSION_STRING="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "flavor=${FLAVOR}" >> "$GITHUB_OUTPUT"
+          echo "version_string=${VERSION_STRING}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install ghr and wasmtime
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/cataggar/ghr/main/install.sh \
+            | GHR_VERSION="${{ env.GHR_VERSION }}" GHR_NO_PATH_ADD=1 sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          ghr install "bytecodealliance/wasmtime@${{ env.WASMTIME_VERSION }}"
+          wasmtime --version
+
+      - name: Download host Zig
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://github.com/cataggar/zig/releases/download/v${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl -sSfL "$URL" | tar -xJ -C "$RUNNER_TEMP"
+          echo "HOST_ZIG=$RUNNER_TEMP/zig-x86_64-linux-${ZIG_VERSION}/zig" >> "$GITHUB_ENV"
+
+      - name: Download LLVM archives (wazigl only)
+        if: steps.meta.outputs.flavor == 'wazigl'
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOST_LLVM_URL="https://github.com/cataggar/llvm/releases/download/llvm-zig-${LLVM_VERSION}/llvm-zig-${LLVM_VERSION}-x86_64-linux.tar.xz"
+          WASM_LLVM_URL="https://github.com/cataggar/llvm/releases/download/llvm-zig-${LLVM_VERSION}/llvm-zig-${LLVM_VERSION}-wasm64-wasi.tar.xz"
+          curl -sSfL "$HOST_LLVM_URL" | tar -xJ -C "$RUNNER_TEMP"
+          curl -sSfL "$WASM_LLVM_URL" | tar -xJ -C "$RUNNER_TEMP"
+          echo "HOST_LLVM_PREFIX=$RUNNER_TEMP/llvm-zig-${LLVM_VERSION}-x86_64-linux" >> "$GITHUB_ENV"
+          echo "WASM_LLVM_PREFIX=$RUNNER_TEMP/llvm-zig-${LLVM_VERSION}-wasm64-wasi" >> "$GITHUB_ENV"
+
+      - name: Build stage3-host and wazig.wasm
+        if: steps.meta.outputs.flavor == 'wazig'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ZIG_LIB_DIR="$PWD/lib" "$HOST_ZIG" build \
+            --prefix "$RUNNER_TEMP/stage3-host" \
+            -Denable-llvm=false \
+            -Duse-llvm=true \
+            -Doptimize=ReleaseFast \
+            -Dno-langref
+
+          "$RUNNER_TEMP/stage3-host/bin/zig" build \
+            --prefix "$RUNNER_TEMP/stage3-wazig" \
+            -Dtarget=wasm64-wasip3 \
+            -Denable-llvm=false \
+            -Duse-llvm=false \
+            -Doptimize=ReleaseSafe \
+            -Dstrip \
+            -Dno-langref \
+            -Dversion-string="${{ steps.meta.outputs.version_string }}"
+
+          mkdir -p dist
+          cp "$RUNNER_TEMP/stage3-wazig/bin/zig.wasm" dist/wazig.wasm
+          ls -lh dist/wazig.wasm
+
+      - name: Build stage3-host and wazigl.wasm
+        if: steps.meta.outputs.flavor == 'wazigl'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ZIG_LIB_DIR="$PWD/lib" "$HOST_ZIG" build \
+            --prefix "$RUNNER_TEMP/stage3-host" \
+            --search-prefix "$HOST_LLVM_PREFIX" \
+            -Denable-llvm=true \
+            -Dstatic-llvm \
+            -Duse-zig-libcxx \
+            -Doptimize=ReleaseFast \
+            -Dno-langref
+
+          "$RUNNER_TEMP/stage3-host/bin/zig" build \
+            --prefix "$RUNNER_TEMP/stage3-wazigl" \
+            --search-prefix "$WASM_LLVM_PREFIX" \
+            -Dtarget=wasm64-wasip3 \
+            -Denable-llvm=true \
+            -Dstatic-llvm \
+            -Duse-llvm=false \
+            -Duse-zig-libcxx \
+            -Doptimize=ReleaseSafe \
+            -Dstrip \
+            -Dno-langref \
+            -Dversion-string="${{ steps.meta.outputs.version_string }}"
+
+          mkdir -p dist
+          cp "$RUNNER_TEMP/stage3-wazigl/bin/zig.wasm" dist/wazigl.wasm
+          ls -lh dist/wazigl.wasm
+
+      - name: Write .wasm.ghr manifest and smoke-test with wasmtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+          FLAVOR="${{ steps.meta.outputs.flavor }}"
+          cat > "dist/${FLAVOR}.wasm.ghr" <<'EOF'
+          .{
+              .version = 1,
+              .runtime = "wasmtime",
+              .runtimeArgs = .{
+                  "run",
+                  "-W", "component-model-memory64=y",
+                  "-W", "component-model-async=y",
+                  "-W", "component-model-async-stackful=y",
+                  "-W", "component-model-more-async-builtins=y",
+                  "-W", "component-model-error-context=y",
+                  "-W", "max-wasm-stack=67108864",
+                  "-W", "async-stack-size=67108864",
+                  "-S", "p3=y",
+                  "-S", "cli-exit-with-code=y",
+                  "-S", "inherit-env=y",
+                  "--dir=.",
+              },
+          }
+          EOF
+
+          WASMTIME_ARGS=(
+            run
+            -W component-model-memory64=y
+            -W component-model-async=y
+            -W component-model-async-stackful=y
+            -W component-model-more-async-builtins=y
+            -W component-model-error-context=y
+            -W max-wasm-stack=67108864
+            -W async-stack-size=67108864
+            -S p3=y
+            -S cli-exit-with-code=y
+            -S inherit-env=y
+            --dir=.
+          )
+
+          ACTUAL_VER="$(wasmtime "${WASMTIME_ARGS[@]}" "dist/${FLAVOR}.wasm" version)"
+          echo "Reported version: ${ACTUAL_VER}"
+          test "${ACTUAL_VER}" = "${{ steps.meta.outputs.version_string }}"
+
+          mkdir -p .zig-cache
+          cat > .zig-cache/smoke.zig <<'EOF'
+          const std = @import("std");
+          pub fn main() void {
+              std.debug.print("smoke ok\n", .{});
+          }
+          EOF
+          wasmtime "${WASMTIME_ARGS[@]}" "dist/${FLAVOR}.wasm" build-exe \
+            .zig-cache/smoke.zig \
+            -target wasm32-wasi \
+            -fno-llvm \
+            -femit-bin=.zig-cache/smoke.wasm
+          wasmtime run .zig-cache/smoke.wasm
+          if [ "$FLAVOR" = "wazigl" ]; then
+            wasmtime "${WASMTIME_ARGS[@]}" "dist/${FLAVOR}.wasm" build-exe \
+              .zig-cache/smoke.zig \
+              -target wasm32-wasi \
+              -fllvm \
+              -O ReleaseSafe \
+              -femit-bin=.zig-cache/smoke_llvm.wasm
+            wasmtime run .zig-cache/smoke_llvm.wasm
+          fi
+          rm -f .zig-cache/smoke.zig .zig-cache/smoke.wasm .zig-cache/smoke_llvm.wasm
+
+      - name: Sign .wasm with minisign
+        if: env.MINISIGN_SECRET_KEY != ''
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          FLAVOR="${{ steps.meta.outputs.flavor }}"
+          TAG="${{ steps.meta.outputs.tag }}"
+          ASSET="dist/${FLAVOR}.wasm"
+          COMMENT="timestamp:$(date +%s) file:${FLAVOR}.wasm commit:${GITHUB_SHA} tag:${TAG}"
+          ghr minisign sign "$ASSET" -t "$COMMENT"
+          ls -lh "dist/${FLAVOR}.wasm.minisig"
+
+      - name: Create or update GitHub prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          FLAVOR: ${{ steps.meta.outputs.flavor }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$FLAVOR" = "wazigl" ]; then
+            DESC="Zig compiler (\`wazigl\`) compiled for \`wasm64-wasip3\` with the LLVM/Clang/LLD backend statically linked in."
+          else
+            DESC="Zig compiler (\`wazig\`) compiled for \`wasm64-wasip3\` (self-hosted backends, without LLVM)."
+          fi
+
+          NOTES="${DESC}
+
+          Install using [ghr](https://github.com/cataggar/ghr):
+
+          \`\`\`sh
+          ghr install ${GITHUB_REPOSITORY}@${TAG}
+          \`\`\`"
+
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Zig $TAG" \
+              --prerelease \
+              --notes "$NOTES"
+          fi
+
+          shopt -s nullglob
+          ASSETS=(dist/"${FLAVOR}".wasm dist/"${FLAVOR}".wasm.ghr dist/"${FLAVOR}".wasm.minisig)
+          gh release upload "$TAG" "${ASSETS[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+      - name: Verify ghr install from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          FLAVOR: ${{ steps.meta.outputs.flavor }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ghr install "${GITHUB_REPOSITORY}@${TAG}"
+          "${FLAVOR}" version

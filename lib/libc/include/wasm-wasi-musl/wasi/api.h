@@ -23,8 +23,8 @@
 #error <wasi/api.h> is only supported on WASI platforms.
 #endif
 
-#ifndef __wasm32__
-#error <wasi/api.h> only supports wasm32; doesn't yet support wasm64
+#if !defined(__wasm32__) && !defined(__wasm64__)
+#error <wasi/api.h> only supports wasm32 and wasm64
 #endif
 
 #include <stddef.h>
@@ -38,7 +38,7 @@ _Static_assert(_Alignof(int32_t) == 4, "non-wasi data layout");
 _Static_assert(_Alignof(uint32_t) == 4, "non-wasi data layout");
 _Static_assert(_Alignof(int64_t) == 8, "non-wasi data layout");
 _Static_assert(_Alignof(uint64_t) == 8, "non-wasi data layout");
-_Static_assert(_Alignof(void*) == 4, "non-wasi data layout");
+_Static_assert(_Alignof(void*) == sizeof(void*), "non-wasi data layout");
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,8 +48,8 @@ extern "C" {
 #define __WASI_DIRCOOKIE_START (UINT64_C(0))
 typedef __SIZE_TYPE__ __wasi_size_t;
 
-_Static_assert(sizeof(__wasi_size_t) == 4, "witx calculated size");
-_Static_assert(_Alignof(__wasi_size_t) == 4, "witx calculated align");
+_Static_assert(sizeof(__wasi_size_t) == sizeof(void*), "witx calculated size");
+_Static_assert(_Alignof(__wasi_size_t) == _Alignof(void*), "witx calculated align");
 
 /**
  * Non-negative file size or length of a region within a file.
@@ -686,10 +686,10 @@ typedef struct __wasi_iovec_t {
 
 } __wasi_iovec_t;
 
-_Static_assert(sizeof(__wasi_iovec_t) == 8, "witx calculated size");
-_Static_assert(_Alignof(__wasi_iovec_t) == 4, "witx calculated align");
+_Static_assert(sizeof(__wasi_iovec_t) == 2 * sizeof(void*), "witx calculated size");
+_Static_assert(_Alignof(__wasi_iovec_t) == _Alignof(void*), "witx calculated align");
 _Static_assert(offsetof(__wasi_iovec_t, buf) == 0, "witx calculated offset");
-_Static_assert(offsetof(__wasi_iovec_t, buf_len) == 4, "witx calculated offset");
+_Static_assert(offsetof(__wasi_iovec_t, buf_len) == sizeof(void*), "witx calculated offset");
 
 /**
  * A region of memory for scatter/gather writes.
@@ -707,10 +707,10 @@ typedef struct __wasi_ciovec_t {
 
 } __wasi_ciovec_t;
 
-_Static_assert(sizeof(__wasi_ciovec_t) == 8, "witx calculated size");
-_Static_assert(_Alignof(__wasi_ciovec_t) == 4, "witx calculated align");
+_Static_assert(sizeof(__wasi_ciovec_t) == 2 * sizeof(void*), "witx calculated size");
+_Static_assert(_Alignof(__wasi_ciovec_t) == _Alignof(void*), "witx calculated align");
 _Static_assert(offsetof(__wasi_ciovec_t, buf) == 0, "witx calculated offset");
-_Static_assert(offsetof(__wasi_ciovec_t, buf_len) == 4, "witx calculated offset");
+_Static_assert(offsetof(__wasi_ciovec_t, buf_len) == sizeof(void*), "witx calculated offset");
 
 /**
  * Relative offset within a file.
@@ -1374,8 +1374,8 @@ typedef struct __wasi_prestat_dir_t {
 
 } __wasi_prestat_dir_t;
 
-_Static_assert(sizeof(__wasi_prestat_dir_t) == 4, "witx calculated size");
-_Static_assert(_Alignof(__wasi_prestat_dir_t) == 4, "witx calculated align");
+_Static_assert(sizeof(__wasi_prestat_dir_t) == sizeof(__wasi_size_t), "witx calculated size");
+_Static_assert(_Alignof(__wasi_prestat_dir_t) == _Alignof(__wasi_size_t), "witx calculated align");
 _Static_assert(offsetof(__wasi_prestat_dir_t, pr_name_len) == 0, "witx calculated offset");
 
 /**
@@ -1389,8 +1389,8 @@ typedef struct __wasi_prestat_t {
     __wasi_prestat_u_t u;
 } __wasi_prestat_t;
 
-_Static_assert(sizeof(__wasi_prestat_t) == 8, "witx calculated size");
-_Static_assert(_Alignof(__wasi_prestat_t) == 4, "witx calculated align");
+_Static_assert(sizeof(__wasi_prestat_t) == 2 * sizeof(__wasi_size_t), "witx calculated size");
+_Static_assert(_Alignof(__wasi_prestat_t) == _Alignof(__wasi_size_t), "witx calculated align");
 
 /**
  * @defgroup wasi_snapshot_preview1
