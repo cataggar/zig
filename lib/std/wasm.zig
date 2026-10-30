@@ -583,7 +583,8 @@ pub const Limits = struct {
     pub const Flags = packed struct(u8) {
         has_max: bool,
         is_shared: bool,
-        reserved: u6 = 0,
+        is_64: bool = false,
+        reserved: u5 = 0,
     };
 };
 

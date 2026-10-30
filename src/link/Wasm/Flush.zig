@@ -831,7 +831,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
         if (memory_ptr > initial_memory) {
             diags.addError("initial memory value {d} insufficient; minimum {d}", .{ initial_memory, memory_ptr });
         }
-        if (initial_memory > std.math.maxInt(u32)) {
+        if (!is64 and initial_memory > std.math.maxInt(u32)) {
             diags.addError("initial memory value {d} exceeds 32-bit address space", .{initial_memory});
         }
         if (diags.hasErrors()) return error.AlreadyReported;
@@ -844,6 +844,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
     // In case we do not import memory, but define it ourselves, set the
     // minimum amount of pages on the memory section.
     wasm.memories.limits.min = @intCast(memory_ptr / page_size);
+    wasm.memories.limits.flags.is_64 = is64;
     log.debug("total memory pages: {d}", .{wasm.memories.limits.min});
 
     if (wasm.max_memory) |max_memory| {
@@ -853,7 +854,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
         if (memory_ptr > max_memory) {
             diags.addError("maximum memory value {d} insufficient; minimum {d}", .{ max_memory, memory_ptr });
         }
-        if (max_memory > std.math.maxInt(u32)) {
+        if (!is64 and max_memory > std.math.maxInt(u32)) {
             diags.addError("maximum memory value {d} exceeds 32-bit address space", .{max_memory});
         }
         if (diags.hasErrors()) return error.AlreadyReported;
@@ -870,7 +871,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
         // This logic that checks `any_tls_relocs` is missing the part where it
         // also notices threadlocal globals from Zcu code.
         if (wasm.any_tls_relocs) try wasm.addFunction(.__wasm_apply_global_tls_relocs, &.{}, &.{});
-        try wasm.addFunction(.__wasm_init_tls, &.{.i32}, &.{});
+        try wasm.addFunction(.__wasm_init_tls, &.{if (is64) .i64 else .i32}, &.{});
         try wasm.globals.ensureUnusedCapacity(gpa, 3);
         wasm.globals.putAssumeCapacity(.__tls_base, {});
         wasm.globals.putAssumeCapacity(.__tls_size, {});
@@ -984,6 +985,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                 .limits_max = wasm.memories.limits.max,
                 .limits_has_max = wasm.memories.limits.flags.has_max,
                 .limits_is_shared = wasm.memories.limits.flags.is_shared,
+                .limits_is_64 = wasm.memories.limits.flags.is_64,
                 .source_location = .none,
             });
             total_imports += 1;
@@ -1340,7 +1342,10 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                 if (flags != .passive) {
                     var aw: std.Io.Writer.Allocating = .fromArrayList(gpa, binary_bytes);
                     defer binary_bytes.* = aw.toArrayList();
-                    try emitInit(&aw.writer, .{ .i32_const = @as(i32, @bitCast(group_start_addr)) });
+                    try emitInit(&aw.writer, if (is64)
+                        .{ .i64_const = @intCast(group_start_addr) }
+                    else
+                        .{ .i32_const = @as(i32, @bitCast(group_start_addr)) });
                 }
                 try appendLeb128(gpa, binary_bytes, group_size);
             }
@@ -2651,7 +2656,7 @@ fn reloc_sleb_table_index(code: []u8, i: IndirectFunctionTableIndex) void {
 }
 
 fn reloc_sleb64_table_index(code: []u8, i: IndirectFunctionTableIndex) void {
-    leb.writeSignedFixed(11, code[0..11], i.toAbi());
+    leb.writeSignedFixed(10, code[0..10], i.toAbi());
 }
 
 fn reloc_u32_function(code: []u8, function: Wasm.OutputFunctionIndex) void {
@@ -2718,7 +2723,7 @@ fn reloc_leb_addr(code: []u8, ra: RelocAddr) void {
 }
 
 fn reloc_leb64_addr(code: []u8, ra: RelocAddr) void {
-    leb.writeUnsignedFixed(11, code[0..11], ra.addr);
+    leb.writeUnsignedFixed(10, code[0..10], ra.addr);
 }
 
 fn reloc_sleb_addr(code: []u8, ra: RelocAddr) void {
@@ -2726,7 +2731,7 @@ fn reloc_sleb_addr(code: []u8, ra: RelocAddr) void {
 }
 
 fn reloc_sleb64_addr(code: []u8, ra: RelocAddr) void {
-    leb.writeSignedFixed(11, code[0..11], ra.addr);
+    leb.writeSignedFixed(10, code[0..10], ra.addr);
 }
 
 fn reloc_leb_table(code: []u8, table: Wasm.TableIndex) void {
@@ -2765,6 +2770,7 @@ fn emitInitMemoryFunction(wasm: *const Wasm, binary_bytes: *ArrayList(u8)) Alloc
     const comp = wasm.base.comp;
     const gpa = comp.gpa;
     const shared_memory = comp.config.shared_memory;
+    const is64 = comp.root_mod.resolved_target.result.cpu.arch == .wasm64;
     const virtual_addrs = &wasm.flush_buffer.virtual_addrs;
 
     // Passive segments are used to avoid memory being reinitialized on each
@@ -2779,7 +2785,7 @@ fn emitInitMemoryFunction(wasm: *const Wasm, binary_bytes: *ArrayList(u8)) Alloc
 
     if (virtual_addrs.init_memory_flag) |flag_address| {
         assert(shared_memory);
-        try binary_bytes.ensureUnusedCapacity(gpa, 2 * 3 + 6 * 3 + 1 + 6 * 3 + 1 + 5 * 4 + 1 + 1);
+        try binary_bytes.ensureUnusedCapacity(gpa, 2 * 3 + 11 + 6 * 2 + 1 + 6 * 3 + 1 + 5 * 4 + 1 + 1);
         // destination blocks
         // based on values we jump to corresponding label
         binary_bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.block)); // $drop
@@ -2792,7 +2798,7 @@ fn emitInitMemoryFunction(wasm: *const Wasm, binary_bytes: *ArrayList(u8)) Alloc
         binary_bytes.appendAssumeCapacity(@backingInt(std.wasm.BlockType.empty));
 
         // atomically check
-        appendReservedI32Const(binary_bytes, flag_address);
+        appendReservedAddrConst(binary_bytes, flag_address, is64);
         appendReservedI32Const(binary_bytes, 0);
         appendReservedI32Const(binary_bytes, 1);
         binary_bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.atomics_prefix));
@@ -2817,29 +2823,31 @@ fn emitInitMemoryFunction(wasm: *const Wasm, binary_bytes: *ArrayList(u8)) Alloc
         const start_addr = wasm.flush_buffer.data_segments.get(segment).?;
         const segment_size: u32 = group.end_addr - start_addr;
 
-        try binary_bytes.ensureUnusedCapacity(gpa, 6 + 6 + 1 + 5 + 6 + 6 + 1 + 6 * 2 + 1 + 1);
+        try binary_bytes.ensureUnusedCapacity(gpa, 11 + 11 + 1 + 5 + 6 + 11 + 1 + 6 * 2 + 1 + 1);
 
         // For passive BSS segments we can simply issue a memory.fill(0). For
         // non-BSS segments we do a memory.init. Both instructions take as
         // their first argument the destination address.
-        appendReservedI32Const(binary_bytes, start_addr);
+        appendReservedAddrConst(binary_bytes, start_addr, is64);
 
         if (shared_memory and segment.isTls(wasm)) {
             // When we initialize the TLS segment we also set the `__tls_base`
             // global.  This allows the runtime to use this static copy of the
             // TLS data for the first/main thread.
-            appendReservedI32Const(binary_bytes, start_addr);
+            appendReservedAddrConst(binary_bytes, start_addr, is64);
             binary_bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.global_set));
             appendReservedUleb32(binary_bytes, virtual_addrs.tls_base.?);
         }
 
         appendReservedI32Const(binary_bytes, 0);
-        appendReservedI32Const(binary_bytes, segment_size);
-        binary_bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.misc_prefix));
         if (segment.isBss(wasm)) {
+            appendReservedAddrConst(binary_bytes, segment_size, is64);
+            binary_bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.misc_prefix));
             // fill bss segment with zeroes
             appendReservedUleb32(binary_bytes, @backingInt(std.wasm.MiscOpcode.memory_fill));
         } else {
+            appendReservedI32Const(binary_bytes, segment_size);
+            binary_bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.misc_prefix));
             // initialize the segment
             appendReservedUleb32(binary_bytes, @backingInt(std.wasm.MiscOpcode.memory_init));
             appendReservedUleb32(binary_bytes, @intCast(segment_index));
@@ -2849,9 +2857,9 @@ fn emitInitMemoryFunction(wasm: *const Wasm, binary_bytes: *ArrayList(u8)) Alloc
 
     if (virtual_addrs.init_memory_flag) |flag_address| {
         assert(shared_memory);
-        try binary_bytes.ensureUnusedCapacity(gpa, 6 + 6 + 1 + 3 * 5 + 6 + 1 + 5 + 1 + 3 * 5 + 1 + 1 + 5 + 1 + 6 * 2 + 1 + 5 + 1 + 3 * 5 + 1 + 1 + 1);
+        try binary_bytes.ensureUnusedCapacity(gpa, 11 + 6 + 1 + 3 * 5 + 11 + 1 + 5 + 1 + 3 * 5 + 1 + 1 + 5 + 1 + 11 + 6 + 1 + 5 + 1 + 3 * 5 + 1 + 1 + 1);
         // we set the init memory flag to value '2'
-        appendReservedI32Const(binary_bytes, flag_address);
+        appendReservedAddrConst(binary_bytes, flag_address, is64);
         appendReservedI32Const(binary_bytes, 2);
         binary_bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.atomics_prefix));
         appendReservedUleb32(binary_bytes, @backingInt(std.wasm.AtomicsOpcode.i32_atomic_store));
@@ -2859,7 +2867,7 @@ fn emitInitMemoryFunction(wasm: *const Wasm, binary_bytes: *ArrayList(u8)) Alloc
         appendReservedUleb32(binary_bytes, @as(u32, 0)); // offset
 
         // notify any waiters for segment initialization completion
-        appendReservedI32Const(binary_bytes, flag_address);
+        appendReservedAddrConst(binary_bytes, flag_address, is64);
         binary_bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.i32_const));
         appendReservedLeb128(binary_bytes, @as(i32, -1)); // number of waiters
         binary_bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.atomics_prefix));
@@ -2874,7 +2882,7 @@ fn emitInitMemoryFunction(wasm: *const Wasm, binary_bytes: *ArrayList(u8)) Alloc
 
         // wait for thread to initialize memory segments
         binary_bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.end)); // end $wait
-        appendReservedI32Const(binary_bytes, flag_address);
+        appendReservedAddrConst(binary_bytes, flag_address, is64);
         appendReservedI32Const(binary_bytes, 1); // expected flag value
         binary_bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.i64_const));
         appendReservedLeb128(binary_bytes, @as(i64, -1)); // timeout
@@ -3124,6 +3132,14 @@ fn appendReservedI64Const(bytes: *ArrayList(u8), val: u64) void {
     return w.writeSleb128(@as(i64, @bitCast(val))) catch |err| switch (err) {
         error.WriteFailed => unreachable,
     };
+}
+
+fn appendReservedAddrConst(bytes: *ArrayList(u8), val: u32, is64: bool) void {
+    if (is64) {
+        appendReservedI64Const(bytes, val);
+    } else {
+        appendReservedI32Const(bytes, val);
+    }
 }
 
 fn appendReservedUleb32(bytes: *ArrayList(u8), val: u32) void {

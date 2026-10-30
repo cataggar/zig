@@ -3130,13 +3130,15 @@ pub const MemoryImport = extern struct {
     source_location: SourceLocation,
     limits_has_max: bool,
     limits_is_shared: bool,
-    padding: [2]u8 = .{ 0, 0 },
+    limits_is_64: bool = false,
+    padding: [1]u8 = .{0},
 
     pub fn limits(mi: *const MemoryImport) std.wasm.Limits {
         return .{
             .flags = .{
                 .has_max = mi.limits_has_max,
                 .is_shared = mi.limits_is_shared,
+                .is_64 = mi.limits_is_64,
             },
             .min = mi.limits_min,
             .max = mi.limits_max,
@@ -4946,9 +4948,14 @@ fn convertZcuFnType(
 
     const gpa = comp.gpa;
     const zcu = comp.zcu.?;
+    const ptr_valtype: std.wasm.Valtype = switch (target.cpu.arch) {
+        .wasm32 => .i32,
+        .wasm64 => .i64,
+        else => unreachable,
+    };
 
     if (CodeGen.firstParamSRet(cc, return_type, zcu, target)) {
-        try params_buffer.append(gpa, .i32); // memory address is always a 32-bit handle
+        try params_buffer.append(gpa, ptr_valtype);
     } else if (return_type.hasRuntimeBits(zcu)) {
         if (cc == .wasm_mvp) {
             switch (abi.classifyType(return_type, zcu, target)) {
@@ -4998,7 +5005,7 @@ fn convertZcuFnType(
     }
 
     if (is_var_args) {
-        try params_buffer.append(gpa, .i32);
+        try params_buffer.append(gpa, ptr_valtype);
     }
 }
 
