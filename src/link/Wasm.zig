@@ -986,13 +986,13 @@ pub const ZcuFunc = union {
                             .exported = wasm.missing_exports.contains(name_string),
                             .explicit_name = false,
                             .no_strip = false,
-                            .tls = ext.is_threadlocal,
+                            .tls = wasm.base.comp.config.any_non_single_threaded and ext.is_threadlocal,
                             .absolute = false,
                         };
                     } else {
                         return .{
                             .binding = .local,
-                            .tls = nav.resolved.?.@"threadlocal",
+                            .tls = wasm.base.comp.config.any_non_single_threaded and nav.resolved.?.@"threadlocal",
                         };
                     }
                 },
@@ -1530,7 +1530,11 @@ pub const TableImport = extern struct {
             return switch (unpack(r)) {
                 .unresolved => unreachable,
                 .__indirect_function_table => .{
-                    .flags = .{ .has_max = !wasm.growable_table, .is_shared = false },
+                    .flags = .{
+                        .has_max = !wasm.growable_table,
+                        .is_shared = false,
+                        .is_64 = wasm.base.comp.root_mod.resolved_target.result.cpu.arch == .wasm64,
+                    },
                     .min = @intCast(wasm.flush_buffer.indirect_function_table.entries.len + 1),
                     .max = @intCast(wasm.flush_buffer.indirect_function_table.entries.len + 1),
                 },
@@ -1560,11 +1564,13 @@ pub const TableImport = extern struct {
         }
     };
 
-    pub fn limits(ti: *const TableImport) std.wasm.Limits {
+    pub fn limits(ti: *const TableImport, wasm: *const Wasm) std.wasm.Limits {
         return .{
             .flags = .{
                 .has_max = ti.flags.limits_has_max,
                 .is_shared = ti.flags.limits_is_shared,
+                .is_64 = ti.name == wasm.preloaded_strings.__indirect_function_table and
+                    wasm.base.comp.root_mod.resolved_target.result.cpu.arch == .wasm64,
             },
             .min = ti.limits_min,
             .max = ti.limits_max,
@@ -1961,13 +1967,13 @@ pub const ObjectDataImport = extern struct {
                             .exported = wasm.missing_exports.contains(name_string),
                             .explicit_name = false,
                             .no_strip = false,
-                            .tls = ext.is_threadlocal,
+                            .tls = wasm.base.comp.config.any_non_single_threaded and ext.is_threadlocal,
                             .absolute = false,
                         };
                     } else {
                         return .{
                             .binding = .local,
-                            .tls = nav.resolved.?.@"threadlocal",
+                            .tls = wasm.base.comp.config.any_non_single_threaded and nav.resolved.?.@"threadlocal",
                         };
                     }
                 },
@@ -2169,7 +2175,7 @@ pub const DataSegmentId = enum(u32) {
                 const zcu = wasm.base.comp.zcu.?;
                 const ip = &zcu.intern_pool;
                 const nav = ip.getNav(i.key(wasm).*);
-                if (nav.resolved.?.@"threadlocal") return .tls;
+                if (wasm.base.comp.config.any_non_single_threaded and nav.resolved.?.@"threadlocal") return .tls;
                 const code = i.value(wasm).code;
                 return if (code.off == .none) .zero else .data;
             },
@@ -2190,7 +2196,7 @@ pub const DataSegmentId = enum(u32) {
                 const zcu = wasm.base.comp.zcu.?;
                 const ip = &zcu.intern_pool;
                 const nav = ip.getNav(i.key(wasm).*);
-                return nav.resolved.?.@"threadlocal";
+                return wasm.base.comp.config.any_non_single_threaded and nav.resolved.?.@"threadlocal";
             },
         };
     }
@@ -2598,7 +2604,7 @@ pub const ZcuImportIndex = enum(u32) {
             .exported = wasm.missing_exports.contains(name_string),
             .explicit_name = index.symbolName(wasm) != name_string,
             .no_strip = false,
-            .tls = ext.is_threadlocal,
+            .tls = wasm.base.comp.config.any_non_single_threaded and ext.is_threadlocal,
             .absolute = false,
         };
     }

@@ -177,8 +177,10 @@ pub fn detectFromBuilding(arena: Allocator, zig_lib_dir: Path, target: *const st
         std.zig.target.openbsdArchNameHeaders(target.cpu.arch)
     else
         @tagName(target.cpu.arch);
-    const os_name = @tagName(target.os.tag);
-    const abi_name = if (target.isMuslLibC())
+    const os_name = if (target.isWasiLibC()) "wasi" else @tagName(target.os.tag);
+    const abi_name = if (target.isWasiLibC())
+        "musl"
+    else if (target.isMuslLibC())
         std.zig.target.muslAbiNameHeaders(target.abi)
     else if (target.isGnuLibC())
         std.zig.target.glibcAbiNameHeaders(target.abi)

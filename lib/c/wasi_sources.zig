@@ -879,7 +879,7 @@ fn __wasilibc_open_nomode(path: [*:0]const u8, oflag: c_int) callconv(.c) c_int 
     return __wasilibc_nocwd_openat_nomode(dirfd, relative_path, oflag);
 }
 
-fn openImpl(path: [*:0]const u8, oflag: c_int, _: c_int) callconv(.c) c_int {
+fn openImpl(path: [*:0]const u8, oflag: c_int, ...) callconv(.c) c_int {
     return __wasilibc_open_nomode(path, oflag);
 }
 
@@ -1128,8 +1128,7 @@ fn wasilibcRenameNewatImpl(from: [*:0]const u8, todirfd: c_int, to: [*:0]const u
 // =========================================================================
 // at_fdcwd.c - AT_FDCWD dispatch for *at functions
 // =========================================================================
-fn openatImpl(dirfd: c_int, pathname: [*:0]const u8, flags: c_int, mode: c_int) callconv(.c) c_int {
-    _ = mode;
+fn openatImpl(dirfd: c_int, pathname: [*:0]const u8, flags: c_int, ...) callconv(.c) c_int {
     if (dirfd == AT_FDCWD or pathname[0] == '/') return __wasilibc_open_nomode(pathname, flags);
     return __wasilibc_nocwd_openat_nomode(dirfd, pathname, flags);
 }
@@ -1273,7 +1272,7 @@ fn wasilibcMaybeReinitializeEnvironEagerlyStrong() callconv(.c) void {
 // =========================================================================
 // __main_void.c (WASIP1 path)
 // =========================================================================
-extern fn __main_argc_argv(argc: usize, argv: [*:null]?[*:0]u8) c_int;
+extern fn __main_argc_argv(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
 
 fn mainVoidImpl() callconv(.c) c_int {
     wasilibcEnsureEnvironImpl();
@@ -1299,7 +1298,7 @@ fn mainVoidImpl() callconv(.c) c_int {
         _Exit(71);
     }
 
-    return __main_argc_argv(argc, argv.?);
+    return __main_argc_argv(@intCast(argc), argv.?);
 }
 
 // =========================================================================

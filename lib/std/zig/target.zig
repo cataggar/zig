@@ -108,6 +108,11 @@ pub const available_libcs = [_]ArchOsAbi{
     .{ .arch = .wasm32, .os = .wasip2, .abi = .musl },
     .{ .arch = .wasm32, .os = .wasip3, .abi = .none },
     .{ .arch = .wasm32, .os = .wasip3, .abi = .musl },
+    .{ .arch = .wasm64, .os = .wasi, .abi = .musl },
+    .{ .arch = .wasm64, .os = .wasip2, .abi = .none },
+    .{ .arch = .wasm64, .os = .wasip2, .abi = .musl },
+    .{ .arch = .wasm64, .os = .wasip3, .abi = .none },
+    .{ .arch = .wasm64, .os = .wasip3, .abi = .musl },
     .{ .arch = .x86, .os = .freebsd, .abi = .none },
     .{ .arch = .x86, .os = .linux, .abi = .gnu, .glibc_triple = "i686-linux-gnu" },
     .{ .arch = .x86, .os = .linux, .abi = .musl },
@@ -401,7 +406,7 @@ pub fn isLibCLibName(target: *const std.Target, name: []const u8) bool {
         if (eqlIgnoreCase(ignore_case, name, "xnet"))
             return true;
 
-        if (target.os.tag == .wasi) {
+        if (target.os.tag.isWasi()) {
             if (eqlIgnoreCase(ignore_case, name, "setjmp"))
                 return true;
             if (eqlIgnoreCase(ignore_case, name, "wasi-emulated-getpid"))
@@ -413,6 +418,17 @@ pub fn isLibCLibName(target: *const std.Target, name: []const u8) bool {
             if (eqlIgnoreCase(ignore_case, name, "wasi-emulated-signal"))
                 return true;
         }
+    } else if (target.isWasiLibC()) {
+        if (eqlIgnoreCase(ignore_case, name, "setjmp"))
+            return true;
+        if (eqlIgnoreCase(ignore_case, name, "wasi-emulated-getpid"))
+            return true;
+        if (eqlIgnoreCase(ignore_case, name, "wasi-emulated-mman"))
+            return true;
+        if (eqlIgnoreCase(ignore_case, name, "wasi-emulated-process-clocks"))
+            return true;
+        if (eqlIgnoreCase(ignore_case, name, "wasi-emulated-signal"))
+            return true;
     }
 
     if (target.os.tag.isDarwin()) {

@@ -1538,7 +1538,7 @@ pub const Directories = struct {
 
         const zig_lib: Cache.Directory = d: {
             if (options.override_zig_lib) |path| break :d openUnresolved(arena, io, cwd, path, .@"zig lib");
-            if (wasi) break :d getPreopen(options.preopens, "/lib");
+            if (wasi) break :d getPreopenOpt(options.preopens, "/lib") orelse openUnresolved(arena, io, cwd, "lib", .@"zig lib");
             break :d findZigLibDirFromSelfExe(arena, io, cwd, options.self_exe_path) catch |err| {
                 fatal("unable to find zig installation directory from executable path {q}: {t}", .{
                     options.self_exe_path, err,
@@ -1552,7 +1552,7 @@ pub const Directories = struct {
 
         const global_cache: Cache.Directory = d: {
             if (options.override_global_cache) |path| break :d openUnresolved(arena, io, cwd, path, .@"global cache");
-            if (wasi) break :d getPreopen(options.preopens, "/cache");
+            if (wasi) break :d getPreopenOpt(options.preopens, "/cache") orelse openUnresolved(arena, io, cwd, ".zig-cache", .@"global cache");
             const path = resolveGlobalCacheDir(arena, options.environ_map) catch |err| {
                 fatal("unable to resolve zig cache directory: {t}", .{err});
             };
@@ -1596,10 +1596,11 @@ pub const Directories = struct {
         };
     }
 
-    fn getPreopen(preopens: std.process.Preopens, name: []const u8) Cache.Directory {
+    fn getPreopenOpt(preopens: std.process.Preopens, name: []const u8) ?Cache.Directory {
+        const res = preopens.get(name) orelse return null;
         return .{
             .path = if (mem.eql(u8, name, ".")) null else name,
-            .handle = switch (preopens.get(name) orelse fatal("preopen not found: {q}", .{name})) {
+            .handle = switch (res) {
                 .file => fatal("preopen {q} is not a directory", .{name}),
                 .dir => |d| d,
             },

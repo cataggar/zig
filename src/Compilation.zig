@@ -5489,7 +5489,9 @@ fn updateCObject(
     if (!build_options.have_llvm) {
         return comp.failCObj(c_object, "clang not available: compiler built without LLVM extensions", .{});
     }
-    const self_exe_path = comp.self_exe_path orelse
+    const self_exe_path = comp.self_exe_path orelse if (!std.process.can_spawn)
+        "zig"
+    else
         return comp.failCObj(c_object, "clang compilation disabled", .{});
 
     const tracy_trace = trace(@src());

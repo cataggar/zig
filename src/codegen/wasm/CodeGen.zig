@@ -2298,9 +2298,6 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) 
         assert(ty.zigTypeTag(zcu) == .pointer);
         const operand = try cg.resolveInst(call.callee);
         try cg.emitWValue(operand);
-        if (cg.ptr_size == .wasm64) {
-            try cg.addTag(.i32_wrap_i64);
-        }
 
         try cg.mir_func_tys.put(cg.gpa, fn_ty.toIntern(), {});
         try cg.addInst(.{
@@ -6440,7 +6437,7 @@ fn isNull(cg: *CodeGen, operand: WValue, op_ty: Type, opcode: std.wasm.Opcode, o
     if (!optional_ty.optionalReprIsPayload(zcu)) {
         // When payload is zero-bits, we can treat operand as a value, rather than
         // a pointer to the stack value
-        if (payload_ty.hasRuntimeBits(zcu)) {
+        if (op_kind == .ptr or payload_ty.hasRuntimeBits(zcu)) {
             const offset = std.math.cast(u32, payload_ty.abiSize(zcu)) orelse {
                 return cg.fail("Optional type {f} too big to fit into stack frame", .{optional_ty.fmt(zcu)});
             };
@@ -6570,13 +6567,9 @@ fn airWrapOptional(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const pt = cg.pt;
     const zcu = pt.zcu;
 
-    const result = result: {
+    const result: WValue = result: {
         if (!payload_ty.hasRuntimeBits(zcu)) {
-            const non_null_bit = try cg.allocStack(Type.u1);
-            try cg.emitMemBase(non_null_bit);
-            try cg.addImm32(1);
-            try cg.addMemArg(.i32_store8, .{ .offset = non_null_bit.memOffset(), .alignment = .@"1" });
-            break :result non_null_bit;
+            break :result .{ .imm32 = 1 };
         }
 
         const operand = try cg.resolveInst(ty_op.operand);

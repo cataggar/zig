@@ -379,7 +379,6 @@ pub fn parse(
                                     for (0..symbol_count) |_| {
                                         const kind, pos = readEnum(Wasm.Comdat.Symbol.Type, bytes, pos);
                                         const index, pos = readLeb(u32, bytes, pos);
-                                        if (true) @panic("TODO rebase index depending on kind");
                                         wasm.object_comdat_symbols.appendAssumeCapacity(.{
                                             .kind = kind,
                                             .index = index,
@@ -935,6 +934,9 @@ pub fn parse(
                 .@"shared-mem" => if (comp.config.shared_memory) {
                     return diags.failParse(path, "object forbids shared-mem but compilation enables it", .{});
                 },
+                .memory64 => if (cpu.arch == .wasm64) {
+                    return diags.failParse(path, "object forbids memory64 but target architecture is wasm64", .{});
+                },
                 else => {
                     const f = feat.tag.toCpuFeature().?;
                     if (cpu.has(.wasm, f)) {
@@ -949,6 +951,9 @@ pub fn parse(
             .@"+", .@"=" => switch (feat.tag) {
                 .@"shared-mem" => if (!comp.config.shared_memory) {
                     return diags.failParse(path, "object requires shared-mem but compilation disables it", .{});
+                },
+                .memory64 => if (cpu.arch != .wasm64) {
+                    return diags.failParse(path, "object requires memory64 but target architecture is not wasm64", .{});
                 },
                 else => {
                     const f = feat.tag.toCpuFeature().?;

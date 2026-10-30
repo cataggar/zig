@@ -42,6 +42,7 @@ extern "c" var stderr: *anyopaque;
 extern "c" fn fprintf(stream: *anyopaque, fmt: [*:0]const u8, ...) c_int;
 extern "c" fn fflush(stream: ?*anyopaque) c_int;
 var __abort_lock: c_int = 0;
+var dso_handle: ?*anyopaque = null;
 
 comptime {
     if (builtin.target.isMuslLibC()) {
@@ -65,6 +66,7 @@ comptime {
         }
         if (builtin.target.isWasiLibC()) {
             symbol(&__wasm_call_dtors, "__wasm_call_dtors");
+            @export(&dso_handle, .{ .name = "__dso_handle", .linkage = .weak, .visibility = .hidden });
         }
         symbol(&libc_exit_fini, "__libc_exit_fini");
         symbol(&exitImpl, "exit");

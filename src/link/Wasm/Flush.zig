@@ -899,6 +899,18 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
     }
     for (wasm.functions.keys()) |function| {
         try f.func_types.put(gpa, function.typeIndex(wasm), {});
+        switch (function.unpack(wasm)) {
+            .object_function => |of_idx| {
+                const relocs = of_idx.ptr(wasm).relocations(wasm);
+                for (relocs.slice.tags(wasm), relocs.slice.pointees(wasm), relocs.slice.offsets(wasm)) |tag, pointee, offset| {
+                    if (offset >= relocs.end) break;
+                    if (tag == .type_index_leb) {
+                        try f.func_types.put(gpa, pointee.type_index, {});
+                    }
+                }
+            },
+            else => {},
+        }
     }
     if (f.func_types.entries.len != 0) {
         const header_offset = try reserveVecSectionHeader(gpa, binary_bytes);
@@ -972,7 +984,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
 
             try binary_bytes.append(gpa, @backingInt(std.wasm.ExternalKind.table));
             try appendLeb128(gpa, binary_bytes, @backingInt(@as(std.wasm.RefType, table_import.flags.ref_type.to())));
-            try emitLimits(gpa, binary_bytes, table_import.limits());
+            try emitLimits(gpa, binary_bytes, table_import.limits(wasm));
         }
         total_imports += wasm.table_imports.entries.len;
 
@@ -1157,7 +1169,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
         {
             var aw: std.Io.Writer.Allocating = .fromArrayList(gpa, binary_bytes);
             defer binary_bytes.* = aw.toArrayList();
-            try emitInit(&aw.writer, .{ .i32_const = 1 });
+            try emitInit(&aw.writer, if (is64) .{ .i64_const = 1 } else .{ .i32_const = 1 });
         }
         if (flags == 0x02) {
             try appendLeb128(gpa, binary_bytes, @as(u8, 0)); // represents funcref
