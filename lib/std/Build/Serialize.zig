@@ -445,8 +445,8 @@ pub fn write(b: *std.Build, wc: *Configuration.Wip, writer: *std.Io.Writer) !voi
                             },
                             .expect_term => |t| expect_term = switch (t) {
                                 .exited => |x| .{ .status = .exited, .value = x },
-                                .signal => |x| .{ .status = .signal, .value = @backingInt(x) },
-                                .stopped => |x| .{ .status = .stopped, .value = @backingInt(x) },
+                                .signal => |x| .{ .status = .signal, .value = if (@TypeOf(x) == void) 0 else @backingInt(x) },
+                                .stopped => |x| .{ .status = .stopped, .value = if (@TypeOf(x) == void) 0 else @backingInt(x) },
                                 .unknown => |x| .{ .status = .unknown, .value = x },
                             },
                             .expect_stderr_snapshot => |path| expect_stderr_snapshot = try s.addLazyPath(path),

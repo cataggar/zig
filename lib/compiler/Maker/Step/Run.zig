@@ -2522,8 +2522,8 @@ fn runCommand(
             if (conf_run.expect_term_value.value) |expected_term_value| {
                 const expected_term: process.Child.Term = switch (conf_run.flags2.expect_term_status) {
                     .exited => .{ .exited = @intCast(expected_term_value) },
-                    .signal => .{ .signal = @fromBackingInt(@intCast(expected_term_value)) },
-                    .stopped => .{ .stopped = @fromBackingInt(@intCast(expected_term_value)) },
+                    .signal => .{ .signal = if (@TypeOf(@as(process.Child.Term, undefined).signal) == void) {} else @fromBackingInt(@intCast(expected_term_value)) },
+                    .stopped => .{ .stopped = if (@TypeOf(@as(process.Child.Term, undefined).stopped) == void) {} else @fromBackingInt(@intCast(expected_term_value)) },
                     .unknown => .{ .unknown = expected_term_value },
                 };
                 if (!termMatches(expected_term, generic_result.term)) {
