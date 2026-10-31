@@ -3618,40 +3618,6 @@ fn updateGlobalDynamic(elf: *Elf, orig_gsi: Symbol.Global.Index, force_apply_rel
         }
     }
 
-    {
-        const dynsym_versym: std.elf.Versym = versym: {
-            // If there's a definition, just use the version in the symbol name.
-            if (gsi.defined(elf)) {
-                if (gsi.version(elf)) |orig_version_slice| {
-                    // We want to add the version to dynstr, but we need to explicitly reserve space
-                    // first because that reservation could invalidate the version slice.
-                    try elf.ensureAdditionalStringCapacity(.dynstr, orig_version_slice.len);
-                    const version_dynstr = elf.stringAssumeCapacity(.dynstr, gsi.version(elf).?);
-                    break :versym .{
-                        .VERSION = try elf.verdefId(version_dynstr),
-                        .HIDDEN = !gsi.isDefaultDefinition(elf),
-                    };
-                }
-                break :versym .GLOBAL;
-            }
-
-            // ...but if it's undefined, we need to consult the matching input DSO global.
-            if (maybe_dso_global) |dso_global| {
-                if (dso_global.version.unwrap()) |version| {
-                    const version_dynstr = try elf.string(.dynstr, version.slice(&elf.dso_globals));
-                    break :versym .{
-                        .VERSION = try elf.verneedId(dso_global.soname, version_dynstr),
-                        .HIDDEN = false,
-                    };
-                }
-            }
-
-            break :versym .LOCAL;
-        };
-
-        elf.targetStore(&elf.versymSlice()[new_dynsym_index], dynsym_versym);
-    }
-
     // Populate the dynsym info from the symtab.
     switch (elf.dynsymPtr(new_dynsym_index)) {
         inline else => |dynsym, class| {
@@ -3806,6 +3772,14 @@ fn updateGlobalDynamic(elf: *Elf, orig_gsi: Symbol.Global.Index, force_apply_rel
                 }
                 apply_relocs = true;
             }
+            // For a copy relocation we should also set the shndx to `.data` in the dynamic symbol
+            // table. We don't do it in the symtab, because if we did, `Symbol.Global.Index.defined`
+            // would incorrectly believe there was actually a local definition.
+            switch (elf.dynsymPtr(new_dynsym_index)) {
+                inline else => |dynsym| {
+                    elf.targetStore(&dynsym.shndx, Section.Index.data.toSection().?);
+                },
+            }
         },
         .canonical_plt => {
             const old_sym_val = Symbol.Id.global(gsi).value(elf);
@@ -3826,6 +3800,47 @@ fn updateGlobalDynamic(elf: *Elf, orig_gsi: Symbol.Global.Index, force_apply_rel
                 apply_relocs = true;
             }
         },
+    }
+
+    // We couldn't set up the symbol versioning entry until now because it could be affected by the
+    // choice of whether we emit a copy relocation.
+    {
+        const dynsym_versym: std.elf.Versym = versym: {
+            // If there's a definition, just use the version in the symbol name.
+            if (gsi.defined(elf)) {
+                if (gsi.version(elf)) |orig_version_slice| {
+                    // We want to add the version to dynstr, but we need to explicitly reserve space
+                    // first because that reservation could invalidate the version slice.
+                    try elf.ensureAdditionalStringCapacity(.dynstr, orig_version_slice.len);
+                    const version_dynstr = elf.stringAssumeCapacity(.dynstr, gsi.version(elf).?);
+                    break :versym .{
+                        .VERSION = try elf.verdefId(version_dynstr),
+                        .HIDDEN = !gsi.isDefaultDefinition(elf),
+                    };
+                }
+                break :versym .GLOBAL;
+            }
+
+            // ...but if it's undefined, we need to consult the matching input DSO global.
+            if (maybe_dso_global) |dso_global| {
+                if (dso_global.version.unwrap()) |version| {
+                    const version_dynstr = try elf.string(.dynstr, version.slice(&elf.dso_globals));
+                    break :versym .{
+                        .VERSION = try elf.verneedId(dso_global.soname, version_dynstr),
+                        .HIDDEN = false,
+                    };
+                }
+            }
+
+            // Otherwise, use `.LOCAL`, unless we emitted a copy relocation or canonical PLT entry,
+            // in which case the symbol is technically defined so should be `.GLOBAL`.
+            break :versym switch (copy) {
+                .no => .LOCAL,
+                .copy_reloc, .canonical_plt => .GLOBAL,
+            };
+        };
+
+        elf.targetStore(&elf.versymSlice()[new_dynsym_index], dynsym_versym);
     }
 
     if (!gsi.defined(elf) and
@@ -8967,6 +8982,7 @@ fn createInitFiniArraySection(
             .@"32" => .@"4",
             .@"64" => .@"8",
         },
+        .entsize = elf.identClass().size(),
         .manual_size = true,
     });
     elf.section_by_name.putAssumeCapacityNoClobber(shndx.name(elf), {});
