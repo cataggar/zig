@@ -92,6 +92,53 @@ pub fn addCases(ctx: *LinkContext) void {
         run.expectStdErrEqual("number: 42\n");
     }
 
+    if (ctx.includeTest("canonical_plt")) |case| case: {
+        if (!ctx.link_libc) break :case;
+
+        const lib = case.addLibrary(.dynamic, .{
+            .name = "lib",
+            .zig_source_bytes =
+            \\export fn get_a_number() u32 {
+            \\    return 1234;
+            \\}
+            \\
+            \\export const fn_ptr_in_lib: *const fn () callconv(.c) u32 = &struct {
+            \\    extern fn get_a_number() u32;
+            \\}.get_a_number;
+            \\
+            ,
+        });
+
+        const exe = case.addExecutable(.{
+            .name = "test",
+            .pic = false, // force PDC so that we need a copy reloc
+            .zig_source_bytes =
+            \\extern fn get_a_number() u32;
+            \\extern const fn_ptr_in_lib: *const fn () callconv(.c) u32;
+            \\pub fn main() void {
+            \\    if (fn_ptr_in_lib != &get_a_number) {
+            \\        std.process.fatal("pointers do not match\n", .{});
+            \\    }
+            \\    std.debug.print("number: {d}\n", .{get_a_number()});
+            \\}
+            \\const std = @import("std");
+            \\
+            ,
+        });
+        exe.linkage = .dynamic;
+        exe.root_module.linkLibrary(lib);
+
+        case.verifyObjdump(exe.getEmittedBin(), &.{
+            "-s",
+            "--symbols",
+            "--only-symbol=get_a_number",
+            "--only-section=.dynsym",
+        }, .{});
+
+        const run = case.addRunArtifact(exe);
+        run.expectStdErrEqual("number: 1234\n");
+    }
+
     if (ctx.includeTest("textrel")) |case| {
         const foo = case.addLibrary(.dynamic, .{
             .name = "foo",
