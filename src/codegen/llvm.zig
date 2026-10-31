@@ -1422,15 +1422,15 @@ pub const Object = struct {
 
         const file = if (root_path) |root|
             try o.builder.debugFile(
-                try o.builder.metadataString(path.sub_path),
-                try o.builder.metadataString(root),
+                if (path.sub_path.len > 0) try o.builder.metadataString(path.sub_path) else null,
+                if (root.len > 0) try o.builder.metadataString(root) else null,
             )
         else blk: {
             const relative = try std.fs.path.relative(gpa, dirs.cwd, null, dirs.cwd, path.sub_path);
             defer gpa.free(relative);
             break :blk try o.builder.debugFile(
-                try o.builder.metadataString(relative),
-                try o.builder.metadataString(dirs.cwd),
+                if (relative.len > 0) try o.builder.metadataString(relative) else null,
+                if (dirs.cwd.len > 0) try o.builder.metadataString(dirs.cwd) else null,
             );
         };
 

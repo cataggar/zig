@@ -2841,8 +2841,9 @@ fn airDbgVarPtr(self: *FuncGen, inst: Air.Inst.Index) Allocator.Error!Builder.Va
     const name: Air.NullTerminatedString = @fromBackingInt(@intCast(pl_op.payload));
     const ptr_ty = self.typeOf(pl_op.operand);
 
+    const name_slice = name.toSlice(self.air);
     const debug_local_var = try o.builder.debugLocalVar(
-        try o.builder.metadataString(name.toSlice(self.air)),
+        if (name_slice.len > 0) try o.builder.metadataString(name_slice) else null,
         self.file,
         self.scope,
         self.prev_dbg_line,

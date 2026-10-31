@@ -309,7 +309,10 @@ jobs:
           else
             gh release edit "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
               --title "Zig $TAG" \
+              --prerelease \
+              --draft=false \
               --notes "$NOTES"
           fi
 
