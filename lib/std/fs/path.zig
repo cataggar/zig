@@ -1913,8 +1913,11 @@ pub fn relativeAppendPosix(
     try resolveAppendPosix(gpa, al, &.{ cwd, to });
     const resolved_to_end = al.items.len;
 
-    var from_it = mem.tokenizeScalar(u8, al.items[resolved_from_start..resolved_from_end], '/');
-    var to_it = mem.tokenizeScalar(u8, al.items[resolved_to_start..resolved_to_end], '/');
+    const resolved_from = al.items[resolved_from_start..resolved_from_end];
+    const resolved_to = al.items[resolved_to_start..resolved_to_end];
+
+    var from_it = mem.tokenizeScalar(u8, if (mem.eql(u8, resolved_from, ".")) "" else resolved_from, '/');
+    var to_it = mem.tokenizeScalar(u8, if (mem.eql(u8, resolved_to, ".")) "" else resolved_to, '/');
     while (true) {
         const from_component = from_it.next() orelse {
             const result = to_it.rest();
@@ -1930,20 +1933,30 @@ pub fn relativeAppendPosix(
         var up_count: usize = 1;
         while (from_it.next()) |_| up_count += 1;
         const up_index_end = up_count * "../".len;
-        const result = al.items[orig_len..];
-
-        var result_index: usize = 0;
-        while (result_index < up_index_end) {
-            result[result_index..][0..3].* = "../".*;
-            result_index += 3;
-        }
         if (to_rest.len == 0) {
-            // Shave off the trailing slash.
-            al.shrinkRetainingCapacity(orig_len + result_index - 1);
+            const result_len = up_index_end - 1;
+            try al.resize(gpa, orig_len + result_len);
+            const result = al.items[orig_len..];
+            var result_index: usize = 0;
+            while (result_index < result_len - 2) : (result_index += 3) {
+                result[result_index..][0..3].* = "../".*;
+            }
+            result[result_index..][0..2].* = "..".*;
             return;
         }
-        @memmove(result[result_index..][0..to_rest.len], to_rest);
-        al.shrinkRetainingCapacity(orig_len + result_index + to_rest.len);
+        const to_rest_offset = @intFromPtr(to_rest.ptr) - @intFromPtr(al.items.ptr);
+        const to_rest_len = to_rest.len;
+        const result_len = up_index_end + to_rest_len;
+        if (orig_len + result_len > al.items.len) {
+            try al.resize(gpa, orig_len + result_len);
+        }
+        const result = al.items[orig_len..];
+        @memmove(result[up_index_end..][0..to_rest_len], al.items[to_rest_offset..][0..to_rest_len]);
+        var result_index: usize = 0;
+        while (result_index < up_index_end) : (result_index += 3) {
+            result[result_index..][0..3].* = "../".*;
+        }
+        al.shrinkRetainingCapacity(orig_len + result_len);
         return;
     }
 
@@ -2002,6 +2015,15 @@ test relative {
     try testRelativePosix("/foo/bar/baz", "/foo/bar/baz-quux", "../baz-quux");
     try testRelativePosix("/baz-quux", "/baz", "../baz");
     try testRelativePosix("/baz", "/baz-quux", "../baz-quux");
+    try testRelativePosix("/a/b/c", "/d", "../../../d");
+    try testRelativePosix("/a/b/c", "/defghijk", "../../../defghijk");
+    try testRelativePosix(".", ".", "");
+    try testRelativePosix("", "smoke.zig", "smoke.zig");
+    try testRelativePosix(".", "smoke.zig", "smoke.zig");
+    try testRelativePosix("a/b", ".", "../..");
+    try testRelativePosix("a/b/c", "a/b", "..");
+    try testRelativePosix("a/b/c", "a", "../..");
+    try testRelativePosix("a/b/c", "a/b/c/d", "d");
 }
 
 fn testRelativePosix(from: []const u8, to: []const u8, expected_output: []const u8) !void {
