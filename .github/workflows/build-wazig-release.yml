@@ -360,7 +360,7 @@ jobs:
           INSTALLED_CMD="$GHR_BIN_DIR/${FLAVOR}"
           (
             cd "$VERIFY_PROJ"
-            unset ZIG_LIB_DIR
+            unset ZIG_LIB_DIR ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR
             "$INSTALLED_CMD" version
             cat > hello.zig <<'EOF'
           const std = @import("std");
