@@ -951,7 +951,8 @@ pub fn fd_filestat_get(fd: wasi.fd_t, buf: *wasi.filestat_t) callconv(.c) wasi.e
     if (hash_ret[0] == 0) {
         const lower = std.mem.readInt(u64, hash_ret[8..16], .little);
         const upper = std.mem.readInt(u64, hash_ret[16..24], .little);
-        buf.ino = lower ^ upper;
+        buf.dev = upper;
+        buf.ino = lower;
     } else {
         freeErrorCodePayload(hash_ret[8..24]);
     }
@@ -1185,9 +1186,7 @@ pub fn fd_readdir(
             var hash_ret: [24]u8 align(8) = @splat(0);
             awaitAsyncCall(@"[method]descriptor.metadata-hash-at"(entry.handle, 0, d_name_ptr, d_name_len, &hash_ret));
             if (hash_ret[0] == 0) {
-                const lower = std.mem.readInt(u64, hash_ret[8..16], .little);
-                const upper = std.mem.readInt(u64, hash_ret[16..24], .little);
-                d_ino = lower ^ upper;
+                d_ino = std.mem.readInt(u64, hash_ret[8..16], .little);
             } else {
                 freeErrorCodePayload(hash_ret[8..24]);
             }
@@ -1379,7 +1378,8 @@ pub fn path_filestat_get(
     if (hash_ret[0] == 0) {
         const lower = std.mem.readInt(u64, hash_ret[8..16], .little);
         const upper = std.mem.readInt(u64, hash_ret[16..24], .little);
-        buf.ino = lower ^ upper;
+        buf.dev = upper;
+        buf.ino = lower;
     } else {
         freeErrorCodePayload(hash_ret[8..24]);
     }
