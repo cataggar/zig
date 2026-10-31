@@ -19,7 +19,8 @@ permissions:
 env:
   ZIG_VERSION: "0.17.0"
   LLVM_VERSION: "22.1.8-p1"
-  GHR_VERSION: "v0.9.1"
+  # Requires ghr with cataggar/ghr#251 (.tar.zst.ghr archive sidecar + ${GHR_TOOL_DIR} expansion)
+  GHR_VERSION: "v0.10.2"
   WASMTIME_VERSION: "v50.0.1"
 
 jobs:
@@ -114,10 +115,6 @@ jobs:
             -Dno-langref \
             -Dversion-string="${{ steps.meta.outputs.version_string }}"
 
-          mkdir -p dist
-          cp "$RUNNER_TEMP/stage3-wazig/bin/zig.wasm" dist/wazig.wasm
-          ls -lh dist/wazig.wasm
-
       - name: Build stage3-host and wazigl.wasm
         if: steps.meta.outputs.flavor == 'wazigl'
         shell: bash
@@ -146,35 +143,23 @@ jobs:
             -Dno-langref \
             -Dversion-string="${{ steps.meta.outputs.version_string }}"
 
-          mkdir -p dist
-          cp "$RUNNER_TEMP/stage3-wazigl/bin/zig.wasm" dist/wazigl.wasm
-          ls -lh dist/wazigl.wasm
-
-      - name: Write .wasm.ghr manifest and smoke-test with wasmtime
+      - name: Package .tar.zst bundle, write .tar.zst.ghr sidecar, and smoke-test with wasmtime
         shell: bash
         run: |
           set -euxo pipefail
           FLAVOR="${{ steps.meta.outputs.flavor }}"
-          cat > "dist/${FLAVOR}.wasm.ghr" <<'EOF'
-          .{
-              .version = 1,
-              .runtime = "wasmtime",
-              .runtimeArgs = .{
-                  "run",
-                  "-W", "component-model-memory64=y",
-                  "-W", "component-model-async=y",
-                  "-W", "component-model-async-stackful=y",
-                  "-W", "component-model-more-async-builtins=y",
-                  "-W", "component-model-error-context=y",
-                  "-W", "max-wasm-stack=67108864",
-                  "-W", "async-stack-size=67108864",
-                  "-S", "p3=y",
-                  "-S", "cli-exit-with-code=y",
-                  "-S", "inherit-env=y",
-                  "--dir=.",
-              },
-          }
-          EOF
+          rm -rf dist
+          python3 scripts/package_wazig_bundle.py \
+            --flavor "$FLAVOR" \
+            --stage-prefix "$RUNNER_TEMP/stage3-${FLAVOR}" \
+            --out-dir dist
+          ls -lh "dist/${FLAVOR}.tar.zst" "dist/${FLAVOR}.tar.zst.ghr"
+
+          BUNDLE_DIR="$RUNNER_TEMP/extracted-${FLAVOR}"
+          SMOKE_DIR="$RUNNER_TEMP/smoke-${FLAVOR}"
+          rm -rf "$BUNDLE_DIR" "$SMOKE_DIR"
+          mkdir -p "$BUNDLE_DIR" "$SMOKE_DIR"
+          zstd -dc "dist/${FLAVOR}.tar.zst" | tar -C "$BUNDLE_DIR" -xf -
 
           WASMTIME_ARGS=(
             run
@@ -188,51 +173,85 @@ jobs:
             -S p3=y
             -S cli-exit-with-code=y
             -S inherit-env=y
+            "--dir=${BUNDLE_DIR}/lib::/lib"
             --dir=.
           )
 
-          ACTUAL_VER="$(wasmtime "${WASMTIME_ARGS[@]}" "dist/${FLAVOR}.wasm" version)"
-          echo "Reported version: ${ACTUAL_VER}"
-          test "${ACTUAL_VER}" = "${{ steps.meta.outputs.version_string }}"
+          (
+            cd "$SMOKE_DIR"
+            unset ZIG_LIB_DIR ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR
 
-          mkdir -p .zig-cache
-          cat > .zig-cache/smoke.zig <<'EOF'
+            ACTUAL_VER="$(wasmtime "${WASMTIME_ARGS[@]}" "${BUNDLE_DIR}/${FLAVOR}.wasm" version)"
+            echo "Reported version: ${ACTUAL_VER}"
+            test "${ACTUAL_VER}" = "${{ steps.meta.outputs.version_string }}"
+
+            cat > smoke.zig <<'EOF'
           const std = @import("std");
+          extern "c" fn abs(x: c_int) c_int;
           pub fn main() void {
+              std.debug.assert(abs(-42) == 42);
               std.debug.print("smoke ok\n", .{});
           }
+          test "bundled test_runner smoke" {
+              try std.testing.expectEqual(@as(c_int, 42), abs(-42));
+          }
           EOF
-          wasmtime "${WASMTIME_ARGS[@]}" "dist/${FLAVOR}.wasm" build-exe \
-            .zig-cache/smoke.zig \
-            -target wasm32-wasi \
-            -fno-llvm \
-            -femit-bin=.zig-cache/smoke.wasm
-          wasmtime run .zig-cache/smoke.wasm
-          if [ "$FLAVOR" = "wazigl" ]; then
-            wasmtime "${WASMTIME_ARGS[@]}" "dist/${FLAVOR}.wasm" build-exe \
-              .zig-cache/smoke.zig \
+            wasmtime "${WASMTIME_ARGS[@]}" "${BUNDLE_DIR}/${FLAVOR}.wasm" build-exe \
+              smoke.zig \
+              -lc \
               -target wasm32-wasi \
-              -fllvm \
-              -O ReleaseSafe \
-              -femit-bin=.zig-cache/smoke_llvm.wasm
-            wasmtime run .zig-cache/smoke_llvm.wasm
-          fi
-          rm -f .zig-cache/smoke.zig .zig-cache/smoke.wasm .zig-cache/smoke_llvm.wasm
+              -fno-llvm \
+              -femit-bin=smoke.wasm
+            wasmtime run smoke.wasm
 
-      - name: Sign .wasm with minisign
-        if: env.MINISIGN_SECRET_KEY != ''
-        env:
-          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
-          MINISIGN_PASSWORD: ${{ secrets.MINISIGN_PASSWORD }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          FLAVOR="${{ steps.meta.outputs.flavor }}"
-          TAG="${{ steps.meta.outputs.tag }}"
-          ASSET="dist/${FLAVOR}.wasm"
-          COMMENT="timestamp:$(date +%s) file:${FLAVOR}.wasm commit:${GITHUB_SHA} tag:${TAG}"
-          ghr minisign sign "$ASSET" -t "$COMMENT"
-          ls -lh "dist/${FLAVOR}.wasm.minisig"
+            wasmtime "${WASMTIME_ARGS[@]}" "${BUNDLE_DIR}/${FLAVOR}.wasm" test \
+              smoke.zig \
+              --test-no-exec \
+              -lc \
+              -target wasm32-wasi \
+              -fno-llvm \
+              -femit-bin=smoke_test.wasm
+            wasmtime run smoke_test.wasm
+
+            if [ "$FLAVOR" = "wazigl" ]; then
+              cat > helper.c <<'EOF'
+          #include <stdlib.h>
+          #include <stdint.h>
+          #include <wasm_simd128.h>
+          int32_t c_helper(int32_t x) { return abs(x); }
+          EOF
+              wasmtime "${WASMTIME_ARGS[@]}" "${BUNDLE_DIR}/${FLAVOR}.wasm" build-exe \
+                smoke.zig \
+                helper.c \
+                -lc \
+                -target wasm32-wasi \
+                -fllvm \
+                -O ReleaseSafe \
+                -femit-bin=smoke_llvm.wasm
+              wasmtime run smoke_llvm.wasm
+            fi
+
+            # Verify --zig-lib-dir precedence overrides /lib and fails on invalid override.
+            cp -r "${BUNDLE_DIR}/lib" custom-lib
+            wasmtime "${WASMTIME_ARGS[@]}" "${BUNDLE_DIR}/${FLAVOR}.wasm" build-exe \
+              smoke.zig \
+              --zig-lib-dir custom-lib \
+              -lc \
+              -target wasm32-wasi \
+              -fno-llvm \
+              -femit-bin=smoke_override.wasm
+            wasmtime run smoke_override.wasm
+            if wasmtime "${WASMTIME_ARGS[@]}" "${BUNDLE_DIR}/${FLAVOR}.wasm" build-exe \
+              smoke.zig \
+              --zig-lib-dir nonexistent-zig-lib \
+              -target wasm32-wasi \
+              -fno-llvm \
+              -femit-bin=smoke_bad.wasm; then
+              echo "ERROR: Expected invalid --zig-lib-dir override to fail" >&2
+              exit 1
+            fi
+          )
+          rm -rf "$BUNDLE_DIR" "$SMOKE_DIR"
 
       - name: Create or update GitHub prerelease
         env:
@@ -243,12 +262,14 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$FLAVOR" = "wazigl" ]; then
-            DESC="Zig compiler (\`wazigl\`) compiled for \`wasm64-wasip3\` with the LLVM/Clang/LLD backend statically linked in."
+            DESC="Zig compiler (\`wazigl\`) compiled for \`wasm64-wasip3\` with the LLVM/Clang/LLD backend statically linked in, bundled with a Wasm-focused \`lib/\` subset in \`wazigl.tar.zst\`."
           else
-            DESC="Zig compiler (\`wazig\`) compiled for \`wasm64-wasip3\` (self-hosted backends, without LLVM)."
+            DESC="Zig compiler (\`wazig\`) compiled for \`wasm64-wasip3\` (self-hosted backends, without LLVM), bundled with a Wasm-focused \`lib/\` subset in \`wazig.tar.zst\`."
           fi
 
           NOTES="${DESC}
+
+          This release publishes unsigned \`${FLAVOR}.tar.zst\` and \`${FLAVOR}.tar.zst.ghr\` assets (no \`.minisig\` signature sidecar).
 
           Install using [ghr](https://github.com/cataggar/ghr):
 
@@ -263,13 +284,40 @@ jobs:
               --title "Zig $TAG" \
               --prerelease \
               --notes "$NOTES"
+          else
+            gh release edit "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Zig $TAG" \
+              --notes "$NOTES"
           fi
 
           shopt -s nullglob
-          ASSETS=(dist/"${FLAVOR}".wasm dist/"${FLAVOR}".wasm.ghr dist/"${FLAVOR}".wasm.minisig)
+          MINISIG_FILES=(dist/*.minisig)
+          if [ "${#MINISIG_FILES[@]}" -ne 0 ]; then
+            echo "ERROR: Unexpected .minisig files in dist/: ${MINISIG_FILES[*]}" >&2
+            exit 1
+          fi
+
+          ASSETS=("dist/${FLAVOR}.tar.zst" "dist/${FLAVOR}.tar.zst.ghr")
+          for asset in "${ASSETS[@]}"; do
+            test -f "$asset"
+          done
           gh release upload "$TAG" "${ASSETS[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
+
+          EXISTING_ASSETS="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          for obsolete in \
+            "${FLAVOR}.wasm" \
+            "${FLAVOR}.wasm.zst" \
+            "${FLAVOR}.wasm.zstd" \
+            "${FLAVOR}.wasm.ghr" \
+            "${FLAVOR}.wasm.minisig" \
+            "${FLAVOR}.tar.zst.minisig"; do
+            if printf '%s\n' "$EXISTING_ASSETS" | grep -Fxq "$obsolete"; then
+              gh release delete-asset "$TAG" "$obsolete" --repo "$GITHUB_REPOSITORY" --yes
+            fi
+          done
 
       - name: Verify ghr install from release
         env:
@@ -279,5 +327,23 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          ghr install "${GITHUB_REPOSITORY}@${TAG}"
-          "${FLAVOR}" version
+          VERIFY_DIR="$RUNNER_TEMP/verify install ${FLAVOR}"
+          VERIFY_PROJ="$RUNNER_TEMP/verify-proj-${FLAVOR}"
+          rm -rf "$VERIFY_DIR" "$VERIFY_PROJ"
+          mkdir -p "$VERIFY_DIR" "$VERIFY_PROJ"
+          GHR_HOME="$VERIFY_DIR/ghr home" ghr install "${GITHUB_REPOSITORY}@${TAG}"
+          INSTALLED_CMD="$VERIFY_DIR/ghr home/bin/${FLAVOR}"
+          (
+            cd "$VERIFY_PROJ"
+            unset ZIG_LIB_DIR
+            "$INSTALLED_CMD" version
+            cat > hello.zig <<'EOF'
+          const std = @import("std");
+          pub fn main() void {
+              std.debug.print("installed ok\n", .{});
+          }
+          EOF
+            "$INSTALLED_CMD" build-exe hello.zig -target wasm32-wasi -fno-llvm -femit-bin=hello.wasm
+            wasmtime run hello.wasm
+          )
+          rm -rf "$VERIFY_DIR" "$VERIFY_PROJ"

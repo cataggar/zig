@@ -41,6 +41,56 @@ In other words, you can **unpack a release of Zig anywhere**, and then begin
 using it immediately. There is no need to install it globally, although this
 mechanism supports that use case too (i.e. `/usr/bin/zig` and `/usr/lib/zig/`).
 
+### WebAssembly (`wasm64-wasip3`) Releases (`wazig` and `wazigl`)
+
+Pre-built WebAssembly (`wasm64-wasip3`) compiler releases are published in two flavors:
+
+* **`wazig`**: Zig compiler with self-hosted backends (without LLVM).
+* **`wazigl`**: Zig compiler with LLVM, Clang, and LLD statically linked in.
+
+Each release publishes an unsigned archive bundle and a companion [ghr](https://github.com/cataggar/ghr) manifest sidecar:
+
+* `<flavor>.tar.zst` — contains `<flavor>.wasm` and a Wasm-focused `lib/` directory at the archive root.
+* `<flavor>.tar.zst.ghr` — external sidecar manifest describing the Wasmtime runtime flags and `--dir=${GHR_TOOL_DIR}/lib::/lib` preopen mount.
+
+`wazig` and `wazigl` releases are not signed with minisign and do not publish `.minisig` files (official mirrored native Zig releases retain their existing minisign verification and `.minisig` assets).
+
+#### Installing with `ghr`
+
+With a version of `ghr` supporting archive-level `.tar.zst.ghr` sidecars (see [`cataggar/ghr#251`](https://github.com/cataggar/ghr/issues/251)):
+
+```sh
+ghr install cataggar/zig@v0.17.0-wazig.1
+# or with LLVM included:
+ghr install cataggar/zig@v0.17.0-wazigl.1
+```
+
+#### Running manually with Wasmtime
+
+After extracting `<flavor>.tar.zst` into `<extracted-dir>`, mount `<extracted-dir>/lib` at guest `/lib` so Zig resolves its bundled library automatically from any working directory while keeping `--dir=.` as the caller's project directory:
+
+```sh
+zstd -dc wazig.tar.zst | tar -C /path/to/wazig -xf -
+wasmtime run \
+  -W component-model-memory64=y \
+  -W component-model-async=y \
+  -W component-model-async-stackful=y \
+  -W component-model-more-async-builtins=y \
+  -W component-model-error-context=y \
+  -W max-wasm-stack=67108864 \
+  -W async-stack-size=67108864 \
+  -S p3=y \
+  -S cli-exit-with-code=y \
+  -S inherit-env=y \
+  --dir=/path/to/wazig/lib::/lib \
+  --dir=. \
+  /path/to/wazig/wazig.wasm build-exe hello.zig -target wasm32-wasi -fno-llvm
+```
+
+#### Bundled `lib/` subset and overrides
+
+The bundled `lib/` directory contains the Wasm-focused subset required for Zig and WASI C compilation (`std/`, `compiler_rt/`, `compiler_rt.zig`, `c/`, `c.zig`, `ubsan_rt.zig`, `compiler/`, `zig.h`, `init/`, `libc/include/wasm-wasi-musl/`, `libc/include/generic-musl/`, and standard/Wasm C compiler headers under `include/`). Native-target libc and C++ header trees are omitted to keep the bundle compact; pass `--zig-lib-dir` or set `ZIG_LIB_DIR` to a full Zig `lib/` directory when cross-compiling against native target headers (explicit overrides take precedence over the `/lib` preopen).
+
 ## Building from Source
 
 Ensure you have the required dependencies:
