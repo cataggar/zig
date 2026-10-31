@@ -53,6 +53,10 @@ pub fn addCases(ctx: *LinkContext) void {
             .zig_source_bytes =
             \\export var my_favourite_number: u32 = 42;
             \\
+            \\export const var_ptr_in_lib: *const u32 = &struct {
+            \\    extern var my_favourite_number: u32;
+            \\}.my_favourite_number;
+            \\
             ,
         });
 
@@ -61,7 +65,11 @@ pub fn addCases(ctx: *LinkContext) void {
             .pic = false, // force PDC so that we need a copy reloc
             .zig_source_bytes =
             \\extern var my_favourite_number: u32;
+            \\extern const var_ptr_in_lib: *u32;
             \\pub fn main() void {
+            \\    if (var_ptr_in_lib != &my_favourite_number) {
+            \\        std.process.fatal("pointers do not match\n", .{});
+            \\    }
             \\    std.debug.print("number: {d}\n", .{my_favourite_number});
             \\}
             \\const std = @import("std");

@@ -1469,8 +1469,30 @@ fn dumpSymbols(
                 symbolBindString(symbol.info.bind),
                 symbol.other.visibility,
                 fmtShndx(d, symbol.shndx),
-                d.fmtIntField(symbol.value, .address),
-                d.fmtIntField(symbol.size, .size),
+                // For SHN_UNDEF symbols in a dynamic symbol table, the address is usually 0, but it
+                // is significant for it to be non-zero because this causes the dynamic linker to
+                // treat the symbol as defined anyway (this is commonly used for canonical PLT
+                // entries). To allow snapshots to differentiate between these two fundamentally
+                // different cases, do not redact the value of SHN_UNDEF symbols in dynamic symbol
+                // tables if that value is zero.
+                d.fmtIntField(symbol.value, kind: {
+                    if (symtab_section.type == .DYNSYM and
+                        symbol.shndx == std.elf.SHN_UNDEF and
+                        symbol.value == 0)
+                    {
+                        break :kind null;
+                    }
+                    break :kind .address;
+                }),
+                // For STT_OBJECT symbols, the symbol size is considered a part of the ABI (and will
+                // not change due to codegen or linker decisions), so don't redact it in that case.
+                d.fmtIntField(symbol.size, switch (symbol.info.bind) {
+                    .LOCAL => .size,
+                    else => switch (symbol.info.type) {
+                        .OBJECT => null,
+                        else => .size,
+                    },
+                }),
                 sym_name,
             });
         }
