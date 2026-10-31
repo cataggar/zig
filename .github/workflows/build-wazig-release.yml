@@ -130,6 +130,7 @@ jobs:
             -Dstatic-llvm \
             -Duse-zig-libcxx \
             -Doptimize=ReleaseFast \
+            -Dstrip \
             -Dno-langref
 
           "$RUNNER_TEMP/stage3-host/bin/zig" build \

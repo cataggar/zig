@@ -546,3 +546,22 @@ static_assert((object::Archive::Kind)ZigLLVMArchiveKind_DARWIN == object::Archiv
 static_assert((object::Archive::Kind)ZigLLVMArchiveKind_DARWIN64 == object::Archive::Kind::K_DARWIN64, "");
 static_assert((object::Archive::Kind)ZigLLVMArchiveKind_COFF == object::Archive::Kind::K_COFF, "");
 static_assert((object::Archive::Kind)ZigLLVMArchiveKind_AIXBIG == object::Archive::Kind::K_AIXBIG, "");
+
+#ifdef __wasi__
+#include <errno.h>
+#include <limits.h>
+#include <sys/auxv.h>
+
+extern "C" unsigned long getauxval(unsigned long item) {
+    if (item == AT_PAGESZ) return PAGESIZE;
+    errno = ENOENT;
+    return 0;
+}
+
+extern "C" int __cxa_atexit(void (*dtor)(void *), void *obj, void *dso_symbol);
+extern "C" int __cxa_thread_atexit(void (*dtor)(void *), void *obj, void *dso_symbol) {
+    return __cxa_atexit(dtor, obj, dso_symbol);
+}
+#endif
+
+

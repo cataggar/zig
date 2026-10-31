@@ -1022,13 +1022,21 @@ pub fn parse(
             const fn_ty_index = ptr.function_index.ptr(ss).*;
             if (gop.found_existing) {
                 if (gop.value_ptr.type != fn_ty_index) {
-                    var err = try diags.addErrorWithNotes(2);
-                    try err.addMsg("symbol '{s}' mismatching function signatures", .{name.slice(wasm)});
-                    gop.value_ptr.source_location.addNote(&err, "imported as {f} here", .{
-                        gop.value_ptr.type.fmt(wasm),
-                    });
-                    source_location.addNote(&err, "imported as {f} here", .{fn_ty_index.fmt(wasm)});
-                    continue;
+                    const existing_ty = gop.value_ptr.type.ptr(wasm);
+                    const new_ty = fn_ty_index.ptr(wasm);
+                    if (gop.value_ptr.resolution == .unresolved and existing_ty.params.slice(wasm).len == 0 and existing_ty.returns.slice(wasm).len == 0) {
+                        gop.value_ptr.type = fn_ty_index;
+                    } else if (new_ty.params.slice(wasm).len == 0 and new_ty.returns.slice(wasm).len == 0) {
+                        // Ignore dummy () -> void signature from vtable/address-only reference.
+                    } else {
+                        var err = try diags.addErrorWithNotes(2);
+                        try err.addMsg("symbol '{s}' mismatching function signatures", .{name.slice(wasm)});
+                        gop.value_ptr.source_location.addNote(&err, "imported as {f} here", .{
+                            gop.value_ptr.type.fmt(wasm),
+                        });
+                        source_location.addNote(&err, "imported as {f} here", .{fn_ty_index.fmt(wasm)});
+                        continue;
+                    }
                 }
                 if (gop.value_ptr.module_name != ptr.module_name.toOptional()) {
                     var err = try diags.addErrorWithNotes(2);
@@ -1193,14 +1201,19 @@ pub fn parse(
             const gop = try wasm.object_function_imports.getOrPut(gpa, name);
             if (gop.found_existing) {
                 if (gop.value_ptr.type != ptr.type_index) {
-                    var err = try diags.addErrorWithNotes(2);
-                    try err.addMsg("function signature mismatch: {s}", .{name.slice(wasm)});
-                    gop.value_ptr.source_location.addNote(&err, "exported as {f} here", .{
-                        ptr.type_index.fmt(wasm),
-                    });
-                    const word = if (gop.value_ptr.resolution == .unresolved) "imported" else "exported";
-                    source_location.addNote(&err, "{s} as {f} here", .{ word, gop.value_ptr.type.fmt(wasm) });
-                    continue;
+                    const existing_ty = gop.value_ptr.type.ptr(wasm);
+                    if (gop.value_ptr.resolution == .unresolved and existing_ty.params.slice(wasm).len == 0 and existing_ty.returns.slice(wasm).len == 0) {
+                        gop.value_ptr.type = ptr.type_index;
+                    } else {
+                        var err = try diags.addErrorWithNotes(2);
+                        try err.addMsg("function signature mismatch: {s}", .{name.slice(wasm)});
+                        gop.value_ptr.source_location.addNote(&err, "exported as {f} here", .{
+                            ptr.type_index.fmt(wasm),
+                        });
+                        const word = if (gop.value_ptr.resolution == .unresolved) "imported" else "exported";
+                        source_location.addNote(&err, "{s} as {f} here", .{ word, gop.value_ptr.type.fmt(wasm) });
+                        continue;
+                    }
                 }
                 if (gop.value_ptr.resolution == .unresolved or gop.value_ptr.flags.binding == .weak) {
                     // Intentional: if they're both weak, take the last one.

@@ -1456,7 +1456,7 @@ pub fn getResolvedCwd(io: Io, gpa: Allocator) std.process.CurrentPathAllocError!
         if (std.debug.runtime_safety) {
             const cwd = try std.process.currentPathAlloc(io, gpa);
             defer gpa.free(cwd);
-            assert(mem.eql(u8, cwd, "."));
+            assert(mem.eql(u8, cwd, ".") or mem.eql(u8, cwd, "/"));
         }
         return "";
     }

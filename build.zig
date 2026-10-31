@@ -300,6 +300,7 @@ pub fn build(b: *std.Build) !void {
             "-C", b.fmt("{f}", .{b.root}), // affects the --git-dir argument
             "--git-dir", ".git", // affected by the -C argument
             "describe", "--match",    "*.*.*", //
+            "--exclude", "v*", //
             "--tags",   "--abbrev=9",
         }, &code, .ignore) catch {
             break :v version_string;
@@ -930,6 +931,11 @@ fn addCompilerStep(b: *std.Build, options: AddCompilerModOptions) *std.Build.Ste
     exe.link_function_sections = function_data_sections;
     exe.link_data_sections = function_data_sections;
 
+    const os_tag_name = @tagName(options.target.result.os.tag);
+    if (std.mem.eql(u8, os_tag_name, "wasip2") or std.mem.eql(u8, os_tag_name, "wasip3")) {
+        exe.root_module.export_symbol_names = &.{"cabi_realloc"};
+    }
+
     return exe;
 }
 
@@ -1059,7 +1065,7 @@ fn addStaticLlvmOptionsToModule(mod: *std.Build.Module, options: struct {
     };
     mod.addCSourceFiles(.{
         .files = &zig_cpp_sources,
-        .flags = if (mod.resolved_target.?.result.os.tag.isWasi()) &wasi_cpp_cflags else &zig_cpp_cflags,
+        .flags = if (std.mem.startsWith(u8, @tagName(mod.resolved_target.?.result.os.tag), "wasi")) &wasi_cpp_cflags else &zig_cpp_cflags,
     });
 
     const lsl_options: std.Build.Module.LinkSystemLibraryOptions = .{ .use_pkg_config = .no };

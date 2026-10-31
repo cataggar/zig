@@ -100,7 +100,7 @@ pub fn picLevel(target: *const std.Target) u32 {
 pub fn supports_fpic(target: *const std.Target) bool {
     return switch (target.os.tag) {
         .windows, .uefi => false, // Technically allowed for `Abi.gnu`, but completely ignored by Clang (by design) anyway.
-        else => true,
+        else => !target.cpu.arch.isWasm(),
     };
 }
 

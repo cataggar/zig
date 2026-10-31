@@ -97,8 +97,10 @@ pub const Diags = struct {
             return switch (msg.source_location) {
                 .none => try bundle.addString(msg.msg),
                 .wasm => |sl| {
-                    const wasm = base.?.cast(.wasm).?;
-                    return sl.string(msg.msg, bundle, wasm);
+                    if (base) |b| if (b.cast(.wasm)) |wasm| {
+                        return sl.string(msg.msg, bundle, wasm);
+                    };
+                    return try bundle.addString(msg.msg);
                 },
             };
         }
