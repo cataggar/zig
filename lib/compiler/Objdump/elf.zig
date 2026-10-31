@@ -112,7 +112,7 @@ pub fn dump(d: *Objdump) Objdump.Error!void {
                 error.EndOfStream => try d.warn("failed to read phdrs: unexpected eof", .{}),
                 else => |e| return e,
             };
-            if (d.opts.symbols) {
+            if (d.opts.symbols or d.opts.dyn_syms) {
                 try dumpSymbols(d, sections);
             }
             if (d.opts.symbol_versions) {
@@ -1411,11 +1411,19 @@ fn dumpSymbols(
 ) Objdump.Error!void {
     const w = d.w;
 
+    assert(d.opts.symbols or d.opts.dyn_syms);
+
     for (sections) |symtab_section| {
         const symbols = switch (symtab_section.contents) {
             .symtab => |symtab| symtab,
             else => continue,
         };
+        // If only `--dyn-syms` was passed, ignore `SHT_SYMTAB` sections
+        switch (symtab_section.type) {
+            .SYMTAB => if (!d.opts.symbols) continue,
+            .DYNSYM => {},
+            else => unreachable,
+        }
 
         for (d.opts.section_filters) |filter| {
             if (std.mem.find(u8, symtab_section.name, filter) != null) break;
