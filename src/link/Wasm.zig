@@ -3876,6 +3876,16 @@ pub fn prelink(wasm: *Wasm, prog_node: std.Progress.Node) link.Error!void {
         }
     }
 
+    const target = &comp.root_mod.resolved_target.result;
+    if (!is_obj and (target.os.tag == .wasip2 or target.os.tag == .wasip3)) {
+        const cabi_realloc_name = try wasm.internString("cabi_realloc");
+        if (wasm.object_function_imports.getPtr(cabi_realloc_name)) |import| {
+            if (import.resolution != .unresolved) {
+                import.flags.exported = true;
+            }
+        }
+    }
+
     if (comp.zcu != null) {
         // Zig always depends on a stack pointer global.
         // If emitting an object, it's an import. Otherwise, the linker synthesizes it.
@@ -4230,9 +4240,9 @@ fn markRelocations(wasm: *Wasm, relocs: ObjectRelocation.IterableSlice) link.Err
             .table_index_rel_sleb,
             .table_index_rel_sleb64,
             => {
-                const function = pointee.function;
+                const function = pointee.function.chaseWeak(wasm);
                 try wasm.object_indirect_function_set.put(gpa, function, {});
-                try markFunction(wasm, function.chaseWeak(wasm), false);
+                try markFunction(wasm, function, false);
             },
             .global_index_leb,
             .global_index_i32,

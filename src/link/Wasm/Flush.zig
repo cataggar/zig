@@ -556,7 +556,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
     for (wasm.object_indirect_function_import_set.keys()) |symbol_name|
         f.indirect_function_table.putAssumeCapacity(.fromSymbolName(wasm, symbol_name), {});
     for (wasm.object_indirect_function_set.keys()) |object_function_index|
-        f.indirect_function_table.putAssumeCapacity(.fromObjectFunction(wasm, object_function_index), {});
+        f.indirect_function_table.putAssumeCapacity(.fromObjectFunctionHandlingWeak(wasm, object_function_index), {});
 
     try f.sorted_init_funcs.ensureUnusedCapacity(gpa, wasm.object_init_funcs.items.len);
     for (wasm.object_init_funcs.items) |init_func| {

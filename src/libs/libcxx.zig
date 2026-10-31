@@ -187,7 +187,7 @@ pub fn buildLibCxx(comp: *Compilation, prog_node: std.Progress.Node) BuildError!
         return error.AlreadyReported;
     };
 
-    const libcxx_files = if (comp.config.any_non_single_threaded)
+    const libcxx_files = if (comp.config.any_non_single_threaded or target.isWasiLibC())
         &(libcxx_base_files ++ libcxx_thread_files)
     else
         &libcxx_base_files;
@@ -195,9 +195,6 @@ pub fn buildLibCxx(comp: *Compilation, prog_node: std.Progress.Node) BuildError!
     var c_source_files = try std.array_list.Managed(Compilation.CSourceFile).initCapacity(arena, libcxx_files.len);
 
     for (libcxx_files) |cxx_src| {
-        // These don't compile on WASI due to e.g. `fchmod` usage.
-        if (std.mem.startsWith(u8, cxx_src, "src/filesystem/") and target.os.tag.isWasi())
-            continue;
         if (std.mem.startsWith(u8, cxx_src, "src/support/win32/") and target.os.tag != .windows)
             continue;
 
@@ -509,7 +506,7 @@ pub fn addCxxArgs(
         abi_version,
     }));
     try cflags.append(try std.fmt.allocPrint(arena, "-D_LIBCPP_HAS_THREADS={d}", .{
-        @as(u1, if (comp.config.any_non_single_threaded) 1 else 0),
+        @as(u1, if (comp.config.any_non_single_threaded or target.isWasiLibC()) 1 else 0),
     }));
     try cflags.append("-D_LIBCPP_HAS_MONOTONIC_CLOCK");
     try cflags.append("-D_LIBCPP_HAS_TERMINAL");
@@ -519,9 +516,7 @@ pub fn addCxxArgs(
     try cflags.append("-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS");
     try cflags.append("-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS");
     try cflags.append("-D_LIBCPP_HAS_VENDOR_AVAILABILITY_ANNOTATIONS=0");
-    try cflags.append(try std.fmt.allocPrint(arena, "-D_LIBCPP_HAS_FILESYSTEM={d}", .{
-        @as(u1, if (target.os.tag.isWasi()) 0 else 1),
-    }));
+    try cflags.append("-D_LIBCPP_HAS_FILESYSTEM=1");
     try cflags.append("-D_LIBCPP_HAS_RANDOM_DEVICE");
     try cflags.append("-D_LIBCPP_HAS_LOCALIZATION");
     try cflags.append("-D_LIBCPP_HAS_UNICODE");
