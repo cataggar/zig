@@ -57,7 +57,7 @@ Each release publishes an unsigned archive bundle and a companion [ghr](https://
 
 #### Installing with `ghr`
 
-With a version of `ghr` supporting archive-level `.tar.zst.ghr` sidecars (see [`cataggar/ghr#251`](https://github.com/cataggar/ghr/issues/251)):
+Requires `ghr` v0.10.2 or later ([`cataggar/ghr#251`](https://github.com/cataggar/ghr/issues/251) / [`cataggar/ghr#252`](https://github.com/cataggar/ghr/pull/252)), which extracts `<flavor>.tar.zst` and expands `--dir=${GHR_TOOL_DIR}/lib::/lib` from `<flavor>.tar.zst.ghr`:
 
 ```sh
 ghr install cataggar/zig@v0.17.0-wazig.1

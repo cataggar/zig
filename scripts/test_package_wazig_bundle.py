@@ -1,4 +1,8 @@
+import os
 from pathlib import Path
+import shutil
+import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -103,6 +107,56 @@ class PackageWazigBundleTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 package_wazig_bundle.package_bundle("wazig", prefix, out_dir)
+
+    def test_ghr_shim_expands_tool_dir_with_spaces(self) -> None:
+        ghr_bin = shutil.which("ghr") or "/home/g/.local/bin/ghr"
+        if not Path(ghr_bin).is_file():
+            self.skipTest("ghr binary not available")
+
+        ghr_bytes = Path(ghr_bin).read_bytes()
+        magic = b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+        pos = ghr_bytes.find(magic, 16)
+        self.assertGreater(pos, 0, "Expected embedded ELF64 shim inside ghr binary")
+        e_shoff, _, _, _, _, e_shentsize, e_shnum, _ = struct.unpack_from("<QIHHHHHH", ghr_bytes, pos + 40)
+        shim_bytes = ghr_bytes[pos : pos + e_shoff + e_shentsize * e_shnum]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bundle_dir = root / "extracted wazig" / "_unit"
+            shim_bin_dir = root / "extracted wazig" / "bin"
+            fake_rt_dir = root / "fake-rt"
+            (bundle_dir / "lib").mkdir(parents=True)
+            shim_bin_dir.mkdir(parents=True)
+            fake_rt_dir.mkdir(parents=True)
+
+            fake_wasmtime = fake_rt_dir / "wasmtime"
+            fake_wasmtime.write_text('#!/bin/sh\nfor a in "$@"; do printf "%s\\n" "$a"; done\n', encoding="utf-8")
+            fake_wasmtime.chmod(0o755)
+
+            shim_exe = shim_bin_dir / "wazig"
+            shim_exe.write_bytes(shim_bytes)
+            shim_exe.chmod(0o755)
+
+            target_wasm = bundle_dir / "wazig.wasm"
+            target_wasm.write_bytes(b"\x00asm\x01\x00\x00\x00")
+
+            manifest_text = package_wazig_bundle.GHR_MANIFEST_CONTENT.replace(
+                ".version = 1,\n",
+                f'.version = 1,\n    .targetWasm = "{target_wasm}",\n',
+                1,
+            )
+            self.assertIn('"--dir=${GHR_TOOL_DIR}/lib::/lib"', manifest_text)
+            (shim_bin_dir / "wazig.ghr").write_text(manifest_text, encoding="utf-8")
+
+            env = os.environ.copy()
+            env["PATH"] = f"{fake_rt_dir}:" + env.get("PATH", "")
+            res = subprocess.run([str(shim_exe), "version"], env=env, capture_output=True, text=True, check=True)
+            forwarded_args = res.stdout.splitlines()
+
+            self.assertIn(f"--dir={bundle_dir}/lib::/lib", forwarded_args)
+            self.assertIn("--dir=.", forwarded_args)
+            self.assertIn(str(target_wasm), forwarded_args)
+            self.assertEqual(forwarded_args[-1], "version")
 
 
 if __name__ == "__main__":

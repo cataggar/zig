@@ -155,33 +155,35 @@ jobs:
             --out-dir dist
           ls -lh "dist/${FLAVOR}.tar.zst" "dist/${FLAVOR}.tar.zst.ghr"
 
-          BUNDLE_DIR="$RUNNER_TEMP/extracted-${FLAVOR}"
+          BUNDLE_DIR="$RUNNER_TEMP/extracted ${FLAVOR}/_unit"
+          SHIM_BIN_DIR="$RUNNER_TEMP/extracted ${FLAVOR}/bin"
           SMOKE_DIR="$RUNNER_TEMP/smoke-${FLAVOR}"
-          rm -rf "$BUNDLE_DIR" "$SMOKE_DIR"
-          mkdir -p "$BUNDLE_DIR" "$SMOKE_DIR"
+          rm -rf "$RUNNER_TEMP/extracted ${FLAVOR}" "$SMOKE_DIR"
+          mkdir -p "$BUNDLE_DIR" "$SHIM_BIN_DIR" "$SMOKE_DIR"
           zstd -dc "dist/${FLAVOR}.tar.zst" | tar -C "$BUNDLE_DIR" -xf -
 
-          WASMTIME_ARGS=(
-            run
-            -W component-model-memory64=y
-            -W component-model-async=y
-            -W component-model-async-stackful=y
-            -W component-model-more-async-builtins=y
-            -W component-model-error-context=y
-            -W max-wasm-stack=67108864
-            -W async-stack-size=67108864
-            -S p3=y
-            -S cli-exit-with-code=y
-            -S inherit-env=y
-            "--dir=${BUNDLE_DIR}/lib::/lib"
-            --dir=.
-          )
+          python3 - "$(command -v ghr)" "dist/${FLAVOR}.tar.zst.ghr" "$SHIM_BIN_DIR/${FLAVOR}" "${BUNDLE_DIR}/${FLAVOR}.wasm" <<'PY'
+          import pathlib, struct, sys
+          ghr_bin, sidecar_path, shim_out, target_wasm = sys.argv[1:5]
+          ghr_bytes = pathlib.Path(ghr_bin).read_bytes()
+          magic = b"\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+          pos = ghr_bytes.find(magic, 16)
+          if pos <= 0:
+              raise RuntimeError(f"Embedded ghr shim ELF not found in {ghr_bin}")
+          e_shoff, _, _, _, _, e_shentsize, e_shnum, _ = struct.unpack_from("<QIHHHHHH", ghr_bytes, pos + 40)
+          shim_path = pathlib.Path(shim_out)
+          shim_path.write_bytes(ghr_bytes[pos : pos + e_shoff + e_shentsize * e_shnum])
+          shim_path.chmod(0o755)
+          sidecar = pathlib.Path(sidecar_path).read_text(encoding="utf-8")
+          manifest = sidecar.replace(".version = 1,\n", f'.version = 1,\n    .targetWasm = "{target_wasm}",\n', 1)
+          pathlib.Path(f"{shim_out}.ghr").write_text(manifest, encoding="utf-8")
+          PY
 
           (
             cd "$SMOKE_DIR"
             unset ZIG_LIB_DIR ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR
 
-            ACTUAL_VER="$(wasmtime "${WASMTIME_ARGS[@]}" "${BUNDLE_DIR}/${FLAVOR}.wasm" version)"
+            ACTUAL_VER="$("$SHIM_BIN_DIR/${FLAVOR}" version)"
             echo "Reported version: ${ACTUAL_VER}"
             test "${ACTUAL_VER}" = "${{ steps.meta.outputs.version_string }}"
 
@@ -196,7 +198,7 @@ jobs:
               try std.testing.expectEqual(@as(c_int, 42), abs(-42));
           }
           EOF
-            wasmtime "${WASMTIME_ARGS[@]}" "${BUNDLE_DIR}/${FLAVOR}.wasm" build-exe \
+            "$SHIM_BIN_DIR/${FLAVOR}" build-exe \
               smoke.zig \
               -lc \
               -target wasm32-wasi \
@@ -204,7 +206,7 @@ jobs:
               -femit-bin=smoke.wasm
             wasmtime run smoke.wasm
 
-            wasmtime "${WASMTIME_ARGS[@]}" "${BUNDLE_DIR}/${FLAVOR}.wasm" test \
+            "$SHIM_BIN_DIR/${FLAVOR}" test \
               smoke.zig \
               --test-no-exec \
               -lc \
@@ -213,6 +215,26 @@ jobs:
               -femit-bin=smoke_test.wasm
             wasmtime run smoke_test.wasm
 
+            cat > build.zig <<'EOF'
+          const std = @import("std");
+          pub fn build(b: *std.Build) void {
+              _ = b;
+          }
+          EOF
+            cat > deps.zig <<'EOF'
+          pub const packages = struct {};
+          pub const root_deps: []const struct { []const u8, []const u8 } = &.{};
+          EOF
+            "$SHIM_BIN_DIR/${FLAVOR}" build-exe \
+              --dep @build \
+              --dep @dependencies \
+              -Mroot=/lib/compiler/configurer.zig \
+              -M@build=build.zig \
+              -M@dependencies=deps.zig \
+              -target wasm32-wasi \
+              -fno-llvm \
+              -femit-bin=configurer.wasm
+
             if [ "$FLAVOR" = "wazigl" ]; then
               cat > helper.c <<'EOF'
           #include <stdlib.h>
@@ -220,7 +242,7 @@ jobs:
           #include <wasm_simd128.h>
           int32_t c_helper(int32_t x) { return abs(x); }
           EOF
-              wasmtime "${WASMTIME_ARGS[@]}" "${BUNDLE_DIR}/${FLAVOR}.wasm" build-exe \
+              "$SHIM_BIN_DIR/${FLAVOR}" build-exe \
                 smoke.zig \
                 helper.c \
                 -lc \
@@ -233,7 +255,7 @@ jobs:
 
             # Verify --zig-lib-dir precedence overrides /lib and fails on invalid override.
             cp -r "${BUNDLE_DIR}/lib" custom-lib
-            wasmtime "${WASMTIME_ARGS[@]}" "${BUNDLE_DIR}/${FLAVOR}.wasm" build-exe \
+            "$SHIM_BIN_DIR/${FLAVOR}" build-exe \
               smoke.zig \
               --zig-lib-dir custom-lib \
               -lc \
@@ -241,7 +263,7 @@ jobs:
               -fno-llvm \
               -femit-bin=smoke_override.wasm
             wasmtime run smoke_override.wasm
-            if wasmtime "${WASMTIME_ARGS[@]}" "${BUNDLE_DIR}/${FLAVOR}.wasm" build-exe \
+            if "$SHIM_BIN_DIR/${FLAVOR}" build-exe \
               smoke.zig \
               --zig-lib-dir nonexistent-zig-lib \
               -target wasm32-wasi \
@@ -251,7 +273,7 @@ jobs:
               exit 1
             fi
           )
-          rm -rf "$BUNDLE_DIR" "$SMOKE_DIR"
+          rm -rf "$RUNNER_TEMP/extracted ${FLAVOR}" "$SMOKE_DIR"
 
       - name: Create or update GitHub prerelease
         env:
@@ -331,8 +353,11 @@ jobs:
           VERIFY_PROJ="$RUNNER_TEMP/verify-proj-${FLAVOR}"
           rm -rf "$VERIFY_DIR" "$VERIFY_PROJ"
           mkdir -p "$VERIFY_DIR" "$VERIFY_PROJ"
-          GHR_HOME="$VERIFY_DIR/ghr home" ghr install "${GITHUB_REPOSITORY}@${TAG}"
-          INSTALLED_CMD="$VERIFY_DIR/ghr home/bin/${FLAVOR}"
+          export GHR_BIN_DIR="$VERIFY_DIR/ghr home/bin"
+          export GHR_TOOL_DIR="$VERIFY_DIR/ghr home/tools"
+          export GHR_CACHE_DIR="$VERIFY_DIR/ghr home/cache"
+          ghr install "${GITHUB_REPOSITORY}@${TAG}"
+          INSTALLED_CMD="$GHR_BIN_DIR/${FLAVOR}"
           (
             cd "$VERIFY_PROJ"
             unset ZIG_LIB_DIR
@@ -346,4 +371,6 @@ jobs:
             "$INSTALLED_CMD" build-exe hello.zig -target wasm32-wasi -fno-llvm -femit-bin=hello.wasm
             wasmtime run hello.wasm
           )
+          ghr list --ids | grep -Fxq "cataggar/zig/${FLAVOR}"
+          ghr uninstall "cataggar/zig/${FLAVOR}"
           rm -rf "$VERIFY_DIR" "$VERIFY_PROJ"
