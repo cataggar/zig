@@ -829,17 +829,28 @@ const WasiThreadImpl = struct {
         allocator: std.mem.Allocator,
         /// The current state of the thread.
         state: State = State.init(.running),
+        /// Stack memory for use by clean-up routine during thread cancellation
+        cleanup_stack_memory: ?[]u8 = null,
+
+        fn deinit(self: *@This()) void {
+            // Use free in the vtable so the stack doesn't get set to undefined when optimize = Debug.
+            // Copy fields to locals first because `self` resides inside `self.memory`.
+            const free = self.allocator.vtable.free;
+            const ptr = self.allocator.ptr;
+            const memory = self.memory;
+            const cleanup_stack_memory = self.cleanup_stack_memory;
+            if (cleanup_stack_memory) |sm| free(ptr, sm, .@"16", 0);
+            free(ptr, memory, .@"1", 0);
+        }
     };
 
     /// A meta-data structure used to bootstrap a thread
     const Instance = struct {
         thread: WasiThread,
-        /// Contains the offset to the new __tls_base.
-        /// The offset starting from the memory's base.
-        tls_offset: usize,
-        /// Contains the offset to the stack for the newly spawned thread.
-        /// The offset is calculated starting from the memory's base.
-        stack_offset: usize,
+        /// Contains the address to the new __tls_base.
+        tls_address: usize,
+        /// Contains the address to the stack for the newly spawned thread.
+        stack_address: usize,
         /// Contains the raw pointer value to the wrapper which holds all arguments
         /// for the callback.
         raw_ptr: usize,
@@ -847,11 +858,6 @@ const WasiThreadImpl = struct {
         /// function upon thread spawn. The above mentioned pointer will be passed
         /// to this function pointer as its argument.
         call_back: *const fn (usize) void,
-        /// When a thread is in `detached` state, we must free all of its memory
-        /// upon thread completion. However, as this is done while still within
-        /// the thread, we must first jump back to the main thread's stack or else
-        /// we end up freeing the stack that we're currently using.
-        original_stack_pointer: [*]u8,
     };
 
     const State = std.atomic.Value(enum(u8) { running, completed, detached });
@@ -877,12 +883,7 @@ const WasiThreadImpl = struct {
     }
 
     fn join(self: Impl) void {
-        defer {
-            // Create a copy of the allocator so we do not free the reference to the
-            // original allocator while freeing the memory.
-            var allocator = self.thread.allocator;
-            allocator.free(self.thread.memory);
-        }
+        defer self.thread.deinit();
 
         while (true) {
             const tid = self.thread.tid.load(.seq_cst);
@@ -908,9 +909,7 @@ const WasiThreadImpl = struct {
     }
 
     fn spawn(config: std.Thread.SpawnConfig, comptime f: anytype, args: anytype) SpawnError!WasiThreadImpl {
-        if (config.allocator == null) {
-            @panic("an allocator is required to spawn a WASI thread");
-        }
+        const allocator = config.allocator orelse std.heap.wasm_allocator;
 
         // Wrapping struct required to hold the user-provided function arguments.
         const Wrapper = struct {
@@ -962,9 +961,9 @@ const WasiThreadImpl = struct {
             // is only a best effort.
             var bytes: usize = std.wasm.page_size;
 
+            bytes += @max(std.wasm.page_size, config.stack_size);
             bytes = std.mem.alignForward(usize, bytes, 16); // align stack to 16 bytes
             stack_offset = bytes;
-            bytes += @max(std.wasm.page_size, config.stack_size);
 
             bytes = std.mem.alignForward(usize, bytes, __tls_align());
             tls_offset = bytes;
@@ -983,19 +982,19 @@ const WasiThreadImpl = struct {
         };
 
         // Allocate the amount of memory required for all meta data.
-        const allocated_memory = try config.allocator.?.alloc(u8, map_bytes);
+        const allocated_memory = try allocator.alloc(u8, map_bytes);
 
         const wrapper: *Wrapper = @ptrCast(@alignCast(&allocated_memory[wrapper_offset]));
         wrapper.* = .{ .args = args };
 
         const instance: *Instance = @ptrCast(@alignCast(&allocated_memory[instance_offset]));
+        const start_address = @intFromPtr(allocated_memory.ptr);
         instance.* = .{
-            .thread = .{ .memory = allocated_memory, .allocator = config.allocator.? },
-            .tls_offset = tls_offset,
-            .stack_offset = stack_offset,
+            .thread = .{ .memory = allocated_memory, .allocator = allocator },
+            .tls_address = start_address + tls_offset,
+            .stack_address = start_address + stack_offset,
             .raw_ptr = @intFromPtr(wrapper),
             .call_back = &Wrapper.entry,
-            .original_stack_pointer = __get_stack_pointer(),
         };
 
         const tid = spawnWasiThread(instance);
@@ -1016,46 +1015,104 @@ const WasiThreadImpl = struct {
     }
 
     /// Called by the host environment after thread creation.
-    fn wasi_thread_start(tid: i32, arg: *Instance) callconv(.c) void {
+    noinline fn wasi_thread_start(_: i32, _: *Instance) callconv(.naked) void {
         comptime assert(!builtin.single_threaded);
-        __set_stack_pointer(arg.thread.memory.ptr + arg.stack_offset);
-        __wasm_init_tls(arg.thread.memory.ptr + arg.tls_offset);
-        @atomicStore(u32, &WasiThreadImpl.tls_thread_id, @intCast(tid), .seq_cst);
+        const clothed = struct {
+            fn run(tid: i32, arg: *Instance) callconv(.c) void {
+                if (arg.thread.cleanup_stack_memory == null) {
+                    // Initialize thread-local variables.
+                    __wasm_init_tls(@ptrFromInt(arg.tls_address));
+                } else {
+                    // Restore the TLS base so thread-local variables are available during clean-up.
+                    __tls_set_base(@ptrFromInt(arg.tls_address));
+                }
+                @atomicStore(u32, &WasiThreadImpl.tls_thread_id, @intCast(tid), .seq_cst);
 
-        // Finished bootstrapping, call user's procedure.
-        arg.call_back(arg.raw_ptr);
+                // Finished bootstrapping, call user's procedure.
+                arg.call_back(arg.raw_ptr);
 
-        switch (arg.thread.state.swap(.completed, .seq_cst)) {
-            .running => {
-                // reset the Thread ID
-                asm volatile (
-                    \\ local.get %[ptr]
-                    \\ i32.const 0
-                    \\ i32.atomic.store 0
-                    :
-                    : [ptr] "r" (&arg.thread.tid.raw),
-                );
+                // Set thread state and free memory allocated for thread.
+                switch (arg.thread.state.swap(.completed, .seq_cst)) {
+                    .running => {
+                        // reset the Thread ID
+                        asm volatile (
+                            \\ local.get %[ptr]
+                            \\ i32.const 0
+                            \\ i32.atomic.store 0
+                            :
+                            : [ptr] "r" (&arg.thread.tid.raw),
+                        );
 
-                // Wake the main thread listening to this thread
-                asm volatile (
-                    \\ local.get %[ptr]
-                    \\ i32.const 1 # waiters
-                    \\ memory.atomic.notify 0
-                    \\ drop # no need to know the waiters
-                    :
-                    : [ptr] "r" (&arg.thread.tid.raw),
-                );
-            },
-            .completed => unreachable,
-            .detached => {
-                // restore the original stack pointer so we can free the memory
-                // without having to worry about freeing the stack
-                __set_stack_pointer(arg.original_stack_pointer);
-                // Ensure a copy so we don't free the allocator reference itself
-                var allocator = arg.thread.allocator;
-                allocator.free(arg.thread.memory);
-            },
-        }
+                        // Wake the main thread listening to this thread
+                        asm volatile (
+                            \\ local.get %[ptr]
+                            \\ i32.const 1 # waiters
+                            \\ memory.atomic.notify 0
+                            \\ drop # no need to know the waiters
+                            :
+                            : [ptr] "r" (&arg.thread.tid.raw),
+                        );
+                    },
+                    .completed => unreachable,
+                    .detached => arg.thread.deinit(),
+                }
+            }
+        };
+        // Set the stack pointer then jump to the "clothed" portion of the function.
+        asm volatile (if (target.cpu.arch == .wasm64)
+                \\ local.get 1
+                \\ i64.load %[stack_address_offset]
+                \\ global.set __stack_pointer
+                \\ local.get 0
+                \\ local.get 1
+                \\ call %[cont]
+                \\ return
+            else
+                \\ local.get 1
+                \\ i32.load %[stack_address_offset]
+                \\ global.set __stack_pointer
+                \\ local.get 0
+                \\ local.get 1
+                \\ call %[cont]
+                \\ return
+            :
+            : [stack_address_offset] "X" (@offsetOf(Instance, "stack_address")),
+              [cont] "X" (&clothed.run),
+        );
+    }
+
+    /// Send a cancelation request to the WebAssembly host. Currently there's no standard function
+    /// defined for this purpose. To implement cancelation in non-standard manner, you need to
+    /// provide the import name (and library name) of the cancelation function.
+    ///
+    /// To shut down a thread immediately, the cancelation function should use Worker.terminate()
+    /// to kill the worker and spawn a replacement worker to finish the clean-up process.
+    ///
+    /// If deferred cancelation is requested, the host should wait until the thread makes a WASI
+    /// call, at which point it should throw a JavaScript error to halt WebAssembly execution.
+    /// The same worker can then be used to perform clean-up.
+    ///
+    /// We reuse `wasi_thread_start` to run the clean-up routine. Fresh stack memory is allocated
+    /// for its use, as the original stack would be in an unknown state. The caller of this function
+    /// needs to specify the amount.
+    pub fn cancel(self: *@This(), immediate: bool, cb: *const fn (usize) void, arg: usize, comptime options: struct {
+        stack_size: usize,
+        cancel_fn: struct {
+            name: []const u8,
+            library_name: ?[]const u8,
+        },
+    }) !void {
+        const stack_mem = try self.thread.allocator.alignedAlloc(u8, .@"16", options.stack_size);
+        const instance: *Instance = @fieldParentPtr("thread", self.thread);
+        instance.call_back = cb;
+        instance.raw_ptr = arg;
+        instance.stack_address = std.mem.alignBackward(usize, @intFromPtr(stack_mem.ptr) + stack_mem.len, 16);
+        self.thread.cleanup_stack_memory = stack_mem;
+        const cancelThread = @extern(*const fn (i32, *Instance, bool) callconv(.c) void, .{
+            .name = options.cancel_fn.name,
+            .library_name = options.cancel_fn.library_name,
+        });
+        cancelThread(self.thread.tid.raw, instance, immediate);
     }
 
     /// Asks the host to create a new thread for us.
@@ -1070,11 +1127,30 @@ const WasiThreadImpl = struct {
 
     /// Returns a pointer to the base of the TLS data segment for the current thread
     inline fn __tls_base() [*]u8 {
-        return asm (
-            \\ .globaltype __tls_base, i32
-            \\ global.get __tls_base
-            \\ local.set %[ret]
+        return asm volatile (if (target.cpu.arch == .wasm64)
+                \\ .globaltype __tls_base, i64
+                \\ global.get __tls_base
+                \\ local.set %[ret]
+            else
+                \\ .globaltype __tls_base, i32
+                \\ global.get __tls_base
+                \\ local.set %[ret]
             : [ret] "=r" (-> [*]u8),
+        );
+    }
+
+    /// Set the base of the TLS data segment for the current thread
+    inline fn __tls_set_base(ptr: [*]u8) void {
+        asm volatile (if (target.cpu.arch == .wasm64)
+                \\ .globaltype __tls_base, i64
+                \\ local.get %[ptr]
+                \\ global.set __tls_base
+            else
+                \\ .globaltype __tls_base, i32
+                \\ local.get %[ptr]
+                \\ global.set __tls_base
+            :
+            : [ptr] "r" (ptr),
         );
     }
 
@@ -1095,25 +1171,6 @@ const WasiThreadImpl = struct {
             \\ global.get __tls_align
             \\ local.set %[ret]
             : [ret] "=r" (-> u32),
-        );
-    }
-
-    /// Allows for setting the stack pointer in the WebAssembly module.
-    inline fn __set_stack_pointer(addr: [*]u8) void {
-        asm volatile (
-            \\ local.get %[ptr]
-            \\ global.set __stack_pointer
-            :
-            : [ptr] "r" (addr),
-        );
-    }
-
-    /// Returns the current value of the stack pointer
-    inline fn __get_stack_pointer() [*]u8 {
-        return asm (
-            \\ global.get __stack_pointer
-            \\ local.set %[stack_ptr]
-            : [stack_ptr] "=r" (-> [*]u8),
         );
     }
 };
@@ -1616,6 +1673,7 @@ fn testThreadName(io: Io, thread: *Thread) !void {
 
 test "setName, getName" {
     if (builtin.single_threaded) return error.SkipZigTest;
+    if (native_os.isWasi()) return error.SkipZigTest;
 
     const io = testing.io;
 
@@ -1726,7 +1784,7 @@ test "Thread.getCurrentId" {
 
 test "thread local storage" {
     if (builtin.single_threaded) return error.SkipZigTest;
-    if (@sizeOf(usize) == 4) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/25498
+    if (@sizeOf(usize) == 4 and !native_os.isWasi()) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/25498
 
     const thread1 = try Thread.spawn(.{}, testTls, .{});
     const thread2 = try Thread.spawn(.{}, testTls, .{});
@@ -1740,6 +1798,85 @@ fn testTls() !void {
     if (x != 1234) return error.TlsBadStartValue;
     x += 1;
     if (x != 1235) return error.TlsBadEndValue;
+}
+
+test "wasi thread cancel" {
+    if (builtin.single_threaded or !native_os.isWasi()) return error.SkipZigTest;
+
+    const S = struct {
+        var ready: std.atomic.Value(u32) = .init(0);
+        var allow_exit: std.atomic.Value(u32) = .init(0);
+        var cleanup_tls: i32 = 0;
+        var cleanup_arg: usize = 0;
+
+        fn getSp() usize {
+            return asm volatile (if (target.cpu.arch == .wasm64)
+                    \\ global.get __stack_pointer
+                    \\ local.set %[ret]
+                else
+                    \\ global.get __stack_pointer
+                    \\ local.set %[ret]
+                : [ret] "=r" (-> usize),
+            );
+        }
+
+        fn setSp(sp: usize) void {
+            asm volatile (
+                \\ local.get %[sp]
+                \\ global.set __stack_pointer
+                :
+                : [sp] "r" (sp),
+            );
+        }
+
+        fn mockCancel(tid: i32, instance: *WasiThreadImpl.Instance, _: bool) callconv(.c) void {
+            const startFn = @extern(*const fn (i32, *WasiThreadImpl.Instance) callconv(.c) void, .{
+                .name = "wasi_thread_start",
+            });
+            const saved_sp = getSp();
+            const saved_tb = WasiThreadImpl.__tls_base();
+            startFn(tid, instance);
+            setSp(saved_sp);
+            WasiThreadImpl.__tls_set_base(saved_tb);
+        }
+
+        fn worker() void {
+            x = 5678;
+            ready.store(1, .release);
+            while (allow_exit.load(.acquire) == 0) std.atomic.spinLoopHint();
+        }
+
+        fn onCleanup(arg: usize) void {
+            cleanup_arg = arg;
+            cleanup_tls = x;
+        }
+    };
+    comptime {
+        @export(&S.mockCancel, .{ .name = "zig_test_wasi_thread_cancel" });
+    }
+
+    const main_x = x;
+    var thread = try Thread.spawn(.{ .stack_size = 64 * 1024 }, S.worker, .{});
+    while (S.ready.load(.acquire) == 0) std.atomic.spinLoopHint();
+    const tid = thread.getHandle();
+    S.allow_exit.store(1, .release);
+    while (thread.impl.thread.tid.load(.seq_cst) != 0) std.atomic.spinLoopHint();
+
+    thread.impl.thread.state.store(.running, .seq_cst);
+    thread.impl.thread.tid.store(tid, .seq_cst);
+
+    try thread.impl.cancel(true, S.onCleanup, 0x12345678, .{
+        .stack_size = 64 * 1024,
+        .cancel_fn = .{
+            .name = "zig_test_wasi_thread_cancel",
+            .library_name = null,
+        },
+    });
+    thread.join();
+
+    try std.testing.expectEqual(@as(usize, 0x12345678), S.cleanup_arg);
+    try std.testing.expectEqual(@as(i32, 5678), S.cleanup_tls);
+    try std.testing.expectEqual(main_x, x);
 }
 
 /// Configures the per-thread alternative signal stack requested by `std.options.signal_stack_size`.
