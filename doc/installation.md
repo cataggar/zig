@@ -1,6 +1,26 @@
-# Installing `wazig`, `wazigl`, and Zig Releases
+# Installing Zig, `wazig`, and `wazigl` Releases
 
 Releases in `cataggar/zig` can be installed using [`ghr`](https://github.com/cataggar/ghr).
+
+---
+
+## Official Zig Releases (Mirrored from `ziglang.org`)
+
+Stable Zig releases are mirrored automatically and unchanged from <https://ziglang.org/download/>.
+
+Install without specifying a key:
+
+```sh
+ghr install cataggar/zig@v0.17.0
+```
+
+Or verify the download against the official Zig [minisign](https://jedisct1.github.io/minisign/) public key:
+
+```sh
+MINISIGN_PUB=RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
+ghr install cataggar/zig@v0.16.0 $MINISIGN_PUB
+ghr install cataggar/zig@v0.17.0 $MINISIGN_PUB
+```
 
 ---
 
@@ -54,26 +74,6 @@ wasmtime run \
   --dir=/path/to/wazig/lib::/lib \
   --dir=. \
   /path/to/wazig/wazig.wasm build-exe hello.zig -target wasm32-wasi -fno-llvm
-```
-
----
-
-## Official Zig Releases (Mirrored from `ziglang.org`)
-
-Stable Zig releases are mirrored automatically and unchanged from <https://ziglang.org/download/>.
-
-Install without specifying a key:
-
-```sh
-ghr install cataggar/zig@v0.17.0
-```
-
-Or verify the download against the official Zig [minisign](https://jedisct1.github.io/minisign/) public key:
-
-```sh
-MINISIGN_PUB=RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
-ghr install cataggar/zig@v0.16.0 $MINISIGN_PUB
-ghr install cataggar/zig@v0.17.0 $MINISIGN_PUB
 ```
 
 ---

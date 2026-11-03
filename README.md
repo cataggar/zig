@@ -25,6 +25,15 @@ Releases are installed with [`ghr`](https://github.com/cataggar/ghr). See
 [`doc/installation.md`](doc/installation.md) for minisign signature verification
 and running `wazig.wasm` / `wazigl.wasm` directly with `wasmtime`.
 
+#### Official Zig Releases (mirrored from ziglang.org)
+
+Stable Zig releases are mirrored automatically from
+<https://ziglang.org/download/>:
+
+```sh
+ghr install cataggar/zig@v0.17.0
+```
+
 #### WebAssembly (`wasm64-wasip3`) Releases (`wazig` and `wazigl`)
 
 Pre-built WebAssembly (`wasm64-wasip3`) compiler releases are published in two
@@ -47,15 +56,6 @@ Run `wazig`:
 ```sh
 wazig version
 wazig --help
-```
-
-#### Official Zig Releases (mirrored from ziglang.org)
-
-Stable Zig releases are mirrored automatically from
-<https://ziglang.org/download/>:
-
-```sh
-ghr install cataggar/zig@v0.17.0
 ```
 
 ## Documentation
