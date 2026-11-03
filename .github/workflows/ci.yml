@@ -2,9 +2,9 @@ name: WASI Component CI
 
 on:
   push:
-    branches: [wasi, wabt-component]
+    branches: [wazig, wabt-component]
   pull_request:
-    branches: [wasi, wabt-component]
+    branches: [wazig, wabt-component]
 
 permissions:
   contents: read

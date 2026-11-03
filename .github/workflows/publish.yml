@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: mirror
+          ref: wazig
       - uses: astral-sh/setup-uv@v5
 
       - name: Download Zig assets
