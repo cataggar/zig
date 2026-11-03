@@ -360,6 +360,10 @@ pub const FunctionIndex = enum(u32) {
         }
         if (wasm.function_exports.get(name)) |index| return index;
         if (wasm.hidden_function_exports.get(name)) |index| return index;
+        if (name == wasm.preloaded_strings.__wasm_init_memory) return fromResolution(wasm, .__wasm_init_memory);
+        if (name == wasm.preloaded_strings.__wasm_apply_global_tls_relocs) return fromResolution(wasm, .__wasm_apply_global_tls_relocs);
+        if (name == wasm.preloaded_strings.__wasm_call_ctors) return fromResolution(wasm, .__wasm_call_ctors);
+        if (name == wasm.preloaded_strings.__wasm_init_tls) return fromResolution(wasm, .__wasm_init_tls);
         return null;
     }
 
@@ -533,6 +537,12 @@ pub const GlobalIndex = enum(u32) {
 
     pub fn fromSymbolName(wasm: *const Wasm, name: String) GlobalIndex {
         if (wasm.flush_buffer.global_imports.getIndex(name)) |i| return @fromBackingInt(@intCast(i));
+        if (name == wasm.preloaded_strings.__heap_base) return fromResolution(wasm, .__heap_base).?;
+        if (name == wasm.preloaded_strings.__heap_end) return fromResolution(wasm, .__heap_end).?;
+        if (name == wasm.preloaded_strings.__stack_pointer) return fromResolution(wasm, .__stack_pointer).?;
+        if (name == wasm.preloaded_strings.__tls_align) return fromResolution(wasm, .__tls_align).?;
+        if (name == wasm.preloaded_strings.__tls_base) return fromResolution(wasm, .__tls_base).?;
+        if (name == wasm.preloaded_strings.__tls_size) return fromResolution(wasm, .__tls_size).?;
         const import = wasm.object_global_imports.getPtr(name).?;
         return fromResolution(wasm, import.resolution).?;
     }
@@ -1156,7 +1166,7 @@ pub const FunctionImport = extern struct {
                 .__wasm_call_ctors,
                 .__wasm_init_memory,
                 => getExistingFuncType2(wasm, &.{}, &.{}),
-                .__wasm_init_tls => getExistingFuncType2(wasm, &.{.i32}, &.{}),
+                .__wasm_init_tls => getExistingFuncType2(wasm, &.{if (wasm.pointerSize() == 8) .i64 else .i32}, &.{}),
                 .object_function => |i| i.ptr(wasm).type_index,
                 .zcu_func => |i| i.typeIndex(wasm),
             };
@@ -2299,7 +2309,11 @@ pub const DataSegmentId = enum(u32) {
 
     pub fn isPassive(id: DataSegmentId, wasm: *const Wasm) bool {
         const comp = wasm.base.comp;
-        if (comp.config.import_memory) return true;
+        if (wasm.base.isRelocatable()) {
+            return comp.config.any_non_single_threaded and
+                comp.root_mod.resolved_target.result.cpu.has(.wasm, .bulk_memory);
+        }
+        if (comp.config.import_memory or comp.config.shared_memory) return true;
         return switch (unpack(id, wasm)) {
             .__zig_error_names,
             .__zig_error_name_table,
@@ -2740,32 +2754,54 @@ pub const FunctionImportId = enum(u32) {
     }
 };
 
-/// 0. `__stack_pointer`.
+/// 0. Synthetic globals (`__heap_base`..`__tls_size`).
 /// 1. Index into `object_global_imports`.
 /// 2. Index into `imports`.
 pub const GlobalImportId = enum(u32) {
+    __heap_base,
+    __heap_end,
     __stack_pointer,
+    __tls_align,
+    __tls_base,
+    __tls_size,
     _,
 
+    const first_object_global = @backingInt(GlobalImportId.__tls_size) + 1;
+
     pub const Unpacked = union(enum) {
+        __heap_base,
+        __heap_end,
         __stack_pointer,
+        __tls_align,
+        __tls_base,
+        __tls_size,
         object_global_import: GlobalImport.Index,
         zcu_import: ZcuImportIndex,
     };
 
     pub fn pack(unpacked: Unpacked, wasm: *const Wasm) GlobalImportId {
         return switch (unpacked) {
+            .__heap_base => .__heap_base,
+            .__heap_end => .__heap_end,
             .__stack_pointer => .__stack_pointer,
-            .object_global_import => |i| @fromBackingInt(@intCast(@backingInt(i) + 1)),
-            .zcu_import => |i| @fromBackingInt(@intCast(@backingInt(i) + wasm.object_global_imports.entries.len + 1)),
+            .__tls_align => .__tls_align,
+            .__tls_base => .__tls_base,
+            .__tls_size => .__tls_size,
+            .object_global_import => |i| @fromBackingInt(@intCast(@backingInt(i) + first_object_global)),
+            .zcu_import => |i| @fromBackingInt(@intCast(@backingInt(i) + wasm.object_global_imports.entries.len + first_object_global)),
         };
     }
 
     pub fn unpack(id: GlobalImportId, wasm: *const Wasm) Unpacked {
         return switch (id) {
+            .__heap_base => .__heap_base,
+            .__heap_end => .__heap_end,
             .__stack_pointer => .__stack_pointer,
+            .__tls_align => .__tls_align,
+            .__tls_base => .__tls_base,
+            .__tls_size => .__tls_size,
             _ => {
-                const i = @backingInt(id) - 1;
+                const i = @backingInt(id) - first_object_global;
                 if (i < wasm.object_global_imports.entries.len) {
                     return .{ .object_global_import = @fromBackingInt(@intCast(i)) };
                 }
@@ -2781,7 +2817,13 @@ pub const GlobalImportId = enum(u32) {
 
     pub fn flags(id: GlobalImportId, wasm: *const Wasm) SymbolFlags {
         return switch (id.unpack(wasm)) {
-            .__stack_pointer => .{
+            .__heap_base,
+            .__heap_end,
+            .__stack_pointer,
+            .__tls_align,
+            .__tls_base,
+            .__tls_size,
+            => .{
                 .binding = .strong,
                 .undefined = true,
             },
@@ -2794,7 +2836,13 @@ pub const GlobalImportId = enum(u32) {
     /// diagnostic generation.
     pub fn sourceLocation(id: GlobalImportId, wasm: *const Wasm) SourceLocation {
         switch (id.unpack(wasm)) {
-            .__stack_pointer => return .zig_object_nofile,
+            .__heap_base,
+            .__heap_end,
+            .__stack_pointer,
+            .__tls_align,
+            .__tls_base,
+            .__tls_size,
+            => return .zig_object_nofile,
             .object_global_import => |obj_global_index| {
                 // TODO binary search
                 for (wasm.objects.items, 0..) |o, i| {
@@ -2811,27 +2859,43 @@ pub const GlobalImportId = enum(u32) {
 
     pub fn importName(id: GlobalImportId, wasm: *const Wasm) String {
         return switch (unpack(id, wasm)) {
+            .__heap_base => wasm.preloaded_strings.__heap_base,
+            .__heap_end => wasm.preloaded_strings.__heap_end,
             .__stack_pointer => wasm.preloaded_strings.__stack_pointer,
+            .__tls_align => wasm.preloaded_strings.__tls_align,
+            .__tls_base => wasm.preloaded_strings.__tls_base,
+            .__tls_size => wasm.preloaded_strings.__tls_size,
             inline .object_global_import, .zcu_import => |i| i.importName(wasm),
         };
     }
 
     pub fn moduleName(id: GlobalImportId, wasm: *const Wasm) OptionalString {
         return switch (unpack(id, wasm)) {
-            .__stack_pointer => wasm.preloaded_strings.env.toOptional(),
+            .__heap_base,
+            .__heap_end,
+            .__stack_pointer,
+            .__tls_align,
+            .__tls_base,
+            .__tls_size,
+            => wasm.preloaded_strings.env.toOptional(),
             inline .object_global_import, .zcu_import => |i| i.moduleName(wasm),
         };
     }
 
     pub fn globalType(id: GlobalImportId, wasm: *Wasm) ObjectGlobal.Type {
+        const ptr_valtype: std.wasm.Valtype = switch (wasm.pointerSize()) {
+            4 => .i32,
+            8 => .i64,
+            else => unreachable,
+        };
         return switch (unpack(id, wasm)) {
-            .__stack_pointer => .{
-                .valtype = switch (wasm.pointerSize()) {
-                    4 => .i32,
-                    8 => .i64,
-                    else => unreachable,
-                },
+            .__stack_pointer, .__tls_base => .{
+                .valtype = ptr_valtype,
                 .mutable = true,
+            },
+            .__heap_base, .__heap_end, .__tls_align, .__tls_size => .{
+                .valtype = ptr_valtype,
+                .mutable = false,
             },
             inline .object_global_import, .zcu_import => |i| i.globalType(wasm),
         };
@@ -2907,6 +2971,7 @@ pub const ZcuRelocation = struct {
         data_uav: InternPool.Index,
         data_nav: InternPool.Nav.Index,
         data_resolution: ObjectDataImport.Resolution,
+        global_name: String,
         stack_pointer,
         type_index: FunctionType.Index,
     };
@@ -4017,7 +4082,7 @@ fn markObject(wasm: *Wasm, i: ObjectIndex) link.Error!void {
 }
 
 /// Recursively mark alive everything referenced by the global.
-fn markGlobalImport(
+pub fn markGlobalImport(
     wasm: *Wasm,
     name: String,
     import: *GlobalImport,
@@ -4875,6 +4940,13 @@ pub fn syntheticDataAddr(wasm: *const Wasm, resolution: ObjectDataImport.Resolut
 }
 
 /// Asserts it is called after `Flush.data_segments` is fully populated and sorted.
+pub fn navTlsOffset(wasm: *const Wasm, nav_index: InternPool.Nav.Index) u32 {
+    const addr = wasm.navAddr(nav_index);
+    const tls_start_addr = wasm.flush_buffer.data_segments.values()[0];
+    return addr - tls_start_addr;
+}
+
+/// Asserts it is called after `Flush.data_segments` is fully populated and sorted.
 pub fn navAddr(wasm: *const Wasm, nav_index: InternPool.Nav.Index) u32 {
     assert(wasm.flush_buffer.memory_layout_finished);
     const comp = wasm.base.comp;
@@ -5078,7 +5150,7 @@ fn lowerZcuData(wasm: *Wasm, pt: Zcu.PerThread, ip_index: InternPool.Index) !Zcu
             .len = naive_code.len,
         };
     } else c: {
-        wasm.any_passive_inits = wasm.any_passive_inits or wasm.base.comp.config.import_memory;
+        wasm.any_passive_inits = wasm.any_passive_inits or wasm.base.comp.config.import_memory or wasm.base.comp.config.shared_memory;
         break :c naive_code;
     };
 

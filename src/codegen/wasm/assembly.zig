@@ -3,20 +3,32 @@ const mem = std.mem;
 const assert = std.debug.assert;
 const CodeGen = @import("CodeGen.zig");
 const Mir = @import("Mir.zig");
+const InternPool = @import("../../InternPool.zig");
 
-pub const LocalMap = std.array_hash_map.String(u32);
+pub const Operand = union(enum) {
+    local: u32,
+    imm: i64,
+    func_nav: InternPool.Nav.Index,
+};
+
+pub const OperandMap = std.array_hash_map.String(Operand);
 
 pub fn assemble(
     cg: *CodeGen,
     source: [:0]const u8,
-    local_map: *const LocalMap,
+    operand_map: *const OperandMap,
 ) !void {
+    cg.asm_operands = operand_map;
+    defer cg.asm_operands = null;
+
     var line_it = mem.tokenizeAny(u8, source, "\n\r;");
     next_line: while (line_it.next()) |line| {
         var word_it = mem.tokenizeAny(u8, line, " \t");
         const inst = word_it.next() orelse continue :next_line;
 
-        if (mem.eql(u8, inst, "unreachable")) {
+        if (mem.eql(u8, inst, ".globaltype")) {
+            try parseGlobalType(cg, inst, &word_it);
+        } else if (mem.eql(u8, inst, "unreachable")) {
             try cg.addTag(.@"unreachable");
         } else if (mem.eql(u8, inst, "block")) {
             try cg.addTag(.block);
@@ -32,19 +44,28 @@ pub fn assemble(
             try cg.addLabel(.br_if, label);
         } else if (mem.eql(u8, inst, "return")) {
             try cg.addTag(.@"return");
+        } else if (mem.eql(u8, inst, "call")) {
+            const nav_index = try parseCallArg(cg, inst, &word_it, operand_map);
+            try cg.addInst(.{ .tag = .call_nav, .data = .{ .nav_index = nav_index } });
         } else if (mem.eql(u8, inst, "drop")) {
             try cg.addTag(.drop);
         } else if (mem.eql(u8, inst, "select")) {
             try cg.addTag(.select);
         } else if (mem.eql(u8, inst, "local.get")) {
-            const local = try parseLocalArg(cg, inst, &word_it, local_map);
+            const local = try parseLocalArg(cg, inst, &word_it, operand_map);
             try cg.addLocal(.local_get, local);
         } else if (mem.eql(u8, inst, "local.set")) {
-            const local = try parseLocalArg(cg, inst, &word_it, local_map);
+            const local = try parseLocalArg(cg, inst, &word_it, operand_map);
             try cg.addLocal(.local_set, local);
         } else if (mem.eql(u8, inst, "local.tee")) {
-            const local = try parseLocalArg(cg, inst, &word_it, local_map);
+            const local = try parseLocalArg(cg, inst, &word_it, operand_map);
             try cg.addLocal(.local_tee, local);
+        } else if (mem.eql(u8, inst, "global.get")) {
+            const global_str = try parseGlobalArg(cg, inst, &word_it);
+            try cg.addInst(.{ .tag = .global_get, .data = .{ .str = global_str } });
+        } else if (mem.eql(u8, inst, "global.set")) {
+            const global_str = try parseGlobalArg(cg, inst, &word_it);
+            try cg.addInst(.{ .tag = .global_set, .data = .{ .str = global_str } });
         } else if (mem.eql(u8, inst, "i32.load")) {
             const mem_arg = try parseMemArg(cg, inst, &word_it);
             try cg.addMemArg(.i32_load, mem_arg);
@@ -634,17 +655,84 @@ pub fn assemble(
         }
 
         const remaining = word_it.next() orelse continue :next_line;
-        if (mem.startsWith(u8, inst, "#")) continue :next_line;
-        if (mem.startsWith(u8, inst, "//")) continue :next_line;
+        if (mem.startsWith(u8, remaining, "#")) continue :next_line;
+        if (mem.startsWith(u8, remaining, "//")) continue :next_line;
         return cg.fail("Malformed assembly, unknown string after instruction \"{s}\"", .{remaining});
     }
+}
+
+fn parseGlobalType(
+    cg: *CodeGen,
+    inst: []const u8,
+    word_it: *mem.TokenIterator(u8, .any),
+) !void {
+    const raw_name = word_it.next() orelse {
+        return cg.fail("Malformed assembly, global name not found for \"{s}\"", .{inst});
+    };
+    if (!mem.endsWith(u8, raw_name, ",") or raw_name.len <= 1) {
+        return cg.fail("Malformed assembly, expected comma after global name \"{s}\"", .{raw_name});
+    }
+    const raw_valtype = word_it.next() orelse {
+        return cg.fail("Malformed assembly, valtype not found for \"{s}\"", .{inst});
+    };
+    const has_trailing_comma = mem.endsWith(u8, raw_valtype, ",");
+    const valtype_str = if (has_trailing_comma) raw_valtype[0 .. raw_valtype.len - 1] else raw_valtype;
+    if (!mem.eql(u8, valtype_str, "i32") and
+        !mem.eql(u8, valtype_str, "i64") and
+        !mem.eql(u8, valtype_str, "f32") and
+        !mem.eql(u8, valtype_str, "f64"))
+    {
+        return cg.fail("Malformed assembly, unknown global valtype \"{s}\"", .{valtype_str});
+    }
+    if (has_trailing_comma) {
+        const mut_str = word_it.next() orelse {
+            return cg.fail("Malformed assembly, expected \"immutable\" after comma in \"{s}\"", .{inst});
+        };
+        if (!mem.eql(u8, mut_str, "immutable")) {
+            return cg.fail("Malformed assembly, unknown global qualifier \"{s}\"", .{mut_str});
+        }
+    }
+}
+
+fn parseGlobalArg(
+    cg: *CodeGen,
+    inst: []const u8,
+    word_it: *mem.TokenIterator(u8, .any),
+) !InternPool.NullTerminatedString {
+    const name = word_it.next() orelse {
+        return cg.fail("Malformed assembly, argument not found for \"{s}\"", .{inst});
+    };
+    const zcu = cg.pt.zcu;
+    return zcu.intern_pool.getOrPutString(cg.gpa, zcu.comp.io, cg.pt.tid, name, .no_embedded_nulls);
+}
+
+fn parseCallArg(
+    cg: *CodeGen,
+    inst: []const u8,
+    word_it: *mem.TokenIterator(u8, .any),
+    operand_map: *const OperandMap,
+) !InternPool.Nav.Index {
+    const arg = word_it.next() orelse {
+        return cg.fail("Malformed assembly, argument not found for \"{s}\"", .{inst});
+    };
+    if (arg.len >= 3 and arg[0] == '%' and arg[1] == '[' and arg[arg.len - 1] == ']') {
+        const name = arg[2 .. arg.len - 1];
+        const op = operand_map.get(name) orelse {
+            return cg.fail("Malformed assembly, unknown name \"{s}\"", .{name});
+        };
+        return switch (op) {
+            .func_nav => |nav| nav,
+            else => cg.fail("Malformed assembly, operand \"{s}\" is not a function", .{name}),
+        };
+    }
+    return cg.fail("Malformed assembly, malformed call target \"{s}\"", .{arg});
 }
 
 fn parseLocalArg(
     cg: *CodeGen,
     inst: []const u8,
     word_it: *mem.TokenIterator(u8, .any),
-    local_map: *const LocalMap,
+    operand_map: *const OperandMap,
 ) !u32 {
     const arg = word_it.next() orelse {
         return cg.fail("Malformed assembly, argument not found for \"{s}\"", .{inst});
@@ -656,8 +744,12 @@ fn parseLocalArg(
         return local;
     }
     const name = arg[2 .. arg.len - 1];
-    return local_map.get(name) orelse {
+    const op = operand_map.get(name) orelse {
         return cg.fail("Malformed assembly, unknown name \"{s}\"", .{name});
+    };
+    return switch (op) {
+        .local => |local| local,
+        else => cg.fail("Malformed assembly, operand \"{s}\" is not a local", .{name}),
     };
 }
 
@@ -665,10 +757,23 @@ fn parseLabel(cg: *CodeGen, inst: []const u8, word_it: *mem.TokenIterator(u8, .a
     const label_str = word_it.next() orelse {
         return cg.fail("Malformed assembly, label not found for \"{s}\"", .{inst});
     };
-    const label = std.fmt.parseInt(u32, label_str, 0) catch {
+    return (try parseImmOrInt(u32, cg, label_str)) orelse {
         return cg.fail("Malformed assembly, malformed label \"{s}\"", .{label_str});
     };
-    return label;
+}
+
+fn parseImmOrInt(comptime T: type, cg: *CodeGen, arg: []const u8) !?T {
+    if (arg.len >= 3 and arg[0] == '%' and arg[1] == '[' and arg[arg.len - 1] == ']') {
+        const name = arg[2 .. arg.len - 1];
+        const op = cg.asm_operands.?.get(name) orelse {
+            return cg.fail("Malformed assembly, unknown name \"{s}\"", .{name});
+        };
+        return switch (op) {
+            .imm => |imm| std.math.cast(T, imm),
+            else => cg.fail("Malformed assembly, operand \"{s}\" is not an immediate", .{name}),
+        };
+    }
+    return std.fmt.parseInt(T, arg, 0) catch null;
 }
 
 fn parseMemArg(cg: *CodeGen, inst: []const u8, word_it: *mem.TokenIterator(u8, .any)) !Mir.MemArg {
@@ -679,31 +784,49 @@ fn parseMemArg(cg: *CodeGen, inst: []const u8, word_it: *mem.TokenIterator(u8, .
         const offset_str = oa[0];
         const alignment_str = oa[1];
 
-        const offset = std.fmt.parseInt(i64, offset_str, 0) catch {
+        const offset = (try parseImmOrInt(i64, cg, offset_str)) orelse {
             return cg.fail("Malformed assembly, malformed offset \"{s}\"", .{offset_str});
         };
-        const alignment_p2 = std.fmt.parseInt(u5, alignment_str, 0) catch {
+        const alignment_p2 = (try parseImmOrInt(u5, cg, alignment_str)) orelse {
             return cg.fail("Malformed assembly, malformed offset \"{s}\"", .{alignment_str});
         };
 
         return .{ .offset = @bitCast(offset), .alignment = .fromLog2Units(alignment_p2) };
     } else {
         const offset_str = mem_arg_str;
-        const offset = std.fmt.parseInt(i64, offset_str, 0) catch {
+        const offset = (try parseImmOrInt(i64, cg, offset_str)) orelse {
             return cg.fail("Malformed assembly, malformed offset \"{s}\"", .{offset_str});
         };
-        return .{ .offset = @bitCast(offset), .alignment = .@"1" };
+        return .{ .offset = @bitCast(offset), .alignment = defaultAlignment(inst) };
     }
+}
+
+fn defaultAlignment(inst: []const u8) InternPool.Alignment {
+    if (mem.indexOf(u8, inst, "8") != null) return .@"1";
+    if (mem.indexOf(u8, inst, "16") != null) return .@"2";
+    if (mem.indexOf(u8, inst, "32") != null or
+        mem.startsWith(u8, inst, "i32.") or
+        mem.startsWith(u8, inst, "f32.") or
+        mem.eql(u8, inst, "memory.atomic.notify"))
+    {
+        return .@"4";
+    }
+    if (mem.indexOf(u8, inst, "64") != null or
+        mem.startsWith(u8, inst, "i64.") or
+        mem.startsWith(u8, inst, "f64."))
+    {
+        return .@"8";
+    }
+    return .@"1";
 }
 
 fn parseInt(comptime T: type, cg: *CodeGen, inst: []const u8, word_it: *mem.TokenIterator(u8, .any)) !T {
     const value_str = word_it.next() orelse {
         return cg.fail("Malformed assembly, value not found for \"{s}\"", .{inst});
     };
-    const value = std.fmt.parseInt(T, value_str, 0) catch {
+    return (try parseImmOrInt(T, cg, value_str)) orelse {
         return cg.fail("Malformed assembly, malformed integer value \"{s}\"", .{value_str});
     };
-    return value;
 }
 
 fn parseFloat(comptime T: type, cg: *CodeGen, inst: []const u8, word_it: *mem.TokenIterator(u8, .any)) !T {

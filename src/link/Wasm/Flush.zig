@@ -271,6 +271,29 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                     f.function_imports.swapRemoveAt(i);
                     continue;
                 }
+                if (!is_obj) {
+                    if (symbol_name == wasm.preloaded_strings.__wasm_init_memory) {
+                        try wasm.functions.ensureUnusedCapacity(gpa, 1);
+                        try wasm.addFunction(.__wasm_init_memory, &.{}, &.{});
+                        f.function_imports.swapRemoveAt(i);
+                        continue;
+                    } else if (symbol_name == wasm.preloaded_strings.__wasm_apply_global_tls_relocs) {
+                        try wasm.functions.ensureUnusedCapacity(gpa, 1);
+                        try wasm.addFunction(.__wasm_apply_global_tls_relocs, &.{}, &.{});
+                        f.function_imports.swapRemoveAt(i);
+                        continue;
+                    } else if (symbol_name == wasm.preloaded_strings.__wasm_call_ctors) {
+                        try wasm.functions.ensureUnusedCapacity(gpa, 1);
+                        try wasm.addFunction(.__wasm_call_ctors, &.{}, &.{});
+                        f.function_imports.swapRemoveAt(i);
+                        continue;
+                    } else if (symbol_name == wasm.preloaded_strings.__wasm_init_tls) {
+                        try wasm.functions.ensureUnusedCapacity(gpa, 1);
+                        try wasm.addFunction(.__wasm_init_tls, &.{if (is64) .i64 else .i32}, &.{});
+                        f.function_imports.swapRemoveAt(i);
+                        continue;
+                    }
+                }
                 i += 1;
             }
         }
@@ -474,6 +497,30 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                     }
                 }
             },
+            .global_get, .global_set => {
+                const symbol_name = try wasm.internString(data.str.toSlice(ip));
+                if (symbol_name == wasm.preloaded_strings.__heap_base) {
+                    if (is_obj) try f.global_imports.put(gpa, symbol_name, .__heap_base) else try wasm.globals.put(gpa, .__heap_base, {});
+                } else if (symbol_name == wasm.preloaded_strings.__heap_end) {
+                    if (is_obj) try f.global_imports.put(gpa, symbol_name, .__heap_end) else try wasm.globals.put(gpa, .__heap_end, {});
+                } else if (symbol_name == wasm.preloaded_strings.__stack_pointer) {
+                    if (is_obj) try f.global_imports.put(gpa, symbol_name, .__stack_pointer) else try wasm.globals.put(gpa, .__stack_pointer, {});
+                } else if (symbol_name == wasm.preloaded_strings.__tls_align) {
+                    if (is_obj) try f.global_imports.put(gpa, symbol_name, .__tls_align) else try wasm.globals.put(gpa, .__tls_align, {});
+                } else if (symbol_name == wasm.preloaded_strings.__tls_base) {
+                    if (is_obj) try f.global_imports.put(gpa, symbol_name, .__tls_base) else try wasm.globals.put(gpa, .__tls_base, {});
+                } else if (symbol_name == wasm.preloaded_strings.__tls_size) {
+                    if (is_obj) try f.global_imports.put(gpa, symbol_name, .__tls_size) else try wasm.globals.put(gpa, .__tls_size, {});
+                } else if (wasm.object_global_imports.getIndex(symbol_name)) |object_import_index| {
+                    const i: Wasm.GlobalImport.Index = @fromBackingInt(@intCast(object_import_index));
+                    try wasm.markGlobalImport(symbol_name, i.value(wasm), i);
+                    if (i.value(wasm).resolution == .unresolved) {
+                        try f.global_imports.put(gpa, symbol_name, .fromObject(i, wasm));
+                    }
+                } else {
+                    return diags.fail("undefined global symbol '{s}'", .{symbol_name.slice(wasm)});
+                }
+            },
             else => continue,
         };
 
@@ -623,15 +670,6 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
 
     try wasm.functions.ensureUnusedCapacity(gpa, 3);
 
-    // Passive segments are used to avoid memory being reinitialized on each
-    // thread's instantiation. These passive segments are initialized and
-    // dropped in __wasm_init_memory, which is registered as the start function
-    // We also initialize bss segments (using memory.fill) as part of this
-    // function.
-    if (!is_obj and wasm.any_passive_inits) {
-        try wasm.addFunction(.__wasm_init_memory, &.{}, &.{});
-    }
-
     try wasm.tables.ensureUnusedCapacity(gpa, 1);
 
     if (f.indirect_function_table.entries.len > 0) {
@@ -752,6 +790,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
     assert(f.data_segment_groups.items.len == 0);
     if (segment_ids.len > 0) {
         var seen_tls: enum { before, during, after } = .before;
+        var tls_start_addr: u32 = 0;
         var category: Wasm.DataSegmentId.Category = undefined;
         var first_segment: Wasm.DataSegmentId = segment_ids[0];
         for (segment_ids, segment_vaddrs, 0..) |segment_id, *segment_vaddr, i| {
@@ -764,6 +803,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                 switch (seen_tls) {
                     .before => switch (category) {
                         .tls => {
+                            tls_start_addr = @intCast(start_addr);
                             virtual_addrs.tls_base = if (shared_memory) 0 else @intCast(start_addr);
                             virtual_addrs.tls_align = alignment;
                             seen_tls = .during;
@@ -774,10 +814,11 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                     .during => switch (category) {
                         .tls => {
                             virtual_addrs.tls_align = virtual_addrs.tls_align.maxStrict(alignment);
-                            virtual_addrs.tls_size = @intCast(memory_ptr - virtual_addrs.tls_base.?);
+                            virtual_addrs.tls_size = @intCast(memory_ptr - tls_start_addr);
                             break :b false;
                         },
                         else => {
+                            virtual_addrs.tls_size = @intCast(memory_ptr - tls_start_addr);
                             seen_tls = .after;
                             break :b true;
                         },
@@ -804,9 +845,31 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
             .first_segment = first_segment,
             .end_addr = @intCast(memory_ptr),
         });
-        if (category == .tls and seen_tls == .during) {
-            virtual_addrs.tls_size = @intCast(memory_ptr - virtual_addrs.tls_base.?);
+        if (seen_tls == .during) {
+            virtual_addrs.tls_size = @intCast(memory_ptr - tls_start_addr);
         }
+    }
+
+    if (shared_memory and virtual_addrs.tls_base == null) {
+        virtual_addrs.tls_base = 0;
+        virtual_addrs.tls_size = 0;
+        virtual_addrs.tls_align = .@"1";
+    }
+
+    wasm.any_passive_inits = wasm.any_passive_inits or blk: {
+        for (f.data_segment_groups.items) |group| {
+            if (group.first_segment.isPassive(wasm)) break :blk true;
+        }
+        break :blk false;
+    };
+
+    // Passive segments are used to avoid memory being reinitialized on each
+    // thread's instantiation. These passive segments are initialized and
+    // dropped in __wasm_init_memory, which is registered as the start function
+    // We also initialize bss segments (using memory.fill) as part of this
+    // function.
+    if (!is_obj and wasm.any_passive_inits) {
+        try wasm.addFunction(.__wasm_init_memory, &.{}, &.{});
     }
 
     if (shared_memory and wasm.any_passive_inits) {
@@ -862,6 +925,10 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
         wasm.memories.limits.flags.has_max = true;
         if (shared_memory) wasm.memories.limits.flags.is_shared = true;
         log.debug("maximum memory pages: {d}", .{wasm.memories.limits.max});
+    } else if (shared_memory) {
+        wasm.memories.limits.max = 65536;
+        wasm.memories.limits.flags.has_max = true;
+        wasm.memories.limits.flags.is_shared = true;
     }
     f.memory_layout_finished = true;
 
@@ -992,7 +1059,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
             const name = if (is_obj) wasm.preloaded_strings.__linear_memory else wasm.preloaded_strings.memory;
             try emitMemoryImport(wasm, binary_bytes, name, &.{
                 // TODO the import_memory option needs to specify from which module
-                .module_name = wasm.object_host_name.unwrap().?,
+                .module_name = wasm.object_host_name.unwrap() orelse wasm.preloaded_strings.env,
                 .limits_min = wasm.memories.limits.min,
                 .limits_max = wasm.memories.limits.max,
                 .limits_has_max = wasm.memories.limits.flags.has_max,
@@ -1328,7 +1395,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
 
         var group_index: u32 = 0;
         var segment_offset: u32 = 0;
-        var group_start_addr: u32 = data_vaddr;
+        var group_start_addr: u32 = segment_vaddrs[0];
         var group_end_addr = f.data_segment_groups.items[group_index].end_addr;
         var first_segment_in_group = true;
         for (segment_ids, segment_vaddrs) |segment_id, segment_vaddr| {
@@ -1339,7 +1406,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                     // All remaining segments are zero.
                     break;
                 }
-                group_start_addr = group_end_addr;
+                group_start_addr = segment_vaddr;
                 group_end_addr = f.data_segment_groups.items[group_index].end_addr;
                 segment_offset = 0;
                 first_segment_in_group = true;
@@ -1454,6 +1521,9 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                 try binary_bytes.appendSlice(gpa, code.slice(wasm));
             }
             segment_offset += @intCast(binary_bytes.items.len - code_start);
+        }
+        if (group_index < f.data_segment_groups.items.len) {
+            try binary_bytes.appendNTimes(gpa, 0, group_end_addr - group_start_addr - segment_offset);
         }
 
         replaceVecSectionHeader(binary_bytes, header_offset, .data, @intCast(f.data_segment_groups.items.len));
@@ -2367,6 +2437,7 @@ fn processZcuRelocs(
             .data_uav => |ip_index| .{ .data = .fromUav(wasm, ip_index) },
             .data_nav => |nav_index| .{ .data = .fromNav(wasm, nav_index) },
             .data_resolution => |resolution| .{ .data = .fromResolution(wasm, resolution) },
+            .global_name => |name| .{ .global = .fromSymbolName(wasm, name) },
             .stack_pointer => .{ .global = .fromSymbolName(wasm, wasm.preloaded_strings.__stack_pointer) },
             .type_index => |type_index| .{ .type_index = .fromTypeIndex(type_index, &wasm.flush_buffer) },
         };
@@ -2630,8 +2701,8 @@ fn applyRelocs(code: []u8, code_offset: u32, relocs: Wasm.ObjectRelocation.Itera
             .memory_addr_rel_sleb64 => @panic("TODO implement relocation memory_addr_rel_sleb64"),
             .memory_addr_sleb => reloc_sleb_addr(sliced_code, .fromObjectData(wasm, pointee.data, addend.*)),
             .memory_addr_sleb64 => reloc_sleb64_addr(sliced_code, .fromObjectData(wasm, pointee.data, addend.*)),
-            .memory_addr_tls_sleb => reloc_sleb_addr(sliced_code, .fromObjectData(wasm, pointee.data, addend.*)),
-            .memory_addr_tls_sleb64 => reloc_sleb64_addr(sliced_code, .fromObjectData(wasm, pointee.data, addend.*)),
+            .memory_addr_tls_sleb => reloc_sleb_addr(sliced_code, .fromObjectDataTls(wasm, pointee.data, addend.*)),
+            .memory_addr_tls_sleb64 => reloc_sleb64_addr(sliced_code, .fromObjectDataTls(wasm, pointee.data, addend.*)),
 
             .memory_addr_import_i32 => reloc_u32_addr(sliced_code, .fromSymbolName(wasm, pointee.symbol_name, addend.*)),
             .memory_addr_import_i64 => reloc_u64_addr(sliced_code, .fromSymbolName(wasm, pointee.symbol_name, addend.*)),
@@ -2692,6 +2763,13 @@ const RelocAddr = struct {
 
     fn fromObjectData(wasm: *const Wasm, i: Wasm.ObjectData.Index, addend: i32) RelocAddr {
         return fromDataLoc(&wasm.flush_buffer, .fromObjectDataIndex(wasm, i), addend);
+    }
+
+    fn fromObjectDataTls(wasm: *const Wasm, i: Wasm.ObjectData.Index, addend: i32) RelocAddr {
+        const flush = &wasm.flush_buffer;
+        const data_loc: Wasm.DataLoc = .fromObjectDataIndex(wasm, i);
+        const tls_start_addr = flush.data_segments.values()[0];
+        return fromAddr(flush.data_segments.get(data_loc.segment).? + data_loc.offset - tls_start_addr, addend);
     }
 
     fn fromSymbolName(wasm: *const Wasm, name: String, addend: i32) RelocAddr {
@@ -2790,8 +2868,6 @@ fn emitInitMemoryFunction(wasm: *const Wasm, binary_bytes: *ArrayList(u8)) Alloc
     // dropped in __wasm_init_memory, which is registered as the start function
     // We also initialize bss segments (using memory.fill) as part of this
     // function.
-    assert(wasm.any_passive_inits);
-
     try binary_bytes.ensureUnusedCapacity(gpa, 5 + 1);
     appendReservedUleb32(binary_bytes, 0); // no locals
 
@@ -2846,9 +2922,10 @@ fn emitInitMemoryFunction(wasm: *const Wasm, binary_bytes: *ArrayList(u8)) Alloc
             // When we initialize the TLS segment we also set the `__tls_base`
             // global.  This allows the runtime to use this static copy of the
             // TLS data for the first/main thread.
+            const tls_base_global_index = Wasm.GlobalIndex.fromResolution(wasm, .__tls_base).?;
             appendReservedAddrConst(binary_bytes, start_addr, is64);
             binary_bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.global_set));
-            appendReservedUleb32(binary_bytes, virtual_addrs.tls_base.?);
+            appendReservedUleb32(binary_bytes, @backingInt(tls_base_global_index));
         }
 
         appendReservedI32Const(binary_bytes, 0);
@@ -2936,6 +3013,15 @@ fn emitInitTlsFunction(wasm: *const Wasm, bytes: *ArrayList(u8)) Allocator.Error
 
     appendReservedUleb32(bytes, 0); // no locals
 
+    const param_local: u32 = 0;
+    const tls_base_global_index = Wasm.GlobalIndex.fromResolution(wasm, .__tls_base).?;
+
+    bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.local_get));
+    appendReservedUleb32(bytes, param_local);
+
+    bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.global_set));
+    appendReservedUleb32(bytes, @backingInt(tls_base_global_index));
+
     // If there's a TLS segment, initialize it during runtime using the bulk-memory feature
     // TLS segment is always the first one due to how we sort the data segments.
     const data_segments = wasm.flush_buffer.data_segments.keys();
@@ -2944,15 +3030,6 @@ fn emitInitTlsFunction(wasm: *const Wasm, bytes: *ArrayList(u8)) Allocator.Error
         const end_addr = wasm.flush_buffer.data_segment_groups.items[0].end_addr;
         const group_size = end_addr - start_addr;
         const data_segment_index = 0;
-
-        const param_local: u32 = 0;
-
-        bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.local_get));
-        appendReservedUleb32(bytes, param_local);
-
-        const tls_base_global_index: Wasm.GlobalIndex = @fromBackingInt(@intCast(wasm.globals.getIndex(.__tls_base).?));
-        bytes.appendAssumeCapacity(@backingInt(std.wasm.Opcode.global_set));
-        appendReservedUleb32(bytes, @backingInt(tls_base_global_index));
 
         // load stack values for the bulk-memory operation
         {

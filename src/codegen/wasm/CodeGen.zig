@@ -158,6 +158,7 @@ simd_immediates: std.ArrayList([16]u8) = .empty,
 target: *const std.Target,
 ptr_size: enum { wasm32, wasm64 },
 pt: Zcu.PerThread,
+asm_operands: ?*const assembly.OperandMap = null,
 /// List of MIR Instructions
 mir_instructions: std.MultiArrayList(Mir.Inst),
 /// Contains extra data for MIR
@@ -572,7 +573,7 @@ pub fn addImm32(cg: *CodeGen, imm: u32) error{OutOfMemory}!void {
 /// Accepts an unsigned 64bit integer rather than a signed integer to
 /// prevent us from having to bitcast multiple times as most values
 /// within codegen are represented as unsigned rather than signed.
-    pub fn addImm64(cg: *CodeGen, imm: u64) error{OutOfMemory}!void {
+pub fn addImm64(cg: *CodeGen, imm: u64) error{OutOfMemory}!void {
     const extra_index = try cg.addExtra(Mir.Imm64.init(imm));
     try cg.addInst(.{ .tag = .i64_const, .data = .{ .payload = extra_index } });
 }
@@ -1003,9 +1004,11 @@ fn generateInner(cg: *CodeGen, any_returns: bool) InnerError!Mir {
         }
     }
 
+    const cc = zcu.typeToFunc(zcu.navValue(cg.owner_nav).typeOf(zcu)).?.cc;
     const sp_local = cg.initial_stack_value.local;
     const bottom_stack_local = cg.bottom_stack_value.local;
     const needs_stack_prologue = needs_prologue: {
+        if (cc == .naked) break :needs_prologue false;
         if (cg.stack_size > 0) break :needs_prologue true;
         const tags = cg.mir_instructions.items(.tag);
         const datas = cg.mir_instructions.items(.data);
@@ -1127,7 +1130,6 @@ fn resolveCallingConventionValues(
         .varargs = .none,
         .local_index = 0,
     };
-    if (cc == .naked) return result;
 
     var args = std.array_list.Managed(WValue).init(gpa);
     defer args.deinit();
@@ -1142,7 +1144,7 @@ fn resolveCallingConventionValues(
     }
 
     switch (cc) {
-        .auto => {
+        .auto, .naked => {
             for (fn_info.param_types.get(ip)) |ty| {
                 if (!Type.fromInterned(ty).hasRuntimeBits(zcu)) {
                     continue;
@@ -7814,7 +7816,7 @@ fn airCmpxchg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             1 => .i32_atomic_rmw8_cmpxchg_u,
             2 => .i32_atomic_rmw16_cmpxchg_u,
             4 => .i32_atomic_rmw_cmpxchg,
-            8 => .i32_atomic_rmw_cmpxchg,
+            8 => .i64_atomic_rmw_cmpxchg,
             else => |size| return cg.fail("TODO: implement `@cmpxchg` for types with abi size '{d}'", .{size}),
         }, .{
             .offset = ptr_operand.memOffset(),
@@ -8132,7 +8134,8 @@ fn airFrameAddress(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
 fn airRuntimeNavPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const ty_nav = cg.air.instructions.items(.data)[@backingInt(inst)].ty_nav;
-    const mod = cg.pt.zcu.navFileScope(cg.owner_nav).mod.?;
+    const zcu = cg.pt.zcu;
+    const mod = zcu.navFileScope(cg.owner_nav).mod.?;
     if (mod.single_threaded) {
         const result: WValue = .{ .nav_ref = .{
             .nav_index = ty_nav.nav,
@@ -8140,7 +8143,14 @@ fn airRuntimeNavPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         } };
         return cg.finishAir(inst, result, &.{});
     }
-    return cg.fail("TODO: thread-local variables", .{});
+    const tls_base_str = try zcu.intern_pool.getOrPutString(cg.gpa, zcu.comp.io, cg.pt.tid, "__tls_base", .no_embedded_nulls);
+    try cg.addInst(.{ .tag = .global_get, .data = .{ .str = tls_base_str } });
+    try cg.addInst(.{ .tag = .tls_nav_ref, .data = .{ .nav_index = ty_nav.nav } });
+    try cg.addTag(switch (cg.ptr_size) {
+        .wasm32 => .i32_add,
+        .wasm64 => .i64_add,
+    });
+    return cg.finishAir(inst, .stack, &.{});
 }
 
 fn airAsm(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -8148,7 +8158,10 @@ fn airAsm(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const outputs = unwrapped_asm.outputs;
     const inputs = unwrapped_asm.inputs;
 
-    const zcu = cg.pt.zcu;
+    const pt = cg.pt;
+    const zcu = pt.zcu;
+    const ip = &zcu.intern_pool;
+    const cc = zcu.typeToFunc(zcu.navValue(cg.owner_nav).typeOf(zcu)).?.cc;
     const output_ty = cg.typeOfIndex(inst);
 
     const result: WValue = if (output_ty.hasRuntimeBits(zcu))
@@ -8157,8 +8170,8 @@ fn airAsm(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .none;
 
     if (unwrapped_asm.source.len != 0) {
-        var local_map: assembly.LocalMap = .empty;
-        defer local_map.deinit(cg.gpa);
+        var operand_map: assembly.OperandMap = .empty;
+        defer operand_map.deinit(cg.gpa);
         var input_locals: std.ArrayList(WValue) = try .initCapacity(cg.gpa, inputs.len);
         defer {
             for (input_locals.items) |*input_local| input_local.free(cg);
@@ -8176,7 +8189,7 @@ fn airAsm(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                     return cg.fail("Self-hosted wasm backend requires output constraint to be equal \"=r\"", .{});
                 }
 
-                const gop = try local_map.getOrPutValue(cg.gpa, name, result.local);
+                const gop = try operand_map.getOrPutValue(cg.gpa, name, .{ .local = result.local });
                 assert(!gop.found_existing); // first value
 
                 assert(it.next() == null);
@@ -8190,22 +8203,75 @@ fn airAsm(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 const operand = try cg.resolveInst(input.operand);
                 const name = input.name;
 
-                if (!mem.eql(u8, constraint, "r")) {
-                    return cg.fail("Self-hosted wasm backend requires input constraint to be equal \"r\"", .{});
-                }
+                if (mem.eql(u8, constraint, "r")) {
+                    const op_local = if (cc == .naked and operand == .local)
+                        operand
+                    else blk: {
+                        try cg.emitWValue(operand);
+                        const loc = try WValue.toLocal(.stack, cg, cg.typeOf(input.operand));
+                        input_locals.appendAssumeCapacity(loc);
+                        break :blk loc;
+                    };
 
-                try cg.emitWValue(operand);
-                const op_local = try WValue.toLocal(.stack, cg, cg.typeOf(input.operand));
-                input_locals.appendAssumeCapacity(op_local);
+                    const gop = try operand_map.getOrPutValue(cg.gpa, name, .{ .local = op_local.local });
+                    if (gop.found_existing) {
+                        return cg.fail("Duplicate asm variable name \"{s}\"", .{name});
+                    }
+                } else if (mem.eql(u8, constraint, "i") or mem.eql(u8, constraint, "X")) {
+                    const resolved_op: assembly.Operand = blk: {
+                        if (input.operand.toInterned()) |interned| {
+                            const val: Value = .fromInterned(interned);
+                            switch (ip.indexToKey(val.toIntern())) {
+                                .int => {
+                                    const imm: i64 = if (val.typeOf(zcu).intInfo(zcu).signedness == .signed)
+                                        val.toSignedInt(zcu)
+                                    else
+                                        @bitCast(val.toUnsignedInt(zcu));
+                                    break :blk .{ .imm = imm };
+                                },
+                                inline .func, .@"extern" => |x| break :blk .{ .func_nav = x.owner_nav },
+                                .ptr => |ptr| if (ptr.byte_offset == 0) switch (ptr.base_addr) {
+                                    .nav => |nav| if (ip.isFunctionType(ip.getNav(nav).resolved.?.type)) {
+                                        break :blk .{ .func_nav = nav };
+                                    },
+                                    else => {},
+                                },
+                                else => {},
+                            }
+                        }
+                        switch (operand) {
+                            .imm32 => |imm| break :blk .{ .imm = imm },
+                            .imm64 => |imm| break :blk .{ .imm = @bitCast(imm) },
+                            .nav_ref => |nav_ref| if (nav_ref.offset == 0 and ip.isFunctionType(ip.getNav(nav_ref.nav_index).resolved.?.type)) {
+                                break :blk .{ .func_nav = nav_ref.nav_index };
+                            },
+                            else => {},
+                        }
+                        if (mem.eql(u8, constraint, "i")) {
+                            return cg.fail("asm input with constraint \"i\" is not an immediate constant", .{});
+                        }
+                        const op_local = if (cc == .naked and operand == .local)
+                            operand
+                        else loc_blk: {
+                            try cg.emitWValue(operand);
+                            const loc = try WValue.toLocal(.stack, cg, cg.typeOf(input.operand));
+                            input_locals.appendAssumeCapacity(loc);
+                            break :loc_blk loc;
+                        };
+                        break :blk .{ .local = op_local.local };
+                    };
 
-                const gop = try local_map.getOrPutValue(cg.gpa, name, op_local.local);
-                if (gop.found_existing) {
-                    return cg.fail("Duplicate asm variable name \"{s}\"", .{name});
+                    const gop = try operand_map.getOrPutValue(cg.gpa, name, resolved_op);
+                    if (gop.found_existing) {
+                        return cg.fail("Duplicate asm variable name \"{s}\"", .{name});
+                    }
+                } else {
+                    return cg.fail("Self-hosted wasm backend requires input constraint to be \"r\", \"i\", or \"X\"", .{});
                 }
             }
         }
 
-        try assembly.assemble(cg, unwrapped_asm.source, &local_map);
+        try assembly.assemble(cg, unwrapped_asm.source, &operand_map);
     }
 
     var bt = cg.liveness.iterateBigTomb(inst);

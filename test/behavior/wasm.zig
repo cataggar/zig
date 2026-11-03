@@ -164,3 +164,56 @@ test "asm .i64.load and .i64.store" {
     try expect(result == value);
     try expect(slot == value);
 }
+
+test "asm .globaltype, global.get, global.set, and trailing comments" {
+    const sp = asm (
+        \\ # full-line hash comment
+        \\ // full-line slash comment
+        \\ .globaltype __stack_pointer, i32
+        \\ global.get __stack_pointer # trailing hash comment
+        \\ global.set __stack_pointer // trailing slash comment
+        \\ global.get __stack_pointer
+        \\ local.set %[ret]
+        : [ret] "=r" (-> u32),
+    );
+    try expect(sp != 0);
+}
+
+test "asm callconv(.naked), immediate offset, and call operand" {
+    const S = struct {
+        const Context = struct {
+            pad: u32 = 0,
+            bias: u32,
+            out: u32 = 0,
+        };
+
+        fn addBias(x: u32, ctx: *Context) callconv(.c) void {
+            ctx.out = x + ctx.bias;
+        }
+
+        noinline fn nakedTrampoline(_: u32, _: *Context) callconv(.naked) void {
+            asm volatile (
+                \\ local.get 0
+                \\ local.get 1
+                \\ i32.load %[bias_offset]
+                \\ i32.add
+                \\ local.get 1
+                \\ call %[func]
+                \\ return
+                :
+                : [bias_offset] "X" (@offsetOf(Context, "bias")),
+                  [func] "X" (&addBias),
+            );
+        }
+    };
+    comptime {
+        @export(&S.nakedTrampoline, .{ .name = "zig_test_wasm_naked_trampoline" });
+    }
+
+    var ctx: S.Context = .{ .bias = 10 };
+    const trampoline = @extern(*const fn (u32, *S.Context) callconv(.c) void, .{
+        .name = "zig_test_wasm_naked_trampoline",
+    });
+    trampoline(5, &ctx);
+    try expect(ctx.out == 25);
+}

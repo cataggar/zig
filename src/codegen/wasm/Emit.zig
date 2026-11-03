@@ -123,6 +123,11 @@ pub fn lower(emit: *Emit) Error!void {
             inst += 1;
             continue :loop tags[inst];
         },
+        .tls_nav_ref => {
+            try tlsNavRef(wasm, code, datas[inst].nav_index, is_wasm32);
+            inst += 1;
+            continue :loop tags[inst];
+        },
         .func_ref => {
             try code.ensureUnusedCapacity(gpa, 11);
             const opcode: std.wasm.Opcode = if (is_wasm32) .i32_const else .i64_const;
@@ -330,6 +335,26 @@ pub fn lower(emit: *Emit) Error!void {
                 appendUlebRelocPlaceholder(code);
             } else {
                 appendOutputFunctionIndex(code, .fromSymbolName(wasm, symbol_name));
+            }
+
+            inst += 1;
+            continue :loop tags[inst];
+        },
+
+        .global_get, .global_set => {
+            const symbol_name = try wasm.internString(datas[inst].str.toSlice(&comp.zcu.?.intern_pool));
+            try code.ensureUnusedCapacity(gpa, 6);
+            code.appendAssumeCapacity(@backingInt(tags[inst]));
+            if (is_obj) {
+                try wasm.zcu_relocations.append(gpa, .{
+                    .offset = @intCast(code.items.len),
+                    .pointee = .{ .global_name = symbol_name },
+                    .tag = .global_index_leb,
+                    .addend = 0,
+                });
+                appendUlebRelocPlaceholder(code);
+            } else {
+                writeUleb128(code, @backingInt(Wasm.GlobalIndex.fromSymbolName(wasm, symbol_name)));
             }
 
             inst += 1;
@@ -966,6 +991,9 @@ pub fn lower(emit: *Emit) Error!void {
                 .i64_atomic_rmw8_cmpxchg_u,
                 .i64_atomic_rmw16_cmpxchg_u,
                 .i64_atomic_rmw32_cmpxchg_u,
+                .memory_atomic_notify,
+                .memory_atomic_wait32,
+                .memory_atomic_wait64,
                 => {
                     const mem_arg = mir.extraData(Mir.MemArg, extra_index + 1).data;
                     encodeMemArg(code, mem_arg);
@@ -980,9 +1008,6 @@ pub fn lower(emit: *Emit) Error!void {
                     inst += 1;
                     continue :loop tags[inst];
                 },
-                .memory_atomic_notify => @panic("TODO"),
-                .memory_atomic_wait32 => @panic("TODO"),
-                .memory_atomic_wait64 => @panic("TODO"),
             }
             comptime unreachable;
         },
@@ -1050,6 +1075,33 @@ fn navRefOff(wasm: *Wasm, code: *ArrayList(u8), data: Mir.NavRefOff, is_wasm32: 
     } else {
         const addr = wasm.navAddr(data.nav_index);
         writeSleb128(code, @as(u64, @intCast(@as(i64, @intCast(addr)) + data.offset)));
+    }
+}
+
+fn tlsNavRef(wasm: *Wasm, code: *ArrayList(u8), nav_index: InternPool.Nav.Index, is_wasm32: bool) !void {
+    const comp = wasm.base.comp;
+    const zcu = comp.zcu.?;
+    const ip = &zcu.intern_pool;
+    const gpa = comp.gpa;
+    const is_obj = wasm.base.isRelocatable();
+    const nav_ty = ip.getNav(nav_index).resolved.?.type;
+    assert(!ip.isFunctionType(nav_ty));
+
+    try code.ensureUnusedCapacity(gpa, 11);
+
+    const opcode: std.wasm.Opcode = if (is_wasm32) .i32_const else .i64_const;
+    code.appendAssumeCapacity(@backingInt(opcode));
+    if (is_obj) {
+        try wasm.zcu_relocations.append(gpa, .{
+            .offset = @intCast(code.items.len),
+            .pointee = .{ .data_nav = nav_index },
+            .tag = if (is_wasm32) .memory_addr_tls_sleb else .memory_addr_tls_sleb64,
+            .addend = 0,
+        });
+        appendSlebRelocPlaceholder(code, is_wasm32);
+    } else {
+        const offset = wasm.navTlsOffset(nav_index);
+        writeSleb128(code, offset);
     }
 }
 
