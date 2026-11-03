@@ -816,7 +816,7 @@ const WasiThreadImpl = struct {
 
     const WasiThread = struct {
         /// Thread ID
-        tid: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+        tid: std.atomic.Value(i32) = std.atomic.Value(i32).init(-1),
         /// Contains all memory which was allocated to bootstrap this thread, including:
         /// - Guard page
         /// - Stack
@@ -1001,9 +1001,10 @@ const WasiThreadImpl = struct {
         // The specification says any value lower than 0 indicates an error.
         // The values of such error are unspecified. WASI-Libc treats it as EAGAIN.
         if (tid < 0) {
+            allocator.free(allocated_memory);
             return error.SystemResources;
         }
-        instance.thread.tid.store(tid, .seq_cst);
+        _ = instance.thread.tid.cmpxchgStrong(-1, tid, .seq_cst, .seq_cst);
 
         return .{ .thread = &instance.thread };
     }
@@ -1026,6 +1027,7 @@ const WasiThreadImpl = struct {
                     // Restore the TLS base so thread-local variables are available during clean-up.
                     __tls_set_base(@ptrFromInt(arg.tls_address));
                 }
+                _ = arg.thread.tid.cmpxchgStrong(-1, tid, .seq_cst, .seq_cst);
                 @atomicStore(u32, &WasiThreadImpl.tls_thread_id, @intCast(tid), .seq_cst);
 
                 // Finished bootstrapping, call user's procedure.

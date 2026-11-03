@@ -197,11 +197,24 @@ pub const Inst = struct {
         ///
         /// Uses `label`
         local_tee = 0x22,
+        /// Loads a named global onto the stack.
+        ///
+        /// Uses `str`.
+        global_get = 0x23,
+        /// Pops a value from the stack into a named global.
+        ///
+        /// Uses `str`.
+        global_set = 0x24,
         /// Pops a value from the stack and sets the stack pointer global.
         /// The value must be the same type as the stack pointer global.
         ///
         /// Uses `tag` (no additional data).
         global_set_sp,
+        /// Lowers to an i32_const (wasm32) or i64_const (wasm64) which is the
+        /// offset of a threadlocal variable relative to `__tls_base`.
+        ///
+        /// Uses `nav_index`.
+        tls_nav_ref,
         /// Loads a 32-bit integer from memory (data section) onto the stack
         /// Pops the value from the stack which represents the offset into memory.
         ///
@@ -658,6 +671,7 @@ pub const Inst = struct {
 
         ip_index: InternPool.Index,
         nav_index: InternPool.Nav.Index,
+        str: InternPool.NullTerminatedString,
         intrinsic: Intrinsic,
 
         comptime {
