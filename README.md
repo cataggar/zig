@@ -5,6 +5,52 @@ A general-purpose programming language and toolchain for maintaining
 
 https://ziglang.org/
 
+## `cataggar/zig` Fork & Mirror
+
+A personal mirror and build of the [Zig](https://ziglang.org) compiler.
+
+### Branches
+
+- **`wazig`** (default) — WebAssembly (`wasm64-wasip3`) Zig compiler (`wazig` and
+  `wazigl`) source tree, plus the release and CI workflows that mirror official
+  Zig releases and build development binaries.
+- **`master`** — a mirror of the upstream Zig source from
+  [codeberg.org/ziglang/zig](https://codeberg.org/ziglang/zig) (the Zig project
+  migrated from GitHub to Codeberg). Synced daily at 5:15 AM Central Time
+  (`America/Chicago`), automatically adjusting for daylight saving time.
+
+### Releases
+
+Only stable Zig releases are mirrored automatically. Development releases
+require a manual workflow run.
+
+Releases here include official mirrored binaries, signed development builds, and
+unsigned WebAssembly (`wasm64-wasip3`) builds (`wazig` and `wazigl`). Native
+releases are signed with different [minisign](https://jedisct1.github.io/minisign/)
+public keys; install them with [`ghr`](https://github.com/cataggar/ghr), passing
+the matching public key so the download is signature-verified.
+
+#### Official Zig binaries (mirrored from ziglang.org)
+
+Mirrored unchanged from <https://ziglang.org/download/> and verified with the
+official Zig minisign key:
+
+```sh
+MINISIGN_PUB=RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
+ghr install cataggar/zig@v0.16.0 $MINISIGN_PUB
+ghr install cataggar/zig@v0.17.0 $MINISIGN_PUB
+```
+
+#### Development binaries
+
+My own builds (for example the libzigc musl-libc-in-Zig work, issue #17),
+published manually and signed with my own key. The `build-release` workflow
+uses stable Zig 0.17.0 as its host compiler:
+
+```sh
+MINISIGN_PUB=RWQhfv+qEYWFiUiUqTeTGnyN3KQlTSVNpqhCST5HbBKZRi6SfCJhnVF4
+```
+
 ## Documentation
 
 If you are looking at this README file in a source tree, please refer to the
