@@ -80,7 +80,7 @@ wasmtime run \
 
 ## Development Releases
 
-Custom native development builds (such as the `libzigc` musl-libc-in-Zig releases, issue #17) are published manually via the `build-release` workflow using stable Zig 0.17.0 as the host compiler and signed with the repository owner's minisign public key:
+Custom native development builds (such as the `libzigc` musl-libc-in-Zig releases, [#17](https://github.com/cataggar/zig/issues/17)) are published manually via the `build-release` workflow using stable Zig 0.17.0 as the host compiler and signed with the repository owner's minisign public key:
 
 ```sh
 MINISIGN_PUB=RWQhfv+qEYWFiUiUqTeTGnyN3KQlTSVNpqhCST5HbBKZRi6SfCJhnVF4

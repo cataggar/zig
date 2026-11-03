@@ -64,7 +64,6 @@ wazig --help
 * [`doc/wazig-changes.md`](doc/wazig-changes.md) — Summary of all compiler, linker, standard library, and `lib/c` changes in `wazig` since Zig 0.17.0.
 * [`doc/building.md`](doc/building.md) — Building `wazig`/`wazigl`, Zig, and LLVM/Clang/LLD from source across POSIX and Windows.
 * [`doc/debugging-and-testing.md`](doc/debugging-and-testing.md) — Editing source code, running the test suite (native, QEMU, Wine, Wasmtime), Autodoc, `translate-c`, and debugging with LLDB.
-* [`doc/libc-release-notes.md`](doc/libc-release-notes.md) — `libzigc` release notes.
 * [`doc/build.zig.zon.md`](doc/build.zig.zon.md) — `build.zig.zon` package manifest specification.
 
 For official Zig documentation, refer to the **Release Notes**, **Language

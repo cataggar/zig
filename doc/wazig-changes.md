@@ -1,6 +1,6 @@
 # Summary of Code Changes Since Zig 0.17.0
 
-This document catalogs the compiler, linker, standard library, and C library (`lib/c`) changes on the `wazig` branch relative to the Zig 0.17.0 release (`7647adab80`). Changes are grouped into self-contained functional areas with their commits, pull requests, and affected files.
+This document catalogs the compiler, linker, standard library, and C library (`lib/c`) changes on the `wazig` branch relative to the Zig 0.17.0 release ([`7647adab80`](https://github.com/cataggar/zig/commit/7647adab80dd088f4de3610fd245915a912eb6ad)). Changes are grouped into self-contained functional areas with their commits, pull requests, and affected files.
 
 ---
 
@@ -9,12 +9,12 @@ This document catalogs the compiler, linker, standard library, and C library (`l
 Adds first-class target definitions and CLI/build-system options for WASI 0.2.x (`wasip2`) and WASI 0.3.0 (`wasip3`) while preserving `wasi` for WASI Preview 1 (`0.1.0`).
 
 ### Commits
-- `972540096d` — `std.Target, compiler, std: add wasip2 target plumbing` (#65)
-- `318425a3ff` — `wasm: wire post-link Component Model pass for wasm32-wasip2` (#73)
-- `a61bf2a543` — `wasip2: add wasmtime E2E test suite, CI hardening, and custom WIT reactor fixes` (#75)
-- `6385910cfa` — `wasip2: fix path_open mutate-directory flag, fd_renumber preopens, and WIT/cache handling` (#76)
-- `2673277472` — `Adding wasm32-wasip3 component model` (#91)
-- `866cfb988d` — `wasm32-wasip3: self-host full Zig compiler as WASI 0.3 component` (#98)
+- [`972540096d`](https://github.com/cataggar/zig/commit/972540096d9f73403ef65ebde07b7155a326529c) — `std.Target, compiler, std: add wasip2 target plumbing` ([#65](https://github.com/cataggar/zig/pull/65))
+- [`318425a3ff`](https://github.com/cataggar/zig/commit/318425a3fff84f9cfba65f821a1fc30151a434ec) — `wasm: wire post-link Component Model pass for wasm32-wasip2` ([#73](https://github.com/cataggar/zig/pull/73))
+- [`a61bf2a543`](https://github.com/cataggar/zig/commit/a61bf2a543939f545d3e283205dd3ac0c9a9b2c4) — `wasip2: add wasmtime E2E test suite, CI hardening, and custom WIT reactor fixes` ([#75](https://github.com/cataggar/zig/pull/75))
+- [`6385910cfa`](https://github.com/cataggar/zig/commit/6385910cfad4ddc1f4c2de117b49bebbb6ef7fca) — `wasip2: fix path_open mutate-directory flag, fd_renumber preopens, and WIT/cache handling` ([#76](https://github.com/cataggar/zig/pull/76))
+- [`2673277472`](https://github.com/cataggar/zig/commit/2673277472fe03b7a55edfa731b74faaa7d439f4) — `Adding wasm32-wasip3 component model` ([#91](https://github.com/cataggar/zig/pull/91))
+- [`866cfb988d`](https://github.com/cataggar/zig/commit/866cfb988d70fea6c1192fecc49e72eee54ae379) — `wasm32-wasip3: self-host full Zig compiler as WASI 0.3 component` ([#98](https://github.com/cataggar/zig/pull/98))
 
 ### Key Changes
 - **OS Tags & Version Ranges**:
@@ -39,21 +39,21 @@ Adds first-class target definitions and CLI/build-system options for WASI 0.2.x 
 Implements the Canonical ABI guest layers for WASI 0.2.6 and WASI 0.3.0, Component Model entrypoints, WASI host compatibility for the Zig compiler/build runner, and WASI thread/allocator hardening.
 
 ### Commits
-- `07211345ba` — `wasip2: export cabi_realloc and wasi:cli/run@0.2.6#run entrypoint` (#68)
-- `7abd11848b` — `std.os.wasi: add WASI 0.2.6 canonical ABI layer for wasip2` (#71)
-- `318425a3ff` — `wasm: wire post-link Component Model pass for wasm32-wasip2` (#73)
-- `6385910cfa` — `wasip2: fix path_open mutate-directory flag, fd_renumber preopens, and WIT/cache handling` (#76)
-- `2673277472` — `Adding wasm32-wasip3 component model` (#91)
-- `29fa659ca2` — `aarch64, wasip3: fix self-hosted backend for compiler_rt/Maker and wasip3 exit codes` (#92, #93)
-- `866cfb988d` — `wasm32-wasip3: self-host full Zig compiler as WASI 0.3 component` (#98)
-- `50f27c1ed7` — `std.posix, Io.Threaded: stub freestanding system declarations` (#101)
-- `3ea8d8af26` — `std.heap: support multi-threaded WebAssembly in BrkAllocator` (#102)
-- `28de97fbd8` — `wasm: support wasm64-wasip3 (64-bit Component Model cm64 and WASI 0.3.0)` (#116)
-- `20f22e1f0a` — `wasi: support wasm64-wasip3 C/C++, static LLVM, and wazig/wazigl releases` (#117)
-- `113621a0c9` — `Enable wasm64-wasip3 static LLVM linking for wazigl release` (#118)
-- `20b87ed345` — `wasi: guard void Child.Term signal/stopped in Build.Serialize and Maker` (#122)
-- `866b84dfbf` — `Fix WASI P2/P3 filestat metadata-hash ino/dev mapping and relativeAppendPosix` (#123)
-- `11114d306c` — `wasi: harden WasiThreadImpl and support wasm_main_thread_no_wait` (#126, #127)
+- [`07211345ba`](https://github.com/cataggar/zig/commit/07211345ba2271583ef12eed51d8b9b95fa273b0) — `wasip2: export cabi_realloc and wasi:cli/run@0.2.6#run entrypoint` ([#68](https://github.com/cataggar/zig/pull/68))
+- [`7abd11848b`](https://github.com/cataggar/zig/commit/7abd11848bae3c2e90e6b67ae6fa2d6eb3449370) — `std.os.wasi: add WASI 0.2.6 canonical ABI layer for wasip2` ([#71](https://github.com/cataggar/zig/pull/71))
+- [`318425a3ff`](https://github.com/cataggar/zig/commit/318425a3fff84f9cfba65f821a1fc30151a434ec) — `wasm: wire post-link Component Model pass for wasm32-wasip2` ([#73](https://github.com/cataggar/zig/pull/73))
+- [`6385910cfa`](https://github.com/cataggar/zig/commit/6385910cfad4ddc1f4c2de117b49bebbb6ef7fca) — `wasip2: fix path_open mutate-directory flag, fd_renumber preopens, and WIT/cache handling` ([#76](https://github.com/cataggar/zig/pull/76))
+- [`2673277472`](https://github.com/cataggar/zig/commit/2673277472fe03b7a55edfa731b74faaa7d439f4) — `Adding wasm32-wasip3 component model` ([#91](https://github.com/cataggar/zig/pull/91))
+- [`29fa659ca2`](https://github.com/cataggar/zig/commit/29fa659ca221a3e9127fe7ab4e8470f420a8b543) — `aarch64, wasip3: fix self-hosted backend for compiler_rt/Maker and wasip3 exit codes` ([#92](https://github.com/cataggar/zig/issues/92), [#93](https://github.com/cataggar/zig/pull/93))
+- [`866cfb988d`](https://github.com/cataggar/zig/commit/866cfb988d70fea6c1192fecc49e72eee54ae379) — `wasm32-wasip3: self-host full Zig compiler as WASI 0.3 component` ([#98](https://github.com/cataggar/zig/pull/98))
+- [`50f27c1ed7`](https://github.com/cataggar/zig/commit/50f27c1ed772ebe565b67b7090b5f47d95f149e2) — `std.posix, Io.Threaded: stub freestanding system declarations` ([#101](https://github.com/cataggar/zig/pull/101))
+- [`3ea8d8af26`](https://github.com/cataggar/zig/commit/3ea8d8af26faf23a02d052ce8ad9219c222d39de) — `std.heap: support multi-threaded WebAssembly in BrkAllocator` ([#102](https://github.com/cataggar/zig/pull/102))
+- [`28de97fbd8`](https://github.com/cataggar/zig/commit/28de97fbd890857261e9c5557d5202f6eed98fb3) — `wasm: support wasm64-wasip3 (64-bit Component Model cm64 and WASI 0.3.0)` ([#116](https://github.com/cataggar/zig/pull/116))
+- [`20f22e1f0a`](https://github.com/cataggar/zig/commit/20f22e1f0a57f05ac226d60e562ead9ad46ba3ee) — `wasi: support wasm64-wasip3 C/C++, static LLVM, and wazig/wazigl releases` ([#117](https://github.com/cataggar/zig/pull/117))
+- [`113621a0c9`](https://github.com/cataggar/zig/commit/113621a0c92a981741a3bc5ac1a28eb95a210354) — `Enable wasm64-wasip3 static LLVM linking for wazigl release` ([#118](https://github.com/cataggar/zig/pull/118))
+- [`20b87ed345`](https://github.com/cataggar/zig/commit/20b87ed3452c441da0d4fc90a16be6f2c333d0c3) — `wasi: guard void Child.Term signal/stopped in Build.Serialize and Maker` ([#122](https://github.com/cataggar/zig/pull/122))
+- [`866b84dfbf`](https://github.com/cataggar/zig/commit/866b84dfbf162f5254a5752035974069b6eb81e8) — `Fix WASI P2/P3 filestat metadata-hash ino/dev mapping and relativeAppendPosix` ([#123](https://github.com/cataggar/zig/pull/123))
+- [`11114d306c`](https://github.com/cataggar/zig/commit/11114d306c87aa9fb7463d85410218d00d4a07f2) — `wasi: harden WasiThreadImpl and support wasm_main_thread_no_wait` ([#126](https://github.com/cataggar/zig/issues/126), [#127](https://github.com/cataggar/zig/issues/127), [#128](https://github.com/cataggar/zig/pull/128))
 
 ### Key Changes
 - **Component Entrypoints & `cabi_realloc` (`lib/std/start.zig`)**:
@@ -91,19 +91,19 @@ Implements the Canonical ABI guest layers for WASI 0.2.6 and WASI 0.3.0, Compone
 Extends the self-hosted WebAssembly code generator and linker with static archive creation, 64-bit (`memory64` / `cm64`) support, intrafunction MIR and post-link core optimizers, and a built-in Component Model encoder/adapter pipeline.
 
 ### Commits
-- `d677b562f3` — `wasm: undefined allowed limit only to == .strong`
-- `c36f7cb296` — `wasm: fix switch on wide integers and ?error repr`
-- `431f39f6ed` — `wasm: implement static archive`
-- `cee35acdbb` — `wasm: fix bool confusion in memset`
-- `96edf41e88` — `wasm: vendor wabt component library for wasm32-wasip2` (#18, #67)
-- `318425a3ff` — `wasm: wire post-link Component Model pass for wasm32-wasip2` (#73)
-- `a61bf2a543` — `wasip2: add wasmtime E2E test suite, CI hardening, and custom WIT reactor fixes` (#75)
-- `2673277472` — `Adding wasm32-wasip3 component model` (#91)
-- `866cfb988d` — `wasm32-wasip3: self-host full Zig compiler as WASI 0.3 component` (#98)
-- `a5633fae06` — `wasm: add MIR peephole optimizer and wabt post-link core optimizer` (#108)
-- `28de97fbd8` — `wasm: support wasm64-wasip3 (64-bit Component Model cm64 and WASI 0.3.0)` (#116)
-- `20f22e1f0a` — `wasi: support wasm64-wasip3 C/C++, static LLVM, and wazig/wazigl releases` (#117)
-- `113621a0c9` — `Enable wasm64-wasip3 static LLVM linking for wazigl release` (#118)
+- [`d677b562f3`](https://github.com/cataggar/zig/commit/d677b562f33cdb6c5a6dbd330db157142e262a47) — `wasm: undefined allowed limit only to == .strong`
+- [`c36f7cb296`](https://github.com/cataggar/zig/commit/c36f7cb296c6921164989ef56311cbe88d16be38) — `wasm: fix switch on wide integers and ?error repr`
+- [`431f39f6ed`](https://github.com/cataggar/zig/commit/431f39f6ed662b5c54157bdc0b02db1548b0eddc) — `wasm: implement static archive`
+- [`cee35acdbb`](https://github.com/cataggar/zig/commit/cee35acdbb9ef627085325cb94e1b21817f01b08) — `wasm: fix bool confusion in memset`
+- [`96edf41e88`](https://github.com/cataggar/zig/commit/96edf41e88e42216a4669f02a981e2b4f4a2566b) — `wasm: vendor wabt component library for wasm32-wasip2` ([#18](https://github.com/cataggar/zig/issues/18), [#67](https://github.com/cataggar/zig/pull/67))
+- [`318425a3ff`](https://github.com/cataggar/zig/commit/318425a3fff84f9cfba65f821a1fc30151a434ec) — `wasm: wire post-link Component Model pass for wasm32-wasip2` ([#73](https://github.com/cataggar/zig/pull/73))
+- [`a61bf2a543`](https://github.com/cataggar/zig/commit/a61bf2a543939f545d3e283205dd3ac0c9a9b2c4) — `wasip2: add wasmtime E2E test suite, CI hardening, and custom WIT reactor fixes` ([#75](https://github.com/cataggar/zig/pull/75))
+- [`2673277472`](https://github.com/cataggar/zig/commit/2673277472fe03b7a55edfa731b74faaa7d439f4) — `Adding wasm32-wasip3 component model` ([#91](https://github.com/cataggar/zig/pull/91))
+- [`866cfb988d`](https://github.com/cataggar/zig/commit/866cfb988d70fea6c1192fecc49e72eee54ae379) — `wasm32-wasip3: self-host full Zig compiler as WASI 0.3 component` ([#98](https://github.com/cataggar/zig/pull/98))
+- [`a5633fae06`](https://github.com/cataggar/zig/commit/a5633fae066b597595268b4975b68a74d9a0f330) — `wasm: add MIR peephole optimizer and wabt post-link core optimizer` ([#108](https://github.com/cataggar/zig/pull/108))
+- [`28de97fbd8`](https://github.com/cataggar/zig/commit/28de97fbd890857261e9c5557d5202f6eed98fb3) — `wasm: support wasm64-wasip3 (64-bit Component Model cm64 and WASI 0.3.0)` ([#116](https://github.com/cataggar/zig/pull/116))
+- [`20f22e1f0a`](https://github.com/cataggar/zig/commit/20f22e1f0a57f05ac226d60e562ead9ad46ba3ee) — `wasi: support wasm64-wasip3 C/C++, static LLVM, and wazig/wazigl releases` ([#117](https://github.com/cataggar/zig/pull/117))
+- [`113621a0c9`](https://github.com/cataggar/zig/commit/113621a0c92a981741a3bc5ac1a28eb95a210354) — `Enable wasm64-wasip3 static LLVM linking for wazigl release` ([#118](https://github.com/cataggar/zig/pull/118))
 
 ### Key Changes
 - **Core Wasm Codegen & Linker Fixes (`src/codegen/wasm/`, `src/link/Wasm.zig`, `src/link/Wasm/`)**:
@@ -138,14 +138,14 @@ Extends the self-hosted WebAssembly code generator and linker with static archiv
 Migrates C standard library translation units from bundled musl C and `wasi-libc` C into native Zig under `lib/c/`, enabling `-lc` on WASI targets to build 100% from Zig without Clang or LLVM.
 
 ### Commits
-- `e72abbbe67` — `lib/c: port libc17-704 libzigc onto 0.17.0` (#69)
-- `c3528f430c` — `lib/c: wire unistd, ldso, mman, conf, issetugid, time32, and complex parity` (#72)
-- `e238f784d6` — `libc: migrate variadic stdio and syscall wrappers to Zig` (#74)
-- `667417996e` — `libzigc: migrate remaining math, regex, and locale units from musl` (#77)
-- `8b547cb570` — `libzigc: migrate iconv.c and strfmon.c to lib/c/locale.zig` (#78)
-- `333accf5cd` — `lib/c: fix 0.17.0-libc validation issues across musl and wasi` (#79)
-- `caed8ffeb2` — `wasi-libc: migrate all remaining 337 C sources and CRT to libzigc` (#88, #89)
-- `7a50004235` — `lib/c: fix WASI currentLocaleSlot in iconv and avoid TLS in wasi_sources` (#89)
+- [`e72abbbe67`](https://github.com/cataggar/zig/commit/e72abbbe67cec22b859b235a62ea4f8dbea29cda) — `lib/c: port libc17-704 libzigc onto 0.17.0` ([#69](https://github.com/cataggar/zig/pull/69))
+- [`c3528f430c`](https://github.com/cataggar/zig/commit/c3528f430ca0b3f77e5ae8a9e61adfc78096a679) — `lib/c: wire unistd, ldso, mman, conf, issetugid, time32, and complex parity` ([#72](https://github.com/cataggar/zig/pull/72))
+- [`e238f784d6`](https://github.com/cataggar/zig/commit/e238f784d604ab8fcef849a41c0a99edb8292ff3) — `libc: migrate variadic stdio and syscall wrappers to Zig` ([#74](https://github.com/cataggar/zig/pull/74))
+- [`667417996e`](https://github.com/cataggar/zig/commit/667417996e9a297e0ae363457656671cbf10e7a5) — `libzigc: migrate remaining math, regex, and locale units from musl` ([#77](https://github.com/cataggar/zig/pull/77))
+- [`8b547cb570`](https://github.com/cataggar/zig/commit/8b547cb57089d472e7f49a3bd1480da95234059a) — `libzigc: migrate iconv.c and strfmon.c to lib/c/locale.zig` ([#78](https://github.com/cataggar/zig/pull/78))
+- [`333accf5cd`](https://github.com/cataggar/zig/commit/333accf5cdce313efddcdad14d512125e5c8b063) — `lib/c: fix 0.17.0-libc validation issues across musl and wasi` ([#79](https://github.com/cataggar/zig/pull/79))
+- [`caed8ffeb2`](https://github.com/cataggar/zig/commit/caed8ffeb263ca1226ef9448fc189651b0c34df6) — `wasi-libc: migrate all remaining 337 C sources and CRT to libzigc` ([#88](https://github.com/cataggar/zig/issues/88), [#89](https://github.com/cataggar/zig/pull/89))
+- [`7a50004235`](https://github.com/cataggar/zig/commit/7a50004235221b49caee9c96cc61fc75e668bfd8) — `lib/c: fix WASI currentLocaleSlot in iconv and avoid TLS in wasi_sources` ([#89](https://github.com/cataggar/zig/pull/89))
 
 ### Key Changes
 - **Linux/musl C-to-Zig Migration (`lib/c/*.zig`, `src/libs/musl.zig`)**:
@@ -167,12 +167,12 @@ Migrates C standard library translation units from bundled musl C and `wasi-libc
 Fixes multi-architecture `VaList`/`@cVaArg` ABI lowering, cross-module inline debug info stripping, `zig cc` linker script and common-symbol flags, and static LLVM/Clang/LLD compilation targeting `wasm64-wasip3`.
 
 ### Commits
-- `6af9ad0cc0` — `compiler: port VaList and @cVaArg fixes for x86_64, aarch64, and s390x` (#70)
-- `6c3c018259` — `Sema: propagate strip across inline call chain` (#62, #94)
-- `c5a7f27af6` — `zig cc: support define-common, default scripts, and ordered linker scripts` (#60, #105)
-- `20f22e1f0a` — `wasi: support wasm64-wasip3 C/C++, static LLVM, and wazig/wazigl releases` (#117)
-- `113621a0c9` — `Enable wasm64-wasip3 static LLVM linking for wazigl release` (#118)
-- `37ab69369b` — `wasi: guard empty metadataString in LLVM debug info and undraft re-tagged releases` (#124)
+- [`6af9ad0cc0`](https://github.com/cataggar/zig/commit/6af9ad0cc0df66200ae5e8f5590f1c111da6aa42) — `compiler: port VaList and @cVaArg fixes for x86_64, aarch64, and s390x` ([#70](https://github.com/cataggar/zig/pull/70))
+- [`6c3c018259`](https://github.com/cataggar/zig/commit/6c3c0182592100ae04ed0d9af37e3359f2ea078e) — `Sema: propagate strip across inline call chain` ([#62](https://github.com/cataggar/zig/issues/62), [#94](https://github.com/cataggar/zig/pull/94))
+- [`c5a7f27af6`](https://github.com/cataggar/zig/commit/c5a7f27af69cadab6ab474953640cd02af4326a7) — `zig cc: support define-common, default scripts, and ordered linker scripts` ([#60](https://github.com/cataggar/zig/issues/60), [#105](https://github.com/cataggar/zig/pull/105))
+- [`20f22e1f0a`](https://github.com/cataggar/zig/commit/20f22e1f0a57f05ac226d60e562ead9ad46ba3ee) — `wasi: support wasm64-wasip3 C/C++, static LLVM, and wazig/wazigl releases` ([#117](https://github.com/cataggar/zig/pull/117))
+- [`113621a0c9`](https://github.com/cataggar/zig/commit/113621a0c92a981741a3bc5ac1a28eb95a210354) — `Enable wasm64-wasip3 static LLVM linking for wazigl release` ([#118](https://github.com/cataggar/zig/pull/118))
+- [`37ab69369b`](https://github.com/cataggar/zig/commit/37ab69369b6e166aa2ff536418b84a2127939c1b) — `wasi: guard empty metadataString in LLVM debug info and undraft re-tagged releases` ([#124](https://github.com/cataggar/zig/pull/124))
 
 ### Key Changes
 - **`VaList` & `@cVaArg` Lowering (`src/codegen/llvm/FuncGen.zig`, `src/Sema.zig`)**:
@@ -204,9 +204,9 @@ Fixes multi-architecture `VaList`/`@cVaArg` ABI lowering, cross-module inline de
 Fixes register allocation and instruction selection bugs in the self-hosted `x86_64` and `aarch64` backends, enabling `stage2_aarch64` to self-host the full Zig compiler without LLVM.
 
 ### Commits
-- `29fa659ca2` — `aarch64, wasip3: fix self-hosted backend for compiler_rt/Maker and wasip3 exit codes` (#92, #93)
-- `6999ac3e6f` — `stage2_aarch64: fix Select.zig cases to self-host full compiler` (#96, #103)
-- `ee9797f5e0` — `x86_64: fix register-spill restore clobbering branch results` (#61, #104)
+- [`29fa659ca2`](https://github.com/cataggar/zig/commit/29fa659ca221a3e9127fe7ab4e8470f420a8b543) — `aarch64, wasip3: fix self-hosted backend for compiler_rt/Maker and wasip3 exit codes` ([#92](https://github.com/cataggar/zig/issues/92), [#93](https://github.com/cataggar/zig/pull/93))
+- [`6999ac3e6f`](https://github.com/cataggar/zig/commit/6999ac3e6ff8658ab84dbce5c934301c6bca7b4a) — `stage2_aarch64: fix Select.zig cases to self-host full compiler` ([#96](https://github.com/cataggar/zig/issues/96), [#103](https://github.com/cataggar/zig/pull/103))
+- [`ee9797f5e0`](https://github.com/cataggar/zig/commit/ee9797f5e0988184a578a3beb05255c2b6362c29) — `x86_64: fix register-spill restore clobbering branch results` ([#61](https://github.com/cataggar/zig/issues/61), [#104](https://github.com/cataggar/zig/pull/104))
 
 ### Key Changes
 - **Self-Hosted `x86_64` (`src/codegen/x86_64/CodeGen.zig`)**:
@@ -229,8 +229,8 @@ Fixes register allocation and instruction selection bugs in the self-hosted `x86
 Fixes HTTPS over HTTP `CONNECT` proxy tunnels and `/etc/resolv.conf` parsing for large corporate/WSL `search` lists.
 
 ### Commits
-- `d6b022846c` — `std.http.Client: upgrade CONNECT proxy tunnels to TLS for https targets` (#56, #106)
-- `348f24280a` — `std.Io.net.HostName.ResolvConf: expand search/line buffers to 4 KiB and harden parsing` (#59, #107)
+- [`d6b022846c`](https://github.com/cataggar/zig/commit/d6b022846c83ddb75987e1e2b1379ac3bb997297) — `std.http.Client: upgrade CONNECT proxy tunnels to TLS for https targets` ([#56](https://github.com/cataggar/zig/issues/56), [#106](https://github.com/cataggar/zig/pull/106))
+- [`348f24280a`](https://github.com/cataggar/zig/commit/348f24280aadb6e02d870176c629aad357ee96cb) — `std.Io.net.HostName.ResolvConf: expand search/line buffers to 4 KiB and harden parsing` ([#59](https://github.com/cataggar/zig/issues/59), [#107](https://github.com/cataggar/zig/pull/107))
 
 ### Key Changes
 - **HTTPS Proxy `CONNECT` TLS Upgrade (`lib/std/http/Client.zig`)**:
