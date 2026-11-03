@@ -25,6 +25,15 @@ Releases are installed with [`ghr`](https://github.com/cataggar/ghr). See
 [`doc/installation.md`](doc/installation.md) for minisign signature verification
 and running `wazig.wasm` / `wazigl.wasm` directly with `wasmtime`.
 
+#### Official Zig Releases (mirrored from ziglang.org)
+
+Stable Zig releases are mirrored automatically from
+<https://ziglang.org/download/>:
+
+```sh
+ghr install cataggar/zig@v0.17.0
+```
+
 #### WebAssembly (`wasm64-wasip3`) Releases (`wazig` and `wazigl`)
 
 Pre-built WebAssembly (`wasm64-wasip3`) compiler releases are published in two
@@ -49,22 +58,12 @@ wazig version
 wazig --help
 ```
 
-#### Official Zig Releases (mirrored from ziglang.org)
-
-Stable Zig releases are mirrored automatically from
-<https://ziglang.org/download/>:
-
-```sh
-ghr install cataggar/zig@v0.17.0
-```
-
 ## Documentation
 
 * [`doc/installation.md`](doc/installation.md) — Installing `wazig`, `wazigl`, and native Zig releases with `ghr`, minisign verification keys, and running directly with `wasmtime`.
 * [`doc/wazig-changes.md`](doc/wazig-changes.md) — Summary of all compiler, linker, standard library, and `lib/c` changes in `wazig` since Zig 0.17.0.
 * [`doc/building.md`](doc/building.md) — Building `wazig`/`wazigl`, Zig, and LLVM/Clang/LLD from source across POSIX and Windows.
 * [`doc/debugging-and-testing.md`](doc/debugging-and-testing.md) — Editing source code, running the test suite (native, QEMU, Wine, Wasmtime), Autodoc, `translate-c`, and debugging with LLDB.
-* [`doc/libc-release-notes.md`](doc/libc-release-notes.md) — `libzigc` release notes.
 * [`doc/build.zig.zon.md`](doc/build.zig.zon.md) — `build.zig.zon` package manifest specification.
 
 For official Zig documentation, refer to the **Release Notes**, **Language
