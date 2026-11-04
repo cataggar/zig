@@ -327,6 +327,7 @@ pub const DataSegment = struct {
 pub const Custom = struct {
     name: []const u8,
     data: []const u8 = &.{},
+    owns_data: bool = false,
 };
 
 /// Per-type metadata for GC subtyping validation.
@@ -484,6 +485,11 @@ pub const Module = struct {
             }
         }
         self.data_segments.deinit(self.allocator);
+        for (self.customs.items) |custom| {
+            if (custom.owns_data and custom.data.len > 0) {
+                self.allocator.free(custom.data);
+            }
+        }
         self.customs.deinit(self.allocator);
         for (self.owned_strings.items) |s| self.allocator.free(s);
         self.owned_strings.deinit(self.allocator);

@@ -74,7 +74,14 @@ pub fn optimizeModule(allocator: std.mem.Allocator, module: *Mod.Module, options
     if (module.customs.items.len > 0) {
         switch (options.custom_sections) {
             .reject => return error.CustomSectionsPresent,
-            .strip => module.customs.clearRetainingCapacity(),
+            .strip => {
+                for (module.customs.items) |custom| {
+                    if (custom.owns_data and custom.data.len > 0) {
+                        module.allocator.free(custom.data);
+                    }
+                }
+                module.customs.clearRetainingCapacity();
+            },
             .preserve => {
                 for (module.customs.items) |custom| {
                     if (std.mem.startsWith(u8, custom.name, "reloc.") or
@@ -92,17 +99,7 @@ pub fn optimizeModule(allocator: std.mem.Allocator, module: *Mod.Module, options
         try optimizeFuncBody(allocator, func);
     }
 
-    const old_func_count = module.funcs.items.len;
     try removeDeadFunctions(allocator, module);
-    if (options.custom_sections == .preserve and module.funcs.items.len != old_func_count) {
-        var write_idx: usize = 0;
-        for (module.customs.items) |custom| {
-            if (std.mem.eql(u8, custom.name, "name")) continue;
-            module.customs.items[write_idx] = custom;
-            write_idx += 1;
-        }
-        module.customs.shrinkRetainingCapacity(write_idx);
-    }
 }
 
 // ── Preflight validation ─────────────────────────────────────────────────
@@ -421,22 +418,22 @@ fn readS64(bytes: []const u8, pos: *usize) leb128.ReadError!i64 {
     return r.value;
 }
 
-fn appendU32Leb(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), v: u32) Error!void {
+fn appendU32Leb(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), v: u32) std.mem.Allocator.Error!void {
     var tmp: [leb128.max_u32_bytes]u8 = undefined;
     const n = leb128.writeU32Leb128(&tmp, v);
-    buf.appendSlice(allocator, tmp[0..n]) catch return error.OutOfMemory;
+    try buf.appendSlice(allocator, tmp[0..n]);
 }
 
-fn appendS32Leb(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), v: i32) Error!void {
+fn appendS32Leb(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), v: i32) std.mem.Allocator.Error!void {
     var tmp: [leb128.max_s32_bytes]u8 = undefined;
     const n = leb128.writeS32Leb128(&tmp, v);
-    buf.appendSlice(allocator, tmp[0..n]) catch return error.OutOfMemory;
+    try buf.appendSlice(allocator, tmp[0..n]);
 }
 
-fn appendS64Leb(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), v: i64) Error!void {
+fn appendS64Leb(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), v: i64) std.mem.Allocator.Error!void {
     var tmp: [leb128.max_s64_bytes]u8 = undefined;
     const n = leb128.writeS64Leb128(&tmp, v);
-    buf.appendSlice(allocator, tmp[0..n]) catch return error.OutOfMemory;
+    try buf.appendSlice(allocator, tmp[0..n]);
 }
 
 // ── Intrafunction AST & Passes ───────────────────────────────────────────
@@ -1090,6 +1087,7 @@ fn scanExprFuncRefs(
     num_funcs: usize,
     live: []bool,
     worklist: *std.ArrayListUnmanaged(u32),
+    uses_table: *bool,
     allocator: std.mem.Allocator,
 ) Error!void {
     var pos: usize = 0;
@@ -1099,6 +1097,11 @@ fn scanExprFuncRefs(
             const idx = readU32(bytes, &pos) catch return error.InvalidInput;
             try markLiveFunc(num_funcs, live, worklist, allocator, idx);
         } else {
+            if ((decoded.prefix == 0 and (decoded.code == 0x11 or decoded.code == 0x13 or decoded.code == 0x25 or decoded.code == 0x26)) or
+                (decoded.prefix == 0xfc and decoded.code >= 12 and decoded.code <= 17))
+            {
+                uses_table.* = true;
+            }
             instr.skipImmediates(decoded.shape, bytes, &pos) catch return error.InvalidInput;
         }
     }
@@ -1147,9 +1150,12 @@ fn removeDeadFunctions(allocator: std.mem.Allocator, module: *Mod.Module) Error!
         try markLiveFunc(num_funcs, live, &worklist, allocator, @intCast(i));
     }
 
+    var uses_table = module.num_table_imports > 0;
     for (module.exports.items) |exp| {
         if (exp.kind == .func and exp.var_ == .index) {
             try markLiveFunc(num_funcs, live, &worklist, allocator, exp.var_.index);
+        } else if (exp.kind == .table) {
+            uses_table = true;
         }
     }
 
@@ -1159,45 +1165,71 @@ fn removeDeadFunctions(allocator: std.mem.Allocator, module: *Mod.Module) Error!
         }
     }
 
-    for (module.elem_segments.items) |seg| {
-        for (seg.elem_var_indices.items) |v| {
-            if (v == .index and v.index != types.invalid_index) {
-                try markLiveFunc(num_funcs, live, &worklist, allocator, v.index);
-            }
-        }
-        if (seg.elem_expr_bytes.len > 0) {
-            try scanExprFuncRefs(seg.elem_expr_bytes, num_funcs, live, &worklist, allocator);
-        }
-        if (seg.kind == .active and seg.offset_expr_bytes.len > 0) {
-            try scanExprFuncRefs(seg.offset_expr_bytes, num_funcs, live, &worklist, allocator);
-        }
-    }
-
     for (module.globals.items) |global| {
         if (!global.is_import and global.init_expr_bytes.len > 0) {
-            try scanExprFuncRefs(global.init_expr_bytes, num_funcs, live, &worklist, allocator);
+            try scanExprFuncRefs(global.init_expr_bytes, num_funcs, live, &worklist, &uses_table, allocator);
         }
     }
 
     for (module.tables.items) |table| {
         if (!table.is_import and table.hasInitExpr() and table.init_expr_bytes.len > 0) {
-            try scanExprFuncRefs(table.init_expr_bytes, num_funcs, live, &worklist, allocator);
+            try scanExprFuncRefs(table.init_expr_bytes, num_funcs, live, &worklist, &uses_table, allocator);
         }
     }
 
     for (module.data_segments.items) |seg| {
         if (seg.kind == .active and seg.offset_expr_bytes.len > 0) {
-            try scanExprFuncRefs(seg.offset_expr_bytes, num_funcs, live, &worklist, allocator);
+            try scanExprFuncRefs(seg.offset_expr_bytes, num_funcs, live, &worklist, &uses_table, allocator);
         }
     }
 
-    while (worklist.items.len > 0) {
-        const fidx = worklist.pop().?;
+    var elems_seeded = false;
+    while (true) {
+        if (uses_table and !elems_seeded) {
+            elems_seeded = true;
+            for (module.elem_segments.items) |seg| {
+                for (seg.elem_var_indices.items) |v| {
+                    if (v == .index and v.index != types.invalid_index) {
+                        try markLiveFunc(num_funcs, live, &worklist, allocator, v.index);
+                    }
+                }
+                if (seg.elem_expr_bytes.len > 0) {
+                    try scanExprFuncRefs(seg.elem_expr_bytes, num_funcs, live, &worklist, &uses_table, allocator);
+                }
+                if (seg.kind == .active and seg.offset_expr_bytes.len > 0) {
+                    try scanExprFuncRefs(seg.offset_expr_bytes, num_funcs, live, &worklist, &uses_table, allocator);
+                }
+            }
+        }
+        const fidx = worklist.pop() orelse {
+            if (uses_table and !elems_seeded) continue;
+            break;
+        };
         if (fidx < module.num_func_imports or fidx >= num_funcs) continue;
         const func = module.funcs.items[fidx];
         if (func.code_bytes.len > 0) {
-            try scanExprFuncRefs(func.code_bytes, num_funcs, live, &worklist, allocator);
+            try scanExprFuncRefs(func.code_bytes, num_funcs, live, &worklist, &uses_table, allocator);
         }
+    }
+
+    if (!elems_seeded) {
+        for (module.elem_segments.items) |*seg| {
+            seg.elem_var_indices.deinit(module.allocator);
+            if (seg.owns_offset_expr_bytes and seg.offset_expr_bytes.len > 0) {
+                module.allocator.free(seg.offset_expr_bytes);
+            }
+            if (seg.owns_elem_expr_bytes and seg.elem_expr_bytes.len > 0) {
+                module.allocator.free(seg.elem_expr_bytes);
+            }
+        }
+        module.elem_segments.clearRetainingCapacity();
+
+        for (module.tables.items) |*table| {
+            if (table.owns_init_expr_bytes and table.init_expr_bytes.len > 0) {
+                module.allocator.free(table.init_expr_bytes);
+            }
+        }
+        module.tables.clearRetainingCapacity();
     }
 
     var all_live = true;
@@ -1301,6 +1333,35 @@ fn removeDeadFunctions(allocator: std.mem.Allocator, module: *Mod.Module) Error!
         }
     }
 
+    if (next_idx != num_funcs and module.customs.items.len > 0) {
+        var custom_write_idx: usize = 0;
+        for (module.customs.items) |custom| {
+            if (!std.mem.eql(u8, custom.name, "name")) {
+                module.customs.items[custom_write_idx] = custom;
+                custom_write_idx += 1;
+                continue;
+            }
+            if (rewriteNameSectionPayload(module.allocator, custom.data, old_to_new)) |rewritten| {
+                if (custom.owns_data and custom.data.len > 0) {
+                    module.allocator.free(custom.data);
+                }
+                var updated = custom;
+                updated.data = rewritten;
+                updated.owns_data = true;
+                module.customs.items[custom_write_idx] = updated;
+                custom_write_idx += 1;
+            } else |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.InvalidNameSection => {
+                    if (custom.owns_data and custom.data.len > 0) {
+                        module.allocator.free(custom.data);
+                    }
+                },
+            }
+        }
+        module.customs.shrinkRetainingCapacity(custom_write_idx);
+    }
+
     var write_idx: usize = 0;
     for (module.funcs.items, 0..) |*func, i| {
         if (live[i]) {
@@ -1315,6 +1376,102 @@ fn removeDeadFunctions(allocator: std.mem.Allocator, module: *Mod.Module) Error!
         }
     }
     module.funcs.shrinkRetainingCapacity(write_idx);
+}
+
+const RewriteNameSectionError = std.mem.Allocator.Error || error{InvalidNameSection};
+
+fn rewriteNameSectionPayload(
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    old_to_new: []const u32,
+) RewriteNameSectionError![]u8 {
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var entries_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer entries_buf.deinit(allocator);
+
+    var pos: usize = 0;
+    while (pos < data.len) {
+        const subsec_id = data[pos];
+        pos += 1;
+        const subsec_size = readU32(data, &pos) catch return error.InvalidNameSection;
+        if (subsec_size > data.len - pos) return error.InvalidNameSection;
+        const subsec_body = data[pos .. pos + subsec_size];
+        pos += subsec_size;
+
+        switch (subsec_id) {
+            1 => {
+                entries_buf.clearRetainingCapacity();
+                var sub_pos: usize = 0;
+                const count = readU32(subsec_body, &sub_pos) catch return error.InvalidNameSection;
+                var surviving_count: u32 = 0;
+                for (0..count) |_| {
+                    const func_idx = readU32(subsec_body, &sub_pos) catch return error.InvalidNameSection;
+                    const name_len = readU32(subsec_body, &sub_pos) catch return error.InvalidNameSection;
+                    if (name_len > subsec_body.len - sub_pos) return error.InvalidNameSection;
+                    const name_bytes = subsec_body[sub_pos .. sub_pos + name_len];
+                    sub_pos += name_len;
+
+                    if (func_idx < old_to_new.len and old_to_new[func_idx] != types.invalid_index) {
+                        try appendU32Leb(allocator, &entries_buf, old_to_new[func_idx]);
+                        try appendU32Leb(allocator, &entries_buf, name_len);
+                        try entries_buf.appendSlice(allocator, name_bytes);
+                        surviving_count += 1;
+                    }
+                }
+                if (sub_pos != subsec_body.len) return error.InvalidNameSection;
+
+                var count_tmp: [leb128.max_u32_bytes]u8 = undefined;
+                const count_len = leb128.writeU32Leb128(&count_tmp, surviving_count);
+                const new_subsec_size: u32 = @intCast(count_len + entries_buf.items.len);
+                try out.append(allocator, subsec_id);
+                try appendU32Leb(allocator, &out, new_subsec_size);
+                try out.appendSlice(allocator, count_tmp[0..count_len]);
+                try out.appendSlice(allocator, entries_buf.items);
+            },
+            2, 3 => {
+                entries_buf.clearRetainingCapacity();
+                var sub_pos: usize = 0;
+                const count = readU32(subsec_body, &sub_pos) catch return error.InvalidNameSection;
+                var surviving_count: u32 = 0;
+                for (0..count) |_| {
+                    const func_idx = readU32(subsec_body, &sub_pos) catch return error.InvalidNameSection;
+                    const inner_start = sub_pos;
+                    const inner_count = readU32(subsec_body, &sub_pos) catch return error.InvalidNameSection;
+                    for (0..inner_count) |_| {
+                        _ = readU32(subsec_body, &sub_pos) catch return error.InvalidNameSection;
+                        const name_len = readU32(subsec_body, &sub_pos) catch return error.InvalidNameSection;
+                        if (name_len > subsec_body.len - sub_pos) return error.InvalidNameSection;
+                        sub_pos += name_len;
+                    }
+                    const inner_bytes = subsec_body[inner_start..sub_pos];
+
+                    if (func_idx < old_to_new.len and old_to_new[func_idx] != types.invalid_index) {
+                        try appendU32Leb(allocator, &entries_buf, old_to_new[func_idx]);
+                        try entries_buf.appendSlice(allocator, inner_bytes);
+                        surviving_count += 1;
+                    }
+                }
+                if (sub_pos != subsec_body.len) return error.InvalidNameSection;
+
+                var count_tmp: [leb128.max_u32_bytes]u8 = undefined;
+                const count_len = leb128.writeU32Leb128(&count_tmp, surviving_count);
+                const new_subsec_size: u32 = @intCast(count_len + entries_buf.items.len);
+                try out.append(allocator, subsec_id);
+                try appendU32Leb(allocator, &out, new_subsec_size);
+                try out.appendSlice(allocator, count_tmp[0..count_len]);
+                try out.appendSlice(allocator, entries_buf.items);
+            },
+            else => {
+                try out.append(allocator, subsec_id);
+                try appendU32Leb(allocator, &out, subsec_size);
+                try out.appendSlice(allocator, subsec_body);
+            },
+        }
+    }
+
+    return try out.toOwnedSlice(allocator);
 }
 
 // ── Unit Tests ───────────────────────────────────────────────────────────
@@ -1502,4 +1659,143 @@ test "Optimizer: CustomSectionPolicy.preserve and SIMD/atomics passthrough" {
         &[_]u8{ 0x41, 0x00, 0x41, 0x01, 0xfe, 0x00, 0x02, 0x00, 0x1a, 0x41, 42, 0x0b },
         opt_mod.funcs.items[0].code_bytes,
     );
+}
+
+test "Optimizer: CustomSectionPolicy.preserve rewrites name section on dead-function removal" {
+    const allocator = testing.allocator;
+    var mod = Mod.Module.init(allocator);
+    defer mod.deinit();
+
+    const r_copy = try allocator.dupe(types.ValType, &.{.i32});
+    try mod.module_types.append(allocator, .{ .func_type = .{ .params = &.{}, .results = r_copy } });
+    try mod.type_meta.append(allocator, .{});
+
+    const sig = types.FuncType{ .params = &.{}, .results = r_copy };
+
+    // func 0: imported function
+    try mod.imports.append(allocator, .{
+        .module_name = "env",
+        .field_name = "imp",
+        .kind = .func,
+        .func = .{ .type_var = .{ .index = 0 }, .sig = sig },
+    });
+    try mod.funcs.append(allocator, .{
+        .decl = .{ .type_var = .{ .index = 0 }, .sig = sig },
+        .is_import = true,
+    });
+    mod.num_func_imports = 1;
+
+    // func 1: dead function
+    try mod.funcs.append(allocator, .{
+        .decl = .{ .type_var = .{ .index = 0 }, .sig = sig },
+        .code_bytes = &[_]u8{ 0x00, 0x0b },
+    });
+
+    // func 2: live helper returning 42
+    try mod.funcs.append(allocator, .{
+        .decl = .{ .type_var = .{ .index = 0 }, .sig = sig },
+        .code_bytes = &[_]u8{ 0x41, 42, 0x0b },
+    });
+
+    // func 3: exported caller calling func 0 and func 2
+    try mod.funcs.append(allocator, .{
+        .decl = .{ .type_var = .{ .index = 0 }, .sig = sig },
+        .code_bytes = &[_]u8{ 0x10, 0x00, 0x1a, 0x10, 0x02, 0x0b },
+    });
+
+    try mod.exports.append(allocator, .{
+        .name = "main",
+        .kind = .func,
+        .var_ = .{ .index = 3 },
+    });
+
+    // Build a "name" custom section with:
+    // - subsec 0 (module name): "m"
+    // - subsec 1 (function names): 0->"imp", 1->"dead", 2->"live", 3->"main"
+    // - subsec 2 (local names): 1->{0->"d0"}, 2->{0->"l0", 1->"l1"}, 3->{0->"m0"}
+    // - subsec 7 (global names): 0->"g0"
+    // - subsec 9 (data segment names): 0->"dseg"
+    const name_payload = [_]u8{
+        // subsec 0: module name "m"
+        0x00, 0x02, 0x01, 'm',
+        // subsec 1: 4 entries:
+        // (0, 3, "imp") = 5 bytes
+        // (1, 4, "dead") = 6 bytes
+        // (2, 4, "live") = 6 bytes
+        // (3, 4, "main") = 6 bytes
+        // count (1) + 5 + 6 + 6 + 6 = 24 (0x18)
+        0x01, 24,   0x04, 0x00,
+        0x03, 'i',  'm',  'p',
+        0x01, 0x04, 'd',  'e',
+        'a',  'd',  0x02, 0x04,
+        'l',  'i',  'v',  'e',
+        0x03, 0x04, 'm',  'a',
+        'i',  'n',
+        // subsec 2: 3 entries:
+        // func 1: count 1, (0, 2, "d0") -> 1 + 1 + 4 = 6 bytes
+        // func 2: count 2, (0, 2, "l0"), (1, 2, "l1") -> 1 + 1 + 4 + 4 = 10 bytes
+        // func 3: count 1, (0, 2, "m0") -> 1 + 1 + 4 = 6 bytes
+        // count (1) + 6 + 10 + 6 = 23 (0x17)
+        0x02,  23,   0x03, 0x01,
+        0x01, 0x00, 0x02, 'd',
+        '0',  0x02, 0x02, 0x00,
+        0x02, 'l',  '0',  0x01,
+        0x02, 'l',  '1',  0x03,
+        0x01, 0x00, 0x02, 'm',
+        '0',
+        // subsec 7: global names: count 1, (0, 2, "g0") -> size 5
+        0x07,  0x05, 0x01, 0x00,
+        0x02, 'g',  '0',
+        // subsec 9: data names: count 1, (0, 4, "dseg") -> size 7
+        0x09,  0x07, 0x01, 0x00,
+        0x04, 'd',  's',  'e',
+        'g',
+    };
+    try mod.customs.append(allocator, .{ .name = "name", .data = &name_payload });
+
+    const wasm = try writer.writeModule(allocator, &mod);
+    defer allocator.free(wasm);
+
+    const opt_bytes = try optimize(allocator, wasm, .{ .custom_sections = .preserve });
+    defer allocator.free(opt_bytes);
+
+    var opt_mod = try reader.readModule(allocator, opt_bytes);
+    defer opt_mod.deinit();
+
+    // 3 functions survive: 0 (imp), 1 (was 2, live), 2 (was 3, main)
+    try testing.expectEqual(@as(usize, 3), opt_mod.funcs.items.len);
+    try testing.expectEqual(@as(usize, 1), opt_mod.customs.items.len);
+    try testing.expectEqualStrings("name", opt_mod.customs.items[0].name);
+
+    const expected_name_payload = [_]u8{
+        // subsec 0: module name "m" preserved verbatim
+        0x00, 0x02, 0x01, 'm',
+        // subsec 1: 3 entries:
+        // (0, 3, "imp") = 5 bytes
+        // (1, 4, "live") = 6 bytes
+        // (2, 4, "main") = 6 bytes
+        // count (1) + 5 + 6 + 6 = 18
+        0x01, 18,   0x03, 0x00,
+        0x03, 'i',  'm',  'p',
+        0x01, 0x04, 'l',  'i',
+        'v',  'e',  0x02, 0x04,
+        'm',  'a',  'i',  'n',
+        // subsec 2: 2 entries:
+        // func 1 (was 2): count 2, (0, 2, "l0"), (1, 2, "l1") -> 10 bytes
+        // func 2 (was 3): count 1, (0, 2, "m0") -> 6 bytes
+        // count (1) + 10 + 6 = 17
+        0x02, 17,   0x02, 0x01,
+        0x02, 0x00, 0x02, 'l',
+        '0',  0x01, 0x02, 'l',
+        '1',  0x02, 0x01, 0x00,
+        0x02, 'm',  '0',
+        // subsec 7: global names preserved verbatim
+        0x07,  0x05, 0x01, 0x00,
+        0x02, 'g',  '0',
+        // subsec 9: data names preserved verbatim
+        0x09,  0x07, 0x01, 0x00,
+        0x04, 'd',  's',  'e',
+        'g',
+    };
+    try testing.expectEqualSlices(u8, &expected_name_payload, opt_mod.customs.items[0].data);
 }
