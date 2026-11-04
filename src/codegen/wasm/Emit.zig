@@ -34,12 +34,7 @@ pub fn lower(emit: *Emit) Error!void {
     // Write the locals in the prologue of the function body.
     try code.ensureUnusedCapacity(gpa, 5 + mir.locals.len * 6 + 48);
 
-    writeUleb128(code, @as(u32, @intCast(mir.locals.len)));
-
-    for (mir.locals) |local| {
-        writeUleb128(code, @as(u32, 1));
-        code.appendAssumeCapacity(@backingInt(local));
-    }
+    encodeLocals(code, mir.locals);
 
     // Stack management section of function prologue.
     const stack_alignment = mir.prologue.flags.stack_alignment;
@@ -1021,6 +1016,11 @@ pub fn lower(emit: *Emit) Error!void {
         },
     }
     comptime unreachable;
+}
+
+/// Asserts `code` has at least `5 + locals.len * 6` bytes of unused capacity.
+pub fn encodeLocals(code: *ArrayList(u8), locals: []const std.wasm.Valtype) void {
+    Mir.Optimize.encodeLocals(code, locals);
 }
 
 /// Asserts 20 unused capacity.

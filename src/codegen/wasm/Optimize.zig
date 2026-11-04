@@ -52,6 +52,52 @@ pub fn simplifyLocals(
     return Pass(Inst).simplifyLocals(gpa, insts, out);
 }
 
+pub fn compactLocals(
+    gpa: Allocator,
+    mir_instructions: anytype,
+    mir_locals: *std.ArrayList(std.wasm.Valtype),
+    wasm_param_count: u32,
+    bottom_stack_local: ?*u32,
+    sp_local: ?*u32,
+) Allocator.Error!void {
+    const Inst = @TypeOf(mir_instructions.get(0));
+    return Pass(Inst).compactLocals(
+        gpa,
+        mir_instructions,
+        mir_locals,
+        wasm_param_count,
+        bottom_stack_local,
+        sp_local,
+    );
+}
+
+/// Asserts `code` has at least `5 + locals.len * 6` bytes of unused capacity.
+pub fn encodeLocals(code: *std.ArrayList(u8), locals: []const std.wasm.Valtype) void {
+    if (locals.len == 0) {
+        writeUleb128(code, @as(u32, 0));
+        return;
+    }
+    var num_decls: u32 = 1;
+    for (1..locals.len) |i| {
+        if (locals[i] != locals[i - 1]) num_decls += 1;
+    }
+    writeUleb128(code, num_decls);
+    var run_start: usize = 0;
+    while (run_start < locals.len) {
+        var run_end = run_start + 1;
+        while (run_end < locals.len and locals[run_end] == locals[run_start]) : (run_end += 1) {}
+        writeUleb128(code, @as(u32, @intCast(run_end - run_start)));
+        code.appendAssumeCapacity(@backingInt(locals[run_start]));
+        run_start = run_end;
+    }
+}
+
+fn writeUleb128(code: *std.ArrayList(u8), arg: anytype) void {
+    var w: std.Io.Writer = .fixed(code.unusedCapacitySlice());
+    w.writeUleb128(arg) catch unreachable;
+    code.items.len += w.end;
+}
+
 fn readImm64(mir_extra: []const u32, payload: u32) u64 {
     const msb = mir_extra[payload];
     const lsb = mir_extra[payload + 1];
@@ -1325,6 +1371,109 @@ fn Pass(comptime Inst: type) type {
             }
 
             return changed;
+        }
+
+        const valtypes = [5]std.wasm.Valtype{ .i32, .i64, .f32, .f64, .v128 };
+
+        fn valtypeBucket(vt: std.wasm.Valtype) usize {
+            return switch (vt) {
+                .i32 => 0,
+                .i64 => 1,
+                .f32 => 2,
+                .f64 => 3,
+                .v128 => 4,
+            };
+        }
+
+        fn compactLocals(
+            gpa: Allocator,
+            mir_instructions: *std.MultiArrayList(Inst),
+            mir_locals: *std.ArrayList(std.wasm.Valtype),
+            wasm_param_count: u32,
+            bottom_stack_local: ?*u32,
+            sp_local: ?*u32,
+        ) Allocator.Error!void {
+            if (mir_locals.items.len == 0) return;
+
+            const remap = try gpa.alloc(u32, mir_locals.items.len);
+            defer gpa.free(remap);
+            @memset(remap, std.math.maxInt(u32));
+
+            if (bottom_stack_local) |bsl| {
+                assert(bsl.* >= wasm_param_count);
+                remap[bsl.* - wasm_param_count] = 0;
+            }
+            if (sp_local) |spl| {
+                assert(spl.* >= wasm_param_count);
+                remap[spl.* - wasm_param_count] = 0;
+            }
+
+            const tags = mir_instructions.items(.tag);
+            const datas = mir_instructions.items(.data);
+            for (tags, datas) |tag, data| {
+                switch (tag) {
+                    .local_get, .local_set, .local_tee => {
+                        if (data.local >= wasm_param_count) {
+                            const slot = data.local - wasm_param_count;
+                            if (slot < remap.len) {
+                                remap[slot] = 0;
+                            }
+                        }
+                    },
+                    else => {},
+                }
+            }
+
+            var counts: [5]u32 = @splat(0);
+            for (mir_locals.items, remap) |vt, slot_remap| {
+                if (slot_remap == 0) {
+                    counts[valtypeBucket(vt)] += 1;
+                }
+            }
+
+            var next_idx: [5]u32 = undefined;
+            var total_live: u32 = 0;
+            for (&next_idx, counts) |*dst, c| {
+                dst.* = wasm_param_count + total_live;
+                total_live += c;
+            }
+
+            for (mir_locals.items, remap) |vt, *slot_remap| {
+                if (slot_remap.* == 0) {
+                    const b = valtypeBucket(vt);
+                    slot_remap.* = next_idx[b];
+                    next_idx[b] += 1;
+                }
+            }
+
+            var write_pos: usize = 0;
+            for (valtypes, counts) |vt, c| {
+                @memset(mir_locals.items[write_pos..][0..c], vt);
+                write_pos += c;
+            }
+            assert(write_pos == total_live);
+            mir_locals.shrinkRetainingCapacity(total_live);
+
+            if (bottom_stack_local) |bsl| {
+                bsl.* = remap[bsl.* - wasm_param_count];
+            }
+            if (sp_local) |spl| {
+                spl.* = remap[spl.* - wasm_param_count];
+            }
+
+            for (tags, datas) |tag, *data| {
+                switch (tag) {
+                    .local_get, .local_set, .local_tee => {
+                        if (data.local >= wasm_param_count) {
+                            const slot = data.local - wasm_param_count;
+                            if (slot < remap.len) {
+                                data.local = remap[slot];
+                            }
+                        }
+                    },
+                    else => {},
+                }
+            }
         }
     };
 }
@@ -2866,4 +3015,188 @@ test "uav_ref, uav_ref_off, and reference constant pruning across DCE, drop, sel
         );
         try testing.expectEqual(@as(i32, 42), datas[0].imm32);
     }
+}
+
+test "compactLocals: drops dead interior locals, groups Valtypes in canonical order, and preserves params" {
+    var m: TestMir = .{};
+    defer m.deinit();
+
+    var locals: std.ArrayList(std.wasm.Valtype) = .empty;
+    defer locals.deinit(testing.allocator);
+
+    // wasm_param_count = 2 (locals 0 and 1 are parameters)
+    // mir_locals slots (starting at local index 2):
+    //   slot 0 (local 2): .i32  (dead bottom_stack_local)
+    //   slot 1 (local 3): .i32  (dead sp_local)
+    //   slot 2 (local 4): .i64  (live #1 i64)
+    //   slot 3 (local 5): .f64  (dead interior)
+    //   slot 4 (local 6): .v128 (live #1 v128)
+    //   slot 5 (local 7): .i32  (live #1 i32)
+    //   slot 6 (local 8): .f32  (dead interior)
+    //   slot 7 (local 9): .f64  (live #1 f64)
+    //   slot 8 (local 10): .f32 (live #1 f32)
+    //   slot 9 (local 11): .i32 (live #2 i32)
+    //   slot 10 (local 12): .i64 (dead trailing)
+    try locals.appendSlice(testing.allocator, &.{
+        .i32, .i32, .i64, .f64, .v128, .i32,
+        .f32, .f64, .f32, .i32, .i64,
+    });
+
+    // Reference params 0 and 1, and live locals 4, 6, 7, 9, 10, 11 via local_get/local_set/local_tee
+    try m.addLocal(.local_get, 0);
+    try m.addLocal(.local_set, 1);
+    try m.addLocal(.local_get, 4); // i64  -> expected new index 4
+    try m.addLocal(.local_set, 6); // v128 -> expected new index 7
+    try m.addLocal(.local_tee, 7); // i32 #1 -> expected new index 2
+    try m.addLocal(.local_get, 9); // f64  -> expected new index 6
+    try m.addLocal(.local_set, 10); // f32 -> expected new index 5
+    try m.addLocal(.local_get, 11); // i32 #2 -> expected new index 3
+    try m.finishFunc();
+
+    try compactLocals(testing.allocator, &m.instructions, &locals, 2, null, null);
+
+    try testing.expectEqualSlices(
+        std.wasm.Valtype,
+        &.{ .i32, .i32, .i64, .f32, .f64, .v128 },
+        locals.items,
+    );
+
+    const datas = m.instructions.items(.data);
+    try testing.expectEqual(@as(u32, 0), datas[0].local);
+    try testing.expectEqual(@as(u32, 1), datas[1].local);
+    try testing.expectEqual(@as(u32, 4), datas[2].local);
+    try testing.expectEqual(@as(u32, 7), datas[3].local);
+    try testing.expectEqual(@as(u32, 2), datas[4].local);
+    try testing.expectEqual(@as(u32, 6), datas[5].local);
+    try testing.expectEqual(@as(u32, 5), datas[6].local);
+    try testing.expectEqual(@as(u32, 3), datas[7].local);
+}
+
+test "compactLocals: remaps active bottom_stack_local and sp_local across leaf and non-leaf prologues" {
+    // 1. Both bottom_stack_local and sp_local active (e.g. wasm64 where stack pointers are .i64 and move after .i32 locals)
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        var locals: std.ArrayList(std.wasm.Valtype) = .empty;
+        defer locals.deinit(testing.allocator);
+
+        // wasm_param_count = 1
+        // slot 0 (local 1): .i64 (bottom_stack_local, referenced only by prologue)
+        // slot 1 (local 2): .i64 (sp_local, referenced by prologue and epilogue)
+        // slot 2 (local 3): .i32 (dead local)
+        // slot 3 (local 4): .i32 (live body local)
+        try locals.appendSlice(testing.allocator, &.{ .i64, .i64, .i32, .i32 });
+
+        var bottom_stack_local: u32 = 1;
+        var sp_local: u32 = 2;
+
+        try m.addLocal(.local_get, 0); // param 0
+        try m.addLocal(.local_set, 4); // live .i32 local -> moves to index 1
+        try m.addLocal(.local_get, 2); // epilogue sp_local read -> moves to index 3
+        try m.addTag(.global_set_sp);
+        try m.finishFunc();
+
+        try compactLocals(
+            testing.allocator,
+            &m.instructions,
+            &locals,
+            1,
+            &bottom_stack_local,
+            &sp_local,
+        );
+
+        try testing.expectEqualSlices(std.wasm.Valtype, &.{ .i32, .i64, .i64 }, locals.items);
+        try testing.expectEqual(@as(u32, 2), bottom_stack_local);
+        try testing.expectEqual(@as(u32, 3), sp_local);
+
+        const datas = m.instructions.items(.data);
+        try testing.expectEqual(@as(u32, 0), datas[0].local);
+        try testing.expectEqual(@as(u32, 1), datas[1].local);
+        try testing.expectEqual(@as(u32, 3), datas[2].local);
+    }
+
+    // 2. Leaf prologue: bottom_stack_local active, sp_local is null (dead and dropped)
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        var locals: std.ArrayList(std.wasm.Valtype) = .empty;
+        defer locals.deinit(testing.allocator);
+
+        // wasm_param_count = 0
+        // slot 0 (local 0): .i32 (bottom_stack_local)
+        // slot 1 (local 1): .i32 (dead sp_local)
+        // slot 2 (local 2): .i64 (dead local)
+        // slot 3 (local 3): .i32 (live body local)
+        try locals.appendSlice(testing.allocator, &.{ .i32, .i32, .i64, .i32 });
+
+        var bottom_stack_local: u32 = 0;
+
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_tee, 3);
+        try m.finishFunc();
+
+        try compactLocals(
+            testing.allocator,
+            &m.instructions,
+            &locals,
+            0,
+            &bottom_stack_local,
+            null,
+        );
+
+        try testing.expectEqualSlices(std.wasm.Valtype, &.{ .i32, .i32 }, locals.items);
+        try testing.expectEqual(@as(u32, 0), bottom_stack_local);
+
+        const datas = m.instructions.items(.data);
+        try testing.expectEqual(@as(u32, 0), datas[0].local);
+        try testing.expectEqual(@as(u32, 1), datas[1].local);
+    }
+}
+
+test "encodeLocals: run-length encodes empty, grouped, and large local runs" {
+    var code: std.ArrayList(u8) = .empty;
+    defer code.deinit(testing.allocator);
+
+    // 1. Empty locals -> single 0x00 byte
+    try code.ensureUnusedCapacity(testing.allocator, 5);
+    encodeLocals(&code, &.{});
+    try testing.expectEqualSlices(u8, &.{0x00}, code.items);
+
+    // 2. Five runs of all 5 Wasm Valtypes: 3x i32, 2x i64, 1x f32, 4x f64, 2x v128
+    code.clearRetainingCapacity();
+    const mixed: []const std.wasm.Valtype = &.{
+        .i32, .i32,  .i32,
+        .i64, .i64,  .f32,
+        .f64, .f64,  .f64,
+        .f64, .v128, .v128,
+    };
+    try code.ensureUnusedCapacity(testing.allocator, 5 + mixed.len * 6);
+    encodeLocals(&code, mixed);
+    try testing.expectEqualSlices(u8, &.{
+        5, // 5 runs
+        3,
+        @backingInt(std.wasm.Valtype.i32),
+        2,
+        @backingInt(std.wasm.Valtype.i64),
+        1,
+        @backingInt(std.wasm.Valtype.f32),
+        4,
+        @backingInt(std.wasm.Valtype.f64),
+        2,
+        @backingInt(std.wasm.Valtype.v128),
+    }, code.items);
+
+    // 3. Multi-byte ULEB128 run count (130x i32 -> count = 0x82, 0x01)
+    code.clearRetainingCapacity();
+    const many_i32: [130]std.wasm.Valtype = @splat(.i32);
+    try code.ensureUnusedCapacity(testing.allocator, 5 + many_i32.len * 6);
+    encodeLocals(&code, &many_i32);
+    try testing.expectEqualSlices(u8, &.{
+        1, // 1 run
+        0x82,
+        0x01,
+        @backingInt(std.wasm.Valtype.i32),
+    }, code.items);
 }

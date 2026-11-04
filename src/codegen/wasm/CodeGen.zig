@@ -1024,8 +1024,8 @@ fn generateInner(cg: *CodeGen, any_returns: bool) InnerError!Mir {
     }
 
     const cc = zcu.typeToFunc(zcu.navValue(cg.owner_nav).typeOf(zcu)).?.cc;
-    const bottom_stack_local = cg.bottom_stack_value.local;
-    const sp_local = cg.initial_stack_value.local;
+    var bottom_stack_local = cg.bottom_stack_value.local;
+    var sp_local = cg.initial_stack_value.local;
 
     var uses_bottom_stack = cg.stack_size > 0;
     var has_calls = false;
@@ -1087,67 +1087,29 @@ fn generateInner(cg: *CodeGen, any_returns: bool) InnerError!Mir {
             read_idx += 1;
         }
         cg.mir_instructions.len = write_idx;
-
-        if (cc != .naked) {
-            const local_shift: u32 = if (!needs_stack_prologue) 2 else 1;
-            if (!needs_stack_prologue) {
-                cg.mir_locals.replaceRangeAssumeCapacity(0, 2, &.{});
-            } else {
-                _ = cg.mir_locals.orderedRemove(1);
-            }
-            for (
-                cg.mir_instructions.items(.tag),
-                cg.mir_instructions.items(.data),
-            ) |tag, *data| {
-                switch (tag) {
-                    .local_get, .local_set, .local_tee => {
-                        if (data.local > sp_local) {
-                            data.local -= local_shift;
-                        }
-                    },
-                    else => {},
-                }
-            }
-        }
     }
+
+    try Mir.Optimize.compactLocals(
+        cg.gpa,
+        &cg.mir_instructions,
+        &cg.mir_locals,
+        cg.wasm_param_count,
+        if (needs_stack_prologue) &bottom_stack_local else null,
+        if (needs_sp_save) &sp_local else null,
+    );
 
     const prologue: Mir.Prologue = if (!needs_stack_prologue)
         .none
-    else .{
-        .sp_local = if (needs_sp_save) sp_local else 0,
-        .flags = .{
-            .stack_alignment = cg.stack_alignment,
-            .is_leaf = !needs_sp_save,
-        },
-        .stack_size = cg.stack_size,
-        .bottom_stack_local = bottom_stack_local,
-    };
-
-    {
-        var max_local_len: usize = if (!needs_stack_prologue)
-            0
-        else if (!needs_sp_save)
-            1
-        else
-            2;
-        for (
-            cg.mir_instructions.items(.tag),
-            cg.mir_instructions.items(.data),
-        ) |tag, data| {
-            switch (tag) {
-                .local_get, .local_set, .local_tee => {
-                    if (data.local >= cg.wasm_param_count) {
-                        const needed: usize = data.local - cg.wasm_param_count + 1;
-                        if (needed > max_local_len) max_local_len = needed;
-                    }
-                },
-                else => {},
-            }
-        }
-        if (max_local_len < cg.mir_locals.items.len) {
-            cg.mir_locals.shrinkRetainingCapacity(max_local_len);
-        }
-    }
+    else
+        .{
+            .sp_local = if (needs_sp_save) sp_local else 0,
+            .flags = .{
+                .stack_alignment = cg.stack_alignment,
+                .is_leaf = !needs_sp_save,
+            },
+            .stack_size = cg.stack_size,
+            .bottom_stack_local = bottom_stack_local,
+        };
 
     try cg.mir_extra.shrinkToLen(cg.gpa);
     try cg.mir_locals.shrinkToLen(cg.gpa);

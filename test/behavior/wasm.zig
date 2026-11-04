@@ -365,3 +365,183 @@ test "live UAVs, over-aligned UAVs, and offset UAVs alongside dead branches prun
     try expect(res.off_only_base_addr % 64 == 0);
     try std.testing.expectEqualStrings("wasm_uav", res.sub_slice);
 }
+
+test "interleaved mixed local types and eliminated interior locals preserve values after compaction" {
+    const S = struct {
+        const Result = struct {
+            i32_out: u32,
+            i64_out: u64,
+            f32_out: f32,
+            f64_out: f64,
+            vec_out: i32,
+        };
+
+        noinline fn computeMixedLocals(p32: u32, p64: u64, pf32: f32, pf64: f64) Result {
+            // Single-use temporaries interleaved with multi-use locals of every Valtype
+            // so Mir.Optimize eliminates interior locals before compactLocals regroups runs.
+            const tmp32_a: u32 = (p32 +% 3) *% 5;
+            const live32_a: u32 = tmp32_a ^ (p32 +% 11);
+
+            const tmp64_a: u64 = (p64 +% 7) *% 9;
+            const live64_a: u64 = tmp64_a +% (p64 ^ 0x1234_5678_9abc_def0);
+
+            const tmpf32_a: f32 = (pf32 + 1.5) * 2.0;
+            const livef32_a: f32 = tmpf32_a + (pf32 * 0.5);
+
+            const tmpf64_a: f64 = (pf64 - 0.25) * 4.0;
+            const livef64_a: f64 = tmpf64_a + (pf64 * 1.25);
+
+            const vec_a: @Vector(4, i32) = @splat(@as(i32, @intCast(live32_a & 0x7fff)));
+
+            const tmp32_b: u32 = live32_a +% @as(u32, @intCast(vec_a[0]));
+            const live32_b: u32 = (tmp32_b *% 3) ^ p32;
+
+            const tmp64_b: u64 = live64_a ^ @as(u64, live32_b);
+            const live64_b: u64 = tmp64_b +% (live64_a >> 4);
+
+            const tmpf32_b: f32 = livef32_a * 1.5;
+            const livef32_b: f32 = tmpf32_b - pf32 + livef32_a;
+
+            const tmpf64_b: f64 = livef64_a * 0.5;
+            const livef64_b: f64 = tmpf64_b + pf64 + livef64_a;
+
+            const vec_b: @Vector(4, i32) = @splat(@as(i32, @intCast(live32_b & 0x7fff)));
+
+            return .{
+                .i32_out = live32_a +% live32_b +% p32,
+                .i64_out = live64_a +% live64_b +% p64,
+                .f32_out = livef32_a + livef32_b + pf32,
+                .f64_out = livef64_a + livef64_b + pf64,
+                .vec_out = vec_a[1] + vec_a[3] + vec_b[0] + vec_b[2],
+            };
+        }
+    };
+
+    const got = S.computeMixedLocals(10, 100, 2.5, 8.25);
+
+    const live32_a: u32 = ((10 + 3) * 5) ^ (10 + 11);
+    const live64_a: u64 = ((100 + 7) * 9) + (100 ^ 0x1234_5678_9abc_def0);
+    const livef32_a: f32 = ((2.5 + 1.5) * 2.0) + (2.5 * 0.5);
+    const livef64_a: f64 = ((8.25 - 0.25) * 4.0) + (8.25 * 1.25);
+    const vec_a_lane: i32 = @intCast(live32_a & 0x7fff);
+    const live32_b: u32 = ((live32_a + @as(u32, @intCast(vec_a_lane))) * 3) ^ 10;
+    const live64_b: u64 = (live64_a ^ @as(u64, live32_b)) + (live64_a >> 4);
+    const livef32_b: f32 = (livef32_a * 1.5) - 2.5 + livef32_a;
+    const livef64_b: f64 = (livef64_a * 0.5) + 8.25 + livef64_a;
+    const vec_b_lane: i32 = @intCast(live32_b & 0x7fff);
+
+    try expect(got.i32_out == live32_a + live32_b + 10);
+    try expect(got.i64_out == live64_a + live64_b + 100);
+    try expect(got.f32_out == livef32_a + livef32_b + 2.5);
+    try expect(got.f64_out == livef64_a + livef64_b + 8.25);
+    try expect(got.vec_out == vec_a_lane * 2 + vec_b_lane * 2);
+}
+
+test "leaf and non-leaf functions with stack frames and mixed-type locals preserve prologue locals and __stack_pointer" {
+    const S = struct {
+        const FrameData = struct {
+            w32: u32,
+            w64: u64,
+            wf32: f32,
+            wf64: f64,
+        };
+
+        fn readSp() u32 {
+            return asm (
+                \\ .globaltype __stack_pointer, i32
+                \\ global.get __stack_pointer
+                \\ local.set %[ret]
+                : [ret] "=r" (-> u32),
+            );
+        }
+
+        noinline fn leafMixedWithStack(p32: u32, p64: u64, pf32: f32, pf64: f64) FrameData {
+            var slot: FrameData = .{
+                .w32 = p32 + 1,
+                .w64 = p64 + 2,
+                .wf32 = pf32 + 0.5,
+                .wf64 = pf64 + 1.5,
+            };
+            _ = &slot;
+
+            const l32: u32 = (p32 ^ 0x55) +% slot.w32;
+            const l64: u64 = (p64 ^ 0xaa55) +% slot.w64;
+            const lf32: f32 = (pf32 * 2.0) + slot.wf32;
+            const lf64: f64 = (pf64 * 3.0) + slot.wf64;
+
+            slot.w32 = l32 +% p32;
+            slot.w64 = l64 +% p64;
+            slot.wf32 = lf32 + pf32;
+            slot.wf64 = lf64 + pf64;
+
+            return .{
+                .w32 = slot.w32 +% l32,
+                .w64 = slot.w64 +% l64,
+                .wf32 = slot.wf32 + lf32,
+                .wf64 = slot.wf64 + lf64,
+            };
+        }
+
+        noinline fn mutateFrameHelper(frame: *FrameData, delta: u32) u32 {
+            var helper_scratch: [4]u64 = .{ delta, delta + 10, delta + 20, delta + 30 };
+            _ = &helper_scratch;
+            frame.w32 +%= @as(u32, @truncate(helper_scratch[1]));
+            frame.w64 +%= helper_scratch[2];
+            frame.wf32 += 1.0;
+            frame.wf64 += 2.0;
+            return @as(u32, @truncate(helper_scratch[0] + helper_scratch[3]));
+        }
+
+        noinline fn nonLeafMixedWithStack(p32: u32, p64: u64, pf32: f32, pf64: f64) FrameData {
+            var slot: FrameData = .{
+                .w32 = p32 + 10,
+                .w64 = p64 + 20,
+                .wf32 = pf32 + 1.25,
+                .wf64 = pf64 + 2.5,
+            };
+
+            // Live across the helper call so they must coexist with sp_local and bottom_stack_local.
+            const pre32: u32 = (p32 *% 3) +% 7;
+            const pre64: u64 = (p64 *% 5) +% 9;
+            const pref32: f32 = pf32 * 1.5;
+            const pref64: f64 = pf64 * 2.5;
+
+            const helper_ret = mutateFrameHelper(&slot, pre32);
+
+            return .{
+                .w32 = slot.w32 +% pre32 +% helper_ret +% p32,
+                .w64 = slot.w64 +% pre64 +% p64,
+                .wf32 = slot.wf32 + pref32 + pf32,
+                .wf64 = slot.wf64 + pref64 + pf64,
+            };
+        }
+    };
+
+    const sp_initial = S.readSp();
+    const leaf_res = S.leafMixedWithStack(6, 40, 1.5, 3.5);
+    const sp_after_leaf = S.readSp();
+    const non_leaf_res = S.nonLeafMixedWithStack(6, 40, 1.5, 3.5);
+    const sp_final = S.readSp();
+
+    try expect(sp_initial == sp_after_leaf);
+    try expect(sp_initial == sp_final);
+
+    const l32: u32 = (6 ^ 0x55) + 7;
+    const l64: u64 = (40 ^ 0xaa55) + 42;
+    const lf32: f32 = (1.5 * 2.0) + 2.0;
+    const lf64: f64 = (3.5 * 3.0) + 5.0;
+    try expect(leaf_res.w32 == (l32 + 6) + l32);
+    try expect(leaf_res.w64 == (l64 + 40) + l64);
+    try expect(leaf_res.wf32 == (lf32 + 1.5) + lf32);
+    try expect(leaf_res.wf64 == (lf64 + 3.5) + lf64);
+
+    const pre32: u32 = 6 * 3 + 7; // 25
+    const pre64: u64 = 40 * 5 + 9; // 209
+    const pref32: f32 = 1.5 * 1.5; // 2.25
+    const pref64: f64 = 3.5 * 2.5; // 8.75
+    const helper_ret: u32 = pre32 + (pre32 + 30); // 80
+    try expect(non_leaf_res.w32 == (16 + (pre32 + 10)) + pre32 + helper_ret + 6);
+    try expect(non_leaf_res.w64 == (60 + (pre32 + 20)) + pre64 + 40);
+    try expect(non_leaf_res.wf32 == (2.75 + 1.0) + pref32 + 1.5);
+    try expect(non_leaf_res.wf64 == (6.0 + 2.0) + pref64 + 3.5);
+}
