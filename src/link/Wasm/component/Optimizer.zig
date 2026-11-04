@@ -826,6 +826,16 @@ fn foldI32Binary(a: i32, b: i32, op: u8) ?Instr {
         0x6a => .{ .i32_const = a +% b }, // i32.add
         0x6b => .{ .i32_const = a -% b }, // i32.sub
         0x6c => .{ .i32_const = a *% b }, // i32.mul
+        0x6d => if (b != 0 and !(a == std.math.minInt(i32) and b == -1))
+            .{ .i32_const = @divTrunc(a, b) }
+        else
+            null, // i32.div_s
+        0x6e => if (ub != 0) .{ .i32_const = @bitCast(ua / ub) } else null, // i32.div_u
+        0x6f => if (b != 0 and !(a == std.math.minInt(i32) and b == -1))
+            .{ .i32_const = @rem(a, b) }
+        else
+            null, // i32.rem_s
+        0x70 => if (ub != 0) .{ .i32_const = @bitCast(ua % ub) } else null, // i32.rem_u
         0x71 => .{ .i32_const = a & b }, // i32.and
         0x72 => .{ .i32_const = a | b }, // i32.or
         0x73 => .{ .i32_const = a ^ b }, // i32.xor
@@ -871,6 +881,16 @@ fn foldI64Binary(a: i64, b: i64, op: u8) ?Instr {
         0x7c => .{ .i64_const = a +% b }, // i64.add
         0x7d => .{ .i64_const = a -% b }, // i64.sub
         0x7e => .{ .i64_const = a *% b }, // i64.mul
+        0x7f => if (b != 0 and !(a == std.math.minInt(i64) and b == -1))
+            .{ .i64_const = @divTrunc(a, b) }
+        else
+            null, // i64.div_s
+        0x80 => if (ub != 0) .{ .i64_const = @bitCast(ua / ub) } else null, // i64.div_u
+        0x81 => if (b != 0 and !(a == std.math.minInt(i64) and b == -1))
+            .{ .i64_const = @rem(a, b) }
+        else
+            null, // i64.rem_s
+        0x82 => if (ub != 0) .{ .i64_const = @bitCast(ua % ub) } else null, // i64.rem_u
         0x83 => .{ .i64_const = a & b }, // i64.and
         0x84 => .{ .i64_const = a | b }, // i64.or
         0x85 => .{ .i64_const = a ^ b }, // i64.xor
@@ -891,6 +911,82 @@ fn foldI64Binary(a: i64, b: i64, op: u8) ?Instr {
         0x5a => .{ .i32_const = if (ua >= ub) 1 else 0 }, // i64.ge_u
         else => null,
     };
+}
+
+fn isBoolProducer(inst: Instr) bool {
+    return switch (inst) {
+        .numeric_op => |op| op >= 0x45 and op <= 0x66,
+        else => false,
+    };
+}
+
+fn invertComparisonOp(op: u8) ?u8 {
+    return switch (op) {
+        0x46 => 0x47, // i32.eq -> i32.ne
+        0x47 => 0x46, // i32.ne -> i32.eq
+        0x48 => 0x4e, // i32.lt_s -> i32.ge_s
+        0x4e => 0x48, // i32.ge_s -> i32.lt_s
+        0x49 => 0x4f, // i32.lt_u -> i32.ge_u
+        0x4f => 0x49, // i32.ge_u -> i32.lt_u
+        0x4a => 0x4c, // i32.gt_s -> i32.le_s
+        0x4c => 0x4a, // i32.le_s -> i32.gt_s
+        0x4b => 0x4d, // i32.gt_u -> i32.le_u
+        0x4d => 0x4b, // i32.le_u -> i32.gt_u
+        0x51 => 0x52, // i64.eq -> i64.ne
+        0x52 => 0x51, // i64.ne -> i64.eq
+        0x53 => 0x59, // i64.lt_s -> i64.ge_s
+        0x59 => 0x53, // i64.ge_s -> i64.lt_s
+        0x54 => 0x5a, // i64.lt_u -> i64.ge_u
+        0x5a => 0x54, // i64.ge_u -> i64.lt_u
+        0x55 => 0x57, // i64.gt_s -> i64.le_s
+        0x57 => 0x55, // i64.le_s -> i64.gt_s
+        0x56 => 0x58, // i64.gt_u -> i64.le_u
+        0x58 => 0x56, // i64.le_u -> i64.gt_u
+        0x5b => 0x5c, // f32.eq -> f32.ne
+        0x5c => 0x5b, // f32.ne -> f32.eq
+        0x61 => 0x62, // f64.eq -> f64.ne
+        0x62 => 0x61, // f64.ne -> f64.eq
+        else => null,
+    };
+}
+
+fn isPureZeroPopInstr(inst: Instr) bool {
+    return switch (inst) {
+        .raw => |r| r.len > 0 and (r[0] == 0x20 or r[0] == 0x23),
+        else => false,
+    };
+}
+
+fn emitOrFoldI32Eqz(items: []Instr, out_len: *usize) bool {
+    if (out_len.* >= 1) {
+        switch (items[out_len.* - 1]) {
+            .i32_const => |c| {
+                items[out_len.* - 1] = .{ .i32_const = if (c == 0) 1 else 0 };
+                return true;
+            },
+            .numeric_op => |prev_op| {
+                if (invertComparisonOp(prev_op)) |inv| {
+                    items[out_len.* - 1] = .{ .numeric_op = inv };
+                    if (inv == 0x46 and out_len.* >= 2 and items[out_len.* - 2] == .i32_const and items[out_len.* - 2].i32_const == 0) {
+                        out_len.* -= 2;
+                        _ = emitOrFoldI32Eqz(items, out_len);
+                    } else if (inv == 0x51 and out_len.* >= 2 and items[out_len.* - 2] == .i64_const and items[out_len.* - 2].i64_const == 0) {
+                        items[out_len.* - 2] = .{ .numeric_op = 0x50 };
+                        out_len.* -= 1;
+                    }
+                    return true;
+                }
+                if (prev_op == 0x45 and out_len.* >= 2 and isBoolProducer(items[out_len.* - 2])) {
+                    out_len.* -= 1;
+                    return true;
+                }
+            },
+            else => {},
+        }
+    }
+    items[out_len.*] = .{ .numeric_op = 0x45 };
+    out_len.* += 1;
+    return false;
 }
 
 fn prevNonNopIndex(items: []const Instr, end: usize) ?usize {
@@ -1035,6 +1131,12 @@ fn foldConstants(list: *InstrList) bool {
                 continue;
             },
             .numeric_op => |op| {
+                if (op == 0x45) {
+                    if (emitOrFoldI32Eqz(list.items, &out_len)) {
+                        changed = true;
+                    }
+                    continue;
+                }
                 if (out_len >= 1) {
                     switch (list.items[out_len - 1]) {
                         .i32_const => |a| {
@@ -1073,6 +1175,373 @@ fn foldConstants(list: *InstrList) bool {
                             changed = true;
                             continue;
                         }
+                    }
+                }
+
+                // Constant reassociation: (x +- c1) +- c2 and associative bitwise
+                if (out_len >= 3) {
+                    if ((op == 0x6a or op == 0x6b) and
+                        list.items[out_len - 1] == .i32_const and
+                        list.items[out_len - 2] == .numeric_op and
+                        (list.items[out_len - 2].numeric_op == 0x6a or list.items[out_len - 2].numeric_op == 0x6b) and
+                        list.items[out_len - 3] == .i32_const)
+                    {
+                        const c1 = list.items[out_len - 3].i32_const;
+                        const op1 = list.items[out_len - 2].numeric_op;
+                        const c2 = list.items[out_len - 1].i32_const;
+                        const d1: i32 = if (op1 == 0x6a) c1 else 0 -% c1;
+                        const d2: i32 = if (op == 0x6a) c2 else 0 -% c2;
+                        const total: i32 = d1 +% d2;
+                        if (total == 0) {
+                            out_len -= 3;
+                        } else {
+                            list.items[out_len - 3] = .{ .i32_const = total };
+                            list.items[out_len - 2] = .{ .numeric_op = 0x6a };
+                            out_len -= 1;
+                        }
+                        changed = true;
+                        continue;
+                    }
+                    if ((op == 0x71 or op == 0x72 or op == 0x73) and
+                        list.items[out_len - 1] == .i32_const and
+                        list.items[out_len - 2] == .numeric_op and
+                        list.items[out_len - 2].numeric_op == op and
+                        list.items[out_len - 3] == .i32_const)
+                    {
+                        const c1 = list.items[out_len - 3].i32_const;
+                        const c2 = list.items[out_len - 1].i32_const;
+                        const combined: i32 = switch (op) {
+                            0x71 => c1 & c2,
+                            0x72 => c1 | c2,
+                            0x73 => c1 ^ c2,
+                            else => unreachable,
+                        };
+                        const is_identity = switch (op) {
+                            0x71 => combined == -1,
+                            0x72, 0x73 => combined == 0,
+                            else => unreachable,
+                        };
+                        if (is_identity) {
+                            out_len -= 3;
+                        } else {
+                            list.items[out_len - 3] = .{ .i32_const = combined };
+                            out_len -= 1;
+                        }
+                        changed = true;
+                        continue;
+                    }
+                    if ((op == 0x7c or op == 0x7d) and
+                        list.items[out_len - 1] == .i64_const and
+                        list.items[out_len - 2] == .numeric_op and
+                        (list.items[out_len - 2].numeric_op == 0x7c or list.items[out_len - 2].numeric_op == 0x7d) and
+                        list.items[out_len - 3] == .i64_const)
+                    {
+                        const c1 = list.items[out_len - 3].i64_const;
+                        const op1 = list.items[out_len - 2].numeric_op;
+                        const c2 = list.items[out_len - 1].i64_const;
+                        const d1: i64 = if (op1 == 0x7c) c1 else 0 -% c1;
+                        const d2: i64 = if (op == 0x7c) c2 else 0 -% c2;
+                        const total: i64 = d1 +% d2;
+                        if (total == 0) {
+                            out_len -= 3;
+                        } else {
+                            list.items[out_len - 3] = .{ .i64_const = total };
+                            list.items[out_len - 2] = .{ .numeric_op = 0x7c };
+                            out_len -= 1;
+                        }
+                        changed = true;
+                        continue;
+                    }
+                    if ((op == 0x83 or op == 0x84 or op == 0x85) and
+                        list.items[out_len - 1] == .i64_const and
+                        list.items[out_len - 2] == .numeric_op and
+                        list.items[out_len - 2].numeric_op == op and
+                        list.items[out_len - 3] == .i64_const)
+                    {
+                        const c1 = list.items[out_len - 3].i64_const;
+                        const c2 = list.items[out_len - 1].i64_const;
+                        const combined: i64 = switch (op) {
+                            0x83 => c1 & c2,
+                            0x84 => c1 | c2,
+                            0x85 => c1 ^ c2,
+                            else => unreachable,
+                        };
+                        const is_identity = switch (op) {
+                            0x83 => combined == -1,
+                            0x84, 0x85 => combined == 0,
+                            else => unreachable,
+                        };
+                        if (is_identity) {
+                            out_len -= 3;
+                        } else {
+                            list.items[out_len - 3] = .{ .i64_const = combined };
+                            out_len -= 1;
+                        }
+                        changed = true;
+                        continue;
+                    }
+                }
+
+                // Single-constant right-operand peepholes
+                if (out_len >= 1) {
+                    switch (list.items[out_len - 1]) {
+                        .i32_const => |rhs| {
+                            const rhs_u: u32 = @bitCast(rhs);
+                            const shift_amt: u5 = @truncate(rhs_u);
+                            switch (op) {
+                                0x6a, 0x6b, 0x72 => if (rhs == 0) {
+                                    out_len -= 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                0x73 => {
+                                    if (rhs == 0) {
+                                        out_len -= 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if (rhs == 1 and out_len >= 2 and isBoolProducer(list.items[out_len - 2])) {
+                                        out_len -= 1;
+                                        _ = emitOrFoldI32Eqz(list.items, &out_len);
+                                        changed = true;
+                                        continue;
+                                    }
+                                },
+                                0x71 => if (rhs == -1 or (out_len >= 2 and isBoolProducer(list.items[out_len - 2]) and (rhs & 1) == 1)) {
+                                    out_len -= 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                0x74, 0x75, 0x76, 0x77, 0x78 => if (shift_amt == 0) {
+                                    out_len -= 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                0x46 => {
+                                    if (rhs == 0) {
+                                        out_len -= 1;
+                                        _ = emitOrFoldI32Eqz(list.items, &out_len);
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if (rhs == 1 and out_len >= 2 and isBoolProducer(list.items[out_len - 2])) {
+                                        out_len -= 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                },
+                                0x47 => {
+                                    if (rhs == 0 and out_len >= 2 and isBoolProducer(list.items[out_len - 2])) {
+                                        out_len -= 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if (rhs == 1 and out_len >= 2 and isBoolProducer(list.items[out_len - 2])) {
+                                        out_len -= 1;
+                                        _ = emitOrFoldI32Eqz(list.items, &out_len);
+                                        changed = true;
+                                        continue;
+                                    }
+                                },
+                                0x6c => {
+                                    if (rhs == 1) {
+                                        out_len -= 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if (rhs_u > 1 and std.math.isPowerOfTwo(rhs_u)) {
+                                        list.items[out_len - 1] = .{ .i32_const = @intCast(@ctz(rhs_u)) };
+                                        list.items[out_len] = .{ .numeric_op = 0x74 };
+                                        out_len += 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                },
+                                0x6d => if (rhs == 1) {
+                                    out_len -= 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                0x6e => {
+                                    if (rhs_u == 1) {
+                                        out_len -= 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if (rhs_u > 1 and std.math.isPowerOfTwo(rhs_u)) {
+                                        list.items[out_len - 1] = .{ .i32_const = @intCast(@ctz(rhs_u)) };
+                                        list.items[out_len] = .{ .numeric_op = 0x76 };
+                                        out_len += 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                },
+                                0x70 => if (rhs_u >= 1 and std.math.isPowerOfTwo(rhs_u)) {
+                                    list.items[out_len - 1] = .{ .i32_const = @bitCast(rhs_u - 1) };
+                                    list.items[out_len] = .{ .numeric_op = 0x71 };
+                                    out_len += 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                else => {},
+                            }
+                        },
+                        .i64_const => |rhs| {
+                            const rhs_u: u64 = @bitCast(rhs);
+                            const shift_amt: u6 = @truncate(rhs_u);
+                            switch (op) {
+                                0x7c, 0x7d, 0x84, 0x85 => if (rhs == 0) {
+                                    out_len -= 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                0x83 => if (rhs == -1) {
+                                    out_len -= 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                0x86, 0x87, 0x88, 0x89, 0x8a => if (shift_amt == 0) {
+                                    out_len -= 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                0x51 => if (rhs == 0) {
+                                    list.items[out_len - 1] = .{ .numeric_op = 0x50 };
+                                    changed = true;
+                                    continue;
+                                },
+                                0x7e => {
+                                    if (rhs == 1) {
+                                        out_len -= 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if (rhs_u > 1 and std.math.isPowerOfTwo(rhs_u)) {
+                                        list.items[out_len - 1] = .{ .i64_const = @intCast(@ctz(rhs_u)) };
+                                        list.items[out_len] = .{ .numeric_op = 0x86 };
+                                        out_len += 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                },
+                                0x7f => if (rhs == 1) {
+                                    out_len -= 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                0x80 => {
+                                    if (rhs_u == 1) {
+                                        out_len -= 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if (rhs_u > 1 and std.math.isPowerOfTwo(rhs_u)) {
+                                        list.items[out_len - 1] = .{ .i64_const = @intCast(@ctz(rhs_u)) };
+                                        list.items[out_len] = .{ .numeric_op = 0x88 };
+                                        out_len += 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                },
+                                0x82 => if (rhs_u >= 1 and std.math.isPowerOfTwo(rhs_u)) {
+                                    list.items[out_len - 1] = .{ .i64_const = @bitCast(rhs_u - 1) };
+                                    list.items[out_len] = .{ .numeric_op = 0x83 };
+                                    out_len += 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                else => {},
+                            }
+                        },
+                        else => {},
+                    }
+                }
+
+                // Commutative left-constant peepholes when RHS is a pure zero-pop instruction
+                if (out_len >= 2 and isPureZeroPopInstr(list.items[out_len - 1])) {
+                    const rhs_inst = list.items[out_len - 1];
+                    switch (list.items[out_len - 2]) {
+                        .i32_const => |lhs| {
+                            const lhs_u: u32 = @bitCast(lhs);
+                            switch (op) {
+                                0x6a, 0x72, 0x73 => if (lhs == 0) {
+                                    list.items[out_len - 2] = rhs_inst;
+                                    out_len -= 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                0x71 => if (lhs == -1) {
+                                    list.items[out_len - 2] = rhs_inst;
+                                    out_len -= 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                0x46 => if (lhs == 0) {
+                                    list.items[out_len - 2] = rhs_inst;
+                                    list.items[out_len - 1] = .{ .numeric_op = 0x45 };
+                                    changed = true;
+                                    continue;
+                                },
+                                0x6c => {
+                                    if (lhs == 1) {
+                                        list.items[out_len - 2] = rhs_inst;
+                                        out_len -= 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if (lhs_u > 1 and std.math.isPowerOfTwo(lhs_u)) {
+                                        list.items[out_len - 2] = rhs_inst;
+                                        list.items[out_len - 1] = .{ .i32_const = @intCast(@ctz(lhs_u)) };
+                                        list.items[out_len] = .{ .numeric_op = 0x74 };
+                                        out_len += 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                },
+                                else => {},
+                            }
+                        },
+                        .i64_const => |lhs| {
+                            const lhs_u: u64 = @bitCast(lhs);
+                            switch (op) {
+                                0x7c, 0x84, 0x85 => if (lhs == 0) {
+                                    list.items[out_len - 2] = rhs_inst;
+                                    out_len -= 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                0x83 => if (lhs == -1) {
+                                    list.items[out_len - 2] = rhs_inst;
+                                    out_len -= 1;
+                                    changed = true;
+                                    continue;
+                                },
+                                0x51 => if (lhs == 0) {
+                                    list.items[out_len - 2] = rhs_inst;
+                                    list.items[out_len - 1] = .{ .numeric_op = 0x50 };
+                                    changed = true;
+                                    continue;
+                                },
+                                0x7e => {
+                                    if (lhs == 1) {
+                                        list.items[out_len - 2] = rhs_inst;
+                                        out_len -= 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if (lhs_u > 1 and std.math.isPowerOfTwo(lhs_u)) {
+                                        list.items[out_len - 2] = rhs_inst;
+                                        list.items[out_len - 1] = .{ .i64_const = @intCast(@ctz(lhs_u)) };
+                                        list.items[out_len] = .{ .numeric_op = 0x86 };
+                                        out_len += 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                },
+                                else => {},
+                            }
+                        },
+                        else => {},
                     }
                 }
             },
@@ -1141,6 +1610,24 @@ fn decrementOuterLabels(instrs: []Instr, min_depth: u32) void {
     }
 }
 
+fn stripRedundantCondTests(out: *InstrList) bool {
+    var stripped = false;
+    while (out.items.len >= 2) {
+        const prev = out.items[out.items.len - 2];
+        const last = out.items[out.items.len - 1];
+        if (prev == .i32_const and prev.i32_const == 0 and last == .numeric_op and last.numeric_op == 0x47) {
+            out.items.len -= 2;
+            stripped = true;
+        } else if (prev == .numeric_op and prev.numeric_op == 0x45 and last == .numeric_op and last.numeric_op == 0x45) {
+            out.items.len -= 2;
+            stripped = true;
+        } else {
+            break;
+        }
+    }
+    return stripped;
+}
+
 fn simplifyControlFlow(arena: std.mem.Allocator, list: *InstrList) Error!bool {
     var changed = false;
 
@@ -1170,6 +1657,9 @@ fn simplifyControlFlow(arena: std.mem.Allocator, list: *InstrList) Error!bool {
                 continue;
             },
             .br_if => |label| {
+                if (stripRedundantCondTests(&out)) {
+                    changed = true;
+                }
                 if (out.items.len > 0 and out.items[out.items.len - 1] == .i32_const) {
                     const cond = out.pop().?.i32_const;
                     changed = true;
@@ -1180,6 +1670,9 @@ fn simplifyControlFlow(arena: std.mem.Allocator, list: *InstrList) Error!bool {
                 }
             },
             .if_ => |if_inst| {
+                if (stripRedundantCondTests(&out)) {
+                    changed = true;
+                }
                 if (out.items.len > 0 and out.items[out.items.len - 1] == .i32_const) {
                     const cond = out.pop().?.i32_const;
                     changed = true;
@@ -1919,20 +2412,21 @@ test "Optimizer: CustomSectionPolicy.preserve rewrites name section on dead-func
         // func 2: count 2, (0, 2, "l0"), (1, 2, "l1") -> 1 + 1 + 4 + 4 = 10 bytes
         // func 3: count 1, (0, 2, "m0") -> 1 + 1 + 4 = 6 bytes
         // count (1) + 6 + 10 + 6 = 23 (0x17)
-        0x02,  23,   0x03, 0x01,
-        0x01, 0x00, 0x02, 'd',
-        '0',  0x02, 0x02, 0x00,
-        0x02, 'l',  '0',  0x01,
-        0x02, 'l',  '1',  0x03,
-        0x01, 0x00, 0x02, 'm',
-        '0',
+         0x02, 23,
+        0x03, 0x01, 0x01, 0x00,
+        0x02, 'd',  '0',  0x02,
+        0x02, 0x00, 0x02, 'l',
+        '0',  0x01, 0x02, 'l',
+        '1',  0x03, 0x01, 0x00,
+        0x02, 'm',  '0',
         // subsec 7: global names: count 1, (0, 2, "g0") -> size 5
-        0x07,  0x05, 0x01, 0x00,
-        0x02, 'g',  '0',
+         0x07,
+        0x05, 0x01, 0x00, 0x02,
+        'g',  '0',
         // subsec 9: data names: count 1, (0, 4, "dseg") -> size 7
-        0x09,  0x07, 0x01, 0x00,
-        0x04, 'd',  's',  'e',
-        'g',
+         0x09, 0x07,
+        0x01, 0x00, 0x04, 'd',
+        's',  'e',  'g',
     };
     try mod.customs.append(allocator, .{ .name = "name", .data = &name_payload });
 
@@ -1973,12 +2467,13 @@ test "Optimizer: CustomSectionPolicy.preserve rewrites name section on dead-func
         '1',  0x02, 0x01, 0x00,
         0x02, 'm',  '0',
         // subsec 7: global names preserved verbatim
-        0x07,  0x05, 0x01, 0x00,
-        0x02, 'g',  '0',
+         0x07,
+        0x05, 0x01, 0x00, 0x02,
+        'g',  '0',
         // subsec 9: data names preserved verbatim
-        0x09,  0x07, 0x01, 0x00,
-        0x04, 'd',  's',  'e',
-        'g',
+         0x09, 0x07,
+        0x01, 0x00, 0x04, 'd',
+        's',  'e',  'g',
     };
     try testing.expectEqualSlices(u8, &expected_name_payload, opt_mod.customs.items[0].data);
 }
@@ -2136,3 +2631,290 @@ test "Optimizer: negative constant and u32 overflow are not folded into MemArg.o
     try testing.expectEqualSlices(u8, ovf_code.items, mod_ovf.funcs.items[0].code_bytes);
 }
 
+test "Optimizer: i32 and i64 additive, bitwise, shift, and rotate identities" {
+    const allocator = testing.allocator;
+
+    // i32 right-constant identities and left-constant commutative identities
+    // local.get 0; +0; -0; |0; ^0; &-1; <<0; >>_s 0; >>_u 0; rotl 0; rotr 0 -> local.get 0
+    const i32_code = [_]u8{
+        0x41, 0x00, // i32.const 0 (left identity: 0 + local.get 0)
+        0x20, 0x00, // local.get 0
+        0x6a, // i32.add
+        0x41, 0x00, 0x6a, // + 0
+        0x41, 0x00, 0x6b, // - 0
+        0x41, 0x00, 0x72, // | 0
+        0x41, 0x00, 0x73, // ^ 0
+        0x41, 0x7f, 0x71, // & -1
+        0x41, 0x00, 0x74, // << 0
+        0x41, 0x00, 0x75, // >>_s 0
+        0x41, 0x00, 0x76, // >>_u 0
+        0x41, 0x00, 0x77, // rotl 0
+        0x41, 0x00, 0x78, // rotr 0
+        0x0b, // end
+    };
+    const wasm32 = try buildSingleFuncModule(allocator, &.{.i32}, &.{.i32}, &.{}, &i32_code);
+    defer allocator.free(wasm32);
+    const opt32 = try optimize(allocator, wasm32, .{});
+    defer allocator.free(opt32);
+    var mod32 = try reader.readModule(allocator, opt32);
+    defer mod32.deinit();
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x20, 0x00, 0x0b }, mod32.funcs.items[0].code_bytes);
+
+    // i64 right-constant identities and left-constant commutative identities
+    const i64_code = [_]u8{
+        0x42, 0x7f, // i64.const -1 (left identity: -1 & local.get 0)
+        0x20, 0x00, // local.get 0
+        0x83, // i64.and
+        0x42, 0x00, 0x7c, // + 0
+        0x42, 0x00, 0x7d, // - 0
+        0x42, 0x00, 0x84, // | 0
+        0x42, 0x00, 0x85, // ^ 0
+        0x42, 0x7f, 0x83, // & -1
+        0x42, 0x00, 0x86, // << 0
+        0x42, 0x00, 0x87, // >>_s 0
+        0x42, 0x00, 0x88, // >>_u 0
+        0x42, 0x00, 0x89, // rotl 0
+        0x42, 0x00, 0x8a, // rotr 0
+        0x0b, // end
+    };
+    const wasm64 = try buildSingleFuncModule(allocator, &.{.i64}, &.{.i64}, &.{}, &i64_code);
+    defer allocator.free(wasm64);
+    const opt64 = try optimize(allocator, wasm64, .{});
+    defer allocator.free(opt64);
+    var mod64 = try reader.readModule(allocator, opt64);
+    defer mod64.deinit();
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x20, 0x00, 0x0b }, mod64.funcs.items[0].code_bytes);
+}
+
+test "Optimizer: zero comparison, comparison negation, double-boolean, and condition normalization" {
+    const allocator = testing.allocator;
+
+    // 1. x == 0 -> i32.eqz and i64.eqz
+    const eq0_code = [_]u8{
+        0x20, 0x00, // local.get 0 (i32)
+        0x41, 0x00, // i32.const 0
+        0x46, // i32.eq -> i32.eqz (0x45)
+        0x1a, // drop
+        0x20, 0x01, // local.get 1 (i64)
+        0x42, 0x00, // i64.const 0
+        0x51, // i64.eq -> i64.eqz (0x50)
+        0x0b,
+    };
+    const wasm_eq0 = try buildSingleFuncModule(allocator, &.{ .i32, .i64 }, &.{.i32}, &.{}, &eq0_code);
+    defer allocator.free(wasm_eq0);
+    const opt_eq0 = try optimize(allocator, wasm_eq0, .{});
+    defer allocator.free(opt_eq0);
+    var mod_eq0 = try reader.readModule(allocator, opt_eq0);
+    defer mod_eq0.deinit();
+    try testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0x20, 0x00, 0x45, 0x1a, 0x20, 0x01, 0x50, 0x0b },
+        mod_eq0.funcs.items[0].code_bytes,
+    );
+
+    // 2. <cmp>; i32.eqz -> inverted comparison, and <cmp>; i32.const 0; i32.ne -> <cmp>
+    // local.get 0; local.get 1; i32.lt_s; i32.eqz; i32.const 0; i32.ne -> local.get 0; local.get 1; i32.ge_s
+    const cmp_code = [_]u8{
+        0x20, 0x00, // local.get 0
+        0x20, 0x01, // local.get 1
+        0x48, // i32.lt_s
+        0x45, // i32.eqz -> i32.ge_s (0x4e)
+        0x41, 0x00, // i32.const 0
+        0x47, // i32.ne -> redundant on bool producer
+        0x41, 0x01, // i32.const 1
+        0x71, // i32.and -> redundant on bool producer
+        0x0b,
+    };
+    const wasm_cmp = try buildSingleFuncModule(allocator, &.{ .i32, .i32 }, &.{.i32}, &.{}, &cmp_code);
+    defer allocator.free(wasm_cmp);
+    const opt_cmp = try optimize(allocator, wasm_cmp, .{});
+    defer allocator.free(opt_cmp);
+    var mod_cmp = try reader.readModule(allocator, opt_cmp);
+    defer mod_cmp.deinit();
+    try testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0x20, 0x00, 0x20, 0x01, 0x4e, 0x0b },
+        mod_cmp.funcs.items[0].code_bytes,
+    );
+
+    // 3. br_if / if condition normalization:
+    // (block
+    //   local.get 0; i32.const 0; i32.ne; br_if 0
+    //   local.get 0; i32.eqz; i32.eqz; br_if 0
+    // )
+    // local.get 0; i32.const 0; i32.eq; i32.eqz; if (result i32) (i32.const 10) else (i32.const 20) end
+    const br_if_code = [_]u8{
+        0x02, 0x40, // block
+        0x20, 0x00, // local.get 0
+        0x41, 0x00, // i32.const 0
+        0x47, // i32.ne
+        0x0d, 0x00, // br_if 0
+        0x20, 0x00, // local.get 0
+        0x45, // i32.eqz
+        0x45, // i32.eqz
+        0x0d, 0x00, // br_if 0
+        0x0b, // end block
+        0x20, 0x00, // local.get 0
+        0x41, 0x00, // i32.const 0
+        0x46, // i32.eq -> i32.eqz
+        0x45, // i32.eqz -> i32.eqz; i32.eqz stripped before if
+        0x04, 0x7f, // if (result i32)
+        0x41, 10,
+        0x05, // else
+        0x41,
+        20,
+        0x0b, // end if
+        0x0b, // end func
+    };
+    const wasm_br = try buildSingleFuncModule(allocator, &.{.i32}, &.{.i32}, &.{}, &br_if_code);
+    defer allocator.free(wasm_br);
+    const opt_br = try optimize(allocator, wasm_br, .{});
+    defer allocator.free(opt_br);
+    var mod_br = try reader.readModule(allocator, opt_br);
+    defer mod_br.deinit();
+    try testing.expectEqualSlices(
+        u8,
+        &[_]u8{
+            0x02, 0x40,
+            0x20, 0x00,
+            0x0d, 0x00,
+            0x20, 0x00,
+            0x0d, 0x00,
+            0x0b, 0x20,
+            0x00, 0x04,
+            0x7f, 0x41,
+            10,   0x05,
+            0x41, 20,
+            0x0b, 0x0b,
+        },
+        mod_br.funcs.items[0].code_bytes,
+    );
+}
+
+test "Optimizer: multiplicative identities, power-of-two strength reductions, and division folding" {
+    const allocator = testing.allocator;
+
+    // i32: (local.get 0 * 1 /_s 1 /_u 1 * 8) -> local.get 0; i32.const 3; i32.shl
+    //      (local.get 0 /_u 16) -> local.get 0; i32.const 4; i32.shr_u
+    //      (local.get 0 %_u 32) -> local.get 0; i32.const 31; i32.and
+    const i32_strength_code = [_]u8{
+        0x20, 0x00, // local.get 0
+        0x41, 0x01, 0x6c, // * 1
+        0x41, 0x01, 0x6d, // /_s 1
+        0x41, 0x01, 0x6e, // /_u 1
+        0x41, 0x08, 0x6c, // * 8 -> << 3
+        0x41, 0x10, 0x6e, // /_u 16 -> >>_u 4
+        0x41, 0x20, 0x70, // %_u 32 -> & 31
+        0x0b,
+    };
+    const wasm32 = try buildSingleFuncModule(allocator, &.{.i32}, &.{.i32}, &.{}, &i32_strength_code);
+    defer allocator.free(wasm32);
+    const opt32 = try optimize(allocator, wasm32, .{});
+    defer allocator.free(opt32);
+    var mod32 = try reader.readModule(allocator, opt32);
+    defer mod32.deinit();
+    try testing.expectEqualSlices(
+        u8,
+        &[_]u8{
+            0x20, 0x00,
+            0x41, 0x03, 0x74, // i32.const 3; i32.shl
+            0x41, 0x04, 0x76, // i32.const 4; i32.shr_u
+            0x41, 0x1f, 0x71, // i32.const 31; i32.and
+            0x0b,
+        },
+        mod32.funcs.items[0].code_bytes,
+    );
+
+    // i64: (4 * local.get 0 * 1 /_s 1 /_u 1 /_u 8 %_u 16)
+    const i64_strength_code = [_]u8{
+        0x42, 0x04, // i64.const 4
+        0x20, 0x00, // local.get 0
+        0x7e, // * -> local.get 0; i64.const 2; i64.shl
+        0x42, 0x01, 0x7e, // * 1
+        0x42, 0x01, 0x7f, // /_s 1
+        0x42, 0x01, 0x80, // /_u 1
+        0x42, 0x08, 0x80, // /_u 8 -> >>_u 3
+        0x42, 0x10, 0x82, // %_u 16 -> & 15
+        0x0b,
+    };
+    const wasm64 = try buildSingleFuncModule(allocator, &.{.i64}, &.{.i64}, &.{}, &i64_strength_code);
+    defer allocator.free(wasm64);
+    const opt64 = try optimize(allocator, wasm64, .{});
+    defer allocator.free(opt64);
+    var mod64 = try reader.readModule(allocator, opt64);
+    defer mod64.deinit();
+    try testing.expectEqualSlices(
+        u8,
+        &[_]u8{
+            0x20, 0x00,
+            0x42, 0x02, 0x86, // i64.const 2; i64.shl
+            0x42, 0x03, 0x88, // i64.const 3; i64.shr_u
+            0x42, 0x0f, 0x83, // i64.const 15; i64.and
+            0x0b,
+        },
+        mod64.funcs.items[0].code_bytes,
+    );
+
+    // Two-constant non-trapping division/remainder folding:
+    // (-20 /_s 3) = -6, (-20 %_s 3) = -2 -> (-6 + -2 = -8)
+    const div_fold_code = [_]u8{
+        0x41, 0x6c, // i32.const -20
+        0x41, 0x03, // i32.const 3
+        0x6d, // i32.div_s -> -6
+        0x41, 0x6c, // i32.const -20
+        0x41, 0x03, // i32.const 3
+        0x6f, // i32.rem_s -> -2
+        0x6a, // i32.add -> -8 (0x78)
+        0x0b,
+    };
+    const wasm_div = try buildSingleFuncModule(allocator, &.{}, &.{.i32}, &.{}, &div_fold_code);
+    defer allocator.free(wasm_div);
+    const opt_div = try optimize(allocator, wasm_div, .{});
+    defer allocator.free(opt_div);
+    var mod_div = try reader.readModule(allocator, opt_div);
+    defer mod_div.deinit();
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x41, 0x78, 0x0b }, mod_div.funcs.items[0].code_bytes);
+}
+
+test "Optimizer: constant reassociation and MemArg offset folding after reassociation" {
+    const allocator = testing.allocator;
+
+    // 1. Cancelling reassociation: (x + 12) - 12 -> x
+    const cancel_code = [_]u8{
+        0x20, 0x00, // local.get 0
+        0x41, 12, // i32.const 12
+        0x6a, // i32.add
+        0x41, 12, // i32.const 12
+        0x6b, // i32.sub
+        0x0b,
+    };
+    const wasm_cancel = try buildSingleFuncModule(allocator, &.{.i32}, &.{.i32}, &.{}, &cancel_code);
+    defer allocator.free(wasm_cancel);
+    const opt_cancel = try optimize(allocator, wasm_cancel, .{});
+    defer allocator.free(opt_cancel);
+    var mod_cancel = try reader.readModule(allocator, opt_cancel);
+    defer mod_cancel.deinit();
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x20, 0x00, 0x0b }, mod_cancel.funcs.items[0].code_bytes);
+
+    // 2. (x + 16) - 4 before i32.load folds into MemArg.offset = 16
+    const mem_reassoc_code = [_]u8{
+        0x20, 0x00, // local.get 0
+        0x41, 16, // i32.const 16
+        0x6a, // i32.add
+        0x41, 0x04, // i32.const 4
+        0x6b, // i32.sub -> reassociates to (local.get 0 + 12)
+        0x28, 0x02, 0x04, // i32.load align=2 offset=4 -> offset becomes 16
+        0x0b,
+    };
+    const wasm_mem = try buildSingleFuncModule(allocator, &.{.i32}, &.{.i32}, &.{}, &mem_reassoc_code);
+    defer allocator.free(wasm_mem);
+    const opt_mem = try optimize(allocator, wasm_mem, .{});
+    defer allocator.free(opt_mem);
+    var mod_mem = try reader.readModule(allocator, opt_mem);
+    defer mod_mem.deinit();
+    try testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0x20, 0x00, 0x28, 0x02, 16, 0x0b },
+        mod_mem.funcs.items[0].code_bytes,
+    );
+}

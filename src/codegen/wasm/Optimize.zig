@@ -276,6 +276,123 @@ fn Pass(comptime Inst: type) type {
             };
         }
 
+        fn isBoolProducerTag(tag: Inst.Tag) bool {
+            return switch (tag) {
+                .i32_eqz,
+                .i64_eqz,
+                .i32_eq,
+                .i32_ne,
+                .i32_lt_s,
+                .i32_lt_u,
+                .i32_gt_s,
+                .i32_gt_u,
+                .i32_le_s,
+                .i32_le_u,
+                .i32_ge_s,
+                .i32_ge_u,
+                .i64_eq,
+                .i64_ne,
+                .i64_lt_s,
+                .i64_lt_u,
+                .i64_gt_s,
+                .i64_gt_u,
+                .i64_le_s,
+                .i64_le_u,
+                .i64_ge_s,
+                .i64_ge_u,
+                .f32_eq,
+                .f32_ne,
+                .f32_lt,
+                .f32_gt,
+                .f32_le,
+                .f32_ge,
+                .f64_eq,
+                .f64_ne,
+                .f64_lt,
+                .f64_gt,
+                .f64_le,
+                .f64_ge,
+                => true,
+                else => false,
+            };
+        }
+
+        fn invertComparisonTag(tag: Inst.Tag) ?Inst.Tag {
+            return switch (tag) {
+                .i32_eq => .i32_ne,
+                .i32_ne => .i32_eq,
+                .i32_lt_s => .i32_ge_s,
+                .i32_ge_s => .i32_lt_s,
+                .i32_lt_u => .i32_ge_u,
+                .i32_ge_u => .i32_lt_u,
+                .i32_gt_s => .i32_le_s,
+                .i32_le_s => .i32_gt_s,
+                .i32_gt_u => .i32_le_u,
+                .i32_le_u => .i32_gt_u,
+                .i64_eq => .i64_ne,
+                .i64_ne => .i64_eq,
+                .i64_lt_s => .i64_ge_s,
+                .i64_ge_s => .i64_lt_s,
+                .i64_lt_u => .i64_ge_u,
+                .i64_ge_u => .i64_lt_u,
+                .i64_gt_s => .i64_le_s,
+                .i64_le_s => .i64_gt_s,
+                .i64_gt_u => .i64_le_u,
+                .i64_le_u => .i64_gt_u,
+                .f32_eq => .f32_ne,
+                .f32_ne => .f32_eq,
+                .f64_eq => .f64_ne,
+                .f64_ne => .f64_eq,
+                else => null,
+            };
+        }
+
+        fn isPureZeroPopTag(tag: Inst.Tag) bool {
+            return switch (tag) {
+                .local_get,
+                .global_get,
+                .uav_ref,
+                .uav_ref_off,
+                .nav_ref,
+                .nav_ref_off,
+                .func_ref,
+                .tls_nav_ref,
+                .errors_len,
+                .error_name_table_ref,
+                .enum_tag_name_table_ref,
+                => true,
+                else => false,
+            };
+        }
+
+        fn emitOrFoldI32Eqz(out: *std.ArrayList(Inst), mir_extra: []const u32) bool {
+            const len = out.items.len;
+            if (len >= 1) {
+                const last = out.items[len - 1];
+                if (last.tag == .i32_const) {
+                    out.items[len - 1] = makeI32Const(if (last.data.imm32 == 0) 1 else 0);
+                    return true;
+                }
+                if (invertComparisonTag(last.tag)) |inv| {
+                    out.items[len - 1].tag = inv;
+                    if (inv == .i32_eq and len >= 2 and out.items[len - 2].tag == .i32_const and out.items[len - 2].data.imm32 == 0) {
+                        out.items.len = len - 2;
+                        _ = emitOrFoldI32Eqz(out, mir_extra);
+                    } else if (inv == .i64_eq and len >= 2 and out.items[len - 2].tag == .i64_const and readImm64(mir_extra, out.items[len - 2].data.payload) == 0) {
+                        out.items.len = len - 1;
+                        out.items[len - 2] = .{ .tag = .i64_eqz, .data = .{ .tag = {} } };
+                    }
+                    return true;
+                }
+                if (last.tag == .i32_eqz and len >= 2 and isBoolProducerTag(out.items[len - 2].tag)) {
+                    _ = out.pop();
+                    return true;
+                }
+            }
+            out.appendAssumeCapacity(.{ .tag = .i32_eqz, .data = .{ .tag = {} } });
+            return false;
+        }
+
         fn isLocalReadBeforeOverwriteOrExit(
             insts: []const Inst,
             start_idx: usize,
@@ -419,6 +536,20 @@ fn Pass(comptime Inst: type) type {
                     }
                 }
 
+                // Select condition normalization:
+                // `<cond>; i32_const 0; i32_ne; select` -> `<cond>; select`
+                // `<cond>; i32_eqz; i32_eqz; select` -> `<cond>; select`
+                if (inst.tag == .select and len >= 2) {
+                    if ((out.items[len - 2].tag == .i32_const and out.items[len - 2].data.imm32 == 0 and out.items[len - 1].tag == .i32_ne) or
+                        (out.items[len - 2].tag == .i32_eqz and out.items[len - 1].tag == .i32_eqz))
+                    {
+                        out.items.len = len - 2;
+                        out.appendAssumeCapacity(inst);
+                        changed = true;
+                        continue;
+                    }
+                }
+
                 // i32 unary ops preceded by `i32_const`
                 if (len >= 1 and out.items[len - 1].tag == .i32_const) {
                     const v: i32 = out.items[len - 1].data.imm32;
@@ -468,6 +599,13 @@ fn Pass(comptime Inst: type) type {
                     }
                 }
 
+                if (inst.tag == .i32_eqz) {
+                    if (emitOrFoldI32Eqz(out, mir_extra.items)) {
+                        changed = true;
+                    }
+                    continue;
+                }
+
                 // i32 binary ops preceded by two `i32_const`
                 if (len >= 2 and out.items[len - 2].tag == .i32_const and out.items[len - 1].tag == .i32_const) {
                     const lhs: i32 = out.items[len - 2].data.imm32;
@@ -480,6 +618,10 @@ fn Pass(comptime Inst: type) type {
                         .i32_add => lhs +% rhs,
                         .i32_sub => lhs -% rhs,
                         .i32_mul => lhs *% rhs,
+                        .i32_div_u => if (rhs_u != 0) @bitCast(lhs_u / rhs_u) else null,
+                        .i32_rem_u => if (rhs_u != 0) @bitCast(lhs_u % rhs_u) else null,
+                        .i32_div_s => if (rhs != 0 and !(lhs == std.math.minInt(i32) and rhs == -1)) @divTrunc(lhs, rhs) else null,
+                        .i32_rem_s => if (rhs != 0 and !(lhs == std.math.minInt(i32) and rhs == -1)) @rem(lhs, rhs) else null,
                         .i32_and => lhs & rhs,
                         .i32_or => lhs | rhs,
                         .i32_xor => lhs ^ rhs,
@@ -504,6 +646,220 @@ fn Pass(comptime Inst: type) type {
                         out.items[len - 2] = makeI32Const(res);
                         changed = true;
                         continue;
+                    }
+                }
+
+                // i32 constant reassociation: `(x +- c1) +- c2 -> x + (d1 +% d2)` (or `x` if 0)
+                if ((inst.tag == .i32_add or inst.tag == .i32_sub) and len >= 3 and
+                    out.items[len - 1].tag == .i32_const and
+                    (out.items[len - 2].tag == .i32_add or out.items[len - 2].tag == .i32_sub) and
+                    out.items[len - 3].tag == .i32_const)
+                {
+                    const c1 = out.items[len - 3].data.imm32;
+                    const c2 = out.items[len - 1].data.imm32;
+                    const d1: i32 = if (out.items[len - 2].tag == .i32_add) c1 else 0 -% c1;
+                    const d2: i32 = if (inst.tag == .i32_add) c2 else 0 -% c2;
+                    const total: i32 = d1 +% d2;
+                    if (total == 0) {
+                        out.items.len = len - 3;
+                    } else {
+                        out.items[len - 3] = makeI32Const(total);
+                        out.items[len - 2] = .{ .tag = .i32_add, .data = .{ .tag = {} } };
+                        out.items.len = len - 1;
+                    }
+                    changed = true;
+                    continue;
+                }
+
+                // i32 associative bitwise reassociation: `(x op c1) op c2 -> x op (c1 op c2)`
+                if ((inst.tag == .i32_and or inst.tag == .i32_or or inst.tag == .i32_xor) and len >= 3 and
+                    out.items[len - 1].tag == .i32_const and
+                    out.items[len - 2].tag == inst.tag and
+                    out.items[len - 3].tag == .i32_const)
+                {
+                    const c1 = out.items[len - 3].data.imm32;
+                    const c2 = out.items[len - 1].data.imm32;
+                    const combined: i32 = switch (inst.tag) {
+                        .i32_and => c1 & c2,
+                        .i32_or => c1 | c2,
+                        .i32_xor => c1 ^ c2,
+                        else => unreachable,
+                    };
+                    const is_identity = switch (inst.tag) {
+                        .i32_and => combined == -1,
+                        .i32_or, .i32_xor => combined == 0,
+                        else => unreachable,
+                    };
+                    if (is_identity) {
+                        out.items.len = len - 3;
+                    } else {
+                        out.items[len - 3] = makeI32Const(combined);
+                        out.items.len = len - 1;
+                    }
+                    changed = true;
+                    continue;
+                }
+
+                // i32 single-constant right-operand peepholes: `<x>; i32_const C; <op>`
+                if (len >= 1 and out.items[len - 1].tag == .i32_const and
+                    !(len >= 2 and out.items[len - 2].tag == .i32_const))
+                {
+                    const rhs: i32 = out.items[len - 1].data.imm32;
+                    const rhs_u: u32 = @bitCast(rhs);
+                    const shift_amt: u5 = @truncate(rhs_u);
+                    switch (inst.tag) {
+                        .i32_add, .i32_sub, .i32_or => {
+                            if (rhs == 0) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_xor => {
+                            if (rhs == 0) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                            if (rhs == 1 and len >= 2 and isBoolProducerTag(out.items[len - 2].tag)) {
+                                _ = out.pop();
+                                _ = emitOrFoldI32Eqz(out, mir_extra.items);
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_and => {
+                            if (rhs == -1 or (len >= 2 and isBoolProducerTag(out.items[len - 2].tag) and (rhs & 1) == 1)) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_shl, .i32_shr_s, .i32_shr_u => {
+                            if (shift_amt == 0) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_eq => {
+                            if (rhs == 0) {
+                                _ = out.pop();
+                                _ = emitOrFoldI32Eqz(out, mir_extra.items);
+                                changed = true;
+                                continue;
+                            }
+                            if (rhs == 1 and len >= 2 and isBoolProducerTag(out.items[len - 2].tag)) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_ne => {
+                            if (rhs == 0 and len >= 2 and isBoolProducerTag(out.items[len - 2].tag)) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                            if (rhs == 1 and len >= 2 and isBoolProducerTag(out.items[len - 2].tag)) {
+                                _ = out.pop();
+                                _ = emitOrFoldI32Eqz(out, mir_extra.items);
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_mul => {
+                            if (rhs == 1) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                            if (rhs_u > 1 and std.math.isPowerOfTwo(rhs_u)) {
+                                out.items[len - 1] = makeI32Const(@intCast(@ctz(rhs_u)));
+                                out.appendAssumeCapacity(.{ .tag = .i32_shl, .data = .{ .tag = {} } });
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_div_s => {
+                            if (rhs == 1) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_div_u => {
+                            if (rhs_u == 1) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                            if (rhs_u > 1 and std.math.isPowerOfTwo(rhs_u)) {
+                                out.items[len - 1] = makeI32Const(@intCast(@ctz(rhs_u)));
+                                out.appendAssumeCapacity(.{ .tag = .i32_shr_u, .data = .{ .tag = {} } });
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_rem_u => {
+                            if (rhs_u >= 1 and std.math.isPowerOfTwo(rhs_u)) {
+                                out.items[len - 1] = makeI32Const(@bitCast(rhs_u - 1));
+                                out.appendAssumeCapacity(.{ .tag = .i32_and, .data = .{ .tag = {} } });
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+
+                // i32 commutative left-constant peepholes when RHS is a single pure 0-pop instruction:
+                // `i32_const C; <pure_0pop x>; <op>`
+                if (len >= 2 and out.items[len - 2].tag == .i32_const and isPureZeroPopTag(out.items[len - 1].tag)) {
+                    const lhs: i32 = out.items[len - 2].data.imm32;
+                    const lhs_u: u32 = @bitCast(lhs);
+                    const x_inst = out.items[len - 1];
+                    switch (inst.tag) {
+                        .i32_add, .i32_or, .i32_xor => {
+                            if (lhs == 0) {
+                                out.items[len - 2] = x_inst;
+                                out.items.len = len - 1;
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_and => {
+                            if (lhs == -1) {
+                                out.items[len - 2] = x_inst;
+                                out.items.len = len - 1;
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_eq => {
+                            if (lhs == 0) {
+                                out.items[len - 2] = x_inst;
+                                out.items[len - 1] = .{ .tag = .i32_eqz, .data = .{ .tag = {} } };
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_mul => {
+                            if (lhs == 1) {
+                                out.items[len - 2] = x_inst;
+                                out.items.len = len - 1;
+                                changed = true;
+                                continue;
+                            }
+                            if (lhs_u > 1 and std.math.isPowerOfTwo(lhs_u)) {
+                                out.items[len - 2] = x_inst;
+                                out.items[len - 1] = makeI32Const(@intCast(@ctz(lhs_u)));
+                                out.appendAssumeCapacity(.{ .tag = .i32_shl, .data = .{ .tag = {} } });
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        else => {},
                     }
                 }
 
@@ -571,6 +927,10 @@ fn Pass(comptime Inst: type) type {
                         .i64_add => lhs_u +% rhs_u,
                         .i64_sub => lhs_u -% rhs_u,
                         .i64_mul => lhs_u *% rhs_u,
+                        .i64_div_u => if (rhs_u != 0) lhs_u / rhs_u else null,
+                        .i64_rem_u => if (rhs_u != 0) lhs_u % rhs_u else null,
+                        .i64_div_s => if (rhs_s != 0 and !(lhs_s == std.math.minInt(i64) and rhs_s == -1)) @bitCast(@divTrunc(lhs_s, rhs_s)) else null,
+                        .i64_rem_s => if (rhs_s != 0 and !(lhs_s == std.math.minInt(i64) and rhs_s == -1)) @bitCast(@rem(lhs_s, rhs_s)) else null,
                         .i64_and => lhs_u & rhs_u,
                         .i64_or => lhs_u | rhs_u,
                         .i64_xor => lhs_u ^ rhs_u,
@@ -607,6 +967,188 @@ fn Pass(comptime Inst: type) type {
                         out.items[len - 2] = makeI32Const(res_i32);
                         changed = true;
                         continue;
+                    }
+                }
+
+                // i64 constant reassociation: `(x +- c1) +- c2 -> x + (d1 +% d2)` (or `x` if 0)
+                if ((inst.tag == .i64_add or inst.tag == .i64_sub) and len >= 3 and
+                    out.items[len - 1].tag == .i64_const and
+                    (out.items[len - 2].tag == .i64_add or out.items[len - 2].tag == .i64_sub) and
+                    out.items[len - 3].tag == .i64_const)
+                {
+                    const c1 = readImm64(mir_extra.items, out.items[len - 3].data.payload);
+                    const c2 = readImm64(mir_extra.items, out.items[len - 1].data.payload);
+                    const d1: u64 = if (out.items[len - 2].tag == .i64_add) c1 else 0 -% c1;
+                    const d2: u64 = if (inst.tag == .i64_add) c2 else 0 -% c2;
+                    const total: u64 = d1 +% d2;
+                    if (total == 0) {
+                        out.items.len = len - 3;
+                    } else {
+                        out.items[len - 3] = try makeI64Const(gpa, mir_extra, total);
+                        out.items[len - 2] = .{ .tag = .i64_add, .data = .{ .tag = {} } };
+                        out.items.len = len - 1;
+                    }
+                    changed = true;
+                    continue;
+                }
+
+                // i64 associative bitwise reassociation: `(x op c1) op c2 -> x op (c1 op c2)`
+                if ((inst.tag == .i64_and or inst.tag == .i64_or or inst.tag == .i64_xor) and len >= 3 and
+                    out.items[len - 1].tag == .i64_const and
+                    out.items[len - 2].tag == inst.tag and
+                    out.items[len - 3].tag == .i64_const)
+                {
+                    const c1 = readImm64(mir_extra.items, out.items[len - 3].data.payload);
+                    const c2 = readImm64(mir_extra.items, out.items[len - 1].data.payload);
+                    const combined: u64 = switch (inst.tag) {
+                        .i64_and => c1 & c2,
+                        .i64_or => c1 | c2,
+                        .i64_xor => c1 ^ c2,
+                        else => unreachable,
+                    };
+                    const is_identity = switch (inst.tag) {
+                        .i64_and => @as(i64, @bitCast(combined)) == -1,
+                        .i64_or, .i64_xor => combined == 0,
+                        else => unreachable,
+                    };
+                    if (is_identity) {
+                        out.items.len = len - 3;
+                    } else {
+                        out.items[len - 3] = try makeI64Const(gpa, mir_extra, combined);
+                        out.items.len = len - 1;
+                    }
+                    changed = true;
+                    continue;
+                }
+
+                // i64 single-constant right-operand peepholes: `<x>; i64_const C; <op>`
+                if (len >= 1 and out.items[len - 1].tag == .i64_const and
+                    !(len >= 2 and out.items[len - 2].tag == .i64_const))
+                {
+                    const rhs_u: u64 = readImm64(mir_extra.items, out.items[len - 1].data.payload);
+                    const rhs_s: i64 = @bitCast(rhs_u);
+                    const shift_amt: u6 = @truncate(rhs_u);
+                    switch (inst.tag) {
+                        .i64_add, .i64_sub, .i64_or, .i64_xor => {
+                            if (rhs_u == 0) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_and => {
+                            if (rhs_s == -1) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_shl, .i64_shr_s, .i64_shr_u => {
+                            if (shift_amt == 0) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_eq => {
+                            if (rhs_u == 0) {
+                                out.items[len - 1] = .{ .tag = .i64_eqz, .data = .{ .tag = {} } };
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_mul => {
+                            if (rhs_u == 1) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                            if (rhs_u > 1 and std.math.isPowerOfTwo(rhs_u)) {
+                                out.items[len - 1] = try makeI64Const(gpa, mir_extra, @ctz(rhs_u));
+                                out.appendAssumeCapacity(.{ .tag = .i64_shl, .data = .{ .tag = {} } });
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_div_s => {
+                            if (rhs_s == 1) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_div_u => {
+                            if (rhs_u == 1) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                            if (rhs_u > 1 and std.math.isPowerOfTwo(rhs_u)) {
+                                out.items[len - 1] = try makeI64Const(gpa, mir_extra, @ctz(rhs_u));
+                                out.appendAssumeCapacity(.{ .tag = .i64_shr_u, .data = .{ .tag = {} } });
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_rem_u => {
+                            if (rhs_u >= 1 and std.math.isPowerOfTwo(rhs_u)) {
+                                out.items[len - 1] = try makeI64Const(gpa, mir_extra, rhs_u - 1);
+                                out.appendAssumeCapacity(.{ .tag = .i64_and, .data = .{ .tag = {} } });
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+
+                // i64 commutative left-constant peepholes when RHS is a single pure 0-pop instruction:
+                // `i64_const C; <pure_0pop x>; <op>`
+                if (len >= 2 and out.items[len - 2].tag == .i64_const and isPureZeroPopTag(out.items[len - 1].tag)) {
+                    const lhs_u: u64 = readImm64(mir_extra.items, out.items[len - 2].data.payload);
+                    const lhs_s: i64 = @bitCast(lhs_u);
+                    const x_inst = out.items[len - 1];
+                    switch (inst.tag) {
+                        .i64_add, .i64_or, .i64_xor => {
+                            if (lhs_u == 0) {
+                                out.items[len - 2] = x_inst;
+                                out.items.len = len - 1;
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_and => {
+                            if (lhs_s == -1) {
+                                out.items[len - 2] = x_inst;
+                                out.items.len = len - 1;
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_eq => {
+                            if (lhs_u == 0) {
+                                out.items[len - 2] = x_inst;
+                                out.items[len - 1] = .{ .tag = .i64_eqz, .data = .{ .tag = {} } };
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_mul => {
+                            if (lhs_u == 1) {
+                                out.items[len - 2] = x_inst;
+                                out.items.len = len - 1;
+                                changed = true;
+                                continue;
+                            }
+                            if (lhs_u > 1 and std.math.isPowerOfTwo(lhs_u)) {
+                                out.items[len - 2] = x_inst;
+                                out.items[len - 1] = try makeI64Const(gpa, mir_extra, @ctz(lhs_u));
+                                out.appendAssumeCapacity(.{ .tag = .i64_shl, .data = .{ .tag = {} } });
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        else => {},
                     }
                 }
 
@@ -1104,6 +1646,15 @@ fn Pass(comptime Inst: type) type {
                         if (cond != 0) {
                             out.appendAssumeCapacity(.{ .tag = .br, .data = .{ .label = label } });
                         }
+                        changed = true;
+                        continue;
+                    }
+                    if (len >= 2 and
+                        ((out.items[len - 2].tag == .i32_const and out.items[len - 2].data.imm32 == 0 and out.items[len - 1].tag == .i32_ne) or
+                            (out.items[len - 2].tag == .i32_eqz and out.items[len - 1].tag == .i32_eqz)))
+                    {
+                        out.items.len = len - 2;
+                        out.appendAssumeCapacity(inst);
                         changed = true;
                         continue;
                     }
@@ -3199,4 +3750,529 @@ test "encodeLocals: run-length encodes empty, grouped, and large local runs" {
         0x01,
         @backingInt(std.wasm.Valtype.i32),
     }, code.items);
+}
+
+test "peepholes: i32 and i64 additive, bitwise, and shift identities (including commutative 0-pop)" {
+    // 1. i32 right-operand and left-operand commutative identities
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        try m.addLocal(.local_get, 0);
+        try m.addI32(0);
+        try m.addTag(.i32_add);
+        try m.addI32(0);
+        try m.addTag(.i32_sub);
+        try m.addI32(0);
+        try m.addTag(.i32_or);
+        try m.addI32(0);
+        try m.addTag(.i32_xor);
+        try m.addI32(-1);
+        try m.addTag(.i32_and);
+        try m.addI32(0);
+        try m.addTag(.i32_shl);
+        try m.addI32(32); // shift_amt == 0 (mod 32)
+        try m.addTag(.i32_shr_s);
+        try m.addI32(0);
+        try m.addTag(.i32_shr_u);
+
+        // Commutative left-constant with local_get: 0 + x, 0 | x, 0 ^ x, -1 & x
+        try m.addI32(0);
+        try m.addLocal(.local_get, 1);
+        try m.addTag(.i32_add);
+        try m.addTag(.i32_add);
+
+        try m.addI32(0);
+        try m.addLocal(.local_get, 2);
+        try m.addTag(.i32_or);
+        try m.addTag(.i32_add);
+
+        try m.addI32(0);
+        try m.addLocal(.local_get, 3);
+        try m.addTag(.i32_xor);
+        try m.addTag(.i32_add);
+
+        try m.addI32(-1);
+        try m.addLocal(.local_get, 4);
+        try m.addTag(.i32_and);
+        try m.addTag(.i32_add);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get,
+                .local_get,
+                .i32_add,
+                .local_get,
+                .i32_add,
+                .local_get,
+                .i32_add,
+                .local_get,
+                .i32_add,
+                .end,
+                .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(u32, 0), datas[0].local);
+        try testing.expectEqual(@as(u32, 1), datas[1].local);
+        try testing.expectEqual(@as(u32, 2), datas[3].local);
+        try testing.expectEqual(@as(u32, 3), datas[5].local);
+        try testing.expectEqual(@as(u32, 4), datas[7].local);
+    }
+
+    // 2. i64 right-operand and left-operand commutative identities
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        try m.addLocal(.local_get, 0);
+        try m.addI64(0);
+        try m.addTag(.i64_add);
+        try m.addI64(0);
+        try m.addTag(.i64_sub);
+        try m.addI64(0);
+        try m.addTag(.i64_or);
+        try m.addI64(0);
+        try m.addTag(.i64_xor);
+        try m.addI64(-1);
+        try m.addTag(.i64_and);
+        try m.addI64(0);
+        try m.addTag(.i64_shl);
+        try m.addI64(64); // shift_amt == 0 (mod 64)
+        try m.addTag(.i64_shr_s);
+        try m.addI64(0);
+        try m.addTag(.i64_shr_u);
+
+        // Commutative left-constant with local_get
+        try m.addI64(0);
+        try m.addLocal(.local_get, 1);
+        try m.addTag(.i64_add);
+        try m.addTag(.i64_add);
+
+        try m.addI64(-1);
+        try m.addLocal(.local_get, 2);
+        try m.addTag(.i64_and);
+        try m.addTag(.i64_add);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get,
+                .local_get,
+                .i64_add,
+                .local_get,
+                .i64_add,
+                .end,
+                .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(u32, 0), datas[0].local);
+        try testing.expectEqual(@as(u32, 1), datas[1].local);
+        try testing.expectEqual(@as(u32, 2), datas[3].local);
+    }
+}
+
+test "peepholes: zero comparison, comparison negation, double-boolean, and br_if/select condition normalization" {
+    // 1. x == 0 -> eqz, 0 == x -> eqz, comparison inversion, and double-boolean normalization
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // x == 0 -> i32_eqz
+        try m.addLocal(.local_get, 0);
+        try m.addI32(0);
+        try m.addTag(.i32_eq);
+        try m.addTag(.drop);
+
+        // 0 == x -> i32_eqz
+        try m.addI32(0);
+        try m.addLocal(.local_get, 0);
+        try m.addTag(.i32_eq);
+        try m.addTag(.drop);
+
+        // x_i64 == 0 and 0 == x_i64 -> i64_eqz
+        try m.addLocal(.local_get, 1);
+        try m.addI64(0);
+        try m.addTag(.i64_eq);
+        try m.addTag(.drop);
+
+        try m.addI64(0);
+        try m.addLocal(.local_get, 1);
+        try m.addTag(.i64_eq);
+        try m.addTag(.drop);
+
+        // Comparison negation via i32_eqz, == 0, != 1, ^ 1
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 2);
+        try m.addTag(.i32_lt_s);
+        try m.addTag(.i32_eqz); // -> i32_ge_s
+        try m.addTag(.drop);
+
+        try m.addLocal(.local_get, 1);
+        try m.addLocal(.local_get, 3);
+        try m.addTag(.i64_gt_u);
+        try m.addI32(0);
+        try m.addTag(.i32_eq); // -> i64_le_u
+        try m.addTag(.drop);
+
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 2);
+        try m.addTag(.i32_eq);
+        try m.addI32(1);
+        try m.addTag(.i32_ne); // -> i32_ne
+        try m.addTag(.drop);
+
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 2);
+        try m.addTag(.i32_ge_u);
+        try m.addI32(1);
+        try m.addTag(.i32_xor); // -> i32_lt_u
+        try m.addTag(.drop);
+
+        // Double-boolean normalization: <cmp>; != 0, <cmp>; == 1, <cmp>; & 1, <bool>; eqz; eqz
+        try m.addLocal(.local_get, 0);
+        try m.addTag(.i32_eqz);
+        try m.addI32(0);
+        try m.addTag(.i32_ne);
+        try m.addI32(1);
+        try m.addTag(.i32_eq);
+        try m.addI32(1);
+        try m.addTag(.i32_and);
+        try m.addTag(.i32_eqz);
+        try m.addTag(.i32_eqz);
+        try m.addTag(.drop);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get, .i32_eqz,   .drop,
+                .local_get, .i32_eqz,   .drop,
+                .local_get, .i64_eqz,   .drop,
+                .local_get, .i64_eqz,   .drop,
+                .local_get, .local_get, .i32_ge_s,
+                .drop,      .local_get, .local_get,
+                .i64_le_u,  .drop,      .local_get,
+                .local_get, .i32_ne,    .drop,
+                .local_get, .local_get, .i32_lt_u,
+                .drop,      .local_get, .i32_eqz,
+                .drop,      .end,       .dbg_epilogue_begin,
+            },
+            tags,
+        );
+    }
+
+    // 2. br_if and select condition normalization
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        try m.addBlock(.block, .empty);
+        // x; i32_const 0; i32_ne; br_if 0 -> x; br_if 0
+        try m.addLocal(.local_get, 0);
+        try m.addI32(0);
+        try m.addTag(.i32_ne);
+        try m.addLabel(.br_if, 0);
+
+        // x; i32_eqz; i32_eqz; br_if 0 -> x; br_if 0
+        try m.addLocal(.local_get, 1);
+        try m.addTag(.i32_eqz);
+        try m.addTag(.i32_eqz);
+        try m.addLabel(.br_if, 0);
+
+        // x; i32_const 0; i32_eq; i32_eqz; br_if 0 -> x; br_if 0
+        try m.addLocal(.local_get, 2);
+        try m.addI32(0);
+        try m.addTag(.i32_eq);
+        try m.addTag(.i32_eqz);
+        try m.addLabel(.br_if, 0);
+        try m.addTag(.end);
+
+        // select with `i32_const 0; i32_ne` and `i32_eqz; i32_eqz`
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 1);
+        try m.addLocal(.local_get, 2);
+        try m.addI32(0);
+        try m.addTag(.i32_ne);
+        try m.addTag(.select);
+
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 1);
+        try m.addTag(.i32_eqz);
+        try m.addTag(.i32_eqz);
+        try m.addTag(.select);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .block,
+                .local_get,
+                .br_if,
+                .local_get,
+                .br_if,
+                .local_get,
+                .br_if,
+                .end,
+                .local_get,
+                .local_get,
+                .local_get,
+                .select,
+                .local_get,
+                .local_get,
+                .select,
+                .@"return",
+                .end,
+                .dbg_epilogue_begin,
+            },
+            tags,
+        );
+    }
+}
+
+test "peepholes: multiplicative identities, power-of-two strength reductions, and non-trapping div/rem folding" {
+    // 1. i32 and i64 multiplicative identities and power-of-two strength reductions
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // i32: * 1, /_s 1, /_u 1, %_u 1 -> 0 (& 0)
+        try m.addLocal(.local_get, 0);
+        try m.addI32(1);
+        try m.addTag(.i32_mul);
+        try m.addI32(1);
+        try m.addTag(.i32_div_s);
+        try m.addI32(1);
+        try m.addTag(.i32_div_u);
+        // x * 8 -> x << 3; /_u 16 -> >>_u 4; %_u 32 -> & 31
+        try m.addI32(8);
+        try m.addTag(.i32_mul);
+        try m.addI32(16);
+        try m.addTag(.i32_div_u);
+        try m.addI32(32);
+        try m.addTag(.i32_rem_u);
+        try m.addTag(.drop);
+
+        // Commutative left-constant 2^k * local_get: 4 * x -> x << 2
+        try m.addI32(4);
+        try m.addLocal(.local_get, 0);
+        try m.addTag(.i32_mul);
+        try m.addTag(.drop);
+
+        // i64: * 1, /_s 1, /_u 1, * 16 -> << 4, /_u 8 -> >>_u 3, %_u 64 -> & 63
+        try m.addLocal(.local_get, 1);
+        try m.addI64(1);
+        try m.addTag(.i64_mul);
+        try m.addI64(1);
+        try m.addTag(.i64_div_s);
+        try m.addI64(1);
+        try m.addTag(.i64_div_u);
+        try m.addI64(16);
+        try m.addTag(.i64_mul);
+        try m.addI64(8);
+        try m.addTag(.i64_div_u);
+        try m.addI64(64);
+        try m.addTag(.i64_rem_u);
+        try m.addTag(.drop);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get,
+                .i32_const,
+                .i32_shl,
+                .i32_const,
+                .i32_shr_u,
+                .i32_const,
+                .i32_and,
+                .drop,
+                .local_get,
+                .i32_const,
+                .i32_shl,
+                .drop,
+                .local_get,
+                .i64_const,
+                .i64_shl,
+                .i64_const,
+                .i64_shr_u,
+                .i64_const,
+                .i64_and,
+                .drop,
+                .end,
+                .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(i32, 3), datas[1].imm32);
+        try testing.expectEqual(@as(i32, 4), datas[3].imm32);
+        try testing.expectEqual(@as(i32, 31), datas[5].imm32);
+        try testing.expectEqual(@as(i32, 2), datas[9].imm32);
+        try testing.expectEqual(@as(u64, 4), readImm64(m.extra.items, datas[13].payload));
+        try testing.expectEqual(@as(u64, 3), readImm64(m.extra.items, datas[15].payload));
+        try testing.expectEqual(@as(u64, 63), readImm64(m.extra.items, datas[17].payload));
+    }
+
+    // 2. Two-constant non-trapping div/rem folding and trapping preservation
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Non-trapping i32 div/rem
+        try m.addI32(-17);
+        try m.addI32(5);
+        try m.addTag(.i32_div_s); // -3
+        try m.addI32(-17);
+        try m.addI32(5);
+        try m.addTag(.i32_rem_s); // -2
+        try m.addTag(.i32_add); // -5
+        try m.addI32(100);
+        try m.addI32(7);
+        try m.addTag(.i32_div_u); // 14
+        try m.addTag(.i32_add); // 9
+        try m.addI32(100);
+        try m.addI32(7);
+        try m.addTag(.i32_rem_u); // 2
+        try m.addTag(.i32_add); // 11
+
+        // Non-trapping i64 div/rem
+        try m.addI64(-23);
+        try m.addI64(6);
+        try m.addTag(.i64_div_s); // -3
+        try m.addI64(-23);
+        try m.addI64(6);
+        try m.addTag(.i64_rem_s); // -5
+        try m.addTag(.i64_add); // -8
+        try m.addI64(50);
+        try m.addI64(8);
+        try m.addTag(.i64_div_u); // 6
+        try m.addTag(.i64_add); // -2
+        try m.addI64(50);
+        try m.addI64(8);
+        try m.addTag(.i64_rem_u); // 2
+        try m.addTag(.i64_add); // 0
+        try m.addTag(.i32_wrap_i64); // 0
+        try m.addTag(.i32_add); // 11
+
+        // Trapping i32_div_s(minInt(i32), -1) must be preserved
+        try m.addI32(std.math.minInt(i32));
+        try m.addI32(-1);
+        try m.addTag(.i32_div_s);
+        try m.addTag(.drop);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .i32_const,
+                .i32_const,
+                .i32_const,
+                .i32_div_s,
+                .drop,
+                .end,
+                .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(i32, 11), datas[0].imm32);
+    }
+}
+
+test "peepholes: constant reassociation and MemArg offset integration" {
+    var m: TestMir = .{};
+    defer m.deinit();
+
+    // (x + 10) + 20 -> x + 30
+    try m.addLocal(.local_get, 0);
+    try m.addI32(10);
+    try m.addTag(.i32_add);
+    try m.addI32(20);
+    try m.addTag(.i32_add);
+    try m.addTag(.drop);
+
+    // (x + 16) - 4 -> x + 12, then folded into i32_load offset=8 -> offset=20
+    try m.addLocal(.local_get, 0);
+    try m.addI32(16);
+    try m.addTag(.i32_add);
+    try m.addI32(4);
+    try m.addTag(.i32_sub);
+    try m.memOp(.i32_load, 8, 2);
+    try m.addTag(.drop);
+
+    // (x - 12) + 12 -> x (cancels completely)
+    try m.addLocal(.local_get, 0);
+    try m.addI32(12);
+    try m.addTag(.i32_sub);
+    try m.addI32(12);
+    try m.addTag(.i32_add);
+    try m.addTag(.drop);
+
+    // i64: (x - 4) + 20 -> x + 16, then folded into i64_load offset=4 -> offset=20
+    try m.addLocal(.local_get, 1);
+    try m.addI64(4);
+    try m.addTag(.i64_sub);
+    try m.addI64(20);
+    try m.addTag(.i64_add);
+    try m.memOp(.i64_load, 4, 3);
+    try m.addTag(.drop);
+
+    // Bitwise reassociation: (x & 0xff) & 0x0f -> x & 0x0f; (x ^ 5) ^ 5 -> x
+    try m.addLocal(.local_get, 0);
+    try m.addI32(0xff);
+    try m.addTag(.i32_and);
+    try m.addI32(0x0f);
+    try m.addTag(.i32_and);
+    try m.addI32(5);
+    try m.addTag(.i32_xor);
+    try m.addI32(5);
+    try m.addTag(.i32_xor);
+    try m.addTag(.@"return");
+
+    try m.finishFunc();
+    try m.run();
+
+    const tags = m.instructions.items(.tag);
+    const datas = m.instructions.items(.data);
+    try testing.expectEqualSlices(
+        Mir.Inst.Tag,
+        &.{
+            .local_get, .i32_const,          .i32_add,  .drop,
+            .local_get, .i32_load,           .drop,     .local_get,
+            .drop,      .local_get,          .i64_load, .drop,
+            .local_get, .i32_const,          .i32_and,  .@"return",
+            .end,       .dbg_epilogue_begin,
+        },
+        tags,
+    );
+    try testing.expectEqual(@as(i32, 30), datas[1].imm32);
+    try testing.expectEqual(@as(u64, 20), m.memOffsetAt(5));
+    try testing.expectEqual(@as(u64, 20), m.memOffsetAt(10));
+    try testing.expectEqual(@as(i32, 0x0f), datas[13].imm32);
 }
