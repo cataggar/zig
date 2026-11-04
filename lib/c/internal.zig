@@ -79,10 +79,10 @@ comptime {
         @export(&sysinfo, .{ .name = "__sysinfo", .linkage = .weak, .visibility = .hidden });
         @export(&libc_struct, .{ .name = "__libc", .linkage = .weak, .visibility = .hidden });
         @export(&hwcap, .{ .name = "__hwcap", .linkage = .weak, .visibility = .hidden });
-        @export(&progname, .{ .name = "__progname", .linkage = .weak, .visibility = .default });
-        @export(&progname_full, .{ .name = "__progname_full", .linkage = .weak, .visibility = .default });
-        @export(&progname, .{ .name = "program_invocation_short_name", .linkage = .weak, .visibility = .default });
-        @export(&progname_full, .{ .name = "program_invocation_name", .linkage = .weak, .visibility = .default });
+        @export(&progname, .{ .name = "__progname", .linkage = .weak, .visibility = if (builtin.object_format == .wasm) .hidden else .default });
+        @export(&progname_full, .{ .name = "__progname_full", .linkage = .weak, .visibility = if (builtin.object_format == .wasm) .hidden else .default });
+        @export(&progname, .{ .name = "program_invocation_short_name", .linkage = .weak, .visibility = if (builtin.object_format == .wasm) .hidden else .default });
+        @export(&progname_full, .{ .name = "program_invocation_name", .linkage = .weak, .visibility = if (builtin.object_format == .wasm) .hidden else .default });
     }
 }
 

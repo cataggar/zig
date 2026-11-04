@@ -1906,7 +1906,7 @@ pub fn create(gpa: Allocator, arena: Allocator, io: Io, diag: *CreateDiagnostic,
             if (target.ofmt == .c) break :s .none;
             if (!link_libc or !is_exe_or_dyn_lib) break :s .none;
             if (!target_util.wantsZigC(target, options.config.link_mode)) break :s .none;
-            if (have_zcu) break :s .zcu;
+            if (have_zcu and !target.isWasiLibC()) break :s .zcu;
             break :s .lib;
         };
 

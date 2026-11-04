@@ -1038,23 +1038,25 @@ pub fn parse(
                         continue;
                     }
                 }
-                if (gop.value_ptr.module_name != ptr.module_name.toOptional()) {
-                    var err = try diags.addErrorWithNotes(2);
-                    try err.addMsg("symbol '{s}' mismatching module names", .{name.slice(wasm)});
-                    if (gop.value_ptr.module_name.slice(wasm)) |module_name| {
-                        gop.value_ptr.source_location.addNote(&err, "module '{s}' here", .{module_name});
-                    } else {
-                        gop.value_ptr.source_location.addNote(&err, "no module here", .{});
+                if (gop.value_ptr.resolution == .unresolved) {
+                    if (gop.value_ptr.module_name != ptr.module_name.toOptional()) {
+                        var err = try diags.addErrorWithNotes(2);
+                        try err.addMsg("symbol '{s}' mismatching module names", .{name.slice(wasm)});
+                        if (gop.value_ptr.module_name.slice(wasm)) |module_name| {
+                            gop.value_ptr.source_location.addNote(&err, "module '{s}' here", .{module_name});
+                        } else {
+                            gop.value_ptr.source_location.addNote(&err, "no module here", .{});
+                        }
+                        source_location.addNote(&err, "module '{s}' here", .{ptr.module_name.slice(wasm)});
+                        continue;
                     }
-                    source_location.addNote(&err, "module '{s}' here", .{ptr.module_name.slice(wasm)});
-                    continue;
-                }
-                if (gop.value_ptr.name != ptr.name) {
-                    var err = try diags.addErrorWithNotes(2);
-                    try err.addMsg("symbol '{s}' mismatching import names", .{name.slice(wasm)});
-                    gop.value_ptr.source_location.addNote(&err, "imported as '{s}' here", .{gop.value_ptr.name.slice(wasm)});
-                    source_location.addNote(&err, "imported as '{s}' here", .{ptr.name.slice(wasm)});
-                    continue;
+                    if (gop.value_ptr.name != ptr.name) {
+                        var err = try diags.addErrorWithNotes(2);
+                        try err.addMsg("symbol '{s}' mismatching import names", .{name.slice(wasm)});
+                        gop.value_ptr.source_location.addNote(&err, "imported as '{s}' here", .{gop.value_ptr.name.slice(wasm)});
+                        source_location.addNote(&err, "imported as '{s}' here", .{ptr.name.slice(wasm)});
+                        continue;
+                    }
                 }
             } else {
                 gop.value_ptr.* = .{
@@ -1095,23 +1097,25 @@ pub fn parse(
                     });
                     continue;
                 }
-                if (gop.value_ptr.module_name != ptr.module_name.toOptional()) {
-                    var err = try diags.addErrorWithNotes(2);
-                    try err.addMsg("symbol '{s}' mismatching module names", .{name.slice(wasm)});
-                    if (gop.value_ptr.module_name.slice(wasm)) |module_name| {
-                        gop.value_ptr.source_location.addNote(&err, "module '{s}' here", .{module_name});
-                    } else {
-                        gop.value_ptr.source_location.addNote(&err, "no module here", .{});
+                if (gop.value_ptr.resolution == .unresolved) {
+                    if (gop.value_ptr.module_name != ptr.module_name.toOptional()) {
+                        var err = try diags.addErrorWithNotes(2);
+                        try err.addMsg("symbol '{s}' mismatching module names", .{name.slice(wasm)});
+                        if (gop.value_ptr.module_name.slice(wasm)) |module_name| {
+                            gop.value_ptr.source_location.addNote(&err, "module '{s}' here", .{module_name});
+                        } else {
+                            gop.value_ptr.source_location.addNote(&err, "no module here", .{});
+                        }
+                        source_location.addNote(&err, "module '{s}' here", .{ptr.module_name.slice(wasm)});
+                        continue;
                     }
-                    source_location.addNote(&err, "module '{s}' here", .{ptr.module_name.slice(wasm)});
-                    continue;
-                }
-                if (gop.value_ptr.name != ptr.name) {
-                    var err = try diags.addErrorWithNotes(2);
-                    try err.addMsg("symbol '{s}' mismatching import names", .{name.slice(wasm)});
-                    gop.value_ptr.source_location.addNote(&err, "imported as '{s}' here", .{gop.value_ptr.name.slice(wasm)});
-                    source_location.addNote(&err, "imported as '{s}' here", .{ptr.name.slice(wasm)});
-                    continue;
+                    if (gop.value_ptr.name != ptr.name) {
+                        var err = try diags.addErrorWithNotes(2);
+                        try err.addMsg("symbol '{s}' mismatching import names", .{name.slice(wasm)});
+                        gop.value_ptr.source_location.addNote(&err, "imported as '{s}' here", .{gop.value_ptr.name.slice(wasm)});
+                        source_location.addNote(&err, "imported as '{s}' here", .{ptr.name.slice(wasm)});
+                        continue;
+                    }
                 }
             } else {
                 gop.value_ptr.* = .{

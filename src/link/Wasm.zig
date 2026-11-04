@@ -354,12 +354,17 @@ pub const FunctionIndex = enum(u32) {
 
     pub fn fromSymbolName(wasm: *const Wasm, name: String) ?FunctionIndex {
         if (wasm.object_function_imports.getPtr(name)) |import| {
-            if (import.resolution != .unresolved) {
+            if (import.flags.binding != .weak and import.resolution != .unresolved) {
                 return fromResolution(wasm, import.resolution);
             }
         }
         if (wasm.function_exports.get(name)) |index| return index;
         if (wasm.hidden_function_exports.get(name)) |index| return index;
+        if (wasm.object_function_imports.getPtr(name)) |import| {
+            if (import.flags.binding == .weak and import.resolution != .unresolved) {
+                return fromResolution(wasm, import.resolution);
+            }
+        }
         if (name == wasm.preloaded_strings.__wasm_init_memory) return fromResolution(wasm, .__wasm_init_memory);
         if (name == wasm.preloaded_strings.__wasm_apply_global_tls_relocs) return fromResolution(wasm, .__wasm_apply_global_tls_relocs);
         if (name == wasm.preloaded_strings.__wasm_call_ctors) return fromResolution(wasm, .__wasm_call_ctors);
@@ -407,9 +412,7 @@ pub const OutputFunctionIndex = enum(u32) {
         const ptr = index.ptr(wasm);
         if (ptr.flags.binding == .weak) {
             const name = ptr.name.unwrap().?;
-            const import = wasm.object_function_imports.getPtr(name).?;
-            assert(import.resolution != .unresolved);
-            return fromResolution(wasm, import.resolution).?;
+            return fromSymbolName(wasm, name);
         }
         return fromResolution(wasm, .fromObjectFunction(wasm, index)).?;
     }
@@ -459,9 +462,16 @@ pub const OutputDataIndex = enum(u32) {
     pub fn fromSymbolName(wasm: *const Wasm, name: String) OutputDataIndex {
         if (wasm.flush_buffer.data_imports.getIndex(name)) |i| return @fromBackingInt(@intCast(i));
         if (wasm.object_data_imports.getPtr(name)) |import| {
-            if (import.resolution != .unresolved) return fromResolution(wasm, import.resolution).?;
+            if (import.flags.binding != .weak and import.resolution != .unresolved) {
+                return fromResolution(wasm, import.resolution).?;
+            }
         }
         if (wasm.flush_buffer.data_exports.get(name)) |symbol| return fromResolution(wasm, symbol.resolution).?;
+        if (wasm.object_data_imports.getPtr(name)) |import| {
+            if (import.flags.binding == .weak and import.resolution != .unresolved) {
+                return fromResolution(wasm, import.resolution).?;
+            }
+        }
         if (std.debug.runtime_safety) {
             std.debug.panic("data index for symbol not found: {s}", .{name.slice(wasm)});
         } else unreachable;
@@ -735,7 +745,7 @@ pub const SymbolFlags = packed struct(u32) {
 
     pub fn isIncluded(flags: SymbolFlags, is_dynamic: bool, is_obj: bool) bool {
         return flags.exported or
-            (is_dynamic and !flags.visibility_hidden) or
+            (!flags.undefined and is_dynamic and !flags.visibility_hidden) or
             (is_obj and flags.binding != .local) or
             (flags.no_strip and flags.must_link);
     }
@@ -4962,6 +4972,12 @@ pub fn navAddr(wasm: *const Wasm, nav_index: InternPool.Nav.Index) u32 {
     switch (ip.indexToKey(ip.getNav(nav_index).resolved.?.value)) {
         .@"extern" => |ext| if (wasm.getExistingString(ext.name.toSlice(ip))) |symbol_name| {
             if (wasm.object_data_imports.getPtr(symbol_name)) |import| {
+                if (import.flags.binding == .weak) {
+                    if (wasm.flush_buffer.data_exports.get(symbol_name)) |symbol| {
+                        const data_loc = symbol.resolution.dataLoc(wasm);
+                        return wasm.flush_buffer.data_segments.get(data_loc.segment).? + data_loc.offset;
+                    }
+                }
                 switch (import.resolution.unpack(wasm)) {
                     .unresolved => {},
                     .object => |object_data_index| {
