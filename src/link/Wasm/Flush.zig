@@ -258,8 +258,16 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
         const function_imports_start = wasm.function_imports.entries.len;
         const global_imports_start = wasm.global_imports.entries.len;
         const data_imports_start = wasm.data_imports.entries.len;
+        const zcu_funcs_end: usize = wasm.zcu_funcs.entries.len;
 
         log.debug("total MIR instructions: {d}", .{wasm.mir_instructions.len});
+
+        try wasm.functions.ensureUnusedCapacity(gpa, zcu_funcs_end);
+        for (wasm.zcu_funcs.keys()[0..zcu_funcs_end], 0..) |ip_index, i| {
+            if (is_obj or zcu_references.?.contains(.wrap(.{ .func = ip_index }))) {
+                wasm.functions.putAssumeCapacity(.pack(wasm, .{ .zcu_func = @fromBackingInt(@intCast(i)) }), {});
+            }
+        }
 
         for (wasm.nav_exports.keys(), wasm.nav_exports.values()) |*nav_export, export_index| {
             if (ip.isFunctionType(ip.getNav(nav_export.nav_index).resolved.?.type)) {
@@ -445,91 +453,96 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
 
         // Detect any intrinsics that were called; they need to have dependencies on the symbols marked.
         // Likewise detect `@tagName` calls so those functions can be included in the output and synthesized.
-        for (wasm.mir_instructions.items(.tag), wasm.mir_instructions.items(.data)) |tag, *data| switch (tag) {
-            .call_intrinsic => {
-                const symbol_name = try wasm.internString(@tagName(data.intrinsic));
-                if (Wasm.FunctionIndex.fromSymbolName(wasm, symbol_name) == null and
-                    !f.function_imports.contains(symbol_name))
-                {
-                    if (wasm.object_function_imports.getIndex(symbol_name)) |object_import_index| {
-                        const i: Wasm.FunctionImport.Index = @fromBackingInt(@intCast(object_import_index));
-                        try wasm.markFunctionImport(symbol_name, i.value(wasm), i);
-                        if (Wasm.FunctionIndex.fromSymbolName(wasm, symbol_name) == null) {
-                            try f.function_imports.put(gpa, symbol_name, .fromObject(i, wasm));
+        for (wasm.zcu_funcs.keys()[0..zcu_funcs_end], wasm.zcu_funcs.values()[0..zcu_funcs_end]) |func_ip_index, zcu_func| {
+            if (!zcu_references.?.contains(.wrap(.{ .func = func_ip_index }))) continue;
+            const func = zcu_func.function;
+            const insts = wasm.mir_instructions.slice().subslice(func.instructions_off, func.instructions_len);
+            for (insts.items(.tag), insts.items(.data)) |tag, *data| switch (tag) {
+                .call_intrinsic => {
+                    const symbol_name = try wasm.internString(@tagName(data.intrinsic));
+                    if (Wasm.FunctionIndex.fromSymbolName(wasm, symbol_name) == null and
+                        !f.function_imports.contains(symbol_name))
+                    {
+                        if (wasm.object_function_imports.getIndex(symbol_name)) |object_import_index| {
+                            const i: Wasm.FunctionImport.Index = @fromBackingInt(@intCast(object_import_index));
+                            try wasm.markFunctionImport(symbol_name, i.value(wasm), i);
+                            if (Wasm.FunctionIndex.fromSymbolName(wasm, symbol_name) == null) {
+                                try f.function_imports.put(gpa, symbol_name, .fromObject(i, wasm));
+                            }
+                        } else if (is_obj) {
+                            const gop = try f.intrinsic_function_imports.getOrPut(gpa, symbol_name);
+                            if (!gop.found_existing) gop.value_ptr.* = try wasm.intrinsicFunctionType(data.intrinsic);
+                        } else {
+                            return diags.fail("missing compiler runtime intrinsic '{t}' (undefined linker symbol)", .{
+                                data.intrinsic,
+                            });
                         }
-                    } else if (is_obj) {
-                        const gop = try f.intrinsic_function_imports.getOrPut(gpa, symbol_name);
-                        if (!gop.found_existing) gop.value_ptr.* = try wasm.intrinsicFunctionType(data.intrinsic);
+                    }
+                },
+                .call_indirect => {
+                    const fn_info = zcu.typeToFunc(.fromInterned(data.ip_index)).?;
+                    const type_index = wasm.getExistingFunctionType(
+                        fn_info.cc,
+                        fn_info.param_types.get(ip),
+                        .fromInterned(fn_info.return_type),
+                        fn_info.is_var_args,
+                        target,
+                    ).?;
+                    try f.func_types.put(gpa, type_index, {});
+                },
+                .call_tag_index => {
+                    assert(ip.indexToKey(data.ip_index) == .enum_type);
+                    const gop = try wasm.zcu_funcs.getOrPut(gpa, data.ip_index);
+                    if (!gop.found_existing) {
+                        const int_tag_ty = Zcu.Type.fromInterned(data.ip_index).backingIntType(zcu);
+                        gop.value_ptr.* = .{ .tag_name = .{
+                            .symbol_name = try wasm.internStringFmt("__zig_tag_index_{d}", .{data.ip_index}),
+                            .type_index = try wasm.internFunctionType(.auto, &.{int_tag_ty.ip_index}, .u32, false, target),
+                        } };
+                    }
+                    try wasm.functions.put(gpa, .fromZcuFunc(wasm, @fromBackingInt(@intCast(gop.index))), {});
+                },
+                .enum_tag_name_table_ref => {
+                    assert(ip.indexToKey(data.ip_index) == .enum_type);
+                    const gop = try f.enum_tag_name_table.getOrPut(gpa, data.ip_index);
+                    if (!gop.found_existing) {
+                        wasm.tag_name_table_ref_count += 1;
+                        gop.value_ptr.* = @intCast(wasm.tag_name_offs.items.len);
+                        const tag_names = ip.loadEnumType(data.ip_index).field_names;
+                        for (tag_names.get(ip)) |tag_name| {
+                            const slice = tag_name.toSlice(ip);
+                            try wasm.tag_name_offs.append(gpa, @intCast(wasm.tag_name_bytes.items.len));
+                            try wasm.tag_name_bytes.appendSlice(gpa, slice[0 .. slice.len + 1]);
+                        }
+                    }
+                },
+                .global_get, .global_set => {
+                    const symbol_name = try wasm.internString(data.str.toSlice(ip));
+                    if (symbol_name == wasm.preloaded_strings.__heap_base) {
+                        if (is_obj) try f.global_imports.put(gpa, symbol_name, .__heap_base) else try wasm.globals.put(gpa, .__heap_base, {});
+                    } else if (symbol_name == wasm.preloaded_strings.__heap_end) {
+                        if (is_obj) try f.global_imports.put(gpa, symbol_name, .__heap_end) else try wasm.globals.put(gpa, .__heap_end, {});
+                    } else if (symbol_name == wasm.preloaded_strings.__stack_pointer) {
+                        if (is_obj) try f.global_imports.put(gpa, symbol_name, .__stack_pointer) else try wasm.globals.put(gpa, .__stack_pointer, {});
+                    } else if (symbol_name == wasm.preloaded_strings.__tls_align) {
+                        if (is_obj) try f.global_imports.put(gpa, symbol_name, .__tls_align) else try wasm.globals.put(gpa, .__tls_align, {});
+                    } else if (symbol_name == wasm.preloaded_strings.__tls_base) {
+                        if (is_obj) try f.global_imports.put(gpa, symbol_name, .__tls_base) else try wasm.globals.put(gpa, .__tls_base, {});
+                    } else if (symbol_name == wasm.preloaded_strings.__tls_size) {
+                        if (is_obj) try f.global_imports.put(gpa, symbol_name, .__tls_size) else try wasm.globals.put(gpa, .__tls_size, {});
+                    } else if (wasm.object_global_imports.getIndex(symbol_name)) |object_import_index| {
+                        const i: Wasm.GlobalImport.Index = @fromBackingInt(@intCast(object_import_index));
+                        try wasm.markGlobalImport(symbol_name, i.value(wasm), i);
+                        if (i.value(wasm).resolution == .unresolved) {
+                            try f.global_imports.put(gpa, symbol_name, .fromObject(i, wasm));
+                        }
                     } else {
-                        return diags.fail("missing compiler runtime intrinsic '{t}' (undefined linker symbol)", .{
-                            data.intrinsic,
-                        });
+                        return diags.fail("undefined global symbol '{s}'", .{symbol_name.slice(wasm)});
                     }
-                }
-            },
-            .call_indirect => {
-                const fn_info = zcu.typeToFunc(.fromInterned(data.ip_index)).?;
-                const type_index = wasm.getExistingFunctionType(
-                    fn_info.cc,
-                    fn_info.param_types.get(ip),
-                    .fromInterned(fn_info.return_type),
-                    fn_info.is_var_args,
-                    target,
-                ).?;
-                try f.func_types.put(gpa, type_index, {});
-            },
-            .call_tag_index => {
-                assert(ip.indexToKey(data.ip_index) == .enum_type);
-                const gop = try wasm.zcu_funcs.getOrPut(gpa, data.ip_index);
-                if (!gop.found_existing) {
-                    const int_tag_ty = Zcu.Type.fromInterned(data.ip_index).backingIntType(zcu);
-                    gop.value_ptr.* = .{ .tag_name = .{
-                        .symbol_name = try wasm.internStringFmt("__zig_tag_index_{d}", .{data.ip_index}),
-                        .type_index = try wasm.internFunctionType(.auto, &.{int_tag_ty.ip_index}, .u32, false, target),
-                    } };
-                }
-                try wasm.functions.put(gpa, .fromZcuFunc(wasm, @fromBackingInt(@intCast(gop.index))), {});
-            },
-            .enum_tag_name_table_ref => {
-                assert(ip.indexToKey(data.ip_index) == .enum_type);
-                const gop = try f.enum_tag_name_table.getOrPut(gpa, data.ip_index);
-                if (!gop.found_existing) {
-                    wasm.tag_name_table_ref_count += 1;
-                    gop.value_ptr.* = @intCast(wasm.tag_name_offs.items.len);
-                    const tag_names = ip.loadEnumType(data.ip_index).field_names;
-                    for (tag_names.get(ip)) |tag_name| {
-                        const slice = tag_name.toSlice(ip);
-                        try wasm.tag_name_offs.append(gpa, @intCast(wasm.tag_name_bytes.items.len));
-                        try wasm.tag_name_bytes.appendSlice(gpa, slice[0 .. slice.len + 1]);
-                    }
-                }
-            },
-            .global_get, .global_set => {
-                const symbol_name = try wasm.internString(data.str.toSlice(ip));
-                if (symbol_name == wasm.preloaded_strings.__heap_base) {
-                    if (is_obj) try f.global_imports.put(gpa, symbol_name, .__heap_base) else try wasm.globals.put(gpa, .__heap_base, {});
-                } else if (symbol_name == wasm.preloaded_strings.__heap_end) {
-                    if (is_obj) try f.global_imports.put(gpa, symbol_name, .__heap_end) else try wasm.globals.put(gpa, .__heap_end, {});
-                } else if (symbol_name == wasm.preloaded_strings.__stack_pointer) {
-                    if (is_obj) try f.global_imports.put(gpa, symbol_name, .__stack_pointer) else try wasm.globals.put(gpa, .__stack_pointer, {});
-                } else if (symbol_name == wasm.preloaded_strings.__tls_align) {
-                    if (is_obj) try f.global_imports.put(gpa, symbol_name, .__tls_align) else try wasm.globals.put(gpa, .__tls_align, {});
-                } else if (symbol_name == wasm.preloaded_strings.__tls_base) {
-                    if (is_obj) try f.global_imports.put(gpa, symbol_name, .__tls_base) else try wasm.globals.put(gpa, .__tls_base, {});
-                } else if (symbol_name == wasm.preloaded_strings.__tls_size) {
-                    if (is_obj) try f.global_imports.put(gpa, symbol_name, .__tls_size) else try wasm.globals.put(gpa, .__tls_size, {});
-                } else if (wasm.object_global_imports.getIndex(symbol_name)) |object_import_index| {
-                    const i: Wasm.GlobalImport.Index = @fromBackingInt(@intCast(object_import_index));
-                    try wasm.markGlobalImport(symbol_name, i.value(wasm), i);
-                    if (i.value(wasm).resolution == .unresolved) {
-                        try f.global_imports.put(gpa, symbol_name, .fromObject(i, wasm));
-                    }
-                } else {
-                    return diags.fail("undefined global symbol '{s}'", .{symbol_name.slice(wasm)});
-                }
-            },
-            else => continue,
-        };
+                },
+                else => continue,
+            };
+        }
 
         // marking above may discover additional imports
         try f.function_imports.ensureUnusedCapacity(gpa, wasm.function_imports.entries.len - function_imports_start);
@@ -605,8 +618,10 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
     try f.indirect_function_table.ensureUnusedCapacity(gpa, wasm.zcu_indirect_function_set.entries.len +
         wasm.object_indirect_function_import_set.entries.len + wasm.object_indirect_function_set.entries.len);
     // This one goes first so the indexes can be stable for MIR lowering.
-    for (wasm.zcu_indirect_function_set.keys()) |nav_index|
-        f.indirect_function_table.putAssumeCapacity(.fromIpNav(wasm, nav_index), {});
+    for (wasm.zcu_indirect_function_set.keys()) |nav_index| {
+        const out_index = Wasm.OutputFunctionIndex.fromIpNavOptional(wasm, nav_index) orelse continue;
+        f.indirect_function_table.putAssumeCapacity(out_index, {});
+    }
     for (wasm.object_indirect_function_import_set.keys()) |symbol_name|
         f.indirect_function_table.putAssumeCapacity(.fromSymbolName(wasm, symbol_name), {});
     for (wasm.object_indirect_function_set.keys()) |object_function_index|
@@ -1322,6 +1337,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                     },
                     else => {
                         if (!zcu_references.?.contains(.wrap(.{ .func = ip_index }))) {
+                            assert(is_obj);
                             try binary_bytes.appendSlice(gpa, &.{
                                 0, // no locals
                                 @backingInt(std.wasm.Opcode.@"unreachable"),
@@ -1386,7 +1402,8 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
             }
         }
         for (wasm.func_table_fixups.items) |fixup| {
-            const table_index: IndirectFunctionTableIndex = .fromIpNav(wasm, fixup.nav_index);
+            const out_index = Wasm.OutputFunctionIndex.fromIpNavOptional(wasm, fixup.nav_index) orelse continue;
+            const table_index: IndirectFunctionTableIndex = .fromOutputFunctionIndex(&wasm.flush_buffer, out_index);
             if (!is64) {
                 mem.writeInt(u32, wasm.string_bytes.items[fixup.offset..][0..4], table_index.toAbi(), .little);
             } else {
@@ -1800,6 +1817,24 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
         try emitNameSection(wasm, f.data_segment_groups.items, binary_bytes);
     }
 
+    if (!is_obj and !wasm.base.isStaticLib()) {
+        if (Wasm.component.Optimizer.optimize(gpa, binary_bytes.items, .{ .custom_sections = .preserve })) |opt_bytes| {
+            defer gpa.free(opt_bytes);
+            binary_bytes.clearRetainingCapacity();
+            try binary_bytes.appendSlice(gpa, opt_bytes);
+        } else |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedFeature,
+            error.UnsupportedOpcode,
+            error.CustomSectionsPresent,
+            error.ComponentNotSupported,
+            => {},
+            error.InvalidInput,
+            error.InvalidOutput,
+            => |e| return diags.fail("failed to optimize core wasm module: {s}", .{@errorName(e)}),
+        }
+    }
+
     if (comp.config.debug_format != .strip) {
         // The build id must be computed on the main sections only,
         // so we have to do it now, before the debug sections.
@@ -1832,24 +1867,6 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
         try emitFeaturesSection(gpa, binary_bytes, target);
     } else if (is_obj) {
         try emitFeaturesSection(gpa, binary_bytes, target);
-    }
-
-    if (!is_obj and !wasm.base.isStaticLib() and comp.config.debug_format == .strip) {
-        if (Wasm.component.Optimizer.optimize(gpa, binary_bytes.items, .{ .custom_sections = .preserve })) |opt_bytes| {
-            defer gpa.free(opt_bytes);
-            binary_bytes.clearRetainingCapacity();
-            try binary_bytes.appendSlice(gpa, opt_bytes);
-        } else |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            error.UnsupportedFeature,
-            error.UnsupportedOpcode,
-            error.CustomSectionsPresent,
-            error.ComponentNotSupported,
-            => {},
-            error.InvalidInput,
-            error.InvalidOutput,
-            => |e| return diags.fail("failed to optimize core wasm module: {s}", .{@errorName(e)}),
-        }
     }
 
     // Finally, write the entire binary into the file.

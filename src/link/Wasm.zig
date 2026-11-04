@@ -417,23 +417,31 @@ pub const OutputFunctionIndex = enum(u32) {
         return fromResolution(wasm, .fromObjectFunction(wasm, index)).?;
     }
 
-    pub fn fromIpIndex(wasm: *const Wasm, ip_index: InternPool.Index) OutputFunctionIndex {
+    pub fn fromIpIndexOptional(wasm: *const Wasm, ip_index: InternPool.Index) ?OutputFunctionIndex {
         const zcu = wasm.base.comp.zcu.?;
         const ip = &zcu.intern_pool;
         return switch (ip.indexToKey(ip_index)) {
             .@"extern" => |ext| {
-                const name = wasm.imports.get(ext.owner_nav).?;
+                const name = wasm.imports.get(ext.owner_nav) orelse return null;
                 return fromSymbolName(wasm, name);
             },
-            else => fromResolution(wasm, .fromIpIndex(wasm, ip_index)).?,
+            else => fromResolution(wasm, FunctionImport.Resolution.fromIpIndexOptional(wasm, ip_index) orelse return null),
         };
     }
 
-    pub fn fromIpNav(wasm: *const Wasm, nav_index: InternPool.Nav.Index) OutputFunctionIndex {
+    pub fn fromIpIndex(wasm: *const Wasm, ip_index: InternPool.Index) OutputFunctionIndex {
+        return fromIpIndexOptional(wasm, ip_index).?;
+    }
+
+    pub fn fromIpNavOptional(wasm: *const Wasm, nav_index: InternPool.Nav.Index) ?OutputFunctionIndex {
         const zcu = wasm.base.comp.zcu.?;
         const ip = &zcu.intern_pool;
         const nav = ip.getNav(nav_index);
-        return fromIpIndex(wasm, nav.resolved.?.value);
+        return fromIpIndexOptional(wasm, nav.resolved.?.value);
+    }
+
+    pub fn fromIpNav(wasm: *const Wasm, nav_index: InternPool.Nav.Index) OutputFunctionIndex {
+        return fromIpNavOptional(wasm, nav_index).?;
     }
 
     pub fn fromTagIndexType(wasm: *const Wasm, tag_type: InternPool.Index) OutputFunctionIndex {
@@ -1145,8 +1153,13 @@ pub const FunctionImport = extern struct {
             return pack(wasm, .{ .zcu_func = i });
         }
 
+        pub fn fromIpIndexOptional(wasm: *const Wasm, ip_index: InternPool.Index) ?Resolution {
+            const zcu_func_index = wasm.zcu_funcs.getIndex(ip_index) orelse return null;
+            return fromZcuFunc(wasm, @fromBackingInt(@intCast(zcu_func_index)));
+        }
+
         pub fn fromIpIndex(wasm: *const Wasm, ip_index: InternPool.Index) Resolution {
-            return fromZcuFunc(wasm, @fromBackingInt(@intCast(wasm.zcu_funcs.getIndex(ip_index).?)));
+            return fromIpIndexOptional(wasm, ip_index).?;
         }
 
         pub fn fromObjectFunction(wasm: *const Wasm, object_function: ObjectFunctionIndex) Resolution {
@@ -3724,7 +3737,6 @@ pub fn updateFunc(
     }
     try zds.finish(wasm, pt); // actually generates the UAVs
 
-    try wasm.functions.ensureUnusedCapacity(gpa, 1);
     try wasm.zcu_funcs.ensureUnusedCapacity(gpa, 1);
 
     // This converts AIR to MIR but does not yet lower to wasm code.
@@ -3737,7 +3749,6 @@ pub fn updateFunc(
         .locals_len = @intCast(mir.locals.len),
         .prologue = mir.prologue,
     } });
-    wasm.functions.putAssumeCapacity(.pack(wasm, .{ .zcu_func = @fromBackingInt(@intCast(wasm.zcu_funcs.entries.len - 1)) }), {});
 }
 
 // Generate code for the "Nav", storing it in memory to be later written to
@@ -4374,6 +4385,9 @@ pub fn flush(
 
     const sub_prog_node = prog_node.start("Wasm Flush", 0);
     defer sub_prog_node.end();
+
+    const zcu_funcs_end_zcu: u32 = @intCast(wasm.zcu_funcs.entries.len);
+    defer wasm.zcu_funcs.shrinkRetainingCapacity(zcu_funcs_end_zcu);
 
     const functions_end_zcu: u32 = @intCast(wasm.functions.entries.len);
     defer wasm.functions.shrinkRetainingCapacity(functions_end_zcu);
