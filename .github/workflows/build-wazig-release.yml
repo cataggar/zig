@@ -215,6 +215,27 @@ jobs:
               -femit-bin=smoke_test.wasm
             wasmtime run smoke_test.wasm
 
+            cat > reactor.zig <<'EOF'
+          fn target() callconv(.c) i32 { return 42; }
+          fn inner() usize { return @intFromPtr(&target); }
+          export fn getFactoryThunk() callconv(.c) usize { return inner(); }
+          EOF
+            "$SHIM_BIN_DIR/${FLAVOR}" build-exe \
+              reactor.zig \
+              -fno-entry \
+              -rdynamic \
+              --import-table \
+              -mexec-model=reactor \
+              -O ReleaseSmall \
+              -target wasm32-wasi \
+              -fno-llvm \
+              -femit-bin=reactor.wasm
+            python3 - <<'PY'
+          data = open("reactor.wasm", "rb").read()
+          assert b"__indirect_function_table" in data, "missing __indirect_function_table import"
+          assert b"\x03\x00\x41\x01\x0b" in data or b"\x04\x00\x41\x01\x0f\x0b" in data, "expected inlined getFactoryThunk body"
+          PY
+
             cat > build.zig <<'EOF'
           const std = @import("std");
           pub fn build(b: *std.Build) void {

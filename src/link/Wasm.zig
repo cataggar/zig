@@ -76,6 +76,8 @@ max_memory: ?u64,
 wit_path: ?[]const u8 = null,
 wit_world: ?[]const u8 = null,
 wasi_adapter_path: ?[]const u8 = null,
+/// When true, will import the function table from the host environment.
+import_table: bool,
 /// When true, will export the function table to the host environment.
 export_table: bool,
 /// When true, remove maximum size from function table, allowing table to grow.
@@ -566,17 +568,20 @@ pub const GlobalIndex = enum(u32) {
     }
 };
 
-/// Index into `tables`.
+/// Index into `table_imports` followed by `tables`.
 pub const TableIndex = enum(u32) {
     _,
 
     pub fn fromObjectTable(wasm: *const Wasm, i: ObjectTableIndex) TableIndex {
-        return @fromBackingInt(@intCast(wasm.tables.getIndex(.fromObjectTable(i)).?));
+        return @fromBackingInt(@intCast(wasm.table_imports.entries.len + wasm.tables.getIndex(.fromObjectTable(i)).?));
     }
 
     pub fn fromSymbolName(wasm: *const Wasm, name: String) TableIndex {
+        if (wasm.table_imports.getIndex(name)) |idx| {
+            return @fromBackingInt(@intCast(idx));
+        }
         const import = wasm.object_table_imports.getPtr(name).?;
-        return @fromBackingInt(@intCast(wasm.tables.getIndex(import.resolution).?));
+        return @fromBackingInt(@intCast(wasm.table_imports.entries.len + wasm.tables.getIndex(import.resolution).?));
     }
 };
 
@@ -3468,6 +3473,7 @@ pub fn createEmpty(
         .wasi_adapter_path = options.wasi_adapter_path,
 
         .string_bytes = .empty,
+        .import_table = options.import_table,
         .export_table = options.export_table,
         .growable_table = options.growable_table,
         .import_symbols = options.import_symbols,
@@ -4188,7 +4194,7 @@ pub fn markTableImport(
     try wasm.tables.ensureUnusedCapacity(gpa, 1);
 
     if (import.resolution == .unresolved) {
-        if (!is_obj) {
+        if (!is_obj and !wasm.import_table) {
             if (name == wasm.preloaded_strings.__indirect_function_table) {
                 import.resolution = .__indirect_function_table;
                 wasm.tables.putAssumeCapacity(.__indirect_function_table, {});
