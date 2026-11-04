@@ -208,10 +208,25 @@ fn Pass(comptime Inst: type) type {
             return .{ .tag = .i64_const, .data = .{ .payload = payload } };
         }
 
+        fn isPtrRefTag(tag: Inst.Tag) bool {
+            return switch (tag) {
+                .uav_ref,
+                .uav_ref_off,
+                .nav_ref,
+                .nav_ref_off,
+                .func_ref,
+                .tls_nav_ref,
+                .error_name_table_ref,
+                .enum_tag_name_table_ref,
+                => true,
+                else => false,
+            };
+        }
+
         fn isConstTag(tag: Inst.Tag) bool {
             return switch (tag) {
-                .i32_const, .i64_const, .f32_const, .f64_const => true,
-                else => false,
+                .i32_const, .i64_const, .f32_const, .f64_const, .errors_len => true,
+                else => isPtrRefTag(tag),
             };
         }
 
@@ -257,21 +272,53 @@ fn Pass(comptime Inst: type) type {
             while (i < insts.len) {
                 const inst = insts[i];
                 if (inst.tag == .local_set) {
+                    const has_num_const_prev = out.items.len >= 1 and switch (out.items[out.items.len - 1].tag) {
+                        .i32_const, .i64_const, .f32_const, .f64_const => true,
+                        else => false,
+                    };
                     var k: usize = i + 1;
-                    while (k < insts.len and insts[k].tag == .dbg_line) : (k += 1) {}
+                    var crossed_block = false;
+                    while (k < insts.len) : (k += 1) {
+                        if (insts[k].tag == .dbg_line) continue;
+                        if (has_num_const_prev and insts[k].tag == .block and insts[k].data.block_type == .empty) {
+                            crossed_block = true;
+                            continue;
+                        }
+                        break;
+                    }
                     if (k < insts.len and
                         insts[k].tag == .local_get and
                         inst.data.local == insts[k].data.local)
                     {
                         const local = inst.data.local;
-                        if (isLocalReadBeforeOverwriteOrExit(insts, k + 1, local, k)) {
-                            out.appendAssumeCapacity(.{ .tag = .local_tee, .data = .{ .local = local } });
-                        }
-                        for (insts[i + 1 .. k]) |dbg_inst| {
-                            out.appendAssumeCapacity(dbg_inst);
+                        if (crossed_block) {
+                            const const_inst = out.pop().?;
+                            for (insts[i + 1 .. k]) |inter_inst| {
+                                out.appendAssumeCapacity(inter_inst);
+                            }
+                            out.appendAssumeCapacity(const_inst);
+                            if (isLocalReadBeforeOverwriteOrExit(insts, k + 1, local, k)) {
+                                out.appendAssumeCapacity(.{ .tag = .local_tee, .data = .{ .local = local } });
+                            }
+                        } else {
+                            if (isLocalReadBeforeOverwriteOrExit(insts, k + 1, local, k)) {
+                                out.appendAssumeCapacity(.{ .tag = .local_tee, .data = .{ .local = local } });
+                            }
+                            for (insts[i + 1 .. k]) |dbg_inst| {
+                                out.appendAssumeCapacity(dbg_inst);
+                            }
                         }
                         changed = true;
                         i = k + 1;
+                        continue;
+                    }
+                    if (out.items.len >= 1 and
+                        isConstTag(out.items[out.items.len - 1].tag) and
+                        !isLocalReadBeforeOverwriteOrExit(insts, i + 1, inst.data.local, null))
+                    {
+                        _ = out.pop();
+                        changed = true;
+                        i += 1;
                         continue;
                     }
                 }
@@ -315,7 +362,9 @@ fn Pass(comptime Inst: type) type {
                     const c1 = out.items[len - 3];
                     const c2 = out.items[len - 2];
                     const cond = out.items[len - 1];
-                    if (cond.tag == .i32_const and isConstTag(c1.tag) and c1.tag == c2.tag) {
+                    if (cond.tag == .i32_const and isConstTag(c1.tag) and
+                        (c1.tag == c2.tag or (isPtrRefTag(c1.tag) and isPtrRefTag(c2.tag))))
+                    {
                         const chosen = if (cond.data.imm32 != 0) c1 else c2;
                         out.items.len = len - 2;
                         out.items[len - 3] = chosen;
@@ -990,29 +1039,57 @@ fn Pass(comptime Inst: type) type {
             for (insts) |inst| {
                 const len = out.items.len;
 
-                if (inst.tag == .br_if and len >= 1 and out.items[len - 1].tag == .i32_const) {
-                    const cond = out.items[len - 1].data.imm32;
-                    const label = inst.data.label;
-                    if (cond == 0) {
-                        _ = out.pop();
-                    } else {
-                        out.items[len - 1] = .{ .tag = .br, .data = .{ .label = label } };
-                    }
-                    changed = true;
-                    continue;
-                }
-
-                if (inst.tag == .br_table and len >= 1 and out.items[len - 1].tag == .i32_const) {
-                    const c = out.items[len - 1].data.imm32;
-                    const payload = inst.data.payload;
-                    const table_len = mir_extra[payload];
-                    if (table_len >= 1) {
-                        const targets = mir_extra[payload + 1 ..][0..table_len];
-                        const idx: u32 = @bitCast(c);
-                        const target = if (idx < table_len - 1) targets[idx] else targets[table_len - 1];
-                        out.items[len - 1] = .{ .tag = .br, .data = .{ .label = target } };
+                if (inst.tag == .br_if) {
+                    if (len >= 1 and out.items[len - 1].tag == .i32_const) {
+                        const cond = out.items[len - 1].data.imm32;
+                        const label = inst.data.label;
+                        if (cond == 0) {
+                            _ = out.pop();
+                        } else {
+                            out.items[len - 1] = .{ .tag = .br, .data = .{ .label = label } };
+                        }
                         changed = true;
                         continue;
+                    }
+                    if (len >= 2 and out.items[len - 2].tag == .i32_const and out.items[len - 1].tag == .local_tee) {
+                        const cond = out.items[len - 2].data.imm32;
+                        const label = inst.data.label;
+                        out.items[len - 1].tag = .local_set;
+                        if (cond != 0) {
+                            out.appendAssumeCapacity(.{ .tag = .br, .data = .{ .label = label } });
+                        }
+                        changed = true;
+                        continue;
+                    }
+                }
+
+                if (inst.tag == .br_table) {
+                    if (len >= 1 and out.items[len - 1].tag == .i32_const) {
+                        const c = out.items[len - 1].data.imm32;
+                        const payload = inst.data.payload;
+                        const table_len = mir_extra[payload];
+                        if (table_len >= 1) {
+                            const targets = mir_extra[payload + 1 ..][0..table_len];
+                            const idx: u32 = @bitCast(c);
+                            const target = if (idx < table_len - 1) targets[idx] else targets[table_len - 1];
+                            out.items[len - 1] = .{ .tag = .br, .data = .{ .label = target } };
+                            changed = true;
+                            continue;
+                        }
+                    }
+                    if (len >= 2 and out.items[len - 2].tag == .i32_const and out.items[len - 1].tag == .local_tee) {
+                        const c = out.items[len - 2].data.imm32;
+                        const payload = inst.data.payload;
+                        const table_len = mir_extra[payload];
+                        if (table_len >= 1) {
+                            const targets = mir_extra[payload + 1 ..][0..table_len];
+                            const idx: u32 = @bitCast(c);
+                            const target = if (idx < table_len - 1) targets[idx] else targets[table_len - 1];
+                            out.items[len - 1].tag = .local_set;
+                            out.appendAssumeCapacity(.{ .tag = .br, .data = .{ .label = target } });
+                            changed = true;
+                            continue;
+                        }
                     }
                 }
 
@@ -1039,10 +1116,12 @@ fn Pass(comptime Inst: type) type {
                     if (findMatchingEnd(insts, i)) |end_idx| {
                         const body = insts[i + 1 .. end_idx];
 
-                        // Pattern 1: `block (.empty)` whose body is solely `br 0` (ignoring `.dbg_line`).
+                        // Pattern 1: `block (.empty)` whose body is solely `br 0` (ignoring `.dbg_line`
+                        // and `<const>; local_set` pairs).
                         if (inst.data.block_type == .empty) {
                             if (findSoleBr0(body)) |br_pos| {
                                 try out.appendSlice(gpa, body[0..br_pos]);
+                                try out.appendSlice(gpa, body[br_pos + 1 ..]);
                                 i = end_idx + 1;
                                 changed = true;
                                 continue;
@@ -1088,11 +1167,17 @@ fn Pass(comptime Inst: type) type {
 
         fn findSoleBr0(body: []const Inst) ?usize {
             var br_idx: ?usize = null;
-            for (body, 0..) |inst, idx| {
+            var idx: usize = 0;
+            while (idx < body.len) : (idx += 1) {
+                const inst = body[idx];
                 if (inst.tag == .br and inst.data.label == 0) {
                     if (br_idx != null) return null;
                     br_idx = idx;
-                } else if (inst.tag != .dbg_line) {
+                } else if (inst.tag == .dbg_line) {
+                    continue;
+                } else if (br_idx == null and isConstTag(inst.tag) and idx + 1 < body.len and body[idx + 1].tag == .local_set) {
+                    idx += 1;
+                } else {
                     return null;
                 }
             }
@@ -1532,6 +1617,10 @@ const TestMir = struct {
 
     fn addLocal(self: *TestMir, tag: Mir.Inst.Tag, local: u32) !void {
         try self.instructions.append(testing.allocator, .{ .tag = tag, .data = .{ .local = local } });
+    }
+
+    fn addPayload(self: *TestMir, tag: Mir.Inst.Tag, payload: u32) !void {
+        try self.instructions.append(testing.allocator, .{ .tag = tag, .data = .{ .payload = payload } });
     }
 
     fn addI32(self: *TestMir, val: i32) !void {
@@ -2287,9 +2376,9 @@ test "MemArg offset folding: stores with single-inst and multi-inst <val>, and <
         try testing.expectEqualSlices(
             Mir.Inst.Tag,
             &.{
-                .local_get, .local_get, .i32_store,
-                .local_get, .f64_const, .f64_store,
-                .local_get, .uav_ref,   .i32_store,
+                .local_get, .local_get,          .i32_store,
+                .local_get, .f64_const,          .f64_store,
+                .local_get, .uav_ref,            .i32_store,
                 .end,       .dbg_epilogue_begin,
             },
             tags,
@@ -2331,9 +2420,9 @@ test "MemArg offset folding: stores with single-inst and multi-inst <val>, and <
         try testing.expectEqualSlices(
             Mir.Inst.Tag,
             &.{
-                .local_get, .local_get, .i32_const, .i32_add, .i32_store,
-                .local_get, .local_get, .i32_load,  .i32_store,
-                .end,       .dbg_epilogue_begin,
+                .local_get,          .local_get, .i32_const, .i32_add,   .i32_store,
+                .local_get,          .local_get, .i32_load,  .i32_store, .end,
+                .dbg_epilogue_begin,
             },
             tags,
         );
@@ -2393,8 +2482,8 @@ test "MemArg offset folding: negative K and overflow rejection" {
         try testing.expectEqualSlices(
             Mir.Inst.Tag,
             &.{
-                .local_get, .i32_const, .i32_add, .i32_load,
-                .local_get, .i64_const, .i64_add, .i64_load,
+                .local_get, .i32_const,          .i32_add, .i32_load,
+                .local_get, .i64_const,          .i64_add, .i64_load,
                 .end,       .dbg_epilogue_begin,
             },
             tags,
@@ -2425,8 +2514,8 @@ test "MemArg offset folding: negative K and overflow rejection" {
         try testing.expectEqualSlices(
             Mir.Inst.Tag,
             &.{
-                .local_get, .i32_const, .i32_add, .i32_load,
-                .local_get, .i64_const, .i64_add, .i64_load,
+                .local_get, .i32_const,          .i32_add, .i32_load,
+                .local_get, .i64_const,          .i64_add, .i64_load,
                 .end,       .dbg_epilogue_begin,
             },
             tags,
@@ -2488,13 +2577,15 @@ test "MemArg offset folding: simd_prefix, atomics_prefix, and simplifyLocals mul
         try testing.expectEqualSlices(
             Mir.Inst.Tag,
             &.{
-                .local_get, .simd_prefix,
-                .local_get, .local_get,     .simd_prefix,
-                .local_get, .simd_prefix,
-                .local_get, .atomics_prefix,
-                .local_get, .local_get,     .atomics_prefix,
-                .local_get, .i32_const,     .atomics_prefix,
-                .end,       .dbg_epilogue_begin,
+                .local_get,          .simd_prefix,
+                .local_get,          .local_get,
+                .simd_prefix,        .local_get,
+                .simd_prefix,        .local_get,
+                .atomics_prefix,     .local_get,
+                .local_get,          .atomics_prefix,
+                .local_get,          .i32_const,
+                .atomics_prefix,     .end,
+                .dbg_epilogue_begin,
             },
             tags,
         );
@@ -2539,9 +2630,10 @@ test "MemArg offset folding: simd_prefix, atomics_prefix, and simplifyLocals mul
         try testing.expectEqualSlices(
             Mir.Inst.Tag,
             &.{
-                .local_get, .i32_load,
-                .local_get, .local_get, .i32_store,
-                .end,       .dbg_epilogue_begin,
+                .local_get,          .i32_load,
+                .local_get,          .local_get,
+                .i32_store,          .end,
+                .dbg_epilogue_begin,
             },
             tags,
         );
@@ -2550,3 +2642,228 @@ test "MemArg offset folding: simd_prefix, atomics_prefix, and simplifyLocals mul
     }
 }
 
+test "uav_ref, uav_ref_off, and reference constant pruning across DCE, drop, select, and dead local_set" {
+    // 1. Elimination of dead uav_ref and uav_ref_off in untaken br_if branches and after return/unreachable
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Untaken else branch (i32_const 1 -> br_if 0) containing dead uav_ref and uav_ref_off
+        try m.addBlock(.block, .empty);
+        try m.addI32(1);
+        try m.addLabel(.br_if, 0);
+        try m.addPayload(.uav_ref, 100);
+        try m.memOp(.i32_load, 0, 2);
+        try m.addTag(.@"return");
+        try m.addTag(.end);
+
+        // Block with unreachable followed by dead uav_ref_off
+        try m.addBlock(.block, .empty);
+        try m.addLocal(.local_get, 0);
+        try m.addLabel(.br_if, 0);
+        try m.addTag(.@"unreachable");
+        try m.addPayload(.uav_ref_off, 200);
+        try m.addTag(.drop);
+        try m.addTag(.end);
+
+        // Live uav_ref returned, followed by dead uav_ref_off after return
+        try m.addPayload(.uav_ref, 42);
+        try m.addTag(.@"return");
+        try m.addPayload(.uav_ref_off, 300);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .block,
+                .local_get,
+                .br_if,
+                .@"unreachable",
+                .end,
+                .uav_ref,
+                .@"return",
+                .end,
+                .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(u32, 42), datas[5].payload);
+    }
+
+    // 2. Folding of uav_ref, uav_ref_off, func_ref, and other reference constants followed by drop
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        try m.addPayload(.uav_ref, 10);
+        try m.addTag(.drop);
+        try m.addPayload(.uav_ref_off, 20);
+        try m.addTag(.drop);
+        try m.addPayload(.func_ref, 30);
+        try m.addTag(.drop);
+        try m.addPayload(.nav_ref, 40);
+        try m.addTag(.drop);
+        try m.addPayload(.nav_ref_off, 50);
+        try m.addTag(.drop);
+        try m.addPayload(.tls_nav_ref, 60);
+        try m.addTag(.drop);
+        try m.addTag(.error_name_table_ref);
+        try m.addTag(.drop);
+        try m.addPayload(.enum_tag_name_table_ref, 70);
+        try m.addTag(.drop);
+        try m.addTag(.errors_len);
+        try m.addTag(.drop);
+
+        try m.addI32(7);
+        try m.addTag(.@"return");
+
+        m.err_ref_count = 1;
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{ .i32_const, .@"return", .end, .dbg_epilogue_begin },
+            tags,
+        );
+        try testing.expectEqual(@as(i32, 7), datas[0].imm32);
+        try testing.expectEqual(@as(u32, 0), m.err_ref_count);
+    }
+
+    // 3. Folding of select with constant condition over uav_ref and uav_ref_off operands
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Same-tag select (cond != 0 picks first uav_ref 11, drops uav_ref 22)
+        try m.addPayload(.uav_ref, 11);
+        try m.addPayload(.uav_ref, 22);
+        try m.addI32(1);
+        try m.addTag(.select);
+        try m.addLocal(.local_set, 0);
+
+        // Mixed pointer-ref select (cond == 0 picks second uav_ref_off 44, drops uav_ref 33)
+        try m.addPayload(.uav_ref, 33);
+        try m.addPayload(.uav_ref_off, 44);
+        try m.addI32(0);
+        try m.addTag(.select);
+        try m.addLocal(.local_get, 0);
+        try m.addTag(.i32_add);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .uav_ref,
+                .local_set,
+                .uav_ref_off,
+                .local_get,
+                .i32_add,
+                .@"return",
+                .end,
+                .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(u32, 11), datas[0].payload);
+        try testing.expectEqual(@as(u32, 44), datas[2].payload);
+    }
+
+    // 4. Multi-round elimination of dead `uav_ref; local_set X` after the branch reading X is eliminated by DCE
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Store uav_ref into local 2, only read inside a dead branch
+        try m.addPayload(.uav_ref, 99);
+        try m.addLocal(.local_set, 2);
+
+        // Constant condition (1 == 1) folds to 1 in round 0, turning br_if 0 into br 0,
+        // which eliminates the dead branch reading local 2 and collapses the block.
+        // In round 1, simplifyLocals sees local 2 is no longer read before exit and removes `uav_ref 99; local_set 2`.
+        try m.addBlock(.block, .empty);
+        try m.addI32(5);
+        try m.addI32(5);
+        try m.addTag(.i32_eq);
+        try m.addLabel(.br_if, 0);
+        try m.addLocal(.local_get, 2);
+        try m.memOp(.i32_load, 0, 2);
+        try m.addTag(.@"return");
+        try m.addTag(.end);
+
+        try m.addI32(123);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{ .i32_const, .@"return", .end, .dbg_epilogue_begin },
+            tags,
+        );
+        try testing.expectEqual(@as(i32, 123), datas[0].imm32);
+    }
+
+    // 5. `airCmp` + `airCondBr` pattern where the condition is stored to a local before `block (.empty)`
+    // and that local is later reused after the branch.
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // `five = 5` stored in local 1, then compared `five != 5` stored in local 2 before `block (.empty)`
+        try m.addI32(5);
+        try m.addLocal(.local_set, 1);
+        try m.addLocal(.local_get, 1);
+        try m.addI32(5);
+        try m.addTag(.i32_ne);
+        try m.addLocal(.local_set, 2);
+
+        try m.addBlock(.block, .empty);
+        try m.addBlock(.block, .empty);
+        try m.addLocal(.local_get, 2);
+        try m.addLabel(.br_if, 0);
+        try m.addLabel(.br, 1);
+        try m.addTag(.end);
+        // Dead branch referencing uav_ref and uav_ref_off
+        try m.addPayload(.uav_ref, 77);
+        try m.addPayload(.uav_ref_off, 88);
+        try m.addTag(.i32_add);
+        try m.addTag(.@"return");
+        try m.addTag(.end);
+
+        // Reuse local 2 inside a later block (simulating LocalPool reuse)
+        try m.addBlock(.block, .empty);
+        try m.addI32(42);
+        try m.addLocal(.local_set, 2);
+        try m.addLocal(.local_get, 2);
+        try m.addTag(.@"return");
+        try m.addTag(.end);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{ .i32_const, .@"return", .end, .dbg_epilogue_begin },
+            tags,
+        );
+        try testing.expectEqual(@as(i32, 42), datas[0].imm32);
+    }
+}
