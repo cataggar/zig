@@ -99,6 +99,7 @@ pub fn optimizeModule(allocator: std.mem.Allocator, module: *Mod.Module, options
         try optimizeFuncBody(allocator, func);
     }
 
+    try inlineTrivialFunctions(allocator, module);
     try removeDeadFunctions(allocator, module);
 }
 
@@ -1811,6 +1812,250 @@ fn rewriteExprFuncIndices(
     return out.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
+const TrivialLeaf = struct {
+    bytes: [16]u8 = undefined,
+    len: u8 = 0,
+
+    fn slice(self: *const TrivialLeaf) []const u8 {
+        return self.bytes[0..self.len];
+    }
+};
+
+const TrivialKind = union(enum) {
+    none,
+    leaf: TrivialLeaf,
+    forward: struct {
+        callee: u32,
+        is_tail: bool,
+    },
+};
+
+fn getFuncSignature(module: *const Mod.Module, func: *const Mod.Func) ?Mod.FuncSignature {
+    if (func.decl.type_var == .index and func.decl.type_var.index < module.module_types.items.len) {
+        return switch (module.module_types.items[func.decl.type_var.index]) {
+            .func_type => |ft| ft,
+            else => null,
+        };
+    }
+    if (func.decl.sig.params.len > 0 or func.decl.sig.results.len > 0) {
+        return .{ .params = func.decl.sig.params, .results = func.decl.sig.results };
+    }
+    return null;
+}
+
+fn isTrivialTail(tail: []const u8) bool {
+    return std.mem.eql(u8, tail, &.{ 0x0f, 0x0b });
+}
+
+fn classifyTrivialFunc(module: *const Mod.Module, fidx: u32, func: *const Mod.Func) TrivialKind {
+    if (func.is_import or func.code_bytes.len == 0) return .none;
+    if (func.local_types.items.len != 0) return .none;
+    const sig = getFuncSignature(module, func) orelse return .none;
+    if (sig.params.len != 0 or sig.results.len > 1) return .none;
+
+    const bytes = func.code_bytes;
+    if (sig.results.len == 0) {
+        if (isTrivialTail(bytes) or std.mem.eql(u8, bytes, &.{ 0x01, 0x0b })) {
+            return .{ .leaf = .{} };
+        }
+        var pos: usize = 0;
+        const decoded = instr.decode(bytes, &pos) catch return .none;
+        if (decoded.prefix == 0 and (decoded.code == 0x10 or decoded.code == 0x12)) {
+            const callee = readU32(bytes, &pos) catch return .none;
+            if (!isTrivialTail(bytes[pos..])) return .none;
+            if (callee >= module.funcs.items.len or callee == fidx) return .none;
+            const callee_sig = getFuncSignature(module, &module.funcs.items[callee]) orelse return .none;
+            if (!Mod.FuncSignature.eql(sig, callee_sig)) return .none;
+            return .{ .forward = .{ .callee = callee, .is_tail = decoded.code == 0x12 } };
+        }
+        return .none;
+    }
+
+    var pos: usize = 0;
+    const decoded = instr.decode(bytes, &pos) catch return .none;
+    if (decoded.prefix != 0) return .none;
+    switch (decoded.code) {
+        0x23, 0x41, 0x42, 0x43, 0x44, 0xd0, 0xd2 => {
+            instr.skipImmediates(decoded.shape, bytes, &pos) catch return .none;
+            if (pos > 16 or !isTrivialTail(bytes[pos..])) return .none;
+            var leaf: TrivialLeaf = .{ .len = @intCast(pos) };
+            @memcpy(leaf.bytes[0..pos], bytes[0..pos]);
+            return .{ .leaf = leaf };
+        },
+        0x10, 0x12 => {
+            const callee = readU32(bytes, &pos) catch return .none;
+            if (!isTrivialTail(bytes[pos..])) return .none;
+            if (callee >= module.funcs.items.len or callee == fidx) return .none;
+            const callee_sig = getFuncSignature(module, &module.funcs.items[callee]) orelse return .none;
+            if (!Mod.FuncSignature.eql(sig, callee_sig)) return .none;
+            return .{ .forward = .{ .callee = callee, .is_tail = decoded.code == 0x12 } };
+        },
+        else => return .none,
+    }
+}
+
+fn inlineTrivialFunctions(allocator: std.mem.Allocator, module: *Mod.Module) Error!void {
+    const num_funcs = module.funcs.items.len;
+    if (num_funcs <= module.num_func_imports) return;
+
+    const trivials = allocator.alloc(TrivialKind, num_funcs) catch return error.OutOfMemory;
+    defer allocator.free(trivials);
+    @memset(trivials, .none);
+
+    const orig_forwards = allocator.alloc(TrivialKind, num_funcs) catch return error.OutOfMemory;
+    defer allocator.free(orig_forwards);
+    @memset(orig_forwards, .none);
+
+    var any_trivial = false;
+    for (module.num_func_imports..num_funcs) |i| {
+        const kind = classifyTrivialFunc(module, @intCast(i), &module.funcs.items[i]);
+        trivials[i] = kind;
+        orig_forwards[i] = kind;
+        if (kind != .none) any_trivial = true;
+    }
+    if (!any_trivial) return;
+
+    // Resolve forwarding chains (e.g. getFactoryThunk -> host.getFactoryThunk -> export.getFactoryThunk).
+    for (module.num_func_imports..num_funcs) |i| {
+        if (trivials[i] != .forward) continue;
+        var curr = trivials[i].forward.callee;
+        const orig_tail = trivials[i].forward.is_tail;
+        var resolved: TrivialKind = .none;
+        for (0..16) |_| {
+            if (curr < module.num_func_imports) {
+                resolved = .{ .forward = .{ .callee = curr, .is_tail = orig_tail } };
+                break;
+            }
+            switch (trivials[curr]) {
+                .leaf => |leaf| {
+                    resolved = .{ .leaf = leaf };
+                    break;
+                },
+                .forward => |fwd| {
+                    if (fwd.callee == i or fwd.callee == curr) {
+                        resolved = .none;
+                        break;
+                    }
+                    curr = fwd.callee;
+                },
+                .none => {
+                    resolved = .{ .forward = .{ .callee = curr, .is_tail = orig_tail } };
+                    break;
+                },
+            }
+        }
+        trivials[i] = resolved;
+    }
+
+    for (module.num_func_imports..num_funcs) |i| {
+        const func = &module.funcs.items[i];
+        if (func.is_import or func.code_bytes.len == 0) continue;
+
+        if (orig_forwards[i] == .forward) {
+            switch (trivials[i]) {
+                .leaf => |leaf| {
+                    var out: std.ArrayListUnmanaged(u8) = .empty;
+                    errdefer out.deinit(module.allocator);
+                    out.ensureTotalCapacity(module.allocator, leaf.len + 1) catch return error.OutOfMemory;
+                    out.appendSliceAssumeCapacity(leaf.slice());
+                    out.appendAssumeCapacity(0x0b);
+                    const new_bytes = out.toOwnedSlice(module.allocator) catch return error.OutOfMemory;
+                    if (func.owns_code_bytes and func.code_bytes.len > 0) {
+                        module.allocator.free(func.code_bytes);
+                    }
+                    func.code_bytes = new_bytes;
+                    func.owns_code_bytes = true;
+                },
+                .forward => |fwd| {
+                    if (fwd.callee != orig_forwards[i].forward.callee) {
+                        var out: std.ArrayListUnmanaged(u8) = .empty;
+                        errdefer out.deinit(module.allocator);
+                        out.append(module.allocator, if (fwd.is_tail) 0x12 else 0x10) catch return error.OutOfMemory;
+                        try appendU32Leb(module.allocator, &out, fwd.callee);
+                        out.append(module.allocator, 0x0b) catch return error.OutOfMemory;
+                        const new_bytes = out.toOwnedSlice(module.allocator) catch return error.OutOfMemory;
+                        if (func.owns_code_bytes and func.code_bytes.len > 0) {
+                            module.allocator.free(func.code_bytes);
+                        }
+                        func.code_bytes = new_bytes;
+                        func.owns_code_bytes = true;
+                    }
+                },
+                .none => {},
+            }
+            continue;
+        }
+
+        // Check whether this non-trivial function calls any trivial function.
+        var has_trivial_call = false;
+        {
+            var pos: usize = 0;
+            const bytes = func.code_bytes;
+            while (pos < bytes.len) {
+                const decoded = instr.decode(bytes, &pos) catch return error.InvalidInput;
+                if (decoded.prefix == 0 and (decoded.code == 0x10 or decoded.code == 0x12)) {
+                    const callee = readU32(bytes, &pos) catch return error.InvalidInput;
+                    if (callee >= module.num_func_imports and callee < num_funcs and trivials[callee] != .none) {
+                        has_trivial_call = true;
+                        break;
+                    }
+                } else {
+                    instr.skipImmediates(decoded.shape, bytes, &pos) catch return error.InvalidInput;
+                }
+            }
+        }
+        if (!has_trivial_call) continue;
+
+        var out: std.ArrayListUnmanaged(u8) = .empty;
+        errdefer out.deinit(module.allocator);
+        out.ensureTotalCapacity(module.allocator, func.code_bytes.len) catch return error.OutOfMemory;
+
+        var inlined_leaf = false;
+        var pos: usize = 0;
+        const bytes = func.code_bytes;
+        while (pos < bytes.len) {
+            const start = pos;
+            const decoded = instr.decode(bytes, &pos) catch return error.InvalidInput;
+            if (decoded.prefix == 0 and (decoded.code == 0x10 or decoded.code == 0x12)) {
+                const callee = readU32(bytes, &pos) catch return error.InvalidInput;
+                if (callee >= module.num_func_imports and callee < num_funcs) {
+                    switch (trivials[callee]) {
+                        .leaf => |leaf| {
+                            out.appendSlice(module.allocator, leaf.slice()) catch return error.OutOfMemory;
+                            if (decoded.code == 0x12) {
+                                out.append(module.allocator, 0x0f) catch return error.OutOfMemory;
+                            }
+                            inlined_leaf = true;
+                            continue;
+                        },
+                        .forward => |fwd| {
+                            out.append(module.allocator, @intCast(decoded.code)) catch return error.OutOfMemory;
+                            try appendU32Leb(module.allocator, &out, fwd.callee);
+                            continue;
+                        },
+                        .none => {},
+                    }
+                }
+                out.appendSlice(module.allocator, bytes[start..pos]) catch return error.OutOfMemory;
+            } else {
+                instr.skipImmediates(decoded.shape, bytes, &pos) catch return error.InvalidInput;
+                out.appendSlice(module.allocator, bytes[start..pos]) catch return error.OutOfMemory;
+            }
+        }
+
+        const new_bytes = out.toOwnedSlice(module.allocator) catch return error.OutOfMemory;
+        if (func.owns_code_bytes and func.code_bytes.len > 0) {
+            module.allocator.free(func.code_bytes);
+        }
+        func.code_bytes = new_bytes;
+        func.owns_code_bytes = true;
+
+        if (inlined_leaf) {
+            try optimizeFuncBody(allocator, func);
+        }
+    }
+}
+
 fn removeDeadFunctions(allocator: std.mem.Allocator, module: *Mod.Module) Error!void {
     const num_funcs = module.funcs.items.len;
     if (num_funcs <= module.num_func_imports) return;
@@ -2917,4 +3162,48 @@ test "Optimizer: constant reassociation and MemArg offset folding after reassoci
         &[_]u8{ 0x20, 0x00, 0x28, 0x02, 16, 0x0b },
         mod_mem.funcs.items[0].code_bytes,
     );
+}
+
+test "Optimizer: trivial 0-param constant and forwarding callee chain inlining" {
+    const allocator = testing.allocator;
+
+    var mod = Mod.Module.init(allocator);
+    defer mod.deinit();
+
+    const r_i32 = try allocator.dupe(types.ValType, &.{.i32});
+    try mod.module_types.append(allocator, .{ .func_type = .{ .params = &.{}, .results = r_i32 } });
+    try mod.type_meta.append(allocator, .{});
+
+    // func 0 (getFactoryThunk): call 1; return; end
+    const code0 = [_]u8{ 0x10, 0x01, 0x0f, 0x0b };
+    // func 1 (host.getFactoryThunk): call 2; return; end
+    const code1 = [_]u8{ 0x10, 0x02, 0x0f, 0x0b };
+    // func 2 (export.getFactoryThunk): i32.const 1; return; end
+    const code2 = [_]u8{ 0x41, 0x01, 0x0f, 0x0b };
+    // func 3 (caller arithmetic): call 0; i32.const 41; i32.add; end
+    const code3 = [_]u8{ 0x10, 0x00, 0x41, 41, 0x6a, 0x0b };
+
+    try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &code0 });
+    try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &code1 });
+    try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &code2 });
+    try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &code3 });
+
+    try mod.exports.append(allocator, .{ .name = "getFactoryThunk", .kind = .func, .var_ = .{ .index = 0 } });
+    try mod.exports.append(allocator, .{ .name = "compute", .kind = .func, .var_ = .{ .index = 3 } });
+
+    const wasm = try writer.writeModule(allocator, &mod);
+    defer allocator.free(wasm);
+
+    const opt_bytes = try optimize(allocator, wasm, .{});
+    defer allocator.free(opt_bytes);
+
+    var opt_mod = try reader.readModule(allocator, opt_bytes);
+    defer opt_mod.deinit();
+
+    // Intermediate funcs 1 and 2 are pruned; only getFactoryThunk (0) and compute (1) remain.
+    try testing.expectEqual(@as(usize, 2), opt_mod.funcs.items.len);
+    // getFactoryThunk collapsed to `i32.const 1; end` (0x41 0x01 0x0b).
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x41, 0x01, 0x0b }, opt_mod.funcs.items[0].code_bytes);
+    // compute inlined `call 0` -> `i32.const 1` and folded `1 + 41` -> `i32.const 42; end`.
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x41, 42, 0x0b }, opt_mod.funcs.items[1].code_bytes);
 }

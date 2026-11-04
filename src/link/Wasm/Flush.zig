@@ -603,6 +603,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
             src_loc.addError(wasm, "undefined global: {s}", .{name.slice(wasm)});
         }
         for (wasm.table_imports.keys(), wasm.table_imports.values()) |name, table_import_id| {
+            if (wasm.import_table and name == wasm.preloaded_strings.__indirect_function_table) continue;
             const src_loc = table_import_id.value(wasm).source_location;
             src_loc.addError(wasm, "undefined table: {s}", .{name.slice(wasm)});
         }
@@ -694,22 +695,29 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
 
     try wasm.tables.ensureUnusedCapacity(gpa, 1);
 
-    if (f.indirect_function_table.entries.len > 0) {
-        if (is_obj) {
+    if (f.indirect_function_table.entries.len > 0 or (!is_obj and wasm.import_table)) {
+        if (is_obj or wasm.import_table) {
             const name = wasm.preloaded_strings.__indirect_function_table;
             const gop = try wasm.object_table_imports.getOrPut(gpa, name);
-            if (!gop.found_existing) gop.value_ptr.* = .{
-                .flags = .{
-                    .undefined = true,
-                    .no_strip = true,
-                },
-                .module_name = wasm.preloaded_strings.env,
-                .name = name,
-                .source_location = .zig_object_nofile,
-                .resolution = .unresolved,
-                .limits_min = 1,
-                .limits_max = 0,
-            };
+            const limits_min: u32 = if (is_obj) 1 else @intCast(f.indirect_function_table.entries.len + 1);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .{
+                    .flags = .{
+                        .undefined = true,
+                        .no_strip = true,
+                    },
+                    .module_name = wasm.object_host_name.unwrap() orelse wasm.preloaded_strings.env,
+                    .name = name,
+                    .source_location = .zig_object_nofile,
+                    .resolution = .unresolved,
+                    .limits_min = limits_min,
+                    .limits_max = 0,
+                };
+            } else if (!is_obj) {
+                gop.value_ptr.limits_min = limits_min;
+                gop.value_ptr.limits_max = 0;
+                gop.value_ptr.flags.limits_has_max = false;
+            }
             const import_index: Wasm.TableImport.Index = @fromBackingInt(@intCast(gop.index));
             try wasm.markTableImport(name, gop.value_ptr, import_index);
         } else {
@@ -1198,8 +1206,10 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
 
         if (wasm.export_table and f.indirect_function_table.entries.len > 0) {
             const name = "__indirect_function_table";
-            const index: u32 = @intCast(wasm.table_imports.entries.len +
-                wasm.tables.getIndex(.__indirect_function_table).?);
+            const index: u32 = @intCast(
+                wasm.table_imports.getIndex(wasm.preloaded_strings.__indirect_function_table) orelse
+                    wasm.table_imports.entries.len + wasm.tables.getIndex(.__indirect_function_table).?,
+            );
             try appendLeb128(gpa, binary_bytes, @as(u32, @intCast(name.len)));
             try binary_bytes.appendSlice(gpa, name);
             try binary_bytes.append(gpa, @backingInt(std.wasm.ExternalKind.table));
@@ -1990,9 +2000,11 @@ fn emitNameSection(
         }
         for (
             wasm.functions.keys(),
+            0..,
             f.function_imports.entries.len + f.intrinsic_function_imports.entries.len..,
-        ) |resolution, function_index| {
-            const name = resolution.name(wasm).?;
+        ) |resolution, def_index, function_index| {
+            const func_idx: Wasm.FunctionIndex = @fromBackingInt(@intCast(def_index));
+            const name = exportedFunctionName(wasm, func_idx) orelse resolution.name(wasm).?;
             try appendLeb128(gpa, binary_bytes, @as(u32, @intCast(function_index)));
             try appendLeb128(gpa, binary_bytes, @as(u32, @intCast(name.len)));
             try binary_bytes.appendSlice(gpa, name);
@@ -2035,6 +2047,13 @@ fn emitNameSection(
             try binary_bytes.appendSlice(gpa, name);
         }
     }
+}
+
+fn exportedFunctionName(wasm: *const Wasm, func_idx: Wasm.FunctionIndex) ?[]const u8 {
+    for (wasm.function_exports.keys(), wasm.function_exports.values()) |exp_name, exp_func_idx| {
+        if (exp_func_idx == func_idx) return exp_name.slice(wasm);
+    }
+    return null;
 }
 
 fn emitFeaturesSection(
