@@ -68,6 +68,34 @@ fn appendImm64(gpa: Allocator, mir_extra: *std.ArrayList(u32), val: u64) Allocat
     return payload;
 }
 
+pub fn readMemArgOffset(mir_extra: []const u32, memarg_idx: u32) u64 {
+    const lo = mir_extra[memarg_idx];
+    const hi = mir_extra[memarg_idx + 1];
+    return (@as(u64, hi) << 32) | @as(u64, lo);
+}
+
+fn appendMemArg(
+    gpa: Allocator,
+    mir_extra: *std.ArrayList(u32),
+    offset: u64,
+    alignment: u32,
+    prefix_opcode: ?u32,
+) Allocator.Error!u32 {
+    const lo: u32 = @truncate(offset);
+    const hi: u32 = @truncate(offset >> 32);
+    const payload: u32 = @intCast(mir_extra.items.len);
+    if (prefix_opcode) |op| {
+        try mir_extra.ensureUnusedCapacity(gpa, 4);
+        mir_extra.appendAssumeCapacity(op);
+    } else {
+        try mir_extra.ensureUnusedCapacity(gpa, 3);
+    }
+    mir_extra.appendAssumeCapacity(lo);
+    mir_extra.appendAssumeCapacity(hi);
+    mir_extra.appendAssumeCapacity(alignment);
+    return payload;
+}
+
 fn Pass(comptime Inst: type) type {
     return struct {
         const Self = @This();
@@ -487,10 +515,439 @@ fn Pass(comptime Inst: type) type {
                     }
                 }
 
+                if (try foldMemArgOffset(gpa, inst, out, mir_extra)) |folded_mem_inst| {
+                    out.appendAssumeCapacity(folded_mem_inst);
+                    changed = true;
+                    continue;
+                }
+
                 out.appendAssumeCapacity(inst);
             }
 
             return changed;
+        }
+
+        const MemOpInfo = struct {
+            val_operands: u1,
+            memarg_idx: u32,
+            prefix_opcode: ?u32,
+        };
+
+        fn memOpInfo(inst: Inst, mir_extra: []const u32) ?MemOpInfo {
+            return switch (inst.tag) {
+                .i32_load,
+                .i64_load,
+                .f32_load,
+                .f64_load,
+                .i32_load8_s,
+                .i32_load8_u,
+                .i32_load16_s,
+                .i32_load16_u,
+                .i64_load8_s,
+                .i64_load8_u,
+                .i64_load16_s,
+                .i64_load16_u,
+                .i64_load32_s,
+                .i64_load32_u,
+                => .{
+                    .val_operands = 0,
+                    .memarg_idx = inst.data.payload,
+                    .prefix_opcode = null,
+                },
+
+                .i32_store,
+                .i64_store,
+                .f32_store,
+                .f64_store,
+                .i32_store8,
+                .i32_store16,
+                .i64_store8,
+                .i64_store16,
+                .i64_store32,
+                => .{
+                    .val_operands = 1,
+                    .memarg_idx = inst.data.payload,
+                    .prefix_opcode = null,
+                },
+
+                .simd_prefix => blk: {
+                    const opcode = mir_extra[inst.data.payload];
+                    break :blk switch (@as(std.wasm.SimdOpcode, @fromBackingInt(opcode))) {
+                        .v128_load,
+                        .v128_load8x8_s,
+                        .v128_load8x8_u,
+                        .v128_load16x4_s,
+                        .v128_load16x4_u,
+                        .v128_load32x2_s,
+                        .v128_load32x2_u,
+                        .v128_load8_splat,
+                        .v128_load16_splat,
+                        .v128_load32_splat,
+                        .v128_load64_splat,
+                        .v128_load32_zero,
+                        .v128_load64_zero,
+                        => .{
+                            .val_operands = 0,
+                            .memarg_idx = inst.data.payload + 1,
+                            .prefix_opcode = opcode,
+                        },
+                        .v128_store => .{
+                            .val_operands = 1,
+                            .memarg_idx = inst.data.payload + 1,
+                            .prefix_opcode = opcode,
+                        },
+                        else => null,
+                    };
+                },
+
+                .atomics_prefix => blk: {
+                    const opcode = mir_extra[inst.data.payload];
+                    break :blk switch (@as(std.wasm.AtomicsOpcode, @fromBackingInt(opcode))) {
+                        .i32_atomic_load,
+                        .i64_atomic_load,
+                        .i32_atomic_load8_u,
+                        .i32_atomic_load16_u,
+                        .i64_atomic_load8_u,
+                        .i64_atomic_load16_u,
+                        .i64_atomic_load32_u,
+                        => .{
+                            .val_operands = 0,
+                            .memarg_idx = inst.data.payload + 1,
+                            .prefix_opcode = opcode,
+                        },
+                        .memory_atomic_notify,
+                        .i32_atomic_store,
+                        .i64_atomic_store,
+                        .i32_atomic_store8,
+                        .i32_atomic_store16,
+                        .i64_atomic_store8,
+                        .i64_atomic_store16,
+                        .i64_atomic_store32,
+                        .i32_atomic_rmw_add,
+                        .i64_atomic_rmw_add,
+                        .i32_atomic_rmw8_add_u,
+                        .i32_atomic_rmw16_add_u,
+                        .i64_atomic_rmw8_add_u,
+                        .i64_atomic_rmw16_add_u,
+                        .i64_atomic_rmw32_add_u,
+                        .i32_atomic_rmw_sub,
+                        .i64_atomic_rmw_sub,
+                        .i32_atomic_rmw8_sub_u,
+                        .i32_atomic_rmw16_sub_u,
+                        .i64_atomic_rmw8_sub_u,
+                        .i64_atomic_rmw16_sub_u,
+                        .i64_atomic_rmw32_sub_u,
+                        .i32_atomic_rmw_and,
+                        .i64_atomic_rmw_and,
+                        .i32_atomic_rmw8_and_u,
+                        .i32_atomic_rmw16_and_u,
+                        .i64_atomic_rmw8_and_u,
+                        .i64_atomic_rmw16_and_u,
+                        .i64_atomic_rmw32_and_u,
+                        .i32_atomic_rmw_or,
+                        .i64_atomic_rmw_or,
+                        .i32_atomic_rmw8_or_u,
+                        .i32_atomic_rmw16_or_u,
+                        .i64_atomic_rmw8_or_u,
+                        .i64_atomic_rmw16_or_u,
+                        .i64_atomic_rmw32_or_u,
+                        .i32_atomic_rmw_xor,
+                        .i64_atomic_rmw_xor,
+                        .i32_atomic_rmw8_xor_u,
+                        .i32_atomic_rmw16_xor_u,
+                        .i64_atomic_rmw8_xor_u,
+                        .i64_atomic_rmw16_xor_u,
+                        .i64_atomic_rmw32_xor_u,
+                        .i32_atomic_rmw_xchg,
+                        .i64_atomic_rmw_xchg,
+                        .i32_atomic_rmw8_xchg_u,
+                        .i32_atomic_rmw16_xchg_u,
+                        .i64_atomic_rmw8_xchg_u,
+                        .i64_atomic_rmw16_xchg_u,
+                        .i64_atomic_rmw32_xchg_u,
+                        => .{
+                            .val_operands = 1,
+                            .memarg_idx = inst.data.payload + 1,
+                            .prefix_opcode = opcode,
+                        },
+                        else => null,
+                    };
+                },
+
+                else => null,
+            };
+        }
+
+        /// For an instruction that pushes exactly 1 value onto the Wasm operand stack,
+        /// returns the number of operand stack values it pops, or `null` if the instruction
+        /// cannot be walked across when locating the `<val>` sub-expression of a store.
+        fn singlePushInstPops(inst: Inst, mir_extra: []const u32) ?i32 {
+            return switch (inst.tag) {
+                .i32_const,
+                .i64_const,
+                .f32_const,
+                .f64_const,
+                .local_get,
+                .global_get,
+                .uav_ref,
+                .uav_ref_off,
+                .nav_ref,
+                .nav_ref_off,
+                .func_ref,
+                .tls_nav_ref,
+                .errors_len,
+                .error_name_table_ref,
+                .enum_tag_name_table_ref,
+                .memory_size,
+                => 0,
+
+                .i32_eqz,
+                .i64_eqz,
+                .i32_clz,
+                .i32_ctz,
+                .i32_popcnt,
+                .i64_clz,
+                .i64_ctz,
+                .i64_popcnt,
+                .f32_abs,
+                .f32_neg,
+                .f32_ceil,
+                .f32_floor,
+                .f32_trunc,
+                .f32_nearest,
+                .f32_sqrt,
+                .f64_abs,
+                .f64_neg,
+                .f64_ceil,
+                .f64_floor,
+                .f64_trunc,
+                .f64_nearest,
+                .f64_sqrt,
+                .i32_wrap_i64,
+                .i32_trunc_f32_s,
+                .i32_trunc_f32_u,
+                .i32_trunc_f64_s,
+                .i32_trunc_f64_u,
+                .i64_extend_i32_s,
+                .i64_extend_i32_u,
+                .i64_trunc_f32_s,
+                .i64_trunc_f32_u,
+                .i64_trunc_f64_s,
+                .i64_trunc_f64_u,
+                .f32_convert_i32_s,
+                .f32_convert_i32_u,
+                .f32_convert_i64_s,
+                .f32_convert_i64_u,
+                .f32_demote_f64,
+                .f64_convert_i32_s,
+                .f64_convert_i32_u,
+                .f64_convert_i64_s,
+                .f64_convert_i64_u,
+                .f64_promote_f32,
+                .i32_reinterpret_f32,
+                .i64_reinterpret_f64,
+                .f32_reinterpret_i32,
+                .f64_reinterpret_i64,
+                .i32_extend8_s,
+                .i32_extend16_s,
+                .i64_extend8_s,
+                .i64_extend16_s,
+                .i64_extend32_s,
+                .local_tee,
+                .memory_grow,
+                .i32_load,
+                .i64_load,
+                .f32_load,
+                .f64_load,
+                .i32_load8_s,
+                .i32_load8_u,
+                .i32_load16_s,
+                .i32_load16_u,
+                .i64_load8_s,
+                .i64_load8_u,
+                .i64_load16_s,
+                .i64_load16_u,
+                .i64_load32_s,
+                .i64_load32_u,
+                => 1,
+
+                .i32_eq,
+                .i32_ne,
+                .i32_lt_s,
+                .i32_lt_u,
+                .i32_gt_s,
+                .i32_gt_u,
+                .i32_le_s,
+                .i32_le_u,
+                .i32_ge_s,
+                .i32_ge_u,
+                .i64_eq,
+                .i64_ne,
+                .i64_lt_s,
+                .i64_lt_u,
+                .i64_gt_s,
+                .i64_gt_u,
+                .i64_le_s,
+                .i64_le_u,
+                .i64_ge_s,
+                .i64_ge_u,
+                .f32_eq,
+                .f32_ne,
+                .f32_lt,
+                .f32_gt,
+                .f32_le,
+                .f32_ge,
+                .f64_eq,
+                .f64_ne,
+                .f64_lt,
+                .f64_gt,
+                .f64_le,
+                .f64_ge,
+                .i32_add,
+                .i32_sub,
+                .i32_mul,
+                .i32_div_s,
+                .i32_div_u,
+                .i32_rem_s,
+                .i32_rem_u,
+                .i32_and,
+                .i32_or,
+                .i32_xor,
+                .i32_shl,
+                .i32_shr_s,
+                .i32_shr_u,
+                .i64_add,
+                .i64_sub,
+                .i64_mul,
+                .i64_div_s,
+                .i64_div_u,
+                .i64_rem_s,
+                .i64_rem_u,
+                .i64_and,
+                .i64_or,
+                .i64_xor,
+                .i64_shl,
+                .i64_shr_s,
+                .i64_shr_u,
+                .f32_add,
+                .f32_sub,
+                .f32_mul,
+                .f32_div,
+                .f32_min,
+                .f32_max,
+                .f32_copysign,
+                .f64_add,
+                .f64_sub,
+                .f64_mul,
+                .f64_div,
+                .f64_min,
+                .f64_max,
+                .f64_copysign,
+                => 2,
+
+                .select => 3,
+
+                .simd_prefix => blk: {
+                    const opcode = mir_extra[inst.data.payload];
+                    const simd_op: std.wasm.SimdOpcode = @fromBackingInt(opcode);
+                    if (simd_op == .v128_const) break :blk 0;
+                    if (memOpInfo(inst, mir_extra)) |info| {
+                        if (info.val_operands == 0) break :blk 1;
+                    }
+                    break :blk null;
+                },
+
+                .atomics_prefix => blk: {
+                    if (memOpInfo(inst, mir_extra)) |info| {
+                        if (info.val_operands == 0) break :blk 1;
+                    }
+                    break :blk null;
+                },
+
+                else => null,
+            };
+        }
+
+        fn findValStartIndex(insts: []const Inst, mir_extra: []const u32) ?usize {
+            var needed: i32 = 1;
+            var idx: usize = insts.len;
+            while (idx > 0) {
+                idx -= 1;
+                const prev = insts[idx];
+                if (prev.tag == .dbg_line) continue;
+                const pops = singlePushInstPops(prev, mir_extra) orelse return null;
+                needed = needed - 1 + pops;
+                if (needed == 0) return idx;
+            }
+            return null;
+        }
+
+        fn prevNonDbgIndex(insts: []const Inst, end_idx: usize) ?usize {
+            var idx = end_idx;
+            while (idx > 0) {
+                idx -= 1;
+                if (insts[idx].tag != .dbg_line) return idx;
+            }
+            return null;
+        }
+
+        fn foldMemArgOffset(
+            gpa: Allocator,
+            inst: Inst,
+            out: *std.ArrayList(Inst),
+            mir_extra: *std.ArrayList(u32),
+        ) Allocator.Error!?Inst {
+            const info = memOpInfo(inst, mir_extra.items) orelse return null;
+            const orig_offset = readMemArgOffset(mir_extra.items, info.memarg_idx);
+            const alignment = mir_extra.items[info.memarg_idx + 2];
+
+            var addr_end: usize = if (info.val_operands == 0)
+                out.items.len
+            else
+                findValStartIndex(out.items, mir_extra.items) orelse return null;
+
+            var current_offset = orig_offset;
+            var folded = false;
+
+            while (true) {
+                const add_idx = prevNonDbgIndex(out.items, addr_end) orelse break;
+                const add_inst = out.items[add_idx];
+                if (add_inst.tag != .i32_add and add_inst.tag != .i64_add) break;
+
+                const const_idx = prevNonDbgIndex(out.items, add_idx) orelse break;
+                const const_inst = out.items[const_idx];
+
+                const maybe_new_offset: ?u64 = switch (add_inst.tag) {
+                    .i32_add => blk: {
+                        if (const_inst.tag != .i32_const) break :blk null;
+                        const k = const_inst.data.imm32;
+                        if (k < 0) break :blk null;
+                        if (current_offset > std.math.maxInt(u32)) break :blk null;
+                        const sum = std.math.add(u32, @intCast(current_offset), @intCast(k)) catch break :blk null;
+                        break :blk @as(u64, sum);
+                    },
+                    .i64_add => blk: {
+                        if (const_inst.tag != .i64_const) break :blk null;
+                        const k_u64 = readImm64(mir_extra.items, const_inst.data.payload);
+                        if (@as(i64, @bitCast(k_u64)) < 0) break :blk null;
+                        const sum = std.math.add(u64, current_offset, k_u64) catch break :blk null;
+                        break :blk sum;
+                    },
+                    else => unreachable,
+                };
+                const new_offset = maybe_new_offset orelse break;
+
+                _ = out.orderedRemove(add_idx);
+                _ = out.orderedRemove(const_idx);
+                addr_end -= 2;
+                current_offset = new_offset;
+                folded = true;
+            }
+
+            if (!folded) return null;
+
+            const new_payload = try appendMemArg(gpa, mir_extra, current_offset, alignment, info.prefix_opcode);
+            return .{ .tag = inst.tag, .data = .{ .payload = new_payload } };
         }
 
         fn simplifyControlFlow(
@@ -1038,6 +1495,11 @@ const StandaloneMir = struct {
             return (@as(u64, f.msb) << 32) | @as(u64, f.lsb);
         }
     };
+
+    pub const MemArg = struct {
+        offset: u64,
+        alignment: u32 = 2,
+    };
 };
 
 // ============================================================================
@@ -1097,6 +1559,39 @@ const TestMir = struct {
         try self.extra.append(testing.allocator, @intCast(targets.len));
         try self.extra.appendSlice(testing.allocator, targets);
         try self.instructions.append(testing.allocator, .{ .tag = .br_table, .data = .{ .payload = payload } });
+    }
+
+    fn memOp(self: *TestMir, tag: Mir.Inst.Tag, offset: u64, alignment: u32) !void {
+        const payload = try appendMemArg(testing.allocator, &self.extra, offset, alignment, null);
+        try self.instructions.append(testing.allocator, .{ .tag = tag, .data = .{ .payload = payload } });
+    }
+
+    fn simdMemOp(self: *TestMir, opcode: std.wasm.SimdOpcode, offset: u64, alignment: u32) !void {
+        const payload = try appendMemArg(testing.allocator, &self.extra, offset, alignment, @backingInt(opcode));
+        try self.instructions.append(testing.allocator, .{ .tag = .simd_prefix, .data = .{ .payload = payload } });
+    }
+
+    fn atomicMemOp(self: *TestMir, opcode: std.wasm.AtomicsOpcode, offset: u64, alignment: u32) !void {
+        const payload = try appendMemArg(testing.allocator, &self.extra, offset, alignment, @backingInt(opcode));
+        try self.instructions.append(testing.allocator, .{ .tag = .atomics_prefix, .data = .{ .payload = payload } });
+    }
+
+    fn memOffsetAt(self: *const TestMir, inst_idx: usize) u64 {
+        const inst = self.instructions.get(inst_idx);
+        const memarg_idx: u32 = switch (inst.tag) {
+            .simd_prefix, .atomics_prefix => inst.data.payload + 1,
+            else => inst.data.payload,
+        };
+        return readMemArgOffset(self.extra.items, memarg_idx);
+    }
+
+    fn memAlignmentAt(self: *const TestMir, inst_idx: usize) u32 {
+        const inst = self.instructions.get(inst_idx);
+        const memarg_idx: u32 = switch (inst.tag) {
+            .simd_prefix, .atomics_prefix => inst.data.payload + 1,
+            else => inst.data.payload,
+        };
+        return self.extra.items[memarg_idx + 2];
     }
 
     fn finishFunc(self: *TestMir) !void {
@@ -1674,3 +2169,384 @@ test "local_set + local_get coalescing and dead local_tee elimination unlock cro
     try testing.expectEqual(@as(u32, 4), datas[2].local);
     try testing.expectEqual(@as(u32, 4), datas[3].local);
 }
+
+test "MemArg offset folding: i32_load, i64_load, K == 0, and chained constant offsets" {
+    // 1. i32_const K; i32_add; i32_load (offset=0 + K, offset=M + K, and K == 0)
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // offset=0 + 24 -> offset=24
+        try m.addLocal(.local_get, 0);
+        try m.addI32(24);
+        try m.addTag(.i32_add);
+        try m.memOp(.i32_load, 0, 2);
+
+        // offset=16 + 12 -> offset=28
+        try m.addLocal(.local_get, 0);
+        try m.addI32(12);
+        try m.addTag(.i32_add);
+        try m.memOp(.i32_load8_u, 16, 0);
+
+        // K == 0: removes i32_const 0; i32_add and preserves offset=8
+        try m.addLocal(.local_get, 0);
+        try m.addI32(0);
+        try m.addTag(.i32_add);
+        try m.memOp(.i32_load16_s, 8, 1);
+
+        // Chained constant offsets: local_get 0; i32_const 4; i32_add; i32_const 8; i32_add; i32_load offset=16 -> offset=28
+        try m.addLocal(.local_get, 0);
+        try m.addI32(4);
+        try m.addTag(.i32_add);
+        try m.addI32(8);
+        try m.addTag(.i32_add);
+        try m.memOp(.i32_load, 16, 2);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get, .i32_load,
+                .local_get, .i32_load8_u,
+                .local_get, .i32_load16_s,
+                .local_get, .i32_load,
+                .end,       .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(u64, 24), m.memOffsetAt(1));
+        try testing.expectEqual(@as(u32, 2), m.memAlignmentAt(1));
+        try testing.expectEqual(@as(u64, 28), m.memOffsetAt(3));
+        try testing.expectEqual(@as(u32, 0), m.memAlignmentAt(3));
+        try testing.expectEqual(@as(u64, 8), m.memOffsetAt(5));
+        try testing.expectEqual(@as(u32, 1), m.memAlignmentAt(5));
+        try testing.expectEqual(@as(u64, 28), m.memOffsetAt(7));
+        try testing.expectEqual(@as(u32, 2), m.memAlignmentAt(7));
+    }
+
+    // 2. i64_const K; i64_add; i64_load on wasm64 (including 64-bit offsets > u32.max)
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        try m.addLocal(.local_get, 0);
+        try m.addI64(0x1_0000_0020);
+        try m.addTag(.i64_add);
+        try m.addI64(0x0_0000_0010);
+        try m.addTag(.i64_add);
+        try m.memOp(.i64_load, 0x2_0000_0008, 3);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{ .local_get, .i64_load, .end, .dbg_epilogue_begin },
+            tags,
+        );
+        try testing.expectEqual(@as(u64, 0x3_0000_0038), m.memOffsetAt(1));
+        try testing.expectEqual(@as(u32, 3), m.memAlignmentAt(1));
+    }
+}
+
+test "MemArg offset folding: stores with single-inst and multi-inst <val>, and <val> vs <addr> disambiguation" {
+    // 1. Single-instruction <val>: local_get, i32_const, f64_const, uav_ref
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // local_get $base; i32_const 12; i32_add; local_get $val; i32_store offset=4 -> offset=16
+        try m.addLocal(.local_get, 0);
+        try m.addI32(12);
+        try m.addTag(.i32_add);
+        try m.addLocal(.local_get, 1);
+        try m.memOp(.i32_store, 4, 2);
+
+        // local_get $base; i32_const 8; i32_add; f64_const 3.25; f64_store offset=0 -> offset=8
+        try m.addLocal(.local_get, 0);
+        try m.addI32(8);
+        try m.addTag(.i32_add);
+        try m.addF64(3.25);
+        try m.memOp(.f64_store, 0, 3);
+
+        // local_get $base; i32_const 16; i32_add; uav_ref; i32_store offset=4 -> offset=20
+        try m.addLocal(.local_get, 0);
+        try m.addI32(16);
+        try m.addTag(.i32_add);
+        try m.addTag(.uav_ref);
+        try m.memOp(.i32_store, 4, 2);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get, .local_get, .i32_store,
+                .local_get, .f64_const, .f64_store,
+                .local_get, .uav_ref,   .i32_store,
+                .end,       .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(u64, 16), m.memOffsetAt(2));
+        try testing.expectEqual(@as(u64, 8), m.memOffsetAt(5));
+        try testing.expectEqual(@as(u64, 20), m.memOffsetAt(8));
+    }
+
+    // 2. Multi-instruction <val>: stack_offset value (local_get $sp; i32_const 32; i32_add) and loaded value (local_get $src; i32_load)
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // <addr>: local_get 0 + 12; <val>: local_get 1 + 32 -> folds 12 into i32_store, preserves <val>
+        try m.addLocal(.local_get, 0);
+        try m.addI32(12);
+        try m.addTag(.i32_add);
+        try m.addLocal(.local_get, 1);
+        try m.addI32(32);
+        try m.addTag(.i32_add);
+        try m.memOp(.i32_store, 0, 2);
+
+        // <addr>: local_get 0 + 20; <val>: (local_get 2 + 4)->i32_load -> folds 4 into i32_load and 20 into i32_store
+        try m.addLocal(.local_get, 0);
+        try m.addI32(20);
+        try m.addTag(.i32_add);
+        try m.addLocal(.local_get, 2);
+        try m.addI32(4);
+        try m.addTag(.i32_add);
+        try m.memOp(.i32_load, 0, 2);
+        try m.memOp(.i32_store, 8, 2);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get, .local_get, .i32_const, .i32_add, .i32_store,
+                .local_get, .local_get, .i32_load,  .i32_store,
+                .end,       .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(i32, 32), datas[2].imm32);
+        try testing.expectEqual(@as(u64, 12), m.memOffsetAt(4));
+        try testing.expectEqual(@as(u64, 4), m.memOffsetAt(7));
+        try testing.expectEqual(@as(u64, 28), m.memOffsetAt(8));
+    }
+
+    // 3. Store <val> vs <addr> disambiguation: local_get $base; local_get $val; i32_const 10; i32_add; i32_store offset=0
+    // MUST NOT fold 10 into i32_store because 10 is added to $val, not $base!
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 1);
+        try m.addI32(10);
+        try m.addTag(.i32_add);
+        try m.memOp(.i32_store, 0, 2);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{ .local_get, .local_get, .i32_const, .i32_add, .i32_store, .end, .dbg_epilogue_begin },
+            tags,
+        );
+        try testing.expectEqual(@as(i32, 10), datas[2].imm32);
+        try testing.expectEqual(@as(u64, 0), m.memOffsetAt(4));
+    }
+}
+
+test "MemArg offset folding: negative K and overflow rejection" {
+    // 1. Negative K rejection on i32_add and i64_add
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        try m.addLocal(.local_get, 0);
+        try m.addI32(-4);
+        try m.addTag(.i32_add);
+        try m.memOp(.i32_load, 8, 2);
+
+        try m.addLocal(.local_get, 0);
+        try m.addI64(-8);
+        try m.addTag(.i64_add);
+        try m.memOp(.i64_load, 16, 3);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get, .i32_const, .i32_add, .i32_load,
+                .local_get, .i64_const, .i64_add, .i64_load,
+                .end,       .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(u64, 8), m.memOffsetAt(3));
+        try testing.expectEqual(@as(u64, 16), m.memOffsetAt(7));
+    }
+
+    // 2. Overflow rejection: u32 overflow on i32_add and u64 overflow on i64_add
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        try m.addLocal(.local_get, 0);
+        try m.addI32(16);
+        try m.addTag(.i32_add);
+        try m.memOp(.i32_load, 0xffff_fff8, 2);
+
+        try m.addLocal(.local_get, 0);
+        try m.addI64(16);
+        try m.addTag(.i64_add);
+        try m.memOp(.i64_load, 0xffff_ffff_ffff_fff8, 3);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get, .i32_const, .i32_add, .i32_load,
+                .local_get, .i64_const, .i64_add, .i64_load,
+                .end,       .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(u64, 0xffff_fff8), m.memOffsetAt(3));
+        try testing.expectEqual(@as(u64, 0xffff_ffff_ffff_fff8), m.memOffsetAt(7));
+    }
+}
+
+test "MemArg offset folding: simd_prefix, atomics_prefix, and simplifyLocals multi-pass integration" {
+    // 1. simd_prefix and atomics_prefix loads, stores, and RMWs
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // v128_load
+        try m.addLocal(.local_get, 0);
+        try m.addI32(16);
+        try m.addTag(.i32_add);
+        try m.simdMemOp(.v128_load, 32, 4);
+
+        // v128_store
+        try m.addLocal(.local_get, 0);
+        try m.addI32(48);
+        try m.addTag(.i32_add);
+        try m.addLocal(.local_get, 1);
+        try m.simdMemOp(.v128_store, 16, 4);
+
+        // v128_load32_splat
+        try m.addLocal(.local_get, 0);
+        try m.addI32(8);
+        try m.addTag(.i32_add);
+        try m.simdMemOp(.v128_load32_splat, 4, 2);
+
+        // i32_atomic_load
+        try m.addLocal(.local_get, 0);
+        try m.addI32(12);
+        try m.addTag(.i32_add);
+        try m.atomicMemOp(.i32_atomic_load, 4, 2);
+
+        // i32_atomic_store
+        try m.addLocal(.local_get, 0);
+        try m.addI32(20);
+        try m.addTag(.i32_add);
+        try m.addLocal(.local_get, 2);
+        try m.atomicMemOp(.i32_atomic_store, 8, 2);
+
+        // i32_atomic_rmw_add
+        try m.addLocal(.local_get, 0);
+        try m.addI32(28);
+        try m.addTag(.i32_add);
+        try m.addI32(1);
+        try m.atomicMemOp(.i32_atomic_rmw_add, 4, 2);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get, .simd_prefix,
+                .local_get, .local_get,     .simd_prefix,
+                .local_get, .simd_prefix,
+                .local_get, .atomics_prefix,
+                .local_get, .local_get,     .atomics_prefix,
+                .local_get, .i32_const,     .atomics_prefix,
+                .end,       .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(u64, 48), m.memOffsetAt(1));
+        try testing.expectEqual(@as(u64, 64), m.memOffsetAt(4));
+        try testing.expectEqual(@as(u64, 12), m.memOffsetAt(6));
+        try testing.expectEqual(@as(u64, 16), m.memOffsetAt(8));
+        try testing.expectEqual(@as(u64, 28), m.memOffsetAt(11));
+        try testing.expectEqual(@as(u64, 32), m.memOffsetAt(14));
+    }
+
+    // 2. Multi-pass optimize: simplifyLocals removes temporary local_set/local_get between i32_add and i32_load/i32_store
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Address computed into temporary local 5, then loaded from:
+        // local_get 0; i32_const 16; i32_add; local_set 5; local_get 5; i32_load offset=8
+        // -> local_get 0; i32_load offset=24
+        try m.addLocal(.local_get, 0);
+        try m.addI32(16);
+        try m.addTag(.i32_add);
+        try m.addLocal(.local_set, 5);
+        try m.addLocal(.local_get, 5);
+        try m.memOp(.i32_load, 8, 2);
+
+        // Store where address was saved in dead temporary local 6:
+        // local_get 0; i32_const 32; i32_add; local_set 6; local_get 6; local_get 1; i32_store offset=4
+        // -> local_get 0; local_get 1; i32_store offset=36
+        try m.addLocal(.local_get, 0);
+        try m.addI32(32);
+        try m.addTag(.i32_add);
+        try m.addLocal(.local_set, 6);
+        try m.addLocal(.local_get, 6);
+        try m.addLocal(.local_get, 1);
+        try m.memOp(.i32_store, 4, 2);
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get, .i32_load,
+                .local_get, .local_get, .i32_store,
+                .end,       .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(u64, 24), m.memOffsetAt(1));
+        try testing.expectEqual(@as(u64, 36), m.memOffsetAt(4));
+    }
+}
+
