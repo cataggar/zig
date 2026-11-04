@@ -1272,8 +1272,6 @@ fn wasilibcMaybeReinitializeEnvironEagerlyStrong() callconv(.c) void {
 // =========================================================================
 // __main_void.c (WASIP1 path)
 // =========================================================================
-extern fn __main_argc_argv(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
-
 fn mainVoidImpl() callconv(.c) c_int {
     wasilibcEnsureEnvironImpl();
     var argv_buf_size: usize = 0;
@@ -1298,7 +1296,11 @@ fn mainVoidImpl() callconv(.c) c_int {
         _Exit(71);
     }
 
-    return __main_argc_argv(@intCast(argc), argv.?);
+    const main_argc_argv = @extern(*const fn (c_int, [*:null]?[*:0]u8) callconv(.c) c_int, .{
+        .name = "__main_argc_argv",
+        .linkage = .weak,
+    });
+    return main_argc_argv.?(@intCast(argc), argv.?);
 }
 
 // =========================================================================

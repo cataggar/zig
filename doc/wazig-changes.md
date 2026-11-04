@@ -110,6 +110,7 @@ Extends the self-hosted WebAssembly code generator and linker with static archiv
   - Implements static archive (`.a`) creation and extraction in `src/link/Wasm/Archive.zig` and `src/link/Wasm/Flush.zig`.
   - Fixes `switch` lowering on wide integers, optional error (`?error`) representation, and `bool` operand lowering in `memset` (`src/codegen/wasm/CodeGen.zig`).
   - Restricts undefined-symbol allowance to `.strong` symbols, maps `extern "c"` symbols to the `.none` import module so weak ZCU definitions do not clobber strong C symbols, fixes weak indirect function table entries, and preserves the `target_features` custom section on stripped relocatable objects.
+  - Guards `SymbolFlags.isIncluded` with `!flags.undefined` for `-rdynamic`, skips `module_name` mismatch errors on already-resolved symbols in `Object.zig`, preserves shared unresolved WASI imports across ZCU and archive objects in `Flush.zig`, and gives strong ZCU exports precedence over weak archive symbols.
 - **64-Bit WebAssembly (`wasm64` / `memory64`) (`src/codegen/wasm/`, `src/link/Wasm/`)**:
   - Adds `is_64: bool` (`0x04`) to `std.wasm.Limits.Flags` and `Wasm.MemoryImport`; emits 64-bit memory limits, `i64.const` active data segment offsets, and 64-bit `memory.fill`/`memory.init` operands in `__wasm_init_memory`.
   - Fixes 64-bit fixed-width LEB128 relocations (`reloc_sleb64_table_index`, `reloc_leb64_addr`, `reloc_sleb64_addr`) in `src/link/Wasm/Flush.zig` to write 10-byte `var_i64` sequences instead of 11-byte sequences.
@@ -150,8 +151,9 @@ Migrates C standard library translation units from bundled musl C and `wasi-libc
 ### Key Changes
 - **Linux/musl C-to-Zig Migration (`lib/c/*.zig`, `src/libs/musl.zig`)**:
   - Ports 681 musl `.c` units (1,646+ exported symbols) to `lib/c/`: `stdio` (including variadic `vfprintf`/`vfscanf`/`vsnprintf`/`vswprintf` family), `math` (all `f32`/`f64`/`f80`/`f128` routines with IEEE-754 exception parity), `locale` (including full `iconv` character tables and `strfmon`), `regex` (`fnmatch`, `glob`, `regcomp`, `regexec`), `thread`, `time`, `process`, `signal` (including `KernelSigaction` padding for RISC-V), `unistd`, `ldso`, `sys/mman`, `conf`, `env`, `fenv`, `setjmp`, `search`, `crypt`, `ctype`, `multibyte`, `network`, `passwd`, `spawn`, `stat`, `stdlib`, `string`, `aio`, `complex`, `dirent`, `errno`, `exit`, `fcntl`, `fts`, `ipc`, `legacy`, `linux`, `misc`, `mq`, `sched`, `sys/select`, `temp`, and `termios`.
-- **Pure-Zig WASI `libc` (`lib/c/wasi_*.zig`, `src/libs/wasi_libc.zig`)**:
+- **Pure-Zig WASI `libc` (`lib/c/wasi_*.zig`, `src/libs/wasi_libc.zig`, `src/Compilation.zig`, `src/link/Lld.zig`)**:
   - Migrates all 337 `wasi-libc` C source files and CRT startup files (`wasi_crt1_command.zig`, `wasi_crt1_reactor.zig`, `wasi_cloudlibc.zig`, `wasi_sources.zig`, `wasi_thread_stub.zig`) to `buildOutputFromZig`, eliminating C compilation when building `-lc` for `wasm32-wasi`, `wasm32-wasip2`, `wasm32-wasip3`, and `wasm64-wasip3`.
+  - Caches `lib/c` as `libzigc.a` (`zigc_strat = .lib`) on WASI instead of compiling 2,157 `@export`s into every user ZCU, places `libzigc.a` after user and C++ objects in `Lld.wasmLink`, declares `__main_argc_argv` with weak linkage in `mainVoidImpl`, and hides internal globals (`__progname*`, `optarg`) on WebAssembly so `-rdynamic` reactor builds do not fail or leak libc globals.
 - **Win32 `lib/c` Modules (`lib/c/win32/*.zig`, `src/libs/mingw.zig`)**:
   - Implements Win32 `time`, `signal`, `process`, `misc`, and POSIX compatibility stubs under `lib/c/win32/`.
 

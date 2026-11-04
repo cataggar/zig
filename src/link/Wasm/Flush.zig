@@ -261,73 +261,6 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
 
         log.debug("total MIR instructions: {d}", .{wasm.mir_instructions.len});
 
-        {
-            var i = wasm.function_imports_len_prelink;
-            while (i < f.function_imports.entries.len) {
-                const symbol_name = f.function_imports.keys()[i];
-                if (wasm.object_function_imports.getIndex(symbol_name)) |import_index_usize| {
-                    const import_index: Wasm.FunctionImport.Index = @fromBackingInt(@intCast(import_index_usize));
-                    try wasm.markFunctionImport(symbol_name, import_index.value(wasm), import_index);
-                    f.function_imports.swapRemoveAt(i);
-                    continue;
-                }
-                if (!is_obj) {
-                    if (symbol_name == wasm.preloaded_strings.__wasm_init_memory) {
-                        try wasm.functions.ensureUnusedCapacity(gpa, 1);
-                        try wasm.addFunction(.__wasm_init_memory, &.{}, &.{});
-                        f.function_imports.swapRemoveAt(i);
-                        continue;
-                    } else if (symbol_name == wasm.preloaded_strings.__wasm_apply_global_tls_relocs) {
-                        try wasm.functions.ensureUnusedCapacity(gpa, 1);
-                        try wasm.addFunction(.__wasm_apply_global_tls_relocs, &.{}, &.{});
-                        f.function_imports.swapRemoveAt(i);
-                        continue;
-                    } else if (symbol_name == wasm.preloaded_strings.__wasm_call_ctors) {
-                        try wasm.functions.ensureUnusedCapacity(gpa, 1);
-                        try wasm.addFunction(.__wasm_call_ctors, &.{}, &.{});
-                        f.function_imports.swapRemoveAt(i);
-                        continue;
-                    } else if (symbol_name == wasm.preloaded_strings.__wasm_init_tls) {
-                        try wasm.functions.ensureUnusedCapacity(gpa, 1);
-                        try wasm.addFunction(.__wasm_init_tls, &.{if (is64) .i64 else .i32}, &.{});
-                        f.function_imports.swapRemoveAt(i);
-                        continue;
-                    }
-                }
-                i += 1;
-            }
-        }
-
-        {
-            var i = wasm.data_imports_len_prelink;
-            while (i < f.data_imports.entries.len) {
-                const symbol_name = f.data_imports.keys()[i];
-                if (wasm.object_data_imports.getIndex(symbol_name)) |import_index_usize| {
-                    const import_index: Wasm.ObjectDataImport.Index = @fromBackingInt(@intCast(import_index_usize));
-                    try wasm.markDataImport(symbol_name, import_index.value(wasm), import_index);
-                    f.data_imports.swapRemoveAt(i);
-                    continue;
-                }
-                i += 1;
-            }
-        }
-
-        if (wasm.error_name_table_ref_count > 0) {
-            // Ensure Zcu error name structures are populated.
-            const full_error_names = ip.global_error_set.getNamesFromMainThread();
-            try wasm.error_name_offs.ensureTotalCapacity(gpa, full_error_names.len + 1);
-            if (wasm.error_name_offs.items.len == 0) {
-                // Dummy entry at index 0 to avoid a sub instruction at `@errorName` sites.
-                wasm.error_name_offs.appendAssumeCapacity(0);
-            }
-            const new_error_names = full_error_names[wasm.error_name_offs.items.len - 1 ..];
-            for (new_error_names) |error_name| {
-                wasm.error_name_offs.appendAssumeCapacity(@intCast(wasm.error_name_bytes.items.len));
-                const s: [:0]const u8 = error_name.toSlice(ip);
-                try wasm.error_name_bytes.appendSlice(gpa, s[0 .. s.len + 1]);
-            }
-        }
-
         for (wasm.nav_exports.keys(), wasm.nav_exports.values()) |*nav_export, export_index| {
             if (ip.isFunctionType(ip.getNav(nav_export.nav_index).resolved.?.type)) {
                 log.debug("flush export '{s}' nav={d}", .{ nav_export.name.slice(wasm), nav_export.nav_index });
@@ -351,7 +284,8 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                 });
                 const already_defined = !is_obj and opts.linkage == .weak and
                     (wasm.hidden_function_exports.contains(nav_export.name) or
-                        wasm.function_exports.contains(nav_export.name));
+                        wasm.function_exports.contains(nav_export.name) or
+                        if (wasm.object_function_imports.get(nav_export.name)) |imp| imp.resolution != .unresolved else false);
                 if (!already_defined) {
                     if (is_hidden) {
                         try wasm.hidden_function_exports.put(gpa, nav_export.name, function_index);
@@ -433,6 +367,79 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                     .name = uav_export.name,
                     .global_index = Wasm.GlobalIndex.fromResolution(wasm, global_resolution).?,
                 });
+            }
+        }
+
+        {
+            var i: usize = 0;
+            while (i < f.function_imports.entries.len) {
+                const symbol_name = f.function_imports.keys()[i];
+                if (wasm.object_function_imports.getIndex(symbol_name)) |import_index_usize| {
+                    const import_index: Wasm.FunctionImport.Index = @fromBackingInt(@intCast(import_index_usize));
+                    const import = import_index.value(wasm);
+                    try wasm.markFunctionImport(symbol_name, import, import_index);
+                    if (import.resolution != .unresolved) {
+                        f.function_imports.swapRemoveAt(i);
+                        continue;
+                    }
+                }
+                if (!is_obj) {
+                    if (symbol_name == wasm.preloaded_strings.__wasm_init_memory) {
+                        try wasm.functions.ensureUnusedCapacity(gpa, 1);
+                        try wasm.addFunction(.__wasm_init_memory, &.{}, &.{});
+                        f.function_imports.swapRemoveAt(i);
+                        continue;
+                    } else if (symbol_name == wasm.preloaded_strings.__wasm_apply_global_tls_relocs) {
+                        try wasm.functions.ensureUnusedCapacity(gpa, 1);
+                        try wasm.addFunction(.__wasm_apply_global_tls_relocs, &.{}, &.{});
+                        f.function_imports.swapRemoveAt(i);
+                        continue;
+                    } else if (symbol_name == wasm.preloaded_strings.__wasm_call_ctors) {
+                        try wasm.functions.ensureUnusedCapacity(gpa, 1);
+                        try wasm.addFunction(.__wasm_call_ctors, &.{}, &.{});
+                        f.function_imports.swapRemoveAt(i);
+                        continue;
+                    } else if (symbol_name == wasm.preloaded_strings.__wasm_init_tls) {
+                        try wasm.functions.ensureUnusedCapacity(gpa, 1);
+                        try wasm.addFunction(.__wasm_init_tls, &.{if (is64) .i64 else .i32}, &.{});
+                        f.function_imports.swapRemoveAt(i);
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+        }
+
+        {
+            var i: usize = 0;
+            while (i < f.data_imports.entries.len) {
+                const symbol_name = f.data_imports.keys()[i];
+                if (wasm.object_data_imports.getIndex(symbol_name)) |import_index_usize| {
+                    const import_index: Wasm.ObjectDataImport.Index = @fromBackingInt(@intCast(import_index_usize));
+                    const import = import_index.value(wasm);
+                    try wasm.markDataImport(symbol_name, import, import_index);
+                    if (import.resolution != .unresolved) {
+                        f.data_imports.swapRemoveAt(i);
+                        continue;
+                    }
+                }
+                i += 1;
+            }
+        }
+
+        if (wasm.error_name_table_ref_count > 0) {
+            // Ensure Zcu error name structures are populated.
+            const full_error_names = ip.global_error_set.getNamesFromMainThread();
+            try wasm.error_name_offs.ensureTotalCapacity(gpa, full_error_names.len + 1);
+            if (wasm.error_name_offs.items.len == 0) {
+                // Dummy entry at index 0 to avoid a sub instruction at `@errorName` sites.
+                wasm.error_name_offs.appendAssumeCapacity(0);
+            }
+            const new_error_names = full_error_names[wasm.error_name_offs.items.len - 1 ..];
+            for (new_error_names) |error_name| {
+                wasm.error_name_offs.appendAssumeCapacity(@intCast(wasm.error_name_bytes.items.len));
+                const s: [:0]const u8 = error_name.toSlice(ip);
+                try wasm.error_name_bytes.appendSlice(gpa, s[0 .. s.len + 1]);
             }
         }
 
@@ -2775,7 +2782,7 @@ const RelocAddr = struct {
     fn fromSymbolName(wasm: *const Wasm, name: String, addend: i32) RelocAddr {
         const flush = &wasm.flush_buffer;
         if (wasm.object_data_imports.getPtr(name)) |import| {
-            if (import.resolution != .unresolved) {
+            if (import.flags.binding != .weak and import.resolution != .unresolved) {
                 if (wasm.syntheticDataAddr(import.resolution)) |addr| {
                     return fromAddr(addr, addend);
                 }
@@ -2784,6 +2791,14 @@ const RelocAddr = struct {
         }
         if (flush.data_exports.get(name)) |symbol| {
             return fromDataLoc(flush, symbol.resolution.dataLoc(wasm), addend);
+        }
+        if (wasm.object_data_imports.getPtr(name)) |import| {
+            if (import.flags.binding == .weak and import.resolution != .unresolved) {
+                if (wasm.syntheticDataAddr(import.resolution)) |addr| {
+                    return fromAddr(addr, addend);
+                }
+                return fromDataLoc(flush, import.resolution.dataLoc(wasm), addend);
+            }
         }
         if (wasm.data_imports.get(name)) |id| {
             return fromDataLoc(flush, .fromDataImportId(wasm, id), addend);

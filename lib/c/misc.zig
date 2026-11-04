@@ -362,7 +362,11 @@ comptime {
         if (builtin.target.isMuslLibC() or builtin.target.isWasiLibC()) {
             symbol(&fmtmsg, "fmtmsg");
             symbol(&realpath, "realpath");
-            @export(&optarg_val, .{ .name = "optarg", .linkage = .weak });
+            @export(&optarg_val, .{
+                .name = "optarg",
+                .linkage = .weak,
+                .visibility = if (builtin.object_format == .wasm) .hidden else .default,
+            });
             symbol(&optind_val, "optind");
             symbol(&opterr_val, "opterr");
             symbol(&optopt_val, "optopt");

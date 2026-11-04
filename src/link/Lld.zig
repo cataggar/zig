@@ -1841,15 +1841,6 @@ fn wasmLink(lld: *Lld, arena: Allocator) !void {
                     wasi_libc.execModelCrtFileFullName(comp.config.wasi_exec_model),
                 ));
             }
-
-            if (comp.zigc_static_lib) |zigc| {
-                try argv.append(try zigc.full_object_path.toString(arena));
-            }
-
-            if (comp.config.link_libcpp) {
-                try argv.append(try comp.libcxx_static_lib.?.full_object_path.toString(arena));
-                try argv.append(try comp.libcxxabi_static_lib.?.full_object_path.toString(arena));
-            }
         }
 
         // Positional arguments to the linker such as object files.
@@ -1881,6 +1872,12 @@ fn wasmLink(lld: *Lld, arena: Allocator) !void {
         }
         if (zcu_obj_path) |p| {
             try argv.append(try p.toString(arena));
+        }
+
+        if (is_exe_or_dyn_lib) {
+            if (comp.libcxxabi_static_lib) |lib| try argv.append(try lib.full_object_path.toString(arena));
+            if (comp.libcxx_static_lib) |lib| try argv.append(try lib.full_object_path.toString(arena));
+            if (comp.zigc_static_lib) |zigc| try argv.append(try zigc.full_object_path.toString(arena));
         }
 
         if (compiler_rt_path) |p| {
