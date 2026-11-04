@@ -424,6 +424,12 @@ fn appendU32Leb(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), 
     try buf.appendSlice(allocator, tmp[0..n]);
 }
 
+fn appendU64Leb(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), v: u64) std.mem.Allocator.Error!void {
+    var tmp: [leb128.max_u64_bytes]u8 = undefined;
+    const n = leb128.writeU64Leb128(&tmp, v);
+    try buf.appendSlice(allocator, tmp[0..n]);
+}
+
 fn appendS32Leb(allocator: std.mem.Allocator, buf: *std.ArrayListUnmanaged(u8), v: i32) std.mem.Allocator.Error!void {
     var tmp: [leb128.max_s32_bytes]u8 = undefined;
     const n = leb128.writeS32Leb128(&tmp, v);
@@ -465,6 +471,14 @@ const IfInstr = struct {
     else_body: InstrList = .empty,
 };
 
+const MemInstr = struct {
+    opcode: u8,
+    align_flags: u32,
+    mem_idx: u32,
+    offset: u64,
+    raw: ?[]const u8 = null,
+};
+
 const Instr = union(enum) {
     unreachable_,
     nop,
@@ -481,6 +495,8 @@ const Instr = union(enum) {
     i32_const: i32,
     i64_const: i64,
     ref_func: u32,
+    mem_load: MemInstr,
+    mem_store: MemInstr,
     numeric_op: u8,
     raw: []const u8,
 
@@ -604,6 +620,40 @@ fn parseInstrBlock(
                 _ = readU32(bytes, pos) catch return error.InvalidInput;
                 out_list.append(arena, .{ .return_call_indirect = bytes[instr_start..pos.*] }) catch return error.OutOfMemory;
             },
+            0x28...0x35 => {
+                const align_flags = readU32(bytes, pos) catch return error.InvalidInput;
+                const mem_idx = if ((align_flags & 0x40) != 0)
+                    readU32(bytes, pos) catch return error.InvalidInput
+                else
+                    0;
+                const offset = readU64(bytes, pos) catch return error.InvalidInput;
+                out_list.append(arena, .{
+                    .mem_load = .{
+                        .opcode = b,
+                        .align_flags = align_flags,
+                        .mem_idx = mem_idx,
+                        .offset = offset,
+                        .raw = bytes[instr_start..pos.*],
+                    },
+                }) catch return error.OutOfMemory;
+            },
+            0x36...0x3e => {
+                const align_flags = readU32(bytes, pos) catch return error.InvalidInput;
+                const mem_idx = if ((align_flags & 0x40) != 0)
+                    readU32(bytes, pos) catch return error.InvalidInput
+                else
+                    0;
+                const offset = readU64(bytes, pos) catch return error.InvalidInput;
+                out_list.append(arena, .{
+                    .mem_store = .{
+                        .opcode = b,
+                        .align_flags = align_flags,
+                        .mem_idx = mem_idx,
+                        .offset = offset,
+                        .raw = bytes[instr_start..pos.*],
+                    },
+                }) catch return error.OutOfMemory;
+            },
             0x41 => {
                 const val = readS32(bytes, pos) catch return error.InvalidInput;
                 out_list.append(arena, .{ .i32_const = val }) catch return error.OutOfMemory;
@@ -697,6 +747,18 @@ fn encodeInstrList(allocator: std.mem.Allocator, list: []const Instr, buf: *std.
             .ref_func => |idx| {
                 buf.append(allocator, 0xd2) catch return error.OutOfMemory;
                 try appendU32Leb(allocator, buf, idx);
+            },
+            .mem_load, .mem_store => |m| {
+                if (m.raw) |raw| {
+                    buf.appendSlice(allocator, raw) catch return error.OutOfMemory;
+                } else {
+                    buf.append(allocator, m.opcode) catch return error.OutOfMemory;
+                    try appendU32Leb(allocator, buf, m.align_flags);
+                    if ((m.align_flags & 0x40) != 0) {
+                        try appendU32Leb(allocator, buf, m.mem_idx);
+                    }
+                    try appendU64Leb(allocator, buf, m.offset);
+                }
             },
             .numeric_op => |op| {
                 buf.append(allocator, op) catch return error.OutOfMemory;
@@ -831,6 +893,105 @@ fn foldI64Binary(a: i64, b: i64, op: u8) ?Instr {
     };
 }
 
+fn prevNonNopIndex(items: []const Instr, end: usize) ?usize {
+    var i = end;
+    while (i > 0) {
+        i -= 1;
+        if (items[i] != .nop) return i;
+    }
+    return null;
+}
+
+fn valueExprPops(inst: Instr) ?i32 {
+    return switch (inst) {
+        .i32_const, .i64_const, .ref_func => 0,
+        .mem_load => 1,
+        .numeric_op => |op| switch (op) {
+            0x45,
+            0x50,
+            0x67...0x69,
+            0x79...0x7b,
+            0x8b...0x91,
+            0x99...0x9f,
+            0xa7...0xc4,
+            => 1,
+            0x46...0x4f,
+            0x51...0x66,
+            0x6a...0x78,
+            0x7c...0x8a,
+            0x92...0x98,
+            0xa0...0xa6,
+            => 2,
+            else => null,
+        },
+        .raw => |r| if (r.len == 0) null else switch (r[0]) {
+            0x20, // local.get
+            0x23, // global.get
+            0x43, // f32.const
+            0x44, // f64.const
+            0xd0, // ref.null
+            0xd2, // ref.func
+            => 0,
+            0x22, // local.tee
+            => 1,
+            0x1b, // select
+            0x1c, // select t*
+            => 3,
+            else => null,
+        },
+        else => null,
+    };
+}
+
+fn findStoreAddrEnd(items: []const Instr, out_len: usize) ?usize {
+    var needed: i32 = 1;
+    var idx = out_len;
+    while (idx > 0) {
+        idx -= 1;
+        const inst = items[idx];
+        if (inst == .nop) continue;
+        const pops = valueExprPops(inst) orelse return null;
+        needed = needed - 1 + pops;
+        if (needed == 0) return idx;
+    }
+    return null;
+}
+
+fn foldMemArgOffsets(items: []Instr, out_len: *usize, addr_end_init: usize, m: *MemInstr) bool {
+    var folded = false;
+    var addr_end = addr_end_init;
+    while (true) {
+        const add_idx = prevNonNopIndex(items, addr_end) orelse break;
+        const const_idx = prevNonNopIndex(items, add_idx) orelse break;
+        const add_inst = items[add_idx];
+        const const_inst = items[const_idx];
+
+        if (add_inst == .numeric_op and add_inst.numeric_op == 0x6a and const_inst == .i32_const) {
+            const k = const_inst.i32_const;
+            if (k < 0 or m.offset > std.math.maxInt(u32)) break;
+            const new_offset = std.math.add(u32, @intCast(m.offset), @intCast(k)) catch break;
+            m.offset = new_offset;
+            m.raw = null;
+        } else if (add_inst == .numeric_op and add_inst.numeric_op == 0x7c and const_inst == .i64_const) {
+            const k = const_inst.i64_const;
+            if (k < 0) break;
+            const new_offset = std.math.add(u64, m.offset, @intCast(k)) catch break;
+            m.offset = new_offset;
+            m.raw = null;
+        } else {
+            break;
+        }
+
+        std.mem.copyForwards(Instr, items[add_idx .. out_len.* - 1], items[add_idx + 1 .. out_len.*]);
+        out_len.* -= 1;
+        std.mem.copyForwards(Instr, items[const_idx .. out_len.* - 1], items[const_idx + 1 .. out_len.*]);
+        out_len.* -= 1;
+        addr_end -= 2;
+        folded = true;
+    }
+    return folded;
+}
+
 fn foldConstants(list: *InstrList) bool {
     var changed = false;
 
@@ -852,48 +1013,70 @@ fn foldConstants(list: *InstrList) bool {
 
     var out_len: usize = 0;
     for (list.items) |inst| {
-        if (inst == .numeric_op) {
-            const op = inst.numeric_op;
-            if (out_len >= 1) {
-                switch (list.items[out_len - 1]) {
-                    .i32_const => |a| {
-                        if (foldI32Unary(a, op)) |folded| {
-                            list.items[out_len - 1] = folded;
+        switch (inst) {
+            .mem_load => |m_in| {
+                var m = m_in;
+                if (foldMemArgOffsets(list.items, &out_len, out_len, &m)) {
+                    changed = true;
+                }
+                list.items[out_len] = .{ .mem_load = m };
+                out_len += 1;
+                continue;
+            },
+            .mem_store => |m_in| {
+                var m = m_in;
+                if (findStoreAddrEnd(list.items, out_len)) |addr_end| {
+                    if (foldMemArgOffsets(list.items, &out_len, addr_end, &m)) {
+                        changed = true;
+                    }
+                }
+                list.items[out_len] = .{ .mem_store = m };
+                out_len += 1;
+                continue;
+            },
+            .numeric_op => |op| {
+                if (out_len >= 1) {
+                    switch (list.items[out_len - 1]) {
+                        .i32_const => |a| {
+                            if (foldI32Unary(a, op)) |folded| {
+                                list.items[out_len - 1] = folded;
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_const => |a| {
+                            if (foldI64Unary(a, op)) |folded| {
+                                list.items[out_len - 1] = folded;
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+                if (out_len >= 2) {
+                    if (list.items[out_len - 2] == .i32_const and list.items[out_len - 1] == .i32_const) {
+                        const a = list.items[out_len - 2].i32_const;
+                        const b = list.items[out_len - 1].i32_const;
+                        if (foldI32Binary(a, b, op)) |folded| {
+                            list.items[out_len - 2] = folded;
+                            out_len -= 1;
                             changed = true;
                             continue;
                         }
-                    },
-                    .i64_const => |a| {
-                        if (foldI64Unary(a, op)) |folded| {
-                            list.items[out_len - 1] = folded;
+                    } else if (list.items[out_len - 2] == .i64_const and list.items[out_len - 1] == .i64_const) {
+                        const a = list.items[out_len - 2].i64_const;
+                        const b = list.items[out_len - 1].i64_const;
+                        if (foldI64Binary(a, b, op)) |folded| {
+                            list.items[out_len - 2] = folded;
+                            out_len -= 1;
                             changed = true;
                             continue;
                         }
-                    },
-                    else => {},
-                }
-            }
-            if (out_len >= 2) {
-                if (list.items[out_len - 2] == .i32_const and list.items[out_len - 1] == .i32_const) {
-                    const a = list.items[out_len - 2].i32_const;
-                    const b = list.items[out_len - 1].i32_const;
-                    if (foldI32Binary(a, b, op)) |folded| {
-                        list.items[out_len - 2] = folded;
-                        out_len -= 1;
-                        changed = true;
-                        continue;
-                    }
-                } else if (list.items[out_len - 2] == .i64_const and list.items[out_len - 1] == .i64_const) {
-                    const a = list.items[out_len - 2].i64_const;
-                    const b = list.items[out_len - 1].i64_const;
-                    if (foldI64Binary(a, b, op)) |folded| {
-                        list.items[out_len - 2] = folded;
-                        out_len -= 1;
-                        changed = true;
-                        continue;
                     }
                 }
-            }
+            },
+            else => {},
         }
         list.items[out_len] = inst;
         out_len += 1;
@@ -1799,3 +1982,157 @@ test "Optimizer: CustomSectionPolicy.preserve rewrites name section on dead-func
     };
     try testing.expectEqualSlices(u8, &expected_name_payload, opt_mod.customs.items[0].data);
 }
+
+test "Optimizer: fold i32.const + i32.add into i32.load offset" {
+    const allocator = testing.allocator;
+    // local.get 0; i32.const 12; i32.add; i32.load align=2 offset=4 -> local.get 0; i32.load align=2 offset=16
+    const code = [_]u8{
+        0x20, 0x00, // local.get 0
+        0x41, 12, // i32.const 12
+        0x6a, // i32.add
+        0x28, 0x02, 0x04, // i32.load align=2 offset=4
+        0x0b, // end
+    };
+    const wasm = try buildSingleFuncModule(allocator, &.{.i32}, &.{.i32}, &.{}, &code);
+    defer allocator.free(wasm);
+
+    const opt_bytes = try optimize(allocator, wasm, .{});
+    defer allocator.free(opt_bytes);
+
+    var mod = try reader.readModule(allocator, opt_bytes);
+    defer mod.deinit();
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x20, 0x00, 0x28, 0x02, 16, 0x0b }, mod.funcs.items[0].code_bytes);
+}
+
+test "Optimizer: fold i64.const + i64.add into i64.load offset (including 64-bit offsets)" {
+    const allocator = testing.allocator;
+    // local.get 0; i64.const 0x1_0000_0000; i64.add; i64.load align=3 offset=8 -> local.get 0; i64.load align=3 offset=0x1_0000_0008
+    var code_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer code_buf.deinit(allocator);
+    try code_buf.appendSlice(allocator, &[_]u8{ 0x20, 0x00, 0x42 });
+    try appendS64Leb(allocator, &code_buf, 0x1_0000_0000);
+    try code_buf.appendSlice(allocator, &[_]u8{ 0x7c, 0x29, 0x03, 0x08, 0x0b });
+
+    const wasm = try buildSingleFuncModule(allocator, &.{.i64}, &.{.i64}, &.{}, code_buf.items);
+    defer allocator.free(wasm);
+
+    const opt_bytes = try optimize(allocator, wasm, .{});
+    defer allocator.free(opt_bytes);
+
+    var mod = try reader.readModule(allocator, opt_bytes);
+    defer mod.deinit();
+
+    var expected: std.ArrayListUnmanaged(u8) = .empty;
+    defer expected.deinit(allocator);
+    try expected.appendSlice(allocator, &[_]u8{ 0x20, 0x00, 0x29, 0x03 });
+    try appendU64Leb(allocator, &expected, 0x1_0000_0008);
+    try expected.append(allocator, 0x0b);
+    try testing.expectEqualSlices(u8, expected.items, mod.funcs.items[0].code_bytes);
+}
+
+test "Optimizer: chained constant additions before i32.load fold in a single pass" {
+    const allocator = testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // local.get 0; i32.const 10; i32.add; i32.const 20; i32.add; i32.load align=2 offset=4
+    const code = [_]u8{
+        0x20, 0x00, // local.get 0
+        0x41, 10, // i32.const 10
+        0x6a, // i32.add
+        0x41, 20, // i32.const 20
+        0x6a, // i32.add
+        0x28, 0x02, 0x04, // i32.load align=2 offset=4
+        0x0b, // end
+    };
+    var pos: usize = 0;
+    var list: InstrList = .empty;
+    const end_kind = try parseInstrBlock(arena, &code, &pos, false, &list);
+    try testing.expectEqual(EndKind.end, end_kind);
+    try testing.expect(foldConstants(&list));
+    try testing.expect(!foldConstants(&list));
+
+    var out_buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer out_buf.deinit(allocator);
+    try encodeInstrList(allocator, list.items, &out_buf);
+    try testing.expectEqualSlices(u8, &[_]u8{ 0x20, 0x00, 0x28, 0x02, 34 }, out_buf.items);
+}
+
+test "Optimizer: fold i32.const + i32.add into i32.store offset and disambiguate val vs addr" {
+    const allocator = testing.allocator;
+    // Case 1: local.get 0; i32.const 8; i32.add; local.get 1; i32.store align=2 offset=4
+    // -> local.get 0; local.get 1; i32.store align=2 offset=12
+    const store_fold_code = [_]u8{
+        0x20, 0x00, // local.get 0
+        0x41, 0x08, // i32.const 8
+        0x6a, // i32.add
+        0x20, 0x01, // local.get 1
+        0x36, 0x02, 0x04, // i32.store align=2 offset=4
+        0x0b, // end
+    };
+    const wasm1 = try buildSingleFuncModule(allocator, &.{ .i32, .i32 }, &.{}, &.{}, &store_fold_code);
+    defer allocator.free(wasm1);
+    const opt1 = try optimize(allocator, wasm1, .{});
+    defer allocator.free(opt1);
+    var mod1 = try reader.readModule(allocator, opt1);
+    defer mod1.deinit();
+    try testing.expectEqualSlices(
+        u8,
+        &[_]u8{ 0x20, 0x00, 0x20, 0x01, 0x36, 0x02, 12, 0x0b },
+        mod1.funcs.items[0].code_bytes,
+    );
+
+    // Case 2: local.get 0; local.get 1; i32.const 8; i32.add; i32.store align=2 offset=0
+    // MUST NOT fold 8 into i32.store offset (8 is added to <val>, not <addr>).
+    const store_val_add_code = [_]u8{
+        0x20, 0x00, // local.get 0
+        0x20, 0x01, // local.get 1
+        0x41, 0x08, // i32.const 8
+        0x6a, // i32.add
+        0x36, 0x02, 0x00, // i32.store align=2 offset=0
+        0x0b, // end
+    };
+    const wasm2 = try buildSingleFuncModule(allocator, &.{ .i32, .i32 }, &.{}, &.{}, &store_val_add_code);
+    defer allocator.free(wasm2);
+    const opt2 = try optimize(allocator, wasm2, .{});
+    defer allocator.free(opt2);
+    var mod2 = try reader.readModule(allocator, opt2);
+    defer mod2.deinit();
+    try testing.expectEqualSlices(u8, &store_val_add_code, mod2.funcs.items[0].code_bytes);
+}
+
+test "Optimizer: negative constant and u32 overflow are not folded into MemArg.offset" {
+    const allocator = testing.allocator;
+    // Negative K: local.get 0; i32.const -4; i32.add; i32.load align=2 offset=8 -> unchanged
+    const neg_code = [_]u8{
+        0x20, 0x00, // local.get 0
+        0x41, 0x7c, // i32.const -4
+        0x6a, // i32.add
+        0x28, 0x02, 0x08, // i32.load align=2 offset=8
+        0x0b, // end
+    };
+    const wasm_neg = try buildSingleFuncModule(allocator, &.{.i32}, &.{.i32}, &.{}, &neg_code);
+    defer allocator.free(wasm_neg);
+    const opt_neg = try optimize(allocator, wasm_neg, .{});
+    defer allocator.free(opt_neg);
+    var mod_neg = try reader.readModule(allocator, opt_neg);
+    defer mod_neg.deinit();
+    try testing.expectEqualSlices(u8, &neg_code, mod_neg.funcs.items[0].code_bytes);
+
+    // u32 overflow: offset = 0xffff_fff8, K = 16 -> unchanged
+    var ovf_code: std.ArrayListUnmanaged(u8) = .empty;
+    defer ovf_code.deinit(allocator);
+    try ovf_code.appendSlice(allocator, &[_]u8{ 0x20, 0x00, 0x41, 16, 0x6a, 0x28, 0x02 });
+    try appendU64Leb(allocator, &ovf_code, 0xffff_fff8);
+    try ovf_code.append(allocator, 0x0b);
+
+    const wasm_ovf = try buildSingleFuncModule(allocator, &.{.i32}, &.{.i32}, &.{}, ovf_code.items);
+    defer allocator.free(wasm_ovf);
+    const opt_ovf = try optimize(allocator, wasm_ovf, .{});
+    defer allocator.free(opt_ovf);
+    var mod_ovf = try reader.readModule(allocator, opt_ovf);
+    defer mod_ovf.deinit();
+    try testing.expectEqualSlices(u8, ovf_code.items, mod_ovf.funcs.items[0].code_bytes);
+}
+
