@@ -303,3 +303,65 @@ test "leaf function with over-aligned stack frame and @frameAddress" {
     try expect(frame_only % 16 == 0);
 }
 
+test "live UAVs, over-aligned UAVs, and offset UAVs alongside dead branches pruned by Mir.Optimize" {
+    const S = struct {
+        const Pair = extern struct {
+            a: u32,
+            b: u32,
+        };
+
+        noinline fn computeWithPrunedDeadUavs(x: u32) struct {
+            sum: u32,
+            aligned_addr: usize,
+            off_only_base_addr: usize,
+            sub_slice: []const u8,
+        } {
+            const five = asm (
+                \\ i32.const 5
+                \\ local.set %[ret]
+                : [ret] "=r" (-> u32),
+            );
+            if (five != 5) {
+                const dead_str: []const u8 = "dead_branch_uav_string_constant_110";
+                const dead_sub: []const u8 = ("dead_branch_offset_uav_constant_110")[12..18];
+                const dead_pair: *const Pair = &.{ .a = 900, .b = 901 };
+                const dead_field: *const u32 = &(@as(Pair, .{ .a = 700, .b = 701 }).b);
+                const dead_aligned_arr: [4]u32 align(64) = .{ 111, 222, 333, 444 };
+                const dead_aligned: *align(64) const [4]u32 = &dead_aligned_arr;
+                return .{
+                    .sum = @as(u32, @truncate(@intFromPtr(dead_str.ptr))) +
+                        @as(u32, dead_sub[0]) +
+                        dead_pair.a +
+                        dead_field.* +
+                        dead_aligned[0],
+                    .aligned_addr = @intFromPtr(dead_aligned),
+                    .off_only_base_addr = @intFromPtr(dead_field),
+                    .sub_slice = dead_sub,
+                };
+            }
+
+            const sink: u32 = x + 5;
+
+            const live_pair: *const Pair = &.{ .a = 10, .b = 20 };
+            const live_field_b: *const u32 = &(@as(Pair, .{ .a = 30, .b = 40 }).b);
+            const live_aligned_arr: [4]u32 align(64) = .{ 1, 2, 3, 4 };
+            const live_aligned: *align(64) const [4]u32 = &live_aligned_arr;
+            const live_only_off_arr: [4]u32 align(64) = .{ 5, 6, 7, 8 };
+            const live_only_off_aligned: *align(8) const u32 = &live_only_off_arr[2];
+            const live_sub_slice: []const u8 = ("prefix_wasm_uav_suffix")[7..15];
+
+            return .{
+                .sum = sink + live_pair.a + live_pair.b + live_field_b.* + live_aligned[0] + live_only_off_aligned.*,
+                .aligned_addr = @intFromPtr(live_aligned),
+                .off_only_base_addr = @intFromPtr(live_only_off_aligned) - 8,
+                .sub_slice = live_sub_slice,
+            };
+        }
+    };
+
+    const res = S.computeWithPrunedDeadUavs(7);
+    try expect(res.sum == 12 + 10 + 20 + 40 + 1 + 7);
+    try expect(res.aligned_addr % 64 == 0);
+    try expect(res.off_only_base_addr % 64 == 0);
+    try std.testing.expectEqualStrings("wasm_uav", res.sub_slice);
+}

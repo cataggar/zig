@@ -1004,6 +1004,25 @@ fn generateInner(cg: *CodeGen, any_returns: bool) InnerError!Mir {
         }
     }
 
+    if (cg.mir_uavs.count() > 0) {
+        var prev_uavs = cg.mir_uavs.move();
+        defer prev_uavs.deinit(cg.gpa);
+        try cg.mir_uavs.ensureTotalCapacity(cg.gpa, prev_uavs.count());
+        for (
+            cg.mir_instructions.items(.tag),
+            cg.mir_instructions.items(.data),
+        ) |tag, data| {
+            const uav_index: InternPool.Index = switch (tag) {
+                .uav_ref => data.ip_index,
+                .uav_ref_off => @fromBackingInt(cg.mir_extra.items[data.payload]),
+                else => continue,
+            };
+            if (prev_uavs.get(uav_index)) |uav_align| {
+                cg.mir_uavs.putAssumeCapacity(uav_index, uav_align);
+            }
+        }
+    }
+
     const cc = zcu.typeToFunc(zcu.navValue(cg.owner_nav).typeOf(zcu)).?.cc;
     const bottom_stack_local = cg.bottom_stack_value.local;
     const sp_local = cg.initial_stack_value.local;
