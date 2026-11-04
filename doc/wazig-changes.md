@@ -104,6 +104,13 @@ Extends the self-hosted WebAssembly code generator and linker with static archiv
 - [`28de97fbd8`](https://github.com/cataggar/zig/commit/28de97fbd890857261e9c5557d5202f6eed98fb3) — `wasm: support wasm64-wasip3 (64-bit Component Model cm64 and WASI 0.3.0)` ([#116](https://github.com/cataggar/zig/pull/116))
 - [`20f22e1f0a`](https://github.com/cataggar/zig/commit/20f22e1f0a57f05ac226d60e562ead9ad46ba3ee) — `wasi: support wasm64-wasip3 C/C++, static LLVM, and wazig/wazigl releases` ([#117](https://github.com/cataggar/zig/pull/117))
 - [`113621a0c9`](https://github.com/cataggar/zig/commit/113621a0c92a981741a3bc5ac1a28eb95a210354) — `Enable wasm64-wasip3 static LLVM linking for wazigl release` ([#118](https://github.com/cataggar/zig/pull/118))
+- [`cf63fe3cd2`](https://github.com/cataggar/zig/commit/cf63fe3cd251f56ed0583f1b3e0d9002aecc0a0c) — `stage2_wasm: support multithreaded WASI (TLS, naked callconv, inline asm)` ([#129](https://github.com/cataggar/zig/issues/129), [#135](https://github.com/cataggar/zig/pull/135))
+- [`6098d8fb45`](https://github.com/cataggar/zig/commit/6098d8fb458b47c9d348f1012194aae12e90e436) — `wasm: omit unreferenced ZCU functions in Flush and rewrite name section in Optimizer` ([#114](https://github.com/cataggar/zig/issues/114), [#137](https://github.com/cataggar/zig/pull/137))
+- [`5cd7a492ff`](https://github.com/cataggar/zig/commit/5cd7a492ff6afebdd66830a8d8b26f710688babf) — `wasm: fold constant address offsets into load/store MemArg.offset` ([#109](https://github.com/cataggar/zig/issues/109), [#138](https://github.com/cataggar/zig/pull/138))
+- [`3409952fa8`](https://github.com/cataggar/zig/commit/3409952fa85ecec38d563ef5ee2e6fbd649017eb) — `wasm: elide stack pointer global.set in leaf functions with stack frames` ([#112](https://github.com/cataggar/zig/issues/112), [#139](https://github.com/cataggar/zig/pull/139))
+- [`60a4c99d9e`](https://github.com/cataggar/zig/commit/60a4c99d9efe37fc1411bc70a0219ebe5769f76e) — `wasm: recompute mir_uavs after Mir.Optimize to prune dead constants` ([#110](https://github.com/cataggar/zig/issues/110), [#140](https://github.com/cataggar/zig/pull/140))
+- [`a99c449c97`](https://github.com/cataggar/zig/commit/a99c449c97272b13d1a719353028334035e4b5f8) — `wasm: compact sparse mir_locals and RLE-encode local declarations` ([#111](https://github.com/cataggar/zig/issues/111), [#141](https://github.com/cataggar/zig/pull/141))
+- [`5d003935f2`](https://github.com/cataggar/zig/commit/5d003935f218f6cc12a88e565d6e73cb4c4b4737) — `wasm: add algebraic identity and strength-reduction peepholes to MIR and core optimizers` ([#113](https://github.com/cataggar/zig/issues/113), [#142](https://github.com/cataggar/zig/pull/142))
 
 ### Key Changes
 - **Core Wasm Codegen & Linker Fixes (`src/codegen/wasm/`, `src/link/Wasm.zig`, `src/link/Wasm/`)**:
@@ -111,13 +118,16 @@ Extends the self-hosted WebAssembly code generator and linker with static archiv
   - Fixes `switch` lowering on wide integers, optional error (`?error`) representation, and `bool` operand lowering in `memset` (`src/codegen/wasm/CodeGen.zig`).
   - Restricts undefined-symbol allowance to `.strong` symbols, maps `extern "c"` symbols to the `.none` import module so weak ZCU definitions do not clobber strong C symbols, fixes weak indirect function table entries, and preserves the `target_features` custom section on stripped relocatable objects.
   - Guards `SymbolFlags.isIncluded` with `!flags.undefined` for `-rdynamic`, skips `module_name` mismatch errors on already-resolved symbols in `Object.zig`, preserves shared unresolved WASI imports across ZCU and archive objects in `Flush.zig`, and gives strong ZCU exports precedence over weak archive symbols.
+  - Supports multithreaded WebAssembly (`+atomics+bulk_memory`) in the self-hosted Wasm backend and linker: `threadlocal` variables (`__tls_base`, `__tls_size`, `__tls_align`, `R_WASM_MEMORY_ADDR_TLS_SLEB`), `.naked` calling convention, inline Wasm assembly (`local.get`/`global.set`), passive data segments (`datacount` section, atomic `__wasm_init_memory`, and `__wasm_init_tls` via `memory.init`), and shared imported memory export handling.
+  - Folds constant address offsets from `ptr_add`, `struct_field_ptr*`, and integer `add` chains directly into Wasm load/store `MemArg.offset` (`src/codegen/wasm/CodeGen.zig`), and run-length encodes local declarations in `src/codegen/wasm/Emit.zig`.
+  - Performs a pre-emission reachability walk in `src/link/Wasm/Flush.zig` (`markZcuNavReachable`, `markZcuUavReachable`) to omit unreferenced ZCU functions before emitting code sections.
 - **64-Bit WebAssembly (`wasm64` / `memory64`) (`src/codegen/wasm/`, `src/link/Wasm/`)**:
   - Adds `is_64: bool` (`0x04`) to `std.wasm.Limits.Flags` and `Wasm.MemoryImport`; emits 64-bit memory limits, `i64.const` active data segment offsets, and 64-bit `memory.fill`/`memory.init` operands in `__wasm_init_memory`.
   - Fixes 64-bit fixed-width LEB128 relocations (`reloc_sleb64_table_index`, `reloc_leb64_addr`, `reloc_sleb64_addr`) in `src/link/Wasm/Flush.zig` to write 10-byte `var_i64` sequences instead of 11-byte sequences.
   - Emits `i64` stack pointer arithmetic in `src/codegen/wasm/Emit.zig` and updates pointer, slice, memory intrinsic, `call_indirect`, `@errorName`, and `@tagName` lowering in `src/codegen/wasm/CodeGen.zig` for 64-bit pointers.
 - **Wasm MIR Peephole Optimizer (`src/codegen/wasm/Optimize.zig`) & Post-Link Optimizer (`src/link/Wasm/component/Optimizer.zig`)**:
-  - Intrafunction multi-round pass over Wasm `Mir` before `Wasm.updateFunc`: coalesces `local.set` + `local.get` into `local.tee`, removes dead `local.tee` stores, folds `i32`/`i64` constants/comparisons/conversions/`select`, simplifies constant branches and trivial blocks, removes unreachable instructions after unconditional transfers, rebuilds `mir_indirect_function_set`, elides stack-pointer prologues in frameless functions, and trims unused trailing locals.
-  - Post-link core-module optimizer in `Flush.finish` on stripped non-relocatable builds: prunes unreferenced `(func unreachable)` stubs and dead functions with full index remapping while preserving custom sections and SIMD (`0xfd`) / atomic (`0xfe`) instructions.
+  - Intrafunction multi-round pass over Wasm `Mir` before `Wasm.updateFunc`: coalesces `local.set` + `local.get` into `local.tee`, removes dead `local.tee` stores, folds `i32`/`i64` constants/comparisons/conversions/`select`, applies algebraic identity and strength-reduction peepholes (power-of-two multiply/divide/remainder, bitwise/shift identities, comparison inversion into `br_if`/`select`, associative constant reassociation, and duplicate pure expression `local.tee` reuse), simplifies constant branches and trivial blocks, removes unreachable instructions after unconditional transfers, rebuilds `mir_indirect_function_set` and `mir_uavs` (pruning dead anonymous constants), elides stack-pointer prologues/epilogues in frameless functions and leaf functions with stack frames (addressing frame slots directly via `$sp + offset`), and compacts sparse `mir_locals`.
+  - Post-link core-module optimizer in `Flush.finish` on non-relocatable builds: prunes unreferenced `(func unreachable)` stubs and dead functions with full index remapping (including rewriting `name` custom section function and local subsections), applies core bytecode algebraic/strength-reduction peepholes and `MemArg.offset` folding, and preserves custom sections and SIMD (`0xfd`) / atomic (`0xfe`) instructions.
 - **WASI Component Model Pipeline (`src/link/Wasm/component/`, `src/link/Wasm/Flush.zig`, `src/link/Lld.zig`)**:
   - In-memory WIT lexer/parser/resolver and metadata encoder with embedded canonical WASI 0.2.6, 0.2.12, and 0.3.0 WIT definitions (`src/link/Wasm/component/wit/`).
   - Synthesizes zero-adapter WASI 0.2.6 and 0.3.0 components with `world_gc` import pruning, supports custom WIT worlds (`-fwit-path`, `-fwit-world`), and automatically splices `wasi_snapshot_preview1` command/reactor adapters when Preview 1 imports are present or `-fwasi-adapter` is specified.
@@ -130,7 +140,7 @@ Extends the self-hosted WebAssembly code generator and linker with static archiv
 - `src/link/Wasm.zig`, `src/link/Wasm/Archive.zig`, `src/link/Wasm/Flush.zig`, `src/link/Wasm/Object.zig`
 - `src/link/Wasm/component/**`
 - `src/link/Lld.zig`
-- `test/behavior/optional.zig`, `test/behavior/switch.zig`
+- `test/behavior/optional.zig`, `test/behavior/switch.zig`, `test/behavior/wasm.zig`
 
 ---
 
@@ -147,6 +157,7 @@ Migrates C standard library translation units from bundled musl C and `wasi-libc
 - [`333accf5cd`](https://github.com/cataggar/zig/commit/333accf5cdce313efddcdad14d512125e5c8b063) — `lib/c: fix 0.17.0-libc validation issues across musl and wasi` ([#79](https://github.com/cataggar/zig/pull/79))
 - [`caed8ffeb2`](https://github.com/cataggar/zig/commit/caed8ffeb263ca1226ef9448fc189651b0c34df6) — `wasi-libc: migrate all remaining 337 C sources and CRT to libzigc` ([#88](https://github.com/cataggar/zig/issues/88), [#89](https://github.com/cataggar/zig/pull/89))
 - [`7a50004235`](https://github.com/cataggar/zig/commit/7a50004235221b49caee9c96cc61fc75e668bfd8) — `lib/c: fix WASI currentLocaleSlot in iconv and avoid TLS in wasi_sources` ([#89](https://github.com/cataggar/zig/pull/89))
+- [`ca181af18a`](https://github.com/cataggar/zig/commit/ca181af18aa7a2ebb74061890480f19343b83452) — `wasi, libc: cache lib/c as libzigc.a and fix reactor exports` ([#130](https://github.com/cataggar/zig/issues/130), [#136](https://github.com/cataggar/zig/pull/136))
 
 ### Key Changes
 - **Linux/musl C-to-Zig Migration (`lib/c/*.zig`, `src/libs/musl.zig`)**:
@@ -159,6 +170,7 @@ Migrates C standard library translation units from bundled musl C and `wasi-libc
 
 ### Affected Files
 - `lib/c.zig`, `lib/c/**`
+- `src/Compilation.zig`, `src/link/Lld.zig`
 - `src/libs/musl.zig`, `src/libs/wasi_libc.zig`, `src/libs/mingw.zig`
 - `test/c.zig`, `test/libc.zig`, `test/src/Libc.zig`
 
