@@ -50,9 +50,11 @@ pub fn lower(emit: *Emit) Error!void {
         // load stack pointer
         code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.global_get));
         try appendStackPointerGlobalIndex(wasm, code, is_obj);
-        // store stack pointer so we can restore it when we return from the function
-        code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.local_tee));
-        writeUleb128(code, mir.prologue.sp_local);
+        if (!mir.prologue.flags.is_leaf) {
+            // store stack pointer so we can restore it when we return from the function
+            code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.local_tee));
+            writeUleb128(code, mir.prologue.sp_local);
+        }
         // get the total stack size
         const aligned_stack: i64 = @intCast(stack_alignment.forward(mir.prologue.stack_size));
         code.appendAssumeCapacity(@backingInt(const_op));
@@ -68,13 +70,19 @@ pub fn lower(emit: *Emit) Error!void {
             // pointers are aligned with the abi alignment.
             code.appendAssumeCapacity(@backingInt(and_op));
         }
-        // The bottom will be used to calculate all stack pointer offsets.
-        code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.local_tee));
-        writeUleb128(code, mir.prologue.bottom_stack_local);
-        // Store the current stack pointer value into the global stack pointer so other function calls will
-        // start from this value instead and not overwrite the current stack.
-        code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.global_set));
-        try appendStackPointerGlobalIndex(wasm, code, is_obj);
+        if (mir.prologue.flags.is_leaf) {
+            // The bottom will be used to calculate all stack pointer offsets.
+            code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.local_set));
+            writeUleb128(code, mir.prologue.bottom_stack_local);
+        } else {
+            // The bottom will be used to calculate all stack pointer offsets.
+            code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.local_tee));
+            writeUleb128(code, mir.prologue.bottom_stack_local);
+            // Store the current stack pointer value into the global stack pointer so other function calls will
+            // start from this value instead and not overwrite the current stack.
+            code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.global_set));
+            try appendStackPointerGlobalIndex(wasm, code, is_obj);
+        }
     }
 
     const tags = mir.instructions.items(.tag);

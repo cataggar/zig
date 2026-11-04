@@ -965,8 +965,8 @@ pub fn generate(
 fn generateInner(cg: *CodeGen, any_returns: bool) InnerError!Mir {
     const zcu = cg.pt.zcu;
     cg.wasm_param_count = @intCast(cg.args.len + @intFromBool(cg.return_value != .none) + @intFromBool(cg.varargs != .none));
-    cg.initial_stack_value = try cg.ensureAllocLocal(Type.usize);
     cg.bottom_stack_value = try cg.ensureAllocLocal(Type.usize);
+    cg.initial_stack_value = try cg.ensureAllocLocal(Type.usize);
     defer assert(cg.branches.items.len == 0);
     // Generate MIR for function body
     try cg.genBody(cg.air.getMainBody());
@@ -1005,35 +1005,48 @@ fn generateInner(cg: *CodeGen, any_returns: bool) InnerError!Mir {
     }
 
     const cc = zcu.typeToFunc(zcu.navValue(cg.owner_nav).typeOf(zcu)).?.cc;
-    const sp_local = cg.initial_stack_value.local;
     const bottom_stack_local = cg.bottom_stack_value.local;
-    const needs_stack_prologue = needs_prologue: {
-        if (cc == .naked) break :needs_prologue false;
-        if (cg.stack_size > 0) break :needs_prologue true;
+    const sp_local = cg.initial_stack_value.local;
+
+    var uses_bottom_stack = cg.stack_size > 0;
+    var has_calls = false;
+    var has_custom_sp_local_access = false;
+    var has_sp_global_access = false;
+    if (cc != .naked) {
         const tags = cg.mir_instructions.items(.tag);
         const datas = cg.mir_instructions.items(.data);
         for (tags, datas, 0..) |tag, data, idx| {
             switch (tag) {
                 .local_get, .local_set, .local_tee => {
-                    if (data.local == bottom_stack_local) break :needs_prologue true;
-                    if (data.local == sp_local) {
+                    if (data.local == bottom_stack_local) {
+                        uses_bottom_stack = true;
+                    } else if (data.local == sp_local) {
                         if (tag != .local_get or idx + 1 >= tags.len or tags[idx + 1] != .global_set_sp) {
-                            break :needs_prologue true;
+                            has_custom_sp_local_access = true;
                         }
                     }
                 },
                 .global_set_sp => {
                     if (idx == 0 or tags[idx - 1] != .local_get or datas[idx - 1].local != sp_local) {
-                        break :needs_prologue true;
+                        has_custom_sp_local_access = true;
                     }
+                },
+                .global_get, .global_set => {
+                    if (std.mem.eql(u8, data.str.toSlice(&zcu.intern_pool), "__stack_pointer")) {
+                        has_sp_global_access = true;
+                    }
+                },
+                .call_nav, .call_indirect, .call_tag_index, .call_intrinsic => {
+                    has_calls = true;
                 },
                 else => {},
             }
         }
-        break :needs_prologue false;
-    };
+    }
+    const needs_stack_prologue = cc != .naked and (uses_bottom_stack or has_custom_sp_local_access);
+    const needs_sp_save = needs_stack_prologue and (has_calls or has_custom_sp_local_access or has_sp_global_access);
 
-    const prologue: Mir.Prologue = if (!needs_stack_prologue) blk: {
+    if (!needs_sp_save) {
         const tags = cg.mir_instructions.items(.tag);
         const datas = cg.mir_instructions.items(.data);
         var write_idx: usize = 0;
@@ -1055,19 +1068,49 @@ fn generateInner(cg: *CodeGen, any_returns: bool) InnerError!Mir {
             read_idx += 1;
         }
         cg.mir_instructions.len = write_idx;
-        break :blk .none;
-    } else .{
-        .sp_local = sp_local,
-        .flags = .{ .stack_alignment = cg.stack_alignment },
+
+        if (cc != .naked) {
+            const local_shift: u32 = if (!needs_stack_prologue) 2 else 1;
+            if (!needs_stack_prologue) {
+                cg.mir_locals.replaceRangeAssumeCapacity(0, 2, &.{});
+            } else {
+                _ = cg.mir_locals.orderedRemove(1);
+            }
+            for (
+                cg.mir_instructions.items(.tag),
+                cg.mir_instructions.items(.data),
+            ) |tag, *data| {
+                switch (tag) {
+                    .local_get, .local_set, .local_tee => {
+                        if (data.local > sp_local) {
+                            data.local -= local_shift;
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+
+    const prologue: Mir.Prologue = if (!needs_stack_prologue)
+        .none
+    else .{
+        .sp_local = if (needs_sp_save) sp_local else 0,
+        .flags = .{
+            .stack_alignment = cg.stack_alignment,
+            .is_leaf = !needs_sp_save,
+        },
         .stack_size = cg.stack_size,
         .bottom_stack_local = bottom_stack_local,
     };
 
     {
-        var max_local_len: usize = if (needs_stack_prologue)
-            (bottom_stack_local - cg.wasm_param_count + 1)
+        var max_local_len: usize = if (!needs_stack_prologue)
+            0
+        else if (!needs_sp_save)
+            1
         else
-            0;
+            2;
         for (
             cg.mir_instructions.items(.tag),
             cg.mir_instructions.items(.data),

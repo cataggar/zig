@@ -43,7 +43,8 @@ pub const Prologue = extern struct {
 
     pub const Flags = packed struct(u32) {
         stack_alignment: Alignment,
-        padding: u26 = 0,
+        is_leaf: bool = false,
+        padding: u25 = 0,
     };
 
     pub const none: Prologue = .{

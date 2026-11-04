@@ -217,3 +217,89 @@ test "asm callconv(.naked), immediate offset, and call operand" {
     trampoline(5, &ctx);
     try expect(ctx.out == 25);
 }
+
+test "leaf function with stack frame and early returns preserves caller stack and __stack_pointer" {
+    const S = struct {
+        const Pair = struct {
+            a: u32,
+            b: u32,
+        };
+
+        noinline fn leafWithStack(x: u32, early: bool) u32 {
+            var arr: [8]u32 = .{ x, x + 1, x + 2, x + 3, x + 4, x + 5, x + 6, x + 7 };
+            var pair: Pair = .{ .a = x * 2, .b = x * 3 };
+            _ = &arr;
+            _ = &pair;
+
+            if (early) {
+                return arr[x & 7] + pair.a;
+            }
+
+            arr[(x + 1) & 7] += pair.b;
+            pair.a += arr[(x + 2) & 7];
+            return arr[(x + 1) & 7] + pair.a;
+        }
+
+        fn readSp() u32 {
+            return asm (
+                \\ .globaltype __stack_pointer, i32
+                \\ global.get __stack_pointer
+                \\ local.set %[ret]
+                : [ret] "=r" (-> u32),
+            );
+        }
+    };
+
+    var caller_canary: [4]u32 = .{ 0x1111_2222, 0x3333_4444, 0x5555_6666, 0x7777_8888 };
+    _ = &caller_canary;
+
+    const sp_before = S.readSp();
+    const r1 = S.leafWithStack(3, true);
+    const sp_mid = S.readSp();
+    const r2 = S.leafWithStack(3, false);
+    const sp_after = S.readSp();
+
+    try expect(r1 == (3 + 3) + 6);
+    try expect(r2 == (7 + 9) + (6 + 8));
+    try expect(sp_before == sp_mid);
+    try expect(sp_before == sp_after);
+    try expect(caller_canary[0] == 0x1111_2222);
+    try expect(caller_canary[1] == 0x3333_4444);
+    try expect(caller_canary[2] == 0x5555_6666);
+    try expect(caller_canary[3] == 0x7777_8888);
+}
+
+test "leaf function with over-aligned stack frame and @frameAddress" {
+    const S = struct {
+        const Info = struct {
+            frame_addr: usize,
+            buf_addr: usize,
+            sum: u32,
+        };
+
+        noinline fn overAlignedLeaf(seed: u32) Info {
+            var aligned_buf: [4]u32 align(64) = .{ seed, seed + 10, seed + 20, seed + 30 };
+            _ = &aligned_buf;
+            return .{
+                .frame_addr = @frameAddress(),
+                .buf_addr = @intFromPtr(&aligned_buf),
+                .sum = aligned_buf[0] + aligned_buf[1] + aligned_buf[2] + aligned_buf[3],
+            };
+        }
+
+        noinline fn frameOnlyLeaf() usize {
+            return @frameAddress();
+        }
+    };
+
+    const info = S.overAlignedLeaf(5);
+    try expect(info.frame_addr != 0);
+    try expect(info.frame_addr % 64 == 0);
+    try expect(info.buf_addr % 64 == 0);
+    try expect(info.sum == 80);
+
+    const frame_only = S.frameOnlyLeaf();
+    try expect(frame_only != 0);
+    try expect(frame_only % 16 == 0);
+}
+
