@@ -54,6 +54,7 @@ Implements the Canonical ABI guest layers for WASI 0.2.6 and WASI 0.3.0, Compone
 - [`20b87ed345`](https://github.com/cataggar/zig/commit/20b87ed3452c441da0d4fc90a16be6f2c333d0c3) — `wasi: guard void Child.Term signal/stopped in Build.Serialize and Maker` ([#122](https://github.com/cataggar/zig/pull/122))
 - [`866b84dfbf`](https://github.com/cataggar/zig/commit/866b84dfbf162f5254a5752035974069b6eb81e8) — `Fix WASI P2/P3 filestat metadata-hash ino/dev mapping and relativeAppendPosix` ([#123](https://github.com/cataggar/zig/pull/123))
 - [`11114d306c`](https://github.com/cataggar/zig/commit/11114d306c87aa9fb7463d85410218d00d4a07f2) — `wasi: harden WasiThreadImpl and support wasm_main_thread_no_wait` ([#126](https://github.com/cataggar/zig/issues/126), [#127](https://github.com/cataggar/zig/issues/127), [#128](https://github.com/cataggar/zig/pull/128))
+- [`978c362e39`](https://github.com/cataggar/zig/commit/978c362e39501a0569002452c12ed1aedf50ac9c) — `wasi: run zig translate-c in-process when !std.process.can_spawn` ([#143](https://github.com/cataggar/zig/issues/143), [#146](https://github.com/cataggar/zig/pull/146))
 
 ### Key Changes
 - **Component Entrypoints & `cabi_realloc` (`lib/std/start.zig`)**:
@@ -68,9 +69,11 @@ Implements the Canonical ABI guest layers for WASI 0.2.6 and WASI 0.3.0, Compone
 - **Filesystem `ino`/`dev` Mapping & Path Resolution (`lib/std/os/wasi/p2.zig`, `lib/std/os/wasi/p3.zig`, `lib/std/fs/path.zig`)**:
   - Maps `metadata-hash-value.upper` to `buf.dev` and `metadata-hash-value.lower` to `buf.ino` (and `d_ino` in `fd_readdir`) instead of `lower ^ upper`, avoiding `(dev, ino)` collisions under Wasmtime's `upper = lower ^ hash(st_dev)`.
   - Fixes `std.fs.path.relativeAppendPosix` when resolving `"."` or empty `cwd` (`""` on WASI) to resize/memmove before writing `"../"` prefixes without slicing out of bounds or clobbering `to_rest`.
+  - Resolves leading-`/` paths against longest-prefix named WASI preopens (`resolvePathEntry`, `stripPreopenPrefix`) across all `path_*` functions in `lib/std/os/wasi/p2.zig` and `lib/std/os/wasi/p3.zig` so non-libc WASI binaries (`wazig`) can access `/lib/...` and `/cache/...` paths via `Io.Dir.cwd()`.
 - **WASI Host Compiler & Build Runner Support**:
   - Resolves `"."` via `preopens.get(".")` in `src/main.zig` `wasi_cwd()`, allows `"/"` alongside `"."` in `std.zig.getResolvedCwd` on WASI when linked with libc, and falls back to the guest `/lib` preopen when `--zig-lib-dir` / `ZIG_LIB_DIR` are not explicitly set (`lib/std/zig/LibCDirs.zig`, `lib/std/Build/Configuration.zig`).
   - Guards `void` `Child.Term.signal` and `.stopped` payloads (`std.posix.SIG == void` on WASI) in `lib/std/Build/Serialize.zig`, `lib/compiler/Maker/Step/Run.zig`, and `lib/compiler/Maker.zig`.
+  - Runs `zig translate-c` in-process via `@import("translate_c").translateInProcess` (`lib/compiler/translate-c/main.zig`, `src/main.zig`, `build.zig`) when `!std.process.can_spawn`, capturing serialized `ErrorBundle` diagnostics under `--zig-integration` without spawning a child process or calling `std.process.exit`.
 - **Freestanding & Multi-Threaded WebAssembly (`lib/std/posix.zig`, `lib/std/Io/Threaded.zig`, `lib/std/Thread.zig`, `lib/std/heap/BrkAllocator.zig`)**:
   - Stubs missing `posix.system` declarations (`IOV_MAX`, `Sigaction`, `STDIN_FILENO`, `cmsghdr`, `flock`, `getrandom`) and guards `Threaded.NullFile` when `posix.fd_t == void` so `std.Io.Threaded` compiles on `wasm32-freestanding`.
   - Guards `BrkAllocator` (`std.heap.wasm_allocator`) global state with `std.atomic.Mutex` when `!builtin.single_threaded`.
@@ -78,6 +81,7 @@ Implements the Canonical ABI guest layers for WASI 0.2.6 and WASI 0.3.0, Compone
   - Adds `std.Options.wasm_main_thread_no_wait` and a race-free main-thread futex spin loop in `std.Io.Threaded` for runtimes that trap `memory.atomic.wait32` on the main thread.
 
 ### Affected Files
+- `build.zig`, `src/main.zig`, `lib/compiler/translate-c/main.zig`
 - `lib/std/start.zig`, `lib/std/os/wasi.zig`, `lib/std/os/wasi/p2.zig`, `lib/std/os/wasi/p3.zig`, `lib/std/posix/wasi.zig`
 - `lib/std/fs/path.zig`, `lib/std/zig.zig`, `lib/std/zig/LibCDirs.zig`, `lib/std/Build/Configuration.zig`, `lib/std/Build/Serialize.zig`
 - `lib/compiler/Maker.zig`, `lib/compiler/Maker/Step.zig`, `lib/compiler/Maker/Step/Run.zig`
@@ -111,6 +115,8 @@ Extends the self-hosted WebAssembly code generator and linker with static archiv
 - [`60a4c99d9e`](https://github.com/cataggar/zig/commit/60a4c99d9efe37fc1411bc70a0219ebe5769f76e) — `wasm: recompute mir_uavs after Mir.Optimize to prune dead constants` ([#110](https://github.com/cataggar/zig/issues/110), [#140](https://github.com/cataggar/zig/pull/140))
 - [`a99c449c97`](https://github.com/cataggar/zig/commit/a99c449c97272b13d1a719353028334035e4b5f8) — `wasm: compact sparse mir_locals and RLE-encode local declarations` ([#111](https://github.com/cataggar/zig/issues/111), [#141](https://github.com/cataggar/zig/pull/141))
 - [`5d003935f2`](https://github.com/cataggar/zig/commit/5d003935f218f6cc12a88e565d6e73cb4c4b4737) — `wasm: add algebraic identity and strength-reduction peepholes to MIR and core optimizers` ([#113](https://github.com/cataggar/zig/issues/113), [#142](https://github.com/cataggar/zig/pull/142))
+- [`e00abf8d94`](https://github.com/cataggar/zig/commit/e00abf8d94a2f592de40eab0abbdaadd1ad6a3b5) — `wasm: support --import-table and inline trivial callees for Zigar` ([#145](https://github.com/cataggar/zig/pull/145))
+- [`b485eb0d2e`](https://github.com/cataggar/zig/commit/b485eb0d2ed91364fe86bacc16cadd65c16bec03) — `wasm: support global_assembly .globaltype, synthetic --export, and zcu_funcs growth` ([#148](https://github.com/cataggar/zig/pull/148))
 
 ### Key Changes
 - **Core Wasm Codegen & Linker Fixes (`src/codegen/wasm/`, `src/link/Wasm.zig`, `src/link/Wasm/`)**:
