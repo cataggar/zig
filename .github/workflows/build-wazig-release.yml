@@ -216,15 +216,31 @@ jobs:
             wasmtime run smoke_test.wasm
 
             cat > reactor.zig <<'EOF'
+          comptime {
+              asm (
+                  \\.globaltype custom_tls_slot, i32
+                  \\custom_tls_slot:
+              );
+          }
           fn target() callconv(.c) i32 { return 42; }
           fn inner() usize { return @intFromPtr(&target); }
           export fn getFactoryThunk() callconv(.c) usize { return inner(); }
+          export fn setSlot(val: usize) void {
+              asm volatile (
+                  \\local.get %[val]
+                  \\global.set custom_tls_slot
+                  :
+                  : [val] "r" (val),
+              );
+          }
           EOF
             "$SHIM_BIN_DIR/${FLAVOR}" build-exe \
               reactor.zig \
               -fno-entry \
               -rdynamic \
               --import-table \
+              --export=__stack_pointer \
+              --export=__wasm_call_ctors \
               -mexec-model=reactor \
               -O ReleaseSmall \
               -target wasm32-wasi \
@@ -233,7 +249,9 @@ jobs:
             python3 - <<'PY'
           data = open("reactor.wasm", "rb").read()
           assert b"__indirect_function_table" in data, "missing __indirect_function_table import"
-          assert b"\x03\x00\x41\x01\x0b" in data or b"\x04\x00\x41\x01\x0f\x0b" in data, "expected inlined getFactoryThunk body"
+          assert b"__stack_pointer" in data, "missing __stack_pointer export"
+          assert b"__wasm_call_ctors" in data, "missing __wasm_call_ctors export"
+          assert b"\x00\x41\x01\x0b" in data or b"\x00\x41\x01\x0f\x0b" in data, "expected inlined getFactoryThunk body"
           PY
 
             cat > build.zig <<'EOF'

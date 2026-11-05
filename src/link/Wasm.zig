@@ -193,6 +193,8 @@ uavs_exe: std.array_hash_map.Auto(InternPool.Index, ZcuDataExe) = .empty,
 overaligned_uavs: std.array_hash_map.Auto(InternPool.Index, Alignment) = .empty,
 /// When the key is an enum type, this represents a `@tagName` function.
 zcu_funcs: std.array_hash_map.Auto(InternPool.Index, ZcuFunc) = .empty,
+/// Globals defined in `Zcu.global_assembly` via `.globaltype <name>, <valtype>`.
+asm_globals: std.array_hash_map.Auto(String, GlobalType4) = .empty,
 nav_exports: std.array_hash_map.Auto(NavExport, Zcu.Export.Index) = .empty,
 uav_exports: std.array_hash_map.Auto(UavExport, Zcu.Export.Index) = .empty,
 imports: std.array_hash_map.Auto(InternPool.Nav.Index, String) = .empty,
@@ -563,6 +565,9 @@ pub const GlobalIndex = enum(u32) {
         if (name == wasm.preloaded_strings.__tls_align) return fromResolution(wasm, .__tls_align).?;
         if (name == wasm.preloaded_strings.__tls_base) return fromResolution(wasm, .__tls_base).?;
         if (name == wasm.preloaded_strings.__tls_size) return fromResolution(wasm, .__tls_size).?;
+        if (wasm.asm_globals.getIndex(name)) |i| {
+            return fromResolution(wasm, .pack(wasm, .{ .asm_global = @fromBackingInt(@intCast(i)) })).?;
+        }
         const import = wasm.object_global_imports.getPtr(name).?;
         return fromResolution(wasm, import.resolution).?;
     }
@@ -895,6 +900,23 @@ pub const UavsExeIndex = enum(u32) {
 
     pub fn value(i: @This(), wasm: *const Wasm) *ZcuDataExe {
         return &wasm.uavs_exe.values()[@backingInt(i)];
+    }
+};
+
+/// Index into `Wasm.asm_globals`.
+pub const AsmGlobalIndex = enum(u32) {
+    _,
+
+    pub fn key(i: @This(), wasm: *const Wasm) *String {
+        return &wasm.asm_globals.keys()[@backingInt(i)];
+    }
+
+    pub fn value(i: @This(), wasm: *const Wasm) *GlobalType4 {
+        return &wasm.asm_globals.values()[@backingInt(i)];
+    }
+
+    pub fn name(i: @This(), wasm: *const Wasm) []const u8 {
+        return i.key(wasm).slice(wasm);
     }
 };
 
@@ -1284,6 +1306,7 @@ pub const GlobalImport = extern struct {
         // Next, index into `object_globals`.
         // Next, index into `uavs_obj` or `uavs_exe` depending on whether emitting an object.
         // Next, index into `navs_obj` or `navs_exe` depending on whether emitting an object.
+        // Next, index into `asm_globals`.
         _,
 
         const first_object_global = @backingInt(Resolution.__tls_size) + 1;
@@ -1301,6 +1324,7 @@ pub const GlobalImport = extern struct {
             uav_obj: UavsObjIndex,
             nav_exe: NavsExeIndex,
             nav_obj: NavsObjIndex,
+            asm_global: AsmGlobalIndex,
         };
 
         pub fn unpack(r: Resolution, wasm: *const Wasm) Unpacked {
@@ -1323,15 +1347,23 @@ pub const GlobalImport = extern struct {
                         if (uav_index < wasm.uavs_obj.entries.len) {
                             return .{ .uav_obj = @fromBackingInt(@intCast(uav_index)) };
                         }
-                        return .{ .nav_obj = @fromBackingInt(
-                            @intCast(uav_index - wasm.uavs_obj.entries.len),
+                        const nav_index = uav_index - wasm.uavs_obj.entries.len;
+                        if (nav_index < wasm.navs_obj.entries.len) {
+                            return .{ .nav_obj = @fromBackingInt(@intCast(nav_index)) };
+                        }
+                        return .{ .asm_global = @fromBackingInt(
+                            @intCast(nav_index - wasm.navs_obj.entries.len),
                         ) };
                     } else {
                         if (uav_index < wasm.uavs_exe.entries.len) {
                             return .{ .uav_exe = @fromBackingInt(@intCast(uav_index)) };
                         }
-                        return .{ .nav_exe = @fromBackingInt(
-                            @intCast(uav_index - wasm.uavs_exe.entries.len),
+                        const nav_index = uav_index - wasm.uavs_exe.entries.len;
+                        if (nav_index < wasm.navs_exe.entries.len) {
+                            return .{ .nav_exe = @fromBackingInt(@intCast(nav_index)) };
+                        }
+                        return .{ .asm_global = @fromBackingInt(
+                            @intCast(nav_index - wasm.navs_exe.entries.len),
                         ) };
                     }
                 },
@@ -1358,6 +1390,13 @@ pub const GlobalImport = extern struct {
                 .nav_exe => |i| @fromBackingInt(@intCast(
                     first_object_global + wasm.object_globals.items.len +
                         wasm.uavs_exe.entries.len + @backingInt(i),
+                )),
+                .asm_global => |i| @fromBackingInt(@intCast(
+                    first_object_global + wasm.object_globals.items.len +
+                        (if (wasm.base.isRelocatable())
+                            wasm.uavs_obj.entries.len + wasm.navs_obj.entries.len
+                        else
+                            wasm.uavs_exe.entries.len + wasm.navs_exe.entries.len) + @backingInt(i),
                 )),
             };
         }
@@ -1396,6 +1435,10 @@ pub const GlobalImport = extern struct {
                 => unreachable,
                 .object_global => |i| i.ptr(wasm).flags,
                 .uav_obj, .uav_exe, .nav_obj, .nav_exe => unreachable,
+                .asm_global => |i| .{
+                    .binding = .strong,
+                    .global_type = i.value(wasm).*,
+                },
             };
         }
 
@@ -1412,6 +1455,7 @@ pub const GlobalImport = extern struct {
                 inline .uav_obj, .uav_exe => |i| std.mem.print(buf, "__anon_{d}", .{i}) catch unreachable,
                 .nav_obj => |i| i.name(wasm),
                 .nav_exe => |i| i.name(wasm),
+                .asm_global => |i| i.name(wasm),
             };
         }
     };
@@ -3644,6 +3688,7 @@ pub fn deinit(wasm: *Wasm) void {
     wasm.function_imports.deinit(gpa);
     wasm.functions.deinit(gpa);
     wasm.globals.deinit(gpa);
+    wasm.asm_globals.deinit(gpa);
     wasm.global_exports.deinit(gpa);
     wasm.global_imports.deinit(gpa);
     wasm.table_imports.deinit(gpa);
@@ -4411,6 +4456,7 @@ pub fn flush(
     defer wasm.global_exports.shrinkRetainingCapacity(global_exports_end_zcu);
 
     wasm.flush_buffer.clear();
+    wasm.asm_globals.clearRetainingCapacity();
     wasm.tag_name_bytes.clearRetainingCapacity();
     wasm.tag_name_offs.clearRetainingCapacity();
     wasm.tag_name_table_ref_count = 0;
@@ -5252,7 +5298,7 @@ pub fn addFunction(
     params: []const std.wasm.Valtype,
     returns: []const std.wasm.Valtype,
 ) Allocator.Error!void {
-    wasm.functions.putAssumeCapacity(resolution, {});
+    try wasm.functions.put(wasm.base.comp.gpa, resolution, {});
     _ = try wasm.addFuncType(.{
         .params = try wasm.internValtypeList(params),
         .returns = try wasm.internValtypeList(returns),

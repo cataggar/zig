@@ -260,6 +260,41 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
         const data_imports_start = wasm.data_imports.entries.len;
         const zcu_funcs_end: usize = wasm.zcu_funcs.entries.len;
 
+        for (zcu.global_assembly.values()) |asm_source| {
+            var line_it = mem.tokenizeAny(u8, asm_source, "\r\n");
+            while (line_it.next()) |raw_line| {
+                const uncommented = if (mem.findScalar(u8, raw_line, '#')) |idx| raw_line[0..idx] else raw_line;
+                const line = mem.trim(u8, uncommented, " \t");
+                const prefix = ".globaltype";
+                if (!mem.startsWith(u8, line, prefix)) continue;
+                const after_prefix = line[prefix.len..];
+                if (after_prefix.len == 0 or (after_prefix[0] != ' ' and after_prefix[0] != '\t')) continue;
+                var part_it = mem.splitScalar(u8, after_prefix, ',');
+                const sym_part = mem.trim(u8, part_it.next() orelse continue, " \t");
+                const type_part = mem.trim(u8, part_it.next() orelse continue, " \t");
+                if (sym_part.len == 0 or type_part.len == 0) continue;
+                const valtype: Wasm.Valtype3 = if (mem.eql(u8, type_part, "i32"))
+                    .i32
+                else if (mem.eql(u8, type_part, "i64"))
+                    .i64
+                else if (mem.eql(u8, type_part, "f32"))
+                    .f32
+                else if (mem.eql(u8, type_part, "f64"))
+                    .f64
+                else if (mem.eql(u8, type_part, "v128"))
+                    .v128
+                else
+                    continue;
+                const mut_part = if (part_it.next()) |p| mem.trim(u8, p, " \t") else "";
+                const mutable = !mem.eql(u8, mut_part, "immutable");
+                const sym_name = try wasm.internString(sym_part);
+                try wasm.asm_globals.put(gpa, sym_name, .{
+                    .valtype = valtype,
+                    .mutable = mutable,
+                });
+            }
+        }
+
         log.debug("total MIR instructions: {d}", .{wasm.mir_instructions.len});
 
         try wasm.functions.ensureUnusedCapacity(gpa, zcu_funcs_end);
@@ -453,7 +488,11 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
 
         // Detect any intrinsics that were called; they need to have dependencies on the symbols marked.
         // Likewise detect `@tagName` calls so those functions can be included in the output and synthesized.
-        for (wasm.zcu_funcs.keys()[0..zcu_funcs_end], wasm.zcu_funcs.values()[0..zcu_funcs_end]) |func_ip_index, zcu_func| {
+        // Note: `.call_tag_index` may append to `wasm.zcu_funcs` and reallocate its backing storage,
+        // so index by integer rather than iterating over a pre-sliced `keys()`/`values()`.
+        for (0..zcu_funcs_end) |func_idx| {
+            const func_ip_index = wasm.zcu_funcs.keys()[func_idx];
+            const zcu_func = wasm.zcu_funcs.values()[func_idx];
             if (!zcu_references.?.contains(.wrap(.{ .func = func_ip_index }))) continue;
             const func = zcu_func.function;
             const insts = wasm.mir_instructions.slice().subslice(func.instructions_off, func.instructions_len);
@@ -530,6 +569,11 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                         if (is_obj) try f.global_imports.put(gpa, symbol_name, .__tls_base) else try wasm.globals.put(gpa, .__tls_base, {});
                     } else if (symbol_name == wasm.preloaded_strings.__tls_size) {
                         if (is_obj) try f.global_imports.put(gpa, symbol_name, .__tls_size) else try wasm.globals.put(gpa, .__tls_size, {});
+                    } else if (wasm.asm_globals.getIndex(symbol_name)) |asm_global_index| {
+                        const res: Wasm.GlobalImport.Resolution = .pack(wasm, .{
+                            .asm_global = @fromBackingInt(@intCast(asm_global_index)),
+                        });
+                        try wasm.globals.put(gpa, res, {});
                     } else if (wasm.object_global_imports.getIndex(symbol_name)) |object_import_index| {
                         const i: Wasm.GlobalImport.Index = @fromBackingInt(@intCast(object_import_index));
                         try wasm.markGlobalImport(symbol_name, i.value(wasm), i);
@@ -570,6 +614,63 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
         ) |name, id| {
             if (!f.data_imports.contains(name) and !f.data_exports.contains(name)) {
                 f.data_imports.putAssumeCapacity(name, id);
+            }
+        }
+
+        if (!is_obj) {
+            var exp_i: usize = 0;
+            while (exp_i < f.missing_exports.entries.len) {
+                const exp_name = f.missing_exports.keys()[exp_i];
+                const maybe_global_res: ?Wasm.GlobalImport.Resolution = if (exp_name == wasm.preloaded_strings.__heap_base)
+                    .__heap_base
+                else if (exp_name == wasm.preloaded_strings.__heap_end)
+                    .__heap_end
+                else if (exp_name == wasm.preloaded_strings.__stack_pointer)
+                    .__stack_pointer
+                else if (exp_name == wasm.preloaded_strings.__tls_align)
+                    .__tls_align
+                else if (exp_name == wasm.preloaded_strings.__tls_base)
+                    .__tls_base
+                else if (exp_name == wasm.preloaded_strings.__tls_size)
+                    .__tls_size
+                else if (wasm.asm_globals.getIndex(exp_name)) |asm_global_index|
+                    .pack(wasm, .{ .asm_global = @fromBackingInt(@intCast(asm_global_index)) })
+                else
+                    null;
+
+                if (maybe_global_res) |global_res| {
+                    try wasm.globals.put(gpa, global_res, {});
+                    try wasm.global_exports.append(gpa, .{
+                        .name = exp_name,
+                        .global_index = Wasm.GlobalIndex.fromResolution(wasm, global_res).?,
+                    });
+                    f.missing_exports.swapRemoveAt(exp_i);
+                    continue;
+                }
+
+                if (exp_name == wasm.preloaded_strings.__wasm_call_ctors) {
+                    try wasm.addFunction(.__wasm_call_ctors, &.{}, &.{});
+                    try wasm.function_exports.put(gpa, exp_name, Wasm.FunctionIndex.fromResolution(wasm, .__wasm_call_ctors).?);
+                    f.missing_exports.swapRemoveAt(exp_i);
+                    continue;
+                } else if (exp_name == wasm.preloaded_strings.__wasm_init_memory) {
+                    try wasm.addFunction(.__wasm_init_memory, &.{}, &.{});
+                    try wasm.function_exports.put(gpa, exp_name, Wasm.FunctionIndex.fromResolution(wasm, .__wasm_init_memory).?);
+                    f.missing_exports.swapRemoveAt(exp_i);
+                    continue;
+                } else if (exp_name == wasm.preloaded_strings.__wasm_apply_global_tls_relocs) {
+                    try wasm.addFunction(.__wasm_apply_global_tls_relocs, &.{}, &.{});
+                    try wasm.function_exports.put(gpa, exp_name, Wasm.FunctionIndex.fromResolution(wasm, .__wasm_apply_global_tls_relocs).?);
+                    f.missing_exports.swapRemoveAt(exp_i);
+                    continue;
+                } else if (exp_name == wasm.preloaded_strings.__wasm_init_tls) {
+                    try wasm.addFunction(.__wasm_init_tls, &.{if (is64) .i64 else .i32}, &.{});
+                    try wasm.function_exports.put(gpa, exp_name, Wasm.FunctionIndex.fromResolution(wasm, .__wasm_init_tls).?);
+                    f.missing_exports.swapRemoveAt(exp_i);
+                    continue;
+                }
+
+                exp_i += 1;
             }
         }
 
@@ -1168,9 +1269,38 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                 .__heap_base => try appendGlobal(gpa, binary_bytes, 0, virtual_addrs.heap_base, is64),
                 .__heap_end => try appendGlobal(gpa, binary_bytes, 0, virtual_addrs.heap_end, is64),
                 .__stack_pointer => try appendGlobal(gpa, binary_bytes, 1, virtual_addrs.stack_pointer, is64),
-                .__tls_align => try appendGlobal(gpa, binary_bytes, 0, @intCast(virtual_addrs.tls_align.toByteUnits().?), is64),
-                .__tls_base => try appendGlobal(gpa, binary_bytes, 1, virtual_addrs.tls_base.?, is64),
-                .__tls_size => try appendGlobal(gpa, binary_bytes, 0, virtual_addrs.tls_size.?, is64),
+                .__tls_align => try appendGlobal(gpa, binary_bytes, 0, @intCast(virtual_addrs.tls_align.toByteUnits() orelse 1), is64),
+                .__tls_base => try appendGlobal(gpa, binary_bytes, 1, virtual_addrs.tls_base orelse 0, is64),
+                .__tls_size => try appendGlobal(gpa, binary_bytes, 0, virtual_addrs.tls_size orelse 0, is64),
+                .asm_global => |i| {
+                    const global_type = i.value(wasm).*;
+                    const valtype: std.wasm.Valtype = global_type.valtype.to();
+                    try binary_bytes.appendSlice(gpa, &.{
+                        @backingInt(valtype),
+                        @intFromBool(global_type.mutable),
+                    });
+                    switch (valtype) {
+                        .v128 => {
+                            try binary_bytes.appendSlice(gpa, &[_]u8{
+                                @backingInt(std.wasm.Opcode.simd_prefix),
+                                @intCast(@backingInt(std.wasm.SimdOpcode.v128_const)),
+                            } ++ &@as([16]u8, @splat(0)) ++ &[_]u8{
+                                @backingInt(std.wasm.Opcode.end),
+                            });
+                        },
+                        inline .i32, .i64, .f32, .f64 => {
+                            var aw: std.Io.Writer.Allocating = .fromArrayList(gpa, binary_bytes);
+                            defer binary_bytes.* = aw.toArrayList();
+                            try emitInit(&aw.writer, switch (valtype) {
+                                .i32 => .{ .i32_const = 0 },
+                                .i64 => .{ .i64_const = 0 },
+                                .f32 => .{ .f32_const = 0 },
+                                .f64 => .{ .f64_const = 0 },
+                                .v128 => unreachable,
+                            });
+                        },
+                    }
+                },
                 .object_global => |i| {
                     const global = i.ptr(wasm);
                     try binary_bytes.appendSlice(gpa, &.{
