@@ -1581,7 +1581,10 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 const result = switch (tag) {
                     .add => try cg.intAdd(int_ty, lhs, rhs),
                     .sub => try cg.intSub(int_ty, lhs, rhs),
-                    .mul => try cg.intMul(int_ty, lhs, rhs),
+                    .mul => if (int_ty.bits >= 65 and int_ty.bits <= 128)
+                        try cg.intMul128(lhs, rhs, cg.isInt128HighZero(bin_op.lhs), cg.isInt128HighZero(bin_op.rhs))
+                    else
+                        try cg.intMul(int_ty, lhs, rhs),
                     .rem => try cg.intRem(int_ty, lhs, rhs),
                     .mod => try cg.intMod(int_ty, lhs, rhs),
                     .max => try cg.intMax(int_ty, lhs, rhs),
@@ -1725,7 +1728,10 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             const raw_result = switch (tag) {
                 .add_wrap => try cg.intAdd(int_ty, lhs, rhs),
                 .sub_wrap => try cg.intSub(int_ty, lhs, rhs),
-                .mul_wrap => try cg.intMul(int_ty, lhs, rhs),
+                .mul_wrap => if (int_ty.bits >= 65 and int_ty.bits <= 128)
+                    try cg.intMul128(lhs, rhs, cg.isInt128HighZero(bin_op.lhs), cg.isInt128HighZero(bin_op.rhs))
+                else
+                    try cg.intMul(int_ty, lhs, rhs),
                 .shl => try cg.intShl(int_ty, lhs, rhs),
                 else => unreachable,
             };
@@ -2898,6 +2904,150 @@ fn intSub(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
     }
 }
 
+fn isInt128HighZero(cg: *CodeGen, ref: Air.Inst.Ref) bool {
+    return cg.isInt128HighZeroDepth(ref, 4);
+}
+
+fn isInt128HighZeroDepth(cg: *CodeGen, ref: Air.Inst.Ref, depth: u8) bool {
+    const zcu = cg.pt.zcu;
+    if (ref.toInterned()) |ip_index| {
+        const val: Value = .fromInterned(ip_index);
+        if (val.isUndef(zcu)) return false;
+        return val.getUnsignedInt(zcu) != null;
+    }
+    if (depth == 0) return false;
+    const inst_idx = ref.toIndex().?;
+    return switch (cg.air.instructions.items(.tag)[@backingInt(inst_idx)]) {
+        .int_cast => {
+            const ty_op = cg.air.instructions.items(.data)[@backingInt(inst_idx)].ty_op;
+            const src_int_ty: IntType = .fromType(cg, cg.typeOf(ty_op.operand));
+            return !src_int_ty.is_signed and src_int_ty.bits <= 64;
+        },
+        .bit_and => {
+            const bin_op = cg.air.instructions.items(.data)[@backingInt(inst_idx)].bin_op;
+            return cg.isInt128HighZeroDepth(bin_op.lhs, depth - 1) or
+                cg.isInt128HighZeroDepth(bin_op.rhs, depth - 1);
+        },
+        .shr, .shr_exact => {
+            const bin_op = cg.air.instructions.items(.data)[@backingInt(inst_idx)].bin_op;
+            const int_ty: IntType = .fromType(cg, cg.typeOfIndex(inst_idx));
+            if (int_ty.is_signed) return false;
+            if (bin_op.rhs.toInterned()) |rhs_ip| {
+                const rhs_val: Value = .fromInterned(rhs_ip);
+                if (!rhs_val.isUndef(zcu)) {
+                    if (rhs_val.getUnsignedInt(zcu)) |shift_amt| {
+                        if (shift_amt >= int_ty.bits -| 64) return true;
+                    }
+                }
+            }
+            return cg.isInt128HighZeroDepth(bin_op.lhs, depth - 1);
+        },
+        else => false,
+    };
+}
+
+fn intMul128(cg: *CodeGen, lhs: WValue, rhs: WValue, lhs_hi_zero: bool, rhs_hi_zero: bool) InnerError!WValue {
+    const result = try cg.allocStack(Type.u128);
+    const result_offset = result.memOffset();
+
+    var lhs_lo = try (try cg.load(lhs, .u64, .{})).toLocal(cg, Type.u64);
+    defer lhs_lo.free(cg);
+    var rhs_lo = try (try cg.load(rhs, .u64, .{})).toLocal(cg, Type.u64);
+    defer rhs_lo.free(cg);
+
+    try cg.emitMemBase(result);
+    try cg.emitWValue(lhs_lo);
+    try cg.emitWValue(rhs_lo);
+    try cg.addTag(.i64_mul);
+    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+
+    var u_lo = try cg.allocLocal(Type.u64);
+    defer u_lo.free(cg);
+    var v_lo_or_t = try cg.allocLocal(Type.u64);
+    defer v_lo_or_t.free(cg);
+    var u_hi = try cg.allocLocal(Type.u64);
+    defer u_hi.free(cg);
+    var v_hi = try cg.allocLocal(Type.u64);
+    defer v_hi.free(cg);
+
+    try cg.emitMemBase(result);
+
+    // u_lo = lhs_lo & 0xffffffff
+    try cg.emitWValue(lhs_lo);
+    try cg.addImm64(0xffffffff);
+    try cg.addTag(.i64_and);
+    try cg.addLocal(.local_tee, u_lo.local);
+
+    // v_lo = rhs_lo & 0xffffffff
+    try cg.emitWValue(rhs_lo);
+    try cg.addImm64(0xffffffff);
+    try cg.addTag(.i64_and);
+    try cg.addLocal(.local_tee, v_lo_or_t.local);
+
+    // w0 >> 32 = (u_lo * v_lo) >>_u 32
+    try cg.addTag(.i64_mul);
+    try cg.addImm64(32);
+    try cg.addTag(.i64_shr_u);
+
+    // u_hi = lhs_lo >>_u 32
+    try cg.emitWValue(lhs_lo);
+    try cg.addImm64(32);
+    try cg.addTag(.i64_shr_u);
+    try cg.addLocal(.local_tee, u_hi.local);
+
+    // t = (w0 >> 32) + (u_hi * v_lo)
+    try cg.addLocal(.local_get, v_lo_or_t.local);
+    try cg.addTag(.i64_mul);
+    try cg.addTag(.i64_add);
+    try cg.addLocal(.local_tee, v_lo_or_t.local);
+
+    // t & 0xffffffff
+    try cg.addImm64(0xffffffff);
+    try cg.addTag(.i64_and);
+
+    // v_hi = rhs_lo >>_u 32
+    try cg.emitWValue(rhs_lo);
+    try cg.addImm64(32);
+    try cg.addTag(.i64_shr_u);
+    try cg.addLocal(.local_tee, v_hi.local);
+
+    // w1 >> 32 = ((t & 0xffffffff) + (v_hi * u_lo)) >>_u 32
+    try cg.addLocal(.local_get, u_lo.local);
+    try cg.addTag(.i64_mul);
+    try cg.addTag(.i64_add);
+    try cg.addImm64(32);
+    try cg.addTag(.i64_shr_u);
+
+    // + (u_hi * v_hi)
+    try cg.addLocal(.local_get, u_hi.local);
+    try cg.addLocal(.local_get, v_hi.local);
+    try cg.addTag(.i64_mul);
+    try cg.addTag(.i64_add);
+
+    // + (t >>_u 32)
+    try cg.addLocal(.local_get, v_lo_or_t.local);
+    try cg.addImm64(32);
+    try cg.addTag(.i64_shr_u);
+    try cg.addTag(.i64_add);
+
+    if (!lhs_hi_zero) {
+        _ = try cg.load(lhs, .u64, .{ .offset = 8 });
+        try cg.emitWValue(rhs_lo);
+        try cg.addTag(.i64_mul);
+        try cg.addTag(.i64_add);
+    }
+
+    if (!rhs_hi_zero) {
+        _ = try cg.load(rhs, .u64, .{ .offset = 8 });
+        try cg.emitWValue(lhs_lo);
+        try cg.addTag(.i64_mul);
+        try cg.addTag(.i64_add);
+    }
+
+    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+    return result;
+}
+
 fn intMul(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue {
     switch (ty.bits) {
         0 => unreachable,
@@ -2913,7 +3063,7 @@ fn intMul(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
             try cg.addTag(.i64_mul);
             return .stack;
         },
-        65...128 => return cg.callIntrinsic(.__multi3, &.{ .i128_type, .i128_type }, Type.i128, &.{ lhs, rhs }),
+        65...128 => return cg.intMul128(lhs, rhs, false, false),
         else => {
             const result = try cg.allocInt(ty);
 
@@ -3418,7 +3568,109 @@ fn intShl(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
             try cg.addTag(.i64_shl);
             return .stack;
         },
-        65...128 => return cg.callIntrinsic(.__ashlti3, &.{ .i128_type, .i32_type }, Type.i128, &.{ lhs, rhs }),
+        65...128 => {
+            if (rhs == .imm32) {
+                const shift_amt: u32 = rhs.imm32;
+                const result = try cg.allocStack(Type.u128);
+                const result_offset = result.memOffset();
+                if (shift_amt == 0) {
+                    try cg.emitMemBase(result);
+                    _ = try cg.load(lhs, .u64, .{});
+                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+                    try cg.emitMemBase(result);
+                    _ = try cg.load(lhs, .u64, .{ .offset = 8 });
+                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                } else if (shift_amt < 64) {
+                    var lhs_lo = try (try cg.load(lhs, .u64, .{})).toLocal(cg, Type.u64);
+                    defer lhs_lo.free(cg);
+
+                    try cg.emitMemBase(result);
+                    try cg.emitWValue(lhs_lo);
+                    try cg.addImm64(shift_amt);
+                    try cg.addTag(.i64_shl);
+                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+
+                    try cg.emitMemBase(result);
+                    _ = try cg.load(lhs, .u64, .{ .offset = 8 });
+                    try cg.addImm64(shift_amt);
+                    try cg.addTag(.i64_shl);
+                    try cg.emitWValue(lhs_lo);
+                    try cg.addImm64(64 - shift_amt);
+                    try cg.addTag(.i64_shr_u);
+                    try cg.addTag(.i64_or);
+                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                } else if (shift_amt == 64) {
+                    try cg.store(result, .{ .imm64 = 0 }, .u64, .{});
+                    try cg.emitMemBase(result);
+                    _ = try cg.load(lhs, .u64, .{});
+                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                } else if (shift_amt < 128) {
+                    try cg.store(result, .{ .imm64 = 0 }, .u64, .{});
+                    try cg.emitMemBase(result);
+                    _ = try cg.load(lhs, .u64, .{});
+                    try cg.addImm64(shift_amt - 64);
+                    try cg.addTag(.i64_shl);
+                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                } else {
+                    try cg.store(result, .{ .imm64 = 0 }, .u64, .{});
+                    try cg.store(result, .{ .imm64 = 0 }, .u64, .{ .offset = 8 });
+                }
+                return result;
+            }
+
+            const result = try cg.allocStack(Type.u128);
+            const result_offset = result.memOffset();
+
+            const owns_s_i32 = rhs == .stack;
+            var s_i32 = try rhs.toLocal(cg, Type.u32);
+            defer if (owns_s_i32) s_i32.free(cg);
+
+            try cg.emitWValue(s_i32);
+            try cg.addTag(.i64_extend_i32_u);
+            var s_i64 = try (@as(WValue, .stack)).toLocal(cg, Type.u64);
+            defer s_i64.free(cg);
+
+            var lhs_lo = try (try cg.load(lhs, .u64, .{})).toLocal(cg, Type.u64);
+            defer lhs_lo.free(cg);
+
+            try cg.emitWValue(lhs_lo);
+            try cg.emitWValue(s_i64);
+            try cg.addTag(.i64_shl);
+            var shl_lo = try (@as(WValue, .stack)).toLocal(cg, Type.u64);
+            defer shl_lo.free(cg);
+
+            try cg.emitWValue(s_i32);
+            try cg.addImm32(64);
+            try cg.addTag(.i32_ge_u);
+            var ge_64 = try (@as(WValue, .stack)).toLocal(cg, Type.u32);
+            defer ge_64.free(cg);
+
+            try cg.emitMemBase(result);
+            try cg.addImm64(0);
+            try cg.emitWValue(shl_lo);
+            try cg.emitWValue(ge_64);
+            try cg.addTag(.select);
+            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+
+            try cg.emitMemBase(result);
+            try cg.emitWValue(shl_lo);
+            _ = try cg.load(lhs, .u64, .{ .offset = 8 });
+            try cg.emitWValue(s_i64);
+            try cg.addTag(.i64_shl);
+            try cg.emitWValue(lhs_lo);
+            try cg.addImm64(1);
+            try cg.addTag(.i64_shr_u);
+            try cg.addImm64(63);
+            try cg.emitWValue(s_i64);
+            try cg.addTag(.i64_sub);
+            try cg.addTag(.i64_shr_u);
+            try cg.addTag(.i64_or);
+            try cg.emitWValue(ge_64);
+            try cg.addTag(.select);
+            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+
+            return result;
+        },
         else => {
             const result = try cg.allocInt(ty);
 
@@ -3453,11 +3705,155 @@ fn intShr(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
             return .stack;
         },
         65...128 => {
-            if (ty.is_signed) {
-                return cg.callIntrinsic(.__ashrti3, &.{ .i128_type, .i32_type }, Type.i128, &.{ lhs, rhs });
-            } else {
-                return cg.callIntrinsic(.__lshrti3, &.{ .i128_type, .i32_type }, Type.i128, &.{ lhs, rhs });
+            const hi_shr_tag: Mir.Inst.Tag = if (ty.is_signed) .i64_shr_s else .i64_shr_u;
+            if (rhs == .imm32) {
+                const shift_amt: u32 = rhs.imm32;
+                const result = try cg.allocStack(Type.u128);
+                const result_offset = result.memOffset();
+                if (shift_amt == 0) {
+                    try cg.emitMemBase(result);
+                    _ = try cg.load(lhs, .u64, .{});
+                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+                    try cg.emitMemBase(result);
+                    _ = try cg.load(lhs, .u64, .{ .offset = 8 });
+                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                } else if (shift_amt < 64) {
+                    var lhs_hi = try (try cg.load(lhs, .u64, .{ .offset = 8 })).toLocal(cg, Type.u64);
+                    defer lhs_hi.free(cg);
+
+                    try cg.emitMemBase(result);
+                    _ = try cg.load(lhs, .u64, .{});
+                    try cg.addImm64(shift_amt);
+                    try cg.addTag(.i64_shr_u);
+                    try cg.emitWValue(lhs_hi);
+                    try cg.addImm64(64 - shift_amt);
+                    try cg.addTag(.i64_shl);
+                    try cg.addTag(.i64_or);
+                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+
+                    try cg.emitMemBase(result);
+                    try cg.emitWValue(lhs_hi);
+                    try cg.addImm64(shift_amt);
+                    try cg.addTag(hi_shr_tag);
+                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                } else if (shift_amt == 64) {
+                    if (ty.is_signed) {
+                        var lhs_hi = try (try cg.load(lhs, .u64, .{ .offset = 8 })).toLocal(cg, Type.u64);
+                        defer lhs_hi.free(cg);
+
+                        try cg.store(result, lhs_hi, .u64, .{});
+
+                        try cg.emitMemBase(result);
+                        try cg.emitWValue(lhs_hi);
+                        try cg.addImm64(63);
+                        try cg.addTag(.i64_shr_s);
+                        try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                    } else {
+                        try cg.emitMemBase(result);
+                        _ = try cg.load(lhs, .u64, .{ .offset = 8 });
+                        try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+                        try cg.store(result, .{ .imm64 = 0 }, .u64, .{ .offset = 8 });
+                    }
+                } else if (shift_amt < 128) {
+                    if (ty.is_signed) {
+                        var lhs_hi = try (try cg.load(lhs, .u64, .{ .offset = 8 })).toLocal(cg, Type.u64);
+                        defer lhs_hi.free(cg);
+
+                        try cg.emitMemBase(result);
+                        try cg.emitWValue(lhs_hi);
+                        try cg.addImm64(shift_amt - 64);
+                        try cg.addTag(.i64_shr_s);
+                        try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+
+                        try cg.emitMemBase(result);
+                        try cg.emitWValue(lhs_hi);
+                        try cg.addImm64(63);
+                        try cg.addTag(.i64_shr_s);
+                        try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                    } else {
+                        try cg.emitMemBase(result);
+                        _ = try cg.load(lhs, .u64, .{ .offset = 8 });
+                        try cg.addImm64(shift_amt - 64);
+                        try cg.addTag(.i64_shr_u);
+                        try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+                        try cg.store(result, .{ .imm64 = 0 }, .u64, .{ .offset = 8 });
+                    }
+                } else {
+                    if (ty.is_signed) {
+                        _ = try cg.load(lhs, .u64, .{ .offset = 8 });
+                        try cg.addImm64(63);
+                        try cg.addTag(.i64_shr_s);
+                        var sign_fill = try (@as(WValue, .stack)).toLocal(cg, Type.u64);
+                        defer sign_fill.free(cg);
+
+                        try cg.store(result, sign_fill, .u64, .{});
+                        try cg.store(result, sign_fill, .u64, .{ .offset = 8 });
+                    } else {
+                        try cg.store(result, .{ .imm64 = 0 }, .u64, .{});
+                        try cg.store(result, .{ .imm64 = 0 }, .u64, .{ .offset = 8 });
+                    }
+                }
+                return result;
             }
+
+            const result = try cg.allocStack(Type.u128);
+            const result_offset = result.memOffset();
+
+            const owns_s_i32 = rhs == .stack;
+            var s_i32 = try rhs.toLocal(cg, Type.u32);
+            defer if (owns_s_i32) s_i32.free(cg);
+
+            try cg.emitWValue(s_i32);
+            try cg.addTag(.i64_extend_i32_u);
+            var s_i64 = try (@as(WValue, .stack)).toLocal(cg, Type.u64);
+            defer s_i64.free(cg);
+
+            var lhs_hi = try (try cg.load(lhs, .u64, .{ .offset = 8 })).toLocal(cg, Type.u64);
+            defer lhs_hi.free(cg);
+
+            try cg.emitWValue(lhs_hi);
+            try cg.emitWValue(s_i64);
+            try cg.addTag(hi_shr_tag);
+            var shr_hi = try (@as(WValue, .stack)).toLocal(cg, Type.u64);
+            defer shr_hi.free(cg);
+
+            try cg.emitWValue(s_i32);
+            try cg.addImm32(64);
+            try cg.addTag(.i32_ge_u);
+            var ge_64 = try (@as(WValue, .stack)).toLocal(cg, Type.u32);
+            defer ge_64.free(cg);
+
+            try cg.emitMemBase(result);
+            try cg.emitWValue(shr_hi);
+            _ = try cg.load(lhs, .u64, .{});
+            try cg.emitWValue(s_i64);
+            try cg.addTag(.i64_shr_u);
+            try cg.emitWValue(lhs_hi);
+            try cg.addImm64(1);
+            try cg.addTag(.i64_shl);
+            try cg.addImm64(63);
+            try cg.emitWValue(s_i64);
+            try cg.addTag(.i64_sub);
+            try cg.addTag(.i64_shl);
+            try cg.addTag(.i64_or);
+            try cg.emitWValue(ge_64);
+            try cg.addTag(.select);
+            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+
+            try cg.emitMemBase(result);
+            if (ty.is_signed) {
+                try cg.emitWValue(lhs_hi);
+                try cg.addImm64(63);
+                try cg.addTag(.i64_shr_s);
+            } else {
+                try cg.addImm64(0);
+            }
+            try cg.emitWValue(shr_hi);
+            try cg.emitWValue(ge_64);
+            try cg.addTag(.select);
+            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+
+            return result;
         },
         else => {
             const result = try cg.allocInt(ty);
@@ -4635,8 +5031,56 @@ fn floatMod(cg: *CodeGen, ty: FloatType, lhs: WValue, rhs: WValue) InnerError!WV
 fn floatMax(cg: *CodeGen, ty: FloatType, lhs: WValue, rhs: WValue) InnerError!WValue {
     switch (ty) {
         .f16 => return cg.callIntrinsic(.__fmaxh, &.{ .f16_type, .f16_type }, Type.f16, &.{ lhs, rhs }),
-        .f32 => return cg.callIntrinsic(.fmaxf, &.{ .f32_type, .f32_type }, Type.f32, &.{ lhs, rhs }),
-        .f64 => return cg.callIntrinsic(.fmax, &.{ .f64_type, .f64_type }, Type.f64, &.{ lhs, rhs }),
+        .f32, .f64 => {
+            const elem_ty: Type = switch (ty) {
+                .f32 => .f32,
+                .f64 => .f64,
+                else => unreachable,
+            };
+            var lhs_val = try lhs.toLocal(cg, elem_ty);
+            defer if (lhs == .stack) lhs_val.free(cg);
+            var rhs_val = try rhs.toLocal(cg, elem_ty);
+            defer if (rhs == .stack) rhs_val.free(cg);
+
+            const lhs_non_nan = switch (lhs_val) {
+                .float32 => |v| !std.math.isNan(v),
+                .float64 => |v| !std.math.isNan(v),
+                else => false,
+            };
+            const rhs_non_nan = switch (rhs_val) {
+                .float32 => |v| !std.math.isNan(v),
+                .float64 => |v| !std.math.isNan(v),
+                else => false,
+            };
+
+            if (rhs_non_nan) {
+                try cg.emitWValue(lhs_val);
+                try cg.emitWValue(rhs_val);
+                try cg.emitWValue(lhs_val);
+                try cg.emitWValue(rhs_val);
+                try cg.addTag(if (ty == .f32) .f32_gt else .f64_gt);
+                try cg.addTag(.select);
+            } else if (lhs_non_nan) {
+                try cg.emitWValue(rhs_val);
+                try cg.emitWValue(lhs_val);
+                try cg.emitWValue(rhs_val);
+                try cg.emitWValue(lhs_val);
+                try cg.addTag(if (ty == .f32) .f32_ge else .f64_ge);
+                try cg.addTag(.select);
+            } else {
+                try cg.emitWValue(lhs_val);
+                try cg.emitWValue(rhs_val);
+                try cg.emitWValue(lhs_val);
+                try cg.emitWValue(rhs_val);
+                try cg.addTag(if (ty == .f32) .f32_gt else .f64_gt);
+                try cg.emitWValue(rhs_val);
+                try cg.emitWValue(rhs_val);
+                try cg.addTag(if (ty == .f32) .f32_ne else .f64_ne);
+                try cg.addTag(.i32_or);
+                try cg.addTag(.select);
+            }
+            return .stack;
+        },
         .f80 => return cg.callIntrinsic(.__fmaxx, &.{ .f80_type, .f80_type }, Type.f80, &.{ lhs, rhs }),
         .f128 => return cg.callIntrinsic(.fmaxf128, &.{ .f128_type, .f128_type }, Type.f128, &.{ lhs, rhs }),
     }
@@ -4646,8 +5090,56 @@ fn floatMax(cg: *CodeGen, ty: FloatType, lhs: WValue, rhs: WValue) InnerError!WV
 fn floatMin(cg: *CodeGen, ty: FloatType, lhs: WValue, rhs: WValue) InnerError!WValue {
     switch (ty) {
         .f16 => return cg.callIntrinsic(.__fminh, &.{ .f16_type, .f16_type }, Type.f16, &.{ lhs, rhs }),
-        .f32 => return cg.callIntrinsic(.fminf, &.{ .f32_type, .f32_type }, Type.f32, &.{ lhs, rhs }),
-        .f64 => return cg.callIntrinsic(.fmin, &.{ .f64_type, .f64_type }, Type.f64, &.{ lhs, rhs }),
+        .f32, .f64 => {
+            const elem_ty: Type = switch (ty) {
+                .f32 => .f32,
+                .f64 => .f64,
+                else => unreachable,
+            };
+            var lhs_val = try lhs.toLocal(cg, elem_ty);
+            defer if (lhs == .stack) lhs_val.free(cg);
+            var rhs_val = try rhs.toLocal(cg, elem_ty);
+            defer if (rhs == .stack) rhs_val.free(cg);
+
+            const lhs_non_nan = switch (lhs_val) {
+                .float32 => |v| !std.math.isNan(v),
+                .float64 => |v| !std.math.isNan(v),
+                else => false,
+            };
+            const rhs_non_nan = switch (rhs_val) {
+                .float32 => |v| !std.math.isNan(v),
+                .float64 => |v| !std.math.isNan(v),
+                else => false,
+            };
+
+            if (rhs_non_nan) {
+                try cg.emitWValue(lhs_val);
+                try cg.emitWValue(rhs_val);
+                try cg.emitWValue(lhs_val);
+                try cg.emitWValue(rhs_val);
+                try cg.addTag(if (ty == .f32) .f32_lt else .f64_lt);
+                try cg.addTag(.select);
+            } else if (lhs_non_nan) {
+                try cg.emitWValue(rhs_val);
+                try cg.emitWValue(lhs_val);
+                try cg.emitWValue(rhs_val);
+                try cg.emitWValue(lhs_val);
+                try cg.addTag(if (ty == .f32) .f32_le else .f64_le);
+                try cg.addTag(.select);
+            } else {
+                try cg.emitWValue(lhs_val);
+                try cg.emitWValue(rhs_val);
+                try cg.emitWValue(lhs_val);
+                try cg.emitWValue(rhs_val);
+                try cg.addTag(if (ty == .f32) .f32_lt else .f64_lt);
+                try cg.emitWValue(rhs_val);
+                try cg.emitWValue(rhs_val);
+                try cg.addTag(if (ty == .f32) .f32_ne else .f64_ne);
+                try cg.addTag(.i32_or);
+                try cg.addTag(.select);
+            }
+            return .stack;
+        },
         .f80 => return cg.callIntrinsic(.__fminx, &.{ .f80_type, .f80_type }, Type.f80, &.{ lhs, rhs }),
         .f128 => return cg.callIntrinsic(.fminf128, &.{ .f128_type, .f128_type }, Type.f128, &.{ lhs, rhs }),
     }

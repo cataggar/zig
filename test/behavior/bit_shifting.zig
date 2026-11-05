@@ -185,3 +185,108 @@ test "Saturating Shift Left" {
     try expectEqual(170141183460469231731687303715884105727, S.shlSat(@as(i128, 0x2fe6bc5448c55ce18252e2c9d4477750), 0x31));
     try expectEqual(0, S.shlSat(@as(i128, 0), 127));
 }
+
+test "128-bit and 72-bit shifts with constant and runtime shift amounts" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+
+    const S = struct {
+        fn checkShifts(comptime T: type, comptime val: T, comptime shifts: anytype) !void {
+            var rt_val: T = val;
+            _ = &rt_val;
+            inline for (shifts) |s| {
+                const expected_shl: T = comptime (val << s);
+                const expected_shr: T = comptime (val >> s);
+
+                // Constant shift amount with runtime lhs
+                try expectEqual(expected_shl, rt_val << s);
+                try expectEqual(expected_shr, rt_val >> s);
+
+                // Runtime shift amount with runtime lhs
+                var rt_s: std.math.Log2Int(T) = s;
+                _ = &rt_s;
+                try expectEqual(expected_shl, rt_val << rt_s);
+                try expectEqual(expected_shr, rt_val >> rt_s);
+            }
+        }
+
+        fn doTheTest() !void {
+            @setEvalBranchQuota(10000);
+            const shifts_128 = .{ 0, 1, 31, 32, 63, 64, 65, 96, 127 };
+            const shifts_72 = .{ 0, 1, 31, 32, 63, 64, 65, 71 };
+
+            const u128_vals = .{
+                @as(u128, 0),
+                @as(u128, 1),
+                @as(u128, 0x01234567_89abcdef_fedcba98_76543211),
+                @as(u128, 0xfedcba98_76543210_01234567_89abcdef),
+                std.math.maxInt(u128),
+            };
+            inline for (u128_vals) |v| {
+                try checkShifts(u128, v, shifts_128);
+            }
+
+            const i128_vals = .{
+                @as(i128, 0),
+                @as(i128, 1),
+                @as(i128, -1),
+                @as(i128, 0x01234567_89abcdef_fedcba98_76543211),
+                @as(i128, -0x01234567_89abcdef_fedcba98_76543211),
+                std.math.minInt(i128),
+                std.math.maxInt(i128),
+            };
+            inline for (i128_vals) |v| {
+                try checkShifts(i128, v, shifts_128);
+            }
+
+            const u72_vals = .{
+                @as(u72, 0),
+                @as(u72, 1),
+                @as(u72, 0xa5_fedcba98_76543211),
+                std.math.maxInt(u72),
+            };
+            inline for (u72_vals) |v| {
+                try checkShifts(u72, v, shifts_72);
+            }
+
+            const i72_vals = .{
+                @as(i72, 0),
+                @as(i72, 1),
+                @as(i72, -1),
+                @as(i72, 0x25_fedcba98_76543211),
+                @as(i72, -0x25_fedcba98_76543211),
+                std.math.minInt(i72),
+                std.math.maxInt(i72),
+            };
+            inline for (i72_vals) |v| {
+                try checkShifts(i72, v, shifts_72);
+            }
+
+            // Explicit cross-limb carry and sign-extension checks
+            var u: u128 = 0x01234567_89abcdef_fedcba98_76543210;
+            var neg: i128 = -0x01234567_89abcdef_fedcba98_76543210;
+            var s0: u7 = 0;
+            var s1: u7 = 1;
+            var s64: u7 = 64;
+            var s65: u7 = 65;
+            var s127: u7 = 127;
+            _ = .{ &u, &neg, &s0, &s1, &s64, &s65, &s127 };
+
+            try expectEqual(@as(u128, 0x01234567_89abcdef_fedcba98_76543210), u << s0);
+            try expectEqual(@as(u128, 0x02468acf_13579bdf_fdb97530_eca86420), u << s1);
+            try expectEqual(@as(u128, 0xfedcba98_76543210_00000000_00000000), u << s64);
+            try expectEqual(@as(u128, 0xfdb97530_eca86420_00000000_00000000), u << s65);
+            try expectEqual(@as(u128, 0x0091a2b3_c4d5e6f7_ff6e5d4c_3b2a1908), u >> s1);
+            try expectEqual(@as(u128, 0x00000000_00000000_01234567_89abcdef), u >> s64);
+            try expectEqual(@as(u128, 0x00000000_00000000_0091a2b3_c4d5e6f7), u >> s65);
+            try expectEqual(@as(i128, -1), neg >> s127);
+            try expectEqual(@as(i128, -1), neg >> 127);
+        }
+    };
+
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}

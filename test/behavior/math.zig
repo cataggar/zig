@@ -877,25 +877,118 @@ test "128-bit multiplication" {
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
 
-    {
-        var a: i128 = 3;
-        var b: i128 = 2;
-        var c = a * b;
-        try expect(c == 6);
+    const S = struct {
+        fn mum(a: u64, b: u64) u64 {
+            const prod = @as(u128, a) *% b;
+            return @as(u64, @truncate(prod)) ^ @as(u64, @truncate(prod >> 64));
+        }
 
-        a = -3;
-        b = 2;
-        c = a * b;
-        try expect(c == -6);
-    }
+        fn doTheTest() !void {
+            {
+                var a: i128 = 3;
+                var b: i128 = 2;
+                var c = a * b;
+                try expect(c == 6);
 
-    {
-        var a: u128 = 0xffffffffffffffff;
-        var b: u128 = 100;
-        _ = .{ &a, &b };
-        const c = a * b;
-        try expect(c == 0x63ffffffffffffff9c);
-    }
+                a = -3;
+                b = 2;
+                c = a * b;
+                try expect(c == -6);
+            }
+
+            {
+                var a: u128 = 0xffffffffffffffff;
+                var b: u128 = 100;
+                _ = .{ &a, &b };
+                const c = a * b;
+                try expect(c == 0x63ffffffffffffff9c);
+            }
+
+            // 64x64->128 unsigned widening multiply with high bits set
+            {
+                var a: u64 = 0xffffffff_ffffffff;
+                var b: u64 = 0xffffffff_ffffffff;
+                _ = .{ &a, &b };
+                try expectEqual(@as(u128, 0xffffffff_fffffffe_00000000_00000001), @as(u128, a) * b);
+                try expectEqual(@as(u128, 0xffffffff_fffffffe_00000000_00000001), @as(u128, a) *% b);
+                try expectEqual(.{ @as(u128, 0xffffffff_fffffffe_00000000_00000001), @as(u1, 0) }, @mulWithOverflow(@as(u128, a), b));
+                try expectEqual(@as(u64, 0xffffffff_ffffffff), mum(a, b));
+
+                var c: u64 = 0x80000000_00000001;
+                var d: u64 = 0x80000000_00000002;
+                _ = .{ &c, &d };
+                try expectEqual(@as(u128, 0x40000000_00000001_80000000_00000002), @as(u128, c) * d);
+                try expectEqual(@as(u128, 0x40000000_00000001_80000000_00000002), @as(u128, c) *% d);
+                try expectEqual(.{ @as(u128, 0x40000000_00000001_80000000_00000002), @as(u1, 0) }, @mulWithOverflow(@as(u128, c), d));
+                try expectEqual(@as(u64, 0xc0000000_00000003), mum(c, d));
+            }
+
+            // Full 128x128->128 multiply where both operands have non-zero upper 64-bit limbs
+            {
+                var a: u128 = 0x00000000_00000003_80000000_00000001;
+                var b: u128 = 0x00000000_00000007_80000000_00000002;
+                _ = .{ &a, &b };
+                try expectEqual(@as(u128, 0x40000000_0000000e_80000000_00000002), a *% b);
+                try expectEqual(.{ @as(u128, 0x40000000_0000000e_80000000_00000002), @as(u1, 1) }, @mulWithOverflow(a, b));
+
+                var sa: i128 = @bitCast(a);
+                var sb: i128 = @bitCast(b);
+                _ = .{ &sa, &sb };
+                try expectEqual(@as(i128, @bitCast(@as(u128, 0x40000000_0000000e_80000000_00000002))), sa *% sb);
+                try expectEqual(.{ @as(i128, @bitCast(@as(u128, 0x40000000_0000000e_80000000_00000002))), @as(u1, 1) }, @mulWithOverflow(sa, sb));
+
+                var neg_a: i128 = -0x00000001_00000000_00000003;
+                var pos_b: i128 = 5;
+                _ = .{ &neg_a, &pos_b };
+                try expectEqual(@as(i128, -0x00000005_00000000_0000000f), neg_a * pos_b);
+                try expectEqual(.{ @as(i128, -0x00000005_00000000_0000000f), @as(u1, 0) }, @mulWithOverflow(neg_a, pos_b));
+            }
+
+            // Single-sided widening multiply where only lhs or only rhs is a widened u64
+            {
+                var a64: u64 = 0x80000000_00000001;
+                var b128: u128 = 0x00000000_00000007_80000000_00000002;
+                _ = .{ &a64, &b128 };
+                try expectEqual(@as(u128, 0xc0000000_00000008_80000000_00000002), @as(u128, a64) *% b128);
+                try expectEqual(@as(u128, 0xc0000000_00000008_80000000_00000002), b128 *% @as(u128, a64));
+                try expectEqual(@as(u128, 0xc0000000_00000008_80000000_00000002), @as(u128, a64) *% @as(u128, 0x00000000_00000007_80000000_00000002));
+                try expectEqual(@as(u128, 0xc0000000_00000008_80000000_00000002), @as(u128, 0x00000000_00000007_80000000_00000002) *% @as(u128, a64));
+                try expectEqual(.{ @as(u128, 0xc0000000_00000008_80000000_00000002), @as(u1, 1) }, @mulWithOverflow(@as(u128, a64), b128));
+                try expectEqual(.{ @as(u128, 0xc0000000_00000008_80000000_00000002), @as(u1, 1) }, @mulWithOverflow(b128, @as(u128, a64)));
+
+                var small64: u64 = 3;
+                _ = &small64;
+                try expectEqual(@as(u128, 0x00000000_00000016_80000000_00000006), @as(u128, small64) * b128);
+                try expectEqual(@as(u128, 0x00000000_00000016_80000000_00000006), b128 * @as(u128, small64));
+                try expectEqual(.{ @as(u128, 0x00000000_00000016_80000000_00000006), @as(u1, 0) }, @mulWithOverflow(@as(u128, small64), b128));
+                try expectEqual(.{ @as(u128, 0x00000000_00000016_80000000_00000006), @as(u1, 0) }, @mulWithOverflow(b128, @as(u128, small64)));
+
+                var neg128: i128 = -7;
+                _ = &neg128;
+                try expectEqual(@as(i128, -0x00000003_80000000_00000007), @as(i128, a64) *% neg128);
+                try expectEqual(@as(i128, -0x00000003_80000000_00000007), neg128 *% @as(i128, a64));
+            }
+
+            // Unchecked .mul (Safety off) and odd-width 72-bit multiplies
+            {
+                @setRuntimeSafety(false);
+                var a64: u64 = 0xffffffff_ffffffff;
+                var b64: u64 = 0xffffffff_ffffffff;
+                var u72_a: u72 = 0x12_ffffffff_ffffffff;
+                var u72_b: u72 = 3;
+                var i72_neg: i72 = -5;
+                _ = .{ &a64, &b64, &u72_a, &u72_b, &i72_neg };
+                try expectEqual(@as(u128, 0xffffffff_fffffffe_00000000_00000001), @as(u128, a64) * b64);
+                try expectEqual(@as(u72, 0x38_ffffffff_fffffffd), u72_a *% u72_b);
+                try expectEqual(@as(u72, 0x38_ffffffff_fffffffd), u72_a * u72_b);
+                try expectEqual(@as(i72, -15), @as(i72, @intCast(u72_b)) *% i72_neg);
+                try expectEqual(@as(i72, -15), @as(i72, @intCast(u72_b)) * i72_neg);
+            }
+        }
+    };
+
+    try S.doTheTest();
+    try comptime S.doTheTest();
 }
 
 fn testAddWithOverflow(comptime T: type, a: T, b: T, add: T, bit: u1) !void {
