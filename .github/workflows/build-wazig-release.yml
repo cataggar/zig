@@ -302,6 +302,7 @@ jobs:
           }
           EOF
             "$SHIM_BIN_DIR/${FLAVOR}" translate-c \
+              -cflags -ffreestanding -- \
               smoke.c > smoke_translated.zig
             grep -q 'pub export fn smoke_add' smoke_translated.zig
             "$SHIM_BIN_DIR/${FLAVOR}" translate-c \
