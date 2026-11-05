@@ -132,6 +132,8 @@ test "@min/max for floats" {
                 _ = &nan;
                 try expectEqual(y, @max(nan, y));
                 try expectEqual(y, @max(y, nan));
+                try expectEqual(y, @min(nan, y));
+                try expectEqual(y, @min(y, nan));
             }
         }
     };
@@ -141,6 +143,99 @@ test "@min/max for floats" {
         try comptime S.doTheTest(T);
     }
     try comptime S.doTheTest(comptime_float);
+}
+
+test "@min/@max f32 and f64 NaN propagation and constant operands" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+
+    const S = struct {
+        fn maxRhsZero(comptime T: type, x: T) T {
+            return @max(x, 0.0);
+        }
+        fn minRhsOne(comptime T: type, x: T) T {
+            return @min(x, 1.0);
+        }
+        fn maxLhsZero(comptime T: type, x: T) T {
+            return @max(@as(T, 0.0), x);
+        }
+        fn minLhsOne(comptime T: type, x: T) T {
+            return @min(@as(T, 1.0), x);
+        }
+
+        fn doTheTest(comptime T: type) !void {
+            const nan_const: T = std.math.nan(T);
+            const pos_inf_const: T = std.math.inf(T);
+            const neg_inf_const: T = -std.math.inf(T);
+
+            var neg: T = -2.5;
+            var pos: T = 2.5;
+            var neg_inf: T = neg_inf_const;
+            var pos_inf: T = pos_inf_const;
+            var nan1: T = std.math.nan(T);
+            var nan2: T = std.math.nan(T);
+            _ = .{ &neg, &pos, &neg_inf, &pos_inf, &nan1, &nan2 };
+
+            // Runtime lhs and runtime rhs with NaN
+            try expectEqual(neg, @max(nan1, neg));
+            try expectEqual(neg, @max(neg, nan1));
+            try expectEqual(pos, @max(nan1, pos));
+            try expectEqual(pos, @max(pos, nan1));
+            try expectEqual(neg, @min(nan1, neg));
+            try expectEqual(neg, @min(neg, nan1));
+            try expectEqual(pos, @min(nan1, pos));
+            try expectEqual(pos, @min(pos, nan1));
+            try expect(std.math.isNan(@max(nan1, nan2)));
+            try expect(std.math.isNan(@min(nan1, nan2)));
+
+            // Runtime lhs and comptime non-NaN constant rhs
+            try expectEqual(@as(T, 0.0), maxRhsZero(T, neg));
+            try expectEqual(pos, maxRhsZero(T, pos));
+            try expectEqual(@as(T, 0.0), maxRhsZero(T, neg_inf));
+            try expectEqual(pos_inf_const, maxRhsZero(T, pos_inf));
+            try expectEqual(@as(T, 0.0), maxRhsZero(T, nan1));
+
+            try expectEqual(neg, minRhsOne(T, neg));
+            try expectEqual(@as(T, 1.0), minRhsOne(T, pos));
+            try expectEqual(neg_inf_const, minRhsOne(T, neg_inf));
+            try expectEqual(@as(T, 1.0), minRhsOne(T, pos_inf));
+            try expectEqual(@as(T, 1.0), minRhsOne(T, nan1));
+
+            // Comptime non-NaN constant lhs and runtime rhs
+            try expectEqual(@as(T, 0.0), maxLhsZero(T, neg));
+            try expectEqual(pos, maxLhsZero(T, pos));
+            try expectEqual(@as(T, 0.0), maxLhsZero(T, neg_inf));
+            try expectEqual(pos_inf_const, maxLhsZero(T, pos_inf));
+            try expectEqual(@as(T, 0.0), maxLhsZero(T, nan1));
+
+            try expectEqual(neg, minLhsOne(T, neg));
+            try expectEqual(@as(T, 1.0), minLhsOne(T, pos));
+            try expectEqual(neg_inf_const, minLhsOne(T, neg_inf));
+            try expectEqual(@as(T, 1.0), minLhsOne(T, pos_inf));
+            try expectEqual(@as(T, 1.0), minLhsOne(T, nan1));
+
+            // Comptime NaN constant with runtime float
+            try expectEqual(neg, @max(nan_const, neg));
+            try expectEqual(neg, @max(neg, nan_const));
+            try expectEqual(pos, @max(nan_const, pos));
+            try expectEqual(pos, @max(pos, nan_const));
+            try expectEqual(neg, @min(nan_const, neg));
+            try expectEqual(neg, @min(neg, nan_const));
+            try expectEqual(pos, @min(nan_const, pos));
+            try expectEqual(pos, @min(pos, nan_const));
+            try expect(std.math.isNan(@max(nan_const, nan1)));
+            try expect(std.math.isNan(@max(nan1, nan_const)));
+            try expect(std.math.isNan(@min(nan_const, nan1)));
+            try expect(std.math.isNan(@min(nan1, nan_const)));
+        }
+    };
+
+    inline for (.{ f32, f64 }) |T| {
+        try S.doTheTest(T);
+        try comptime S.doTheTest(T);
+    }
 }
 
 test "@min/@max on lazy values" {
