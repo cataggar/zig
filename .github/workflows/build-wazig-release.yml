@@ -272,6 +272,22 @@ jobs:
               echo "ERROR: Expected invalid --zig-lib-dir override to fail" >&2
               exit 1
             fi
+
+            # Smoke test: translate-c in-process on a C header/source
+            cat > smoke.c <<'EOF'
+          #include <stdint.h>
+          int32_t smoke_add(int32_t a, int32_t b) {
+              return a + b;
+          }
+          EOF
+            "$SHIM_BIN_DIR/${FLAVOR}" translate-c \
+              smoke.c > smoke_translated.zig
+            grep -q 'pub export fn smoke_add' smoke_translated.zig
+            "$SHIM_BIN_DIR/${FLAVOR}" translate-c \
+              -lc \
+              -target wasm32-wasi \
+              smoke.c > smoke_translated_libc.zig
+            grep -q 'pub export fn smoke_add' smoke_translated_libc.zig
           )
           rm -rf "$RUNNER_TEMP/extracted ${FLAVOR}" "$SMOKE_DIR"
 

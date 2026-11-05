@@ -8,8 +8,7 @@ const Io = std.Io;
 const PkgConfig = std.zig.PkgConfig;
 
 const aro = @import("aro");
-const compiler_util = @import("../util.zig");
-const build_options = @import("build_options");
+const ErrorBundle = std.zig.ErrorBundle;
 
 const Translator = @import("Translator.zig");
 
@@ -18,7 +17,9 @@ pub fn main(init: process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
     const environ_map = init.environ_map;
-    const args = try init.minimal.args.toSlice(arena);
+    const raw_args = try init.minimal.args.toSlice(arena);
+    const args = try arena.alloc([]const u8, raw_args.len);
+    for (raw_args, args) |raw_arg, *arg| arg.* = raw_arg;
 
     var zig_integration = false;
     if (args.len > 1 and std.mem.eql(u8, args[1], "--zig-integration")) {
@@ -74,8 +75,97 @@ pub fn main(init: process.Init) !void {
     return process.cleanExit(io);
 }
 
+pub fn translateInProcess(
+    gpa: Allocator,
+    arena: Allocator,
+    io: Io,
+    argv: []const []const u8,
+    environ_map: *const process.Environ.Map,
+    capture: ?*[]u8,
+) !void {
+    const args = try arena.alloc([]const u8, argv.len + 1);
+    args[0] = "translate-c";
+    @memcpy(args[1..], argv);
+
+    const zig_integration = args.len > 1 and std.mem.eql(u8, args[1], "--zig-integration");
+
+    const NO_COLOR = std.zig.EnvVar.NO_COLOR.isSet(environ_map);
+    const CLICOLOR_FORCE = std.zig.EnvVar.CLICOLOR_FORCE.isSet(environ_map);
+
+    var stderr_buf: [1024]u8 = undefined;
+    var stderr = Io.File.stderr().writer(io, &stderr_buf);
+    var diagnostics: aro.Diagnostics = switch (zig_integration) {
+        false => .{ .output = .{ .to_writer = .{
+            .mode = Io.Terminal.Mode.detect(io, stderr.file, NO_COLOR, CLICOLOR_FORCE) catch .no_color,
+            .writer = &stderr.interface,
+        } } },
+        true => .{ .output = .{ .to_list = .{ .arena = .init(gpa) } } },
+    };
+    defer diagnostics.deinit();
+
+    var comp = try aro.Compilation.init(.{
+        .gpa = gpa,
+        .arena = arena,
+        .io = io,
+        .diagnostics = &diagnostics,
+        .environ_map = environ_map,
+    });
+    defer comp.deinit();
+
+    var driver: aro.Driver = .{ .comp = &comp, .diagnostics = &diagnostics, .aro_name = args[0] };
+    defer driver.deinit();
+
+    var toolchain: aro.Toolchain = .{ .driver = &driver };
+    defer toolchain.deinit();
+
+    var stdout_buf: [512]u8 = undefined;
+    var stdout = Io.File.stdout().writer(io, &stdout_buf);
+    translate(&driver, &toolchain, environ_map, &stdout.interface, args, zig_integration) catch |err| switch (err) {
+        error.FatalError => if (zig_integration) {
+            try serveOrCaptureErrorBundle(arena, io, &diagnostics, capture);
+            return;
+        } else {
+            process.exit(1);
+        },
+        error.WriteFailed => return stdout.err.?,
+        else => |e| return e,
+    };
+    if (comp.diagnostics.errors != 0) {
+        if (zig_integration) {
+            try serveOrCaptureErrorBundle(arena, io, &diagnostics, capture);
+            return;
+        }
+        process.exit(1);
+    }
+    if (capture) |cap| cap.* = &.{};
+}
+
+fn serveOrCaptureErrorBundle(
+    arena: std.mem.Allocator,
+    io: Io,
+    diagnostics: *const aro.Diagnostics,
+    capture: ?*[]u8,
+) !void {
+    if (capture) |cap| {
+        const error_bundle = try aroDiagnosticsToErrorBundle(
+            diagnostics,
+            arena,
+            "translation failure",
+        );
+        var aw: Io.Writer.Allocating = .init(arena);
+        var server: std.zig.Server = .{
+            .out = &aw.writer,
+            .in = undefined,
+        };
+        try server.serveErrorBundle(.error_bundle, error_bundle);
+        cap.* = try aw.toOwnedSlice();
+    } else {
+        try serveErrorBundle(arena, io, diagnostics);
+    }
+}
+
 fn serveErrorBundle(arena: std.mem.Allocator, io: Io, diagnostics: *const aro.Diagnostics) !void {
-    const error_bundle = try compiler_util.aroDiagnosticsToErrorBundle(
+    const error_bundle = try aroDiagnosticsToErrorBundle(
         diagnostics,
         arena,
         "translation failure",
@@ -87,6 +177,82 @@ fn serveErrorBundle(arena: std.mem.Allocator, io: Io, diagnostics: *const aro.Di
         .in = undefined,
     };
     try server.serveErrorBundle(.error_bundle, error_bundle);
+}
+
+fn aroDiagnosticsToErrorBundle(
+    d: *const aro.Diagnostics,
+    gpa: std.mem.Allocator,
+    fail_msg: ?[]const u8,
+) !ErrorBundle {
+    @branchHint(.cold);
+
+    var bundle: ErrorBundle.Wip = try .init(gpa);
+    errdefer bundle.deinit();
+
+    if (fail_msg) |msg| {
+        try bundle.addRootErrorMessage(.{
+            .msg = try bundle.addString(msg),
+        });
+    }
+
+    var cur_err: ?ErrorBundle.ErrorMessage = null;
+    var cur_notes: std.ArrayList(ErrorBundle.ErrorMessage) = .empty;
+    defer cur_notes.deinit(gpa);
+    for (d.output.to_list.messages.items) |msg| {
+        switch (msg.kind) {
+            .off, .warning => {
+                if (cur_err) |err| {
+                    try bundle.addRootErrorMessageWithNotes(err, cur_notes.items);
+                    cur_err = null;
+                }
+                cur_notes.clearRetainingCapacity();
+                continue;
+            },
+            .note => if (cur_err == null) continue,
+            .@"fatal error", .@"error" => {},
+        }
+
+        const src_loc = src_loc: {
+            if (msg.location) |location| {
+                break :src_loc try bundle.addSourceLocation(.{
+                    .src_path = try bundle.addString(location.path),
+                    .line = location.line_no - 1,
+                    .column = location.col - 1,
+                    .span_start = location.width,
+                    .span_main = location.width,
+                    .span_end = location.width,
+                    .source_line = try bundle.addString(location.line),
+                });
+            }
+            break :src_loc ErrorBundle.SourceLocationIndex.none;
+        };
+
+        switch (msg.kind) {
+            .@"fatal error", .@"error" => {
+                if (cur_err) |err| {
+                    try bundle.addRootErrorMessageWithNotes(err, cur_notes.items);
+                }
+                cur_err = .{
+                    .msg = try bundle.addString(msg.text),
+                    .src_loc = src_loc,
+                };
+                cur_notes.clearRetainingCapacity();
+            },
+            .note => {
+                cur_err.?.notes_len += 1;
+                try cur_notes.append(gpa, .{
+                    .msg = try bundle.addString(msg.text),
+                    .src_loc = src_loc,
+                });
+            },
+            .off, .warning => unreachable,
+        }
+    }
+    if (cur_err) |err| {
+        try bundle.addRootErrorMessageWithNotes(err, cur_notes.items);
+    }
+
+    return try bundle.toOwnedBundle("");
 }
 
 pub const usage =
@@ -120,7 +286,7 @@ fn translate(
     tc: *aro.Toolchain,
     environ_map: *const process.Environ.Map,
     stdout: *Io.Writer,
-    args: []const [:0]const u8,
+    args: []const []const u8,
     zig_integration: bool,
 ) !void {
     const arena = d.comp.arena;
@@ -393,18 +559,24 @@ fn translate(
 
     var opt_pc: ?PkgConfig = null;
     if (any_want_pkg_conf or any_force_pkg_conf) {
-        const pkg_config_exe = PkgConfig.exe(environ_map);
-        if (process.run(arena, io, .{
-            .argv = &.{ pkg_config_exe, "--list-all" },
-            .environ_map = environ_map,
-        })) |result| {
-            if (result.term.success()) {
-                opt_pc = try PkgConfig.init(arena, result.stdout, null);
-            } else if (any_force_pkg_conf) {
-                fatal("{s} {f}", .{ pkg_config_exe, result.term });
+        if (!process.can_spawn) {
+            if (any_force_pkg_conf) {
+                fatal("pkg-config cannot be executed: target does not support spawning a child process", .{});
             }
-        } else |err| {
-            if (any_force_pkg_conf) fatal("{s}: failed running --list-all: {t}", .{ pkg_config_exe, err });
+        } else {
+            const pkg_config_exe = PkgConfig.exe(environ_map);
+            if (process.run(arena, io, .{
+                .argv = &.{ pkg_config_exe, "--list-all" },
+                .environ_map = environ_map,
+            })) |result| {
+                if (result.term.success()) {
+                    opt_pc = try PkgConfig.init(arena, result.stdout, null);
+                } else if (any_force_pkg_conf) {
+                    fatal("{s} {f}", .{ pkg_config_exe, result.term });
+                }
+            } else |err| {
+                if (any_force_pkg_conf) fatal("{s}: failed running --list-all: {t}", .{ pkg_config_exe, err });
+            }
         }
     }
 
@@ -547,8 +719,6 @@ fn translate(
         installLibs(d, dest_path) catch |err|
             return d.fatal("failed to install library files: {s}", .{aro.Driver.errorDescription(err)});
     }
-
-    return process.cleanExit(io);
 }
 
 fn installLibs(d: *aro.Driver, dest_path: ?[]const u8) !void {
@@ -587,9 +757,78 @@ fn installLibs(d: *aro.Driver, dest_path: ?[]const u8) !void {
 comptime {
     if (@import("builtin").is_test) {
         _ = Translator;
-        _ = @import("helpers.zig");
         _ = @import("PatternList.zig");
     }
+}
+
+test translateInProcess {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var arena_instance = std.heap.ArenaAllocator.init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "valid.c",
+        .data = "int add(int a, int b) { return a + b; }\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "invalid.c",
+        .data = "int broken( {\n",
+    });
+
+    const tmp_path = try std.fs.path.join(arena, &.{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    const valid_c = try std.fs.path.join(arena, &.{ tmp_path, "valid.c" });
+    const valid_zig = try std.fs.path.join(arena, &.{ tmp_path, "valid.zig" });
+    const invalid_c = try std.fs.path.join(arena, &.{ tmp_path, "invalid.c" });
+    const invalid_zig = try std.fs.path.join(arena, &.{ tmp_path, "invalid.zig" });
+    const zig_lib_arg = try std.fmt.allocPrint(arena, "--zig-lib={s}", .{tmp_path});
+
+    var environ_map: process.Environ.Map = .init(arena);
+
+    var capture: []u8 = undefined;
+    try translateInProcess(gpa, arena, io, &.{
+        "--zig-integration",
+        zig_lib_arg,
+        "--target=wasm32-freestanding-none",
+        "--",
+        "-x",
+        "c",
+        "-nostdinc",
+        valid_c,
+        "-o",
+        valid_zig,
+    }, &environ_map, &capture);
+    try std.testing.expectEqual(@as(usize, 0), capture.len);
+
+    const rendered = try tmp.dir.readFileAlloc(io, "valid.zig", arena, .limited(64 * 1024));
+    try std.testing.expect(mem.indexOf(u8, rendered, "pub export fn add(") != null);
+
+    try translateInProcess(gpa, arena, io, &.{
+        "--zig-integration",
+        zig_lib_arg,
+        "--target=wasm32-freestanding-none",
+        "--",
+        "-x",
+        "c",
+        "-nostdinc",
+        invalid_c,
+        "-o",
+        invalid_zig,
+    }, &environ_map, &capture);
+    try std.testing.expect(capture.len > 0);
+
+    var reader: Io.Reader = .fixed(capture);
+    const header = try reader.takeStruct(std.zig.Server.Message.Header, .little);
+    try std.testing.expectEqual(std.zig.Server.Message.Tag.error_bundle, header.tag);
+    const body = try reader.take(header.bytes_len);
+    var eb = try std.zig.Server.allocErrorBundle(gpa, body);
+    defer eb.deinit(gpa);
+    try std.testing.expect(eb.errorMessageCount() > 0);
 }
 
 const SystemLib = struct {
@@ -618,6 +857,11 @@ fn runPkgConfig(
         return;
     };
     const pkg = pc.all[found_index];
+
+    if (!process.can_spawn) {
+        if (force) fatal("pkg-config cannot be executed: target does not support spawning a child process", .{});
+        return;
+    }
 
     const result = process.run(arena, io, .{
         .argv = &.{ pkg_config_exe, pkg.name, "--cflags", "--libs" },

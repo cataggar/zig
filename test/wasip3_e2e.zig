@@ -193,6 +193,52 @@ fn verifyFilesystem(io: Io) !void {
             wasi.errno_t.ILSEQ,
             wasi.path_open(cwd.handle, .{}, &bad_utf8, bad_utf8.len, .{}, .{}, .{}, .{}, &opened_fd),
         );
+
+        // Verify that absolute paths starting with '/' under a named preopen resolve via
+        // std.os.wasi (p3.zig) even when accessed through cwd.
+        var prestat: wasi.prestat_t = undefined;
+        if (wasi.fd_prestat_get(3, &prestat) == .SUCCESS and prestat.u.dir.pr_name_len <= 128) {
+            var name_buf: [128]u8 = undefined;
+            if (wasi.fd_prestat_dir_name(3, &name_buf, prestat.u.dir.pr_name_len) == .SUCCESS) {
+                var stripped = name_buf[0..prestat.u.dir.pr_name_len];
+                while (true) {
+                    if (stripped.len >= 1 and stripped[0] == '/') {
+                        stripped = stripped[1..];
+                    } else if (stripped.len >= 2 and stripped[0] == '.' and stripped[1] == '/') {
+                        stripped = stripped[2..];
+                    } else if (stripped.len == 1 and stripped[0] == '.') {
+                        stripped = stripped[1..];
+                    } else {
+                        break;
+                    }
+                }
+                while (stripped.len > 0 and (stripped[stripped.len - 1] == '/' or stripped[stripped.len - 1] == 0)) {
+                    stripped = stripped[0 .. stripped.len - 1];
+                }
+                if (stripped.len > 0) {
+                    var abs_dir_buf: [256]u8 = undefined;
+                    abs_dir_buf[0] = '/';
+                    @memcpy(abs_dir_buf[1 .. 1 + stripped.len], stripped);
+                    abs_dir_buf[1 + stripped.len] = '/';
+                    @memcpy(abs_dir_buf[2 + stripped.len .. 2 + stripped.len + sub_dir.len], sub_dir);
+                    const abs_dir_path = abs_dir_buf[0 .. 2 + stripped.len + sub_dir.len];
+
+                    var abs_path_buf: [256]u8 = undefined;
+                    abs_path_buf[0] = '/';
+                    @memcpy(abs_path_buf[1 .. 1 + stripped.len], stripped);
+                    abs_path_buf[1 + stripped.len] = '/';
+                    @memcpy(abs_path_buf[2 + stripped.len .. 2 + stripped.len + file_path.len], file_path);
+                    const abs_path = abs_path_buf[0 .. 2 + stripped.len + file_path.len];
+
+                    try cwd.access(io, abs_dir_path, .{});
+                    try cwd.access(io, abs_path, .{});
+                    const abs_stat = try cwd.statFile(io, abs_path, .{});
+                    try testing.expectEqual(dstat.inode, abs_stat.inode);
+                    const abs_content = try cwd.readFile(io, abs_path, &read_buf);
+                    try testing.expectEqualStrings("Hello, WORLDPreview 3!", abs_content);
+                }
+            }
+        }
     }
 
     try cwd.rename(file_path, cwd, renamed_path, io);

@@ -5039,6 +5039,10 @@ pub fn translateC(
     thread_limit: usize,
     capture: ?*[]u8,
 ) !void {
+    if (!std.process.can_spawn) {
+        try @import("translate_c").translateInProcess(gpa, arena, io, argv, environ_map, capture);
+        return;
+    }
     try jitCmdInner(gpa, arena, io, argv, environ_map, prog_node, thread_limit, .{
         .cmd_name = "translate-c",
         .root_src_path = "translate-c/main.zig",

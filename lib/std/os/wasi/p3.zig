@@ -681,7 +681,7 @@ fn initPreopens() void {
     preopens_initialized = true;
 
     var list: CanonPreopenList = .{ .ptr = 0, .len = 0 };
-    @"get-directories"(&list);
+    if (builtin.os.tag == .wasip3) @"get-directories"(&list);
 
     const count = @min(@as(usize, list.len), max_fds - 3);
     preopens_count = count;
@@ -707,6 +707,66 @@ fn getFdEntry(fd: wasi.fd_t) ?*FdEntry {
     if (idx >= max_fds) return null;
     if (!fd_table[idx].in_use) return null;
     return &fd_table[idx];
+}
+
+const ResolvedPath = struct {
+    entry: *FdEntry,
+    path: [*]const u8,
+    path_len: usize,
+};
+
+fn stripPreopenPrefix(name: []const u8) []const u8 {
+    var s = name;
+    while (true) {
+        if (s.len > 0 and s[0] == '/') {
+            s = s[1..];
+        } else if (s.len >= 2 and s[0] == '.' and s[1] == '/') {
+            s = s[2..];
+        } else if (s.len == 1 and s[0] == '.') {
+            s = s[1..];
+        } else {
+            break;
+        }
+    }
+    while (s.len > 0 and s[s.len - 1] == '/') {
+        s = s[0 .. s.len - 1];
+    }
+    return s;
+}
+
+fn resolvePathEntry(fd: wasi.fd_t, path: [*]const u8, path_len: usize) ?ResolvedPath {
+    const base_entry = getFdEntry(fd) orelse return null;
+    if (path_len == 0 or path[0] != '/') {
+        return .{ .entry = base_entry, .path = path, .path_len = path_len };
+    }
+    var p = path[0..path_len];
+    while (p.len > 0 and p[0] == '/') p = p[1..];
+
+    var best_entry: ?*FdEntry = null;
+    var best_len: usize = 0;
+    for (0..preopens_count) |i| {
+        const pre = &fd_table[3 + i];
+        if (!pre.in_use or !pre.is_preopen) continue;
+        const raw_name = pre.preopen_name_ptr[0..pre.preopen_name_len];
+        const prefix = stripPreopenPrefix(raw_name);
+        if (prefix.len == 0) {
+            // Only match root "/" preopen (not ".") as a fallback for absolute paths.
+            if (raw_name.len > 0 and raw_name[0] == '/' and best_entry == null) {
+                best_entry = pre;
+                best_len = 0;
+            }
+        } else if (std.mem.startsWith(u8, p, prefix) and (p.len == prefix.len or p[prefix.len] == '/')) {
+            if (best_entry == null or prefix.len > best_len) {
+                best_entry = pre;
+                best_len = prefix.len;
+            }
+        }
+    }
+    const matched = best_entry orelse return .{ .entry = base_entry, .path = path, .path_len = path_len };
+    var rel = p[best_len..];
+    while (rel.len > 0 and rel[0] == '/') rel = rel[1..];
+    if (rel.len == 0) rel = ".";
+    return .{ .entry = matched, .path = rel.ptr, .path_len = rel.len };
 }
 
 fn allocUserFdSlot() ?usize {
@@ -1352,10 +1412,11 @@ pub fn fd_write(
 }
 
 pub fn path_create_directory(fd: wasi.fd_t, path: [*]const u8, path_len: usize) callconv(.c) wasi.errno_t {
-    const entry = getFdEntry(fd) orelse return .BADF;
+    const resolved = resolvePathEntry(fd, path, path_len) orelse return .BADF;
     if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
+    if (resolved.path_len == 1 and resolved.path[0] == '.') return .EXIST;
     var ret: [20]u8 align(4) = @splat(0);
-    awaitAsyncCall(@"[method]descriptor.create-directory-at"(entry.handle, path, path_len, &ret));
+    awaitAsyncCall(@"[method]descriptor.create-directory-at"(resolved.entry.handle, resolved.path, resolved.path_len, &ret));
     return descriptorResult20ToErrno(&ret);
 }
 
@@ -1366,15 +1427,15 @@ pub fn path_filestat_get(
     path_len: usize,
     buf: *wasi.filestat_t,
 ) callconv(.c) wasi.errno_t {
-    const entry = getFdEntry(fd) orelse return .BADF;
+    const resolved = resolvePathEntry(fd, path, path_len) orelse return .BADF;
     if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
     const path_flags = translateLookupFlags(flags);
     var ret: [112]u8 align(8) = @splat(0);
-    awaitAsyncCall(@"[method]descriptor.stat-at"(entry.handle, path_flags, path, path_len, &ret));
+    awaitAsyncCall(@"[method]descriptor.stat-at"(resolved.entry.handle, path_flags, resolved.path, resolved.path_len, &ret));
     if (ret[0] != 0) return descriptorStatResultToErrno(&ret);
     writeFilestatFromDescriptorStat(&ret, buf);
     var hash_ret: [24]u8 align(8) = @splat(0);
-    awaitAsyncCall(@"[method]descriptor.metadata-hash-at"(entry.handle, path_flags, path, path_len, &hash_ret));
+    awaitAsyncCall(@"[method]descriptor.metadata-hash-at"(resolved.entry.handle, path_flags, resolved.path, resolved.path_len, &hash_ret));
     if (hash_ret[0] == 0) {
         const lower = std.mem.readInt(u64, hash_ret[8..16], .little);
         const upper = std.mem.readInt(u64, hash_ret[16..24], .little);
@@ -1395,15 +1456,15 @@ pub fn path_filestat_set_times(
     st_mtim: wasi.timestamp_t,
     fstflags: wasi.fstflags_t,
 ) callconv(.c) wasi.errno_t {
-    const entry = getFdEntry(fd) orelse return .BADF;
+    const resolved = resolvePathEntry(fd, path, path_len) orelse return .BADF;
     if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
     const ts = decodeFstTimestamps(st_atim, st_mtim, fstflags) orelse return .INVAL;
     const path_flags = translateLookupFlags(flags);
     var params: [64]u8 align(8) = packSetTimesAtParams(
-        entry.handle,
+        resolved.entry.handle,
         path_flags,
-        @intFromPtr(path),
-        path_len,
+        @intFromPtr(resolved.path),
+        resolved.path_len,
         ts.atim,
         ts.mtim,
     );
@@ -1421,19 +1482,19 @@ pub fn path_link(
     new_path: [*]const u8,
     new_path_len: usize,
 ) callconv(.c) wasi.errno_t {
-    const old_entry = getFdEntry(old_fd) orelse return .BADF;
-    const new_entry = getFdEntry(new_fd) orelse return .BADF;
+    const old_resolved = resolvePathEntry(old_fd, old_path, old_path_len) orelse return .BADF;
+    const new_resolved = resolvePathEntry(new_fd, new_path, new_path_len) orelse return .BADF;
     if (!std.unicode.utf8ValidateSlice(old_path[0..old_path_len])) return .ILSEQ;
     if (!std.unicode.utf8ValidateSlice(new_path[0..new_path_len])) return .ILSEQ;
     const path_flags = translateLookupFlags(old_flags);
     var params: [28]u8 align(4) = packLinkAtParams(
-        old_entry.handle,
+        old_resolved.entry.handle,
         path_flags,
-        @intFromPtr(old_path),
-        old_path_len,
-        new_entry.handle,
-        @intFromPtr(new_path),
-        new_path_len,
+        @intFromPtr(old_resolved.path),
+        old_resolved.path_len,
+        new_resolved.entry.handle,
+        @intFromPtr(new_resolved.path),
+        new_resolved.path_len,
     );
     var ret: [20]u8 align(4) = @splat(0);
     awaitAsyncCall(@"[method]descriptor.link-at"(&params, &ret));
@@ -1452,7 +1513,7 @@ pub fn path_open(
     fd: *wasi.fd_t,
 ) callconv(.c) wasi.errno_t {
     _ = fs_rights_inheriting;
-    const dir_entry = getFdEntry(dirfd) orelse return .BADF;
+    const resolved = resolvePathEntry(dirfd, path, path_len) orelse return .BADF;
     if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
     const slot_idx = allocUserFdSlot() orelse return .MFILE;
 
@@ -1461,10 +1522,10 @@ pub fn path_open(
     const desc_flags = translateDescriptorFlags(fs_rights_base, oflags, fs_flags);
 
     var params: [20]u8 align(4) = packOpenAtParams(
-        dir_entry.handle,
+        resolved.entry.handle,
         path_flags,
-        @intFromPtr(path),
-        path_len,
+        @intFromPtr(resolved.path),
+        resolved.path_len,
         open_flags,
         desc_flags,
     );
@@ -1475,10 +1536,10 @@ pub fn path_open(
         var fallback_flags = desc_flags & ~@as(u32, 32);
         if (fallback_flags == 0) fallback_flags = 1;
         params = packOpenAtParams(
-            dir_entry.handle,
+            resolved.entry.handle,
             path_flags,
-            @intFromPtr(path),
-            path_len,
+            @intFromPtr(resolved.path),
+            resolved.path_len,
             open_flags,
             fallback_flags,
         );
@@ -1508,10 +1569,10 @@ pub fn path_readlink(
     bufused: *usize,
 ) callconv(.c) wasi.errno_t {
     bufused.* = 0;
-    const entry = getFdEntry(fd) orelse return .BADF;
+    const resolved = resolvePathEntry(fd, path, path_len) orelse return .BADF;
     if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
     var ret: [20]u8 align(4) = @splat(0);
-    awaitAsyncCall(@"[method]descriptor.readlink-at"(entry.handle, path, path_len, &ret));
+    awaitAsyncCall(@"[method]descriptor.readlink-at"(resolved.entry.handle, resolved.path, resolved.path_len, &ret));
     if (ret[0] != 0) return descriptorResult20ToErrno(&ret);
 
     const ptr_addr: usize = std.mem.readInt(u32, ret[4..8], .little);
@@ -1529,10 +1590,10 @@ pub fn path_readlink(
 }
 
 pub fn path_remove_directory(fd: wasi.fd_t, path: [*]const u8, path_len: usize) callconv(.c) wasi.errno_t {
-    const entry = getFdEntry(fd) orelse return .BADF;
+    const resolved = resolvePathEntry(fd, path, path_len) orelse return .BADF;
     if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
     var ret: [20]u8 align(4) = @splat(0);
-    awaitAsyncCall(@"[method]descriptor.remove-directory-at"(entry.handle, path, path_len, &ret));
+    awaitAsyncCall(@"[method]descriptor.remove-directory-at"(resolved.entry.handle, resolved.path, resolved.path_len, &ret));
     return descriptorResult20ToErrno(&ret);
 }
 
@@ -1544,17 +1605,17 @@ pub fn path_rename(
     new_path: [*]const u8,
     new_path_len: usize,
 ) callconv(.c) wasi.errno_t {
-    const old_entry = getFdEntry(old_fd) orelse return .BADF;
-    const new_entry = getFdEntry(new_fd) orelse return .BADF;
+    const old_resolved = resolvePathEntry(old_fd, old_path, old_path_len) orelse return .BADF;
+    const new_resolved = resolvePathEntry(new_fd, new_path, new_path_len) orelse return .BADF;
     if (!std.unicode.utf8ValidateSlice(old_path[0..old_path_len])) return .ILSEQ;
     if (!std.unicode.utf8ValidateSlice(new_path[0..new_path_len])) return .ILSEQ;
     var params: [24]u8 align(4) = packRenameAtParams(
-        old_entry.handle,
-        @intFromPtr(old_path),
-        old_path_len,
-        new_entry.handle,
-        @intFromPtr(new_path),
-        new_path_len,
+        old_resolved.entry.handle,
+        @intFromPtr(old_resolved.path),
+        old_resolved.path_len,
+        new_resolved.entry.handle,
+        @intFromPtr(new_resolved.path),
+        new_resolved.path_len,
     );
     var ret: [20]u8 align(4) = @splat(0);
     awaitAsyncCall(@"[method]descriptor.rename-at"(&params, &ret));
@@ -1568,15 +1629,15 @@ pub fn path_symlink(
     new_path: [*]const u8,
     new_path_len: usize,
 ) callconv(.c) wasi.errno_t {
-    const entry = getFdEntry(fd) orelse return .BADF;
+    const resolved = resolvePathEntry(fd, new_path, new_path_len) orelse return .BADF;
     if (!std.unicode.utf8ValidateSlice(old_path[0..old_path_len])) return .ILSEQ;
     if (!std.unicode.utf8ValidateSlice(new_path[0..new_path_len])) return .ILSEQ;
     var params: [20]u8 align(4) = packSymlinkAtParams(
-        entry.handle,
+        resolved.entry.handle,
         @intFromPtr(old_path),
         old_path_len,
-        @intFromPtr(new_path),
-        new_path_len,
+        @intFromPtr(resolved.path),
+        resolved.path_len,
     );
     var ret: [20]u8 align(4) = @splat(0);
     awaitAsyncCall(@"[method]descriptor.symlink-at"(&params, &ret));
@@ -1584,10 +1645,10 @@ pub fn path_symlink(
 }
 
 pub fn path_unlink_file(fd: wasi.fd_t, path: [*]const u8, path_len: usize) callconv(.c) wasi.errno_t {
-    const entry = getFdEntry(fd) orelse return .BADF;
+    const resolved = resolvePathEntry(fd, path, path_len) orelse return .BADF;
     if (!std.unicode.utf8ValidateSlice(path[0..path_len])) return .ILSEQ;
     var ret: [20]u8 align(4) = @splat(0);
-    awaitAsyncCall(@"[method]descriptor.unlink-file-at"(entry.handle, path, path_len, &ret));
+    awaitAsyncCall(@"[method]descriptor.unlink-file-at"(resolved.entry.handle, resolved.path, resolved.path_len, &ret));
     return descriptorResult20ToErrno(&ret);
 }
 
@@ -1815,4 +1876,58 @@ test "canonical ABI 0.3.0 struct layouts and spilled async parameter packing" {
         try std.testing.expectEqual(wasi.errno_t.SPIPE, fd_pwrite(1, undefined, 0, 0, &n));
         try std.testing.expectEqual(wasi.errno_t.SPIPE, fd_pwrite(2, undefined, 0, 0, &n));
     }
+}
+
+test "stripPreopenPrefix and resolvePathEntry" {
+    try std.testing.expectEqualStrings("", stripPreopenPrefix("."));
+    try std.testing.expectEqualStrings("", stripPreopenPrefix("./"));
+    try std.testing.expectEqualStrings("", stripPreopenPrefix("/"));
+    try std.testing.expectEqualStrings("lib", stripPreopenPrefix("/lib"));
+    try std.testing.expectEqualStrings("lib", stripPreopenPrefix("/lib/"));
+    try std.testing.expectEqualStrings(".ci-tmp", stripPreopenPrefix(".ci-tmp"));
+    try std.testing.expectEqualStrings(".ci-tmp", stripPreopenPrefix("./.ci-tmp/"));
+
+    const saved_init = preopens_initialized;
+    const saved_count = preopens_count;
+    const saved_fd3 = fd_table[3];
+    const saved_fd4 = fd_table[4];
+    defer {
+        preopens_initialized = saved_init;
+        preopens_count = saved_count;
+        fd_table[3] = saved_fd3;
+        fd_table[4] = saved_fd4;
+    }
+
+    preopens_initialized = true;
+    preopens_count = 2;
+    fd_table[3] = .{
+        .in_use = true,
+        .is_preopen = true,
+        .handle = 10,
+        .preopen_name_ptr = ".",
+        .preopen_name_len = 1,
+    };
+    fd_table[4] = .{
+        .in_use = true,
+        .is_preopen = true,
+        .handle = 20,
+        .preopen_name_ptr = "/lib",
+        .preopen_name_len = 4,
+    };
+
+    const rel_res = resolvePathEntry(3, "foo/bar", 7).?;
+    try std.testing.expectEqual(@as(i32, 10), rel_res.entry.handle);
+    try std.testing.expectEqualStrings("foo/bar", rel_res.path[0..rel_res.path_len]);
+
+    const lib_sub = resolvePathEntry(3, "/lib/std/std.zig", 16).?;
+    try std.testing.expectEqual(@as(i32, 20), lib_sub.entry.handle);
+    try std.testing.expectEqualStrings("std/std.zig", lib_sub.path[0..lib_sub.path_len]);
+
+    const lib_root = resolvePathEntry(3, "/lib", 4).?;
+    try std.testing.expectEqual(@as(i32, 20), lib_root.entry.handle);
+    try std.testing.expectEqualStrings(".", lib_root.path[0..lib_root.path_len]);
+
+    const unmatched = resolvePathEntry(3, "/nonexistent", 12).?;
+    try std.testing.expectEqual(@as(i32, 10), unmatched.entry.handle);
+    try std.testing.expectEqualStrings("/nonexistent", unmatched.path[0..unmatched.path_len]);
 }
