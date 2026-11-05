@@ -15,19 +15,29 @@ comptime {
     if (!builtin.single_threaded and !builtin.cpu.arch.isWasm()) @compileError("unsupported");
 }
 
-mutex: if (builtin.single_threaded) void else std.atomic.Mutex = if (builtin.single_threaded) {} else .unlocked,
-next_addrs: [size_class_count]usize = @splat(0),
-/// For each size class, points to the freed pointer.
-frees: [size_class_count]usize = @splat(0),
-/// For each big size class, points to the freed pointer.
-big_frees: [big_size_class_count]usize = @splat(0),
-prev_brk: usize = 0,
+pub const State = extern struct {
+    mutex: std.atomic.Mutex = .unlocked,
+    next_addrs: [size_class_count]usize = @splat(0),
+    /// For each size class, points to the freed pointer.
+    frees: [size_class_count]usize = @splat(0),
+    /// For each big size class, points to the freed pointer.
+    big_frees: [big_size_class_count]usize = @splat(0),
+    prev_brk: usize = 0,
+};
 
-var global: BrkAllocator = .{};
+pub var global: State = .{};
+
+inline fn state() *State {
+    if (builtin.os.tag.isWasi() and builtin.link_libc) {
+        return @extern(*State, .{ .name = "__zig_wasm_brk_allocator" });
+    }
+    return &global;
+}
 
 fn lock() void {
     if (!builtin.single_threaded) {
-        while (!global.mutex.tryLock()) {
+        const s = state();
+        while (!s.mutex.tryLock()) {
             std.atomic.spinLoopHint();
         }
     }
@@ -35,7 +45,7 @@ fn lock() void {
 
 fn unlock() void {
     if (!builtin.single_threaded) {
-        global.mutex.unlock();
+        state().mutex.unlock();
     }
 }
 
@@ -71,26 +81,27 @@ fn alloc(ctx: *anyopaque, len: usize, alignment: Alignment, return_address: usiz
     const class = math.log2(slot_size) - min_class;
     lock();
     defer unlock();
+    const s = state();
     if (class < size_class_count) {
         const addr = a: {
-            const top_free_ptr = global.frees[class];
+            const top_free_ptr = s.frees[class];
             if (top_free_ptr != 0) {
                 const node: *usize = @ptrFromInt(top_free_ptr + (slot_size - @sizeOf(usize)));
-                global.frees[class] = node.*;
+                s.frees[class] = node.*;
                 break :a top_free_ptr;
             }
 
-            const next_addr = global.next_addrs[class];
+            const next_addr = s.next_addrs[class];
             if (next_addr % bigpage_size == 0) {
                 const addr = allocBigPages(1);
                 if (addr == 0) return null;
                 //std.debug.print("allocated fresh slot_size={d} class={d} addr=0x{x}\n", .{
                 //    slot_size, class, addr,
                 //});
-                global.next_addrs[class] = addr + slot_size;
+                s.next_addrs[class] = addr + slot_size;
                 break :a addr;
             } else {
-                global.next_addrs[class] = next_addr + slot_size;
+                s.next_addrs[class] = next_addr + slot_size;
                 break :a next_addr;
             }
         };
@@ -153,18 +164,19 @@ fn free(
     const addr = @intFromPtr(buf.ptr);
     lock();
     defer unlock();
+    const s = state();
     if (class < size_class_count) {
         const node: *usize = @ptrFromInt(addr + (slot_size - @sizeOf(usize)));
-        node.* = global.frees[class];
-        global.frees[class] = addr;
+        node.* = s.frees[class];
+        s.frees[class] = addr;
     } else {
         const bigpages_needed = bigPagesNeeded(actual_len);
         const pow2_pages = math.ceilPowerOfTwoAssert(usize, bigpages_needed);
         const big_slot_size_bytes = pow2_pages * bigpage_size;
         const node: *usize = @ptrFromInt(addr + (big_slot_size_bytes - @sizeOf(usize)));
         const big_class = math.log2(pow2_pages);
-        node.* = global.big_frees[big_class];
-        global.big_frees[big_class] = addr;
+        node.* = s.big_frees[big_class];
+        s.big_frees[big_class] = addr;
     }
 }
 
@@ -176,11 +188,12 @@ fn allocBigPages(n: usize) usize {
     const pow2_pages = math.ceilPowerOfTwoAssert(usize, n);
     const slot_size_bytes = pow2_pages * bigpage_size;
     const class = math.log2(pow2_pages);
+    const s = state();
 
-    const top_free_ptr = global.big_frees[class];
+    const top_free_ptr = s.big_frees[class];
     if (top_free_ptr != 0) {
         const node: *usize = @ptrFromInt(top_free_ptr + (slot_size_bytes - @sizeOf(usize)));
-        global.big_frees[class] = node.*;
+        s.big_frees[class] = node.*;
         return top_free_ptr;
     }
 
@@ -192,14 +205,14 @@ fn allocBigPages(n: usize) usize {
         if (page_index == -1) return 0;
         return @as(usize, @intCast(page_index)) * page_size;
     } else if (builtin.os.tag == .linux) {
-        const prev_brk = global.prev_brk;
+        const prev_brk = s.prev_brk;
         const start_brk = if (prev_brk == 0)
             std.mem.alignForward(usize, std.os.linux.brk(0), bigpage_size)
         else
             prev_brk;
         const end_brk = start_brk + pow2_pages * bigpage_size;
         const new_prev_brk = std.os.linux.brk(end_brk);
-        global.prev_brk = new_prev_brk;
+        s.prev_brk = new_prev_brk;
         if (new_prev_brk != end_brk) return 0;
         return start_brk;
     } else {

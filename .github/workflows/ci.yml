@@ -189,6 +189,11 @@ jobs:
             test/wasip3_e2e.zig
 
           .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
+            -target wasm32-wasip3 -lc test/wasip3_e2e.zig -femit-bin=.ci-tmp/wasip3_e2e_libc.wasm
+          cmp -n 8 <(printf '\x00asm\x0d\x00\x01\x00') .ci-tmp/wasip3_e2e_libc.wasm
+          wasmtime run -W component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y -S p3=y --dir=.ci-tmp --env TEST_ENV_KEY=wasip3_val .ci-tmp/wasip3_e2e_libc.wasm arg_one arg_two
+
+          .ci-bootstrap/zig-wasm build-exe --zig-lib-dir lib -fno-llvm -fno-lld \
             -target wasm32-wasip3 -lc .ci-tmp/hello_libc.zig -femit-bin=.ci-tmp/hello_libc_p3.wasm
           cmp -n 8 <(printf '\x00asm\x0d\x00\x01\x00') .ci-tmp/hello_libc_p3.wasm
           wasmtime run -W component-model-async=y,component-model-async-stackful=y,component-model-more-async-builtins=y -S p3=y .ci-tmp/hello_libc_p3.wasm
