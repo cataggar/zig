@@ -656,7 +656,7 @@ fn awaitFsFuture(comptime Fut: type, fut_handle: i32) wasi.errno_t {
 
 const max_fds = 128;
 
-const FdEntry = struct {
+const FdEntry = extern struct {
     in_use: bool = false,
     is_preopen: bool = false,
     append: bool = false,
@@ -666,29 +666,39 @@ const FdEntry = struct {
     preopen_name_len: usize = 0,
 };
 
-var fd_table: [max_fds]FdEntry = @splat(.{});
-var preopens_initialized: bool = false;
-var preopens_count: usize = 0;
+pub const State = extern struct {
+    fd_table: [max_fds]FdEntry = @splat(.{}),
+    preopens_initialized: bool = false,
+    preopens_count: usize = 0,
+    cached_args: CanonStringList = .{ .ptr = 0, .len = 0 },
+    args_initialized: bool = false,
+    cached_env: CanonEnvList = .{ .ptr = 0, .len = 0 },
+    env_initialized: bool = false,
+};
 
-var cached_args: CanonStringList = .{ .ptr = 0, .len = 0 };
-var args_initialized: bool = false;
+pub var local_state: State = .{};
 
-var cached_env: CanonEnvList = .{ .ptr = 0, .len = 0 };
-var env_initialized: bool = false;
+inline fn globalState() *State {
+    if (builtin.os.tag == .wasip3 and builtin.link_libc) {
+        return @extern(*State, .{ .name = "__zig_wasip3_state" });
+    }
+    return &local_state;
+}
 
 fn initPreopens() void {
-    if (preopens_initialized) return;
-    preopens_initialized = true;
+    const s = globalState();
+    if (s.preopens_initialized) return;
+    s.preopens_initialized = true;
 
     var list: CanonPreopenList = .{ .ptr = 0, .len = 0 };
     if (builtin.os.tag == .wasip3) @"get-directories"(&list);
 
     const count = @min(@as(usize, list.len), max_fds - 3);
-    preopens_count = count;
+    s.preopens_count = count;
     const entries = list.ptrSlice();
     for (0..count) |i| {
         const entry = entries[i];
-        fd_table[3 + i] = .{
+        s.fd_table[3 + i] = .{
             .in_use = true,
             .is_preopen = true,
             .append = false,
@@ -705,8 +715,9 @@ fn getFdEntry(fd: wasi.fd_t) ?*FdEntry {
     if (fd < 3) return null;
     const idx: usize = @intCast(fd);
     if (idx >= max_fds) return null;
-    if (!fd_table[idx].in_use) return null;
-    return &fd_table[idx];
+    const s = globalState();
+    if (!s.fd_table[idx].in_use) return null;
+    return &s.fd_table[idx];
 }
 
 const ResolvedPath = struct {
@@ -742,10 +753,11 @@ fn resolvePathEntry(fd: wasi.fd_t, path: [*]const u8, path_len: usize) ?Resolved
     var p = path[0..path_len];
     while (p.len > 0 and p[0] == '/') p = p[1..];
 
+    const s = globalState();
     var best_entry: ?*FdEntry = null;
     var best_len: usize = 0;
-    for (0..preopens_count) |i| {
-        const pre = &fd_table[3 + i];
+    for (0..s.preopens_count) |i| {
+        const pre = &s.fd_table[3 + i];
         if (!pre.in_use or !pre.is_preopen) continue;
         const raw_name = pre.preopen_name_ptr[0..pre.preopen_name_len];
         const prefix = stripPreopenPrefix(raw_name);
@@ -771,9 +783,10 @@ fn resolvePathEntry(fd: wasi.fd_t, path: [*]const u8, path_len: usize) ?Resolved
 
 fn allocUserFdSlot() ?usize {
     initPreopens();
-    const start = 3 + preopens_count;
+    const s = globalState();
+    const start = 3 + s.preopens_count;
     for (start..max_fds) |idx| {
-        if (!fd_table[idx].in_use) return idx;
+        if (!s.fd_table[idx].in_use) return idx;
     }
     return null;
 }
@@ -783,11 +796,12 @@ fn allocUserFdSlot() ?usize {
 // ============================================================================
 
 fn ensureArgs() CanonStringList {
-    if (!args_initialized) {
-        args_initialized = true;
-        @"get-arguments"(&cached_args);
+    const s = globalState();
+    if (!s.args_initialized) {
+        s.args_initialized = true;
+        @"get-arguments"(&s.cached_args);
     }
-    return cached_args;
+    return s.cached_args;
 }
 
 pub fn args_sizes_get(argc: *usize, argv_buf_size: *usize) callconv(.c) wasi.errno_t {
@@ -820,11 +834,12 @@ pub fn args_get(argv: [*][*:0]u8, argv_buf: [*]u8) callconv(.c) wasi.errno_t {
 }
 
 fn ensureEnv() CanonEnvList {
-    if (!env_initialized) {
-        env_initialized = true;
-        @"get-environment"(&cached_env);
+    const s = globalState();
+    if (!s.env_initialized) {
+        s.env_initialized = true;
+        @"get-environment"(&s.cached_env);
     }
-    return cached_env;
+    return s.cached_env;
 }
 
 pub fn environ_sizes_get(environ_count: *usize, environ_buf_size: *usize) callconv(.c) wasi.errno_t {
@@ -1296,13 +1311,14 @@ pub fn fd_renumber(from: wasi.fd_t, to: wasi.fd_t) callconv(.c) wasi.errno_t {
     if (to < 3) return .BADF;
     const to_idx: usize = @intCast(to);
     if (to_idx >= max_fds) return .BADF;
-    if (from_entry.is_preopen or fd_table[to_idx].is_preopen) return .OPNOTSUPP;
+    const s = globalState();
+    if (from_entry.is_preopen or s.fd_table[to_idx].is_preopen) return .OPNOTSUPP;
 
-    if (fd_table[to_idx].in_use) {
-        @"[resource-drop]descriptor"(fd_table[to_idx].handle);
+    if (s.fd_table[to_idx].in_use) {
+        @"[resource-drop]descriptor"(s.fd_table[to_idx].handle);
     }
 
-    fd_table[to_idx] = from_entry.*;
+    s.fd_table[to_idx] = from_entry.*;
     from_entry.* = .{};
     return .SUCCESS;
 }
@@ -1549,7 +1565,7 @@ pub fn path_open(
     if (ret[0] != 0) return descriptorResult20ToErrno(&ret);
 
     const new_handle = std.mem.readInt(i32, ret[4..8], .little);
-    fd_table[slot_idx] = .{
+    globalState().fd_table[slot_idx] = .{
         .in_use = true,
         .is_preopen = false,
         .append = fs_flags.APPEND,
@@ -1887,27 +1903,28 @@ test "stripPreopenPrefix and resolvePathEntry" {
     try std.testing.expectEqualStrings(".ci-tmp", stripPreopenPrefix(".ci-tmp"));
     try std.testing.expectEqualStrings(".ci-tmp", stripPreopenPrefix("./.ci-tmp/"));
 
-    const saved_init = preopens_initialized;
-    const saved_count = preopens_count;
-    const saved_fd3 = fd_table[3];
-    const saved_fd4 = fd_table[4];
+    const s = globalState();
+    const saved_init = s.preopens_initialized;
+    const saved_count = s.preopens_count;
+    const saved_fd3 = s.fd_table[3];
+    const saved_fd4 = s.fd_table[4];
     defer {
-        preopens_initialized = saved_init;
-        preopens_count = saved_count;
-        fd_table[3] = saved_fd3;
-        fd_table[4] = saved_fd4;
+        s.preopens_initialized = saved_init;
+        s.preopens_count = saved_count;
+        s.fd_table[3] = saved_fd3;
+        s.fd_table[4] = saved_fd4;
     }
 
-    preopens_initialized = true;
-    preopens_count = 2;
-    fd_table[3] = .{
+    s.preopens_initialized = true;
+    s.preopens_count = 2;
+    s.fd_table[3] = .{
         .in_use = true,
         .is_preopen = true,
         .handle = 10,
         .preopen_name_ptr = ".",
         .preopen_name_len = 1,
     };
-    fd_table[4] = .{
+    s.fd_table[4] = .{
         .in_use = true,
         .is_preopen = true,
         .handle = 20,

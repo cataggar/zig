@@ -2226,6 +2226,10 @@ comptime {
         @export(&__wasilibc_environ, .{ .name = "_environ", .linkage = .weak, .visibility = .hidden });
         @export(&__wasilibc_environ, .{ .name = "environ", .linkage = .weak, .visibility = .hidden });
         @export(&wasilibc_cwd, .{ .name = "__wasilibc_cwd", .linkage = .weak, .visibility = .hidden });
+        @export(&std.heap.BrkAllocator.global, .{ .name = "__zig_wasm_brk_allocator", .linkage = .weak, .visibility = .hidden });
+        if (builtin.os.tag == .wasip3) {
+            @export(&wasi.p3.local_state, .{ .name = "__zig_wasip3_state", .linkage = .weak, .visibility = .hidden });
+        }
 
         asm (
             \\.section .init_array.10,"",@
