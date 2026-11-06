@@ -260,17 +260,21 @@ pub fn parse(
     must_link: bool,
     gc_sections: bool,
 ) anyerror!Object {
-    const comp = wasm.base.comp;
-    const gpa = comp.gpa;
-    const diags = &comp.link_diags;
-
     var pos: usize = 0;
 
-    if (!std.mem.eql(u8, bytes[0..std.wasm.magic.len], &std.wasm.magic)) return error.BadObjectMagic;
+    if (bytes.len < std.wasm.magic.len + std.wasm.version.len or
+        !std.mem.eql(u8, bytes[0..std.wasm.magic.len], &std.wasm.magic))
+    {
+        return error.BadObjectMagic;
+    }
     pos += std.wasm.magic.len;
 
     const version = std.mem.readInt(u32, bytes[pos..][0..4], .little);
     pos += 4;
+
+    const comp = wasm.base.comp;
+    const gpa = comp.gpa;
+    const diags = &comp.link_diags;
 
     const data_segment_start: u32 = @intCast(wasm.object_data_segments.items.len);
     const custom_segment_start: u32 = @intCast(wasm.object_custom_segments.entries.len);
@@ -1540,4 +1544,15 @@ fn skipInit(bytes: []const u8, pos: usize) !usize {
     const op, const final_pos = readEnum(std.wasm.Opcode, bytes, end_pos);
     if (op != .end) return error.InitExprMissingEnd;
     return final_pos;
+}
+
+test "Object.parse bounds checking on empty and truncated inputs" {
+    try std.testing.expectError(
+        error.BadObjectMagic,
+        Object.parse(undefined, &.{}, undefined, null, .none, undefined, false, false),
+    );
+    try std.testing.expectError(
+        error.BadObjectMagic,
+        Object.parse(undefined, "\x00asm", undefined, null, .none, undefined, false, false),
+    );
 }

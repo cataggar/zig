@@ -2706,7 +2706,7 @@ pub fn hotCodeSwap(
     try lf.makeExecutable();
 }
 
-fn cleanupAfterUpdate(comp: *Compilation, tmp_dir_rand_int: u64) void {
+fn cleanupAfterUpdate(comp: *Compilation, tmp_dir_rand_int: u64, tmp_dir_needs_delete: bool) void {
     const io = comp.io;
 
     switch (comp.cache_use) {
@@ -2751,6 +2751,8 @@ fn cleanupAfterUpdate(comp: *Compilation, tmp_dir_rand_int: u64) void {
             if (whole.tmp_artifact_directory) |*tmp_dir| {
                 tmp_dir.handle.close(io);
                 whole.tmp_artifact_directory = null;
+            }
+            if (tmp_dir_needs_delete) {
                 const tmp_dir_sub_path = "tmp" ++ fs.path.sep_str ++ std.fmt.hex(tmp_dir_rand_int);
                 comp.dirs.local_cache.handle.deleteTree(io, tmp_dir_sub_path) catch |err| {
                     log.warn("failed to delete temporary directory '{s}{c}{s}': {t}", .{
@@ -2789,8 +2791,9 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
     }
 
     var tmp_dir_rand_int: u64 = undefined;
+    var tmp_dir_needs_delete = false;
     var man: Cache.Manifest = undefined;
-    defer cleanupAfterUpdate(comp, tmp_dir_rand_int);
+    defer cleanupAfterUpdate(comp, tmp_dir_rand_int, tmp_dir_needs_delete);
 
     // If using the whole caching strategy, we check for *everything* up front, including
     // C source files.
@@ -2868,6 +2871,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
                 const handle = comp.dirs.local_cache.handle.createDirPathOpen(io, tmp_dir_sub_path, .{}) catch |err| {
                     return comp.setMiscFailure(.open_output, "failed to create output directory '{s}': {t}", .{ path, err });
                 };
+                tmp_dir_needs_delete = true;
                 break :d .{ .path = path, .handle = handle };
             };
             if (comp.emit_bin) |sub_path| {
@@ -3054,90 +3058,135 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) UpdateE
 
             const bin_digest = man.missDigest();
             const hex_digest = Cache.binToHex(bin_digest);
-
-            // Work around windows `AccessDenied` if any files within this
-            // directory are open by closing and reopening the file handles.
-            const need_writable_dance: enum { no, lf_only, lf_and_debug } = w: {
-                if (builtin.os.tag == .windows) {
-                    if (comp.bin_file) |lf| {
-                        // We cannot just call `makeExecutable` as it makes a false
-                        // assumption that we have a file handle open only when linking
-                        // an executable file. This used to be true when our linkers
-                        // were incapable of emitting relocatables and static archive.
-                        // Now that they are capable, we need to unconditionally close
-                        // the file handle and re-open it in the follow up call to
-                        // `makeWritable`.
-                        if (lf.file) |f| {
-                            f.close(io);
-                            lf.file = null;
-
-                            if (lf.closeDebugInfo()) break :w .lf_and_debug;
-                            break :w .lf_only;
-                        }
-                    }
-                }
-                break :w .no;
-            };
-
-            // Rename the temporary directory into place.
-            // Close tmp dir and link.File to avoid open handle during rename.
-            whole.tmp_artifact_directory.?.handle.close(io);
-            whole.tmp_artifact_directory = null;
             const s = fs.path.sep_str;
             const tmp_dir_sub_path = "tmp" ++ s ++ std.fmt.hex(tmp_dir_rand_int);
             const o_sub_path = "o" ++ s ++ hex_digest;
-            renameTmpIntoCache(io, comp.dirs.local_cache, tmp_dir_sub_path, o_sub_path) catch |err| {
-                return comp.setMiscFailure(
-                    .rename_results,
-                    "failed to rename compilation results ('{f}{s}') into local cache ('{f}{s}'): {t}",
-                    .{
-                        comp.dirs.local_cache, tmp_dir_sub_path,
-                        comp.dirs.local_cache, o_sub_path,
-                        err,
-                    },
-                );
-            };
-            comp.digest = bin_digest;
 
-            // The linker flush functions need to know the final output path
-            // for debug info purposes because executable debug info contains
-            // references object file paths.
-            if (comp.bin_file) |lf| {
-                lf.emit = .{
-                    .root_dir = comp.dirs.local_cache,
-                    .sub_path = try fs.path.join(arena, &.{ o_sub_path, comp.emit_bin.? }),
-                };
-                const result: (link.File.OpenError || error{HotSwapUnavailableOnHostOperatingSystem})!void = switch (need_writable_dance) {
-                    .no => {},
-                    .lf_only => lf.makeWritable(),
-                    .lf_and_debug => res: {
-                        lf.makeWritable() catch |err| break :res err;
-                        lf.reopenDebugInfo() catch |err| break :res err;
-                    },
-                };
-                result catch |err| {
+            const flush_before_publish = (builtin.os.tag == .wasi and comp.getTarget().ofmt != .macho) or
+                comp.getTarget().ofmt == .wasm;
+            if (flush_before_publish) {
+                comp.digest = bin_digest;
+
+                try flush(comp, arena);
+
+                // Calling `flush` may have produced errors, in which case the
+                // cache manifest must not be written.
+                if (anyErrors(comp)) return;
+
+                // Release the lock and close the file before renaming into the cache.
+                // This avoids another process observing an incomplete or 0-byte artifact in `o/<digest>`.
+                if (comp.bin_file) |lf| {
+                    lf.releaseLock();
+                    if (lf.file) |f| {
+                        f.close(io);
+                        lf.file = null;
+                    }
+                }
+
+                whole.tmp_artifact_directory.?.handle.close(io);
+                whole.tmp_artifact_directory = null;
+                renameTmpIntoCache(io, comp.dirs.local_cache, tmp_dir_sub_path, o_sub_path) catch |err| {
                     return comp.setMiscFailure(
                         .rename_results,
-                        "failed to re-open renamed compilation results ('{f}{s}'): {t}",
-                        .{ comp.dirs.local_cache, o_sub_path, err },
+                        "failed to rename compilation results ('{f}{s}') into local cache ('{f}{s}'): {t}",
+                        .{
+                            comp.dirs.local_cache, tmp_dir_sub_path,
+                            comp.dirs.local_cache, o_sub_path,
+                            err,
+                        },
                     );
                 };
-            }
+                tmp_dir_needs_delete = false;
 
-            try flush(comp, arena);
+                if (comp.bin_file) |lf| {
+                    lf.emit = .{
+                        .root_dir = comp.dirs.local_cache,
+                        .sub_path = try fs.path.join(arena, &.{ o_sub_path, comp.emit_bin.? }),
+                    };
+                }
+            } else {
+                // Work around windows `AccessDenied` if any files within this
+                // directory are open by closing and reopening the file handles.
+                const need_writable_dance: enum { no, lf_only, lf_and_debug } = w: {
+                    if (builtin.os.tag == .windows) {
+                        if (comp.bin_file) |lf| {
+                            // We cannot just call `makeExecutable` as it makes a false
+                            // assumption that we have a file handle open only when linking
+                            // an executable file. This used to be true when our linkers
+                            // were incapable of emitting relocatables and static archive.
+                            // Now that they are capable, we need to unconditionally close
+                            // the file handle and re-open it in the follow up call to
+                            // `makeWritable`.
+                            if (lf.file) |f| {
+                                f.close(io);
+                                lf.file = null;
 
-            // Calling `flush` may have produced errors, in which case the
-            // cache manifest must not be written.
-            if (anyErrors(comp)) return;
+                                if (lf.closeDebugInfo()) break :w .lf_and_debug;
+                                break :w .lf_only;
+                            }
+                        }
+                    }
+                    break :w .no;
+                };
 
-            // Release the lock and close the file before writing the manifest.
-            // This avoids the potential of another process getting a cache hit and
-            // trying to spawn a process with it while there's still an open fd to it.
-            if (comp.bin_file) |lf| {
-                lf.releaseLock();
-                if (lf.file) |f| {
-                    f.close(io);
-                    lf.file = null;
+                // Rename the temporary directory into place.
+                // Close tmp dir and link.File to avoid open handle during rename.
+                whole.tmp_artifact_directory.?.handle.close(io);
+                whole.tmp_artifact_directory = null;
+                renameTmpIntoCache(io, comp.dirs.local_cache, tmp_dir_sub_path, o_sub_path) catch |err| {
+                    return comp.setMiscFailure(
+                        .rename_results,
+                        "failed to rename compilation results ('{f}{s}') into local cache ('{f}{s}'): {t}",
+                        .{
+                            comp.dirs.local_cache, tmp_dir_sub_path,
+                            comp.dirs.local_cache, o_sub_path,
+                            err,
+                        },
+                    );
+                };
+                tmp_dir_needs_delete = false;
+                comp.digest = bin_digest;
+
+                // The linker flush functions need to know the final output path
+                // for debug info purposes because executable debug info contains
+                // references object file paths.
+                if (comp.bin_file) |lf| {
+                    lf.emit = .{
+                        .root_dir = comp.dirs.local_cache,
+                        .sub_path = try fs.path.join(arena, &.{ o_sub_path, comp.emit_bin.? }),
+                    };
+                    const result: (link.File.OpenError || error{HotSwapUnavailableOnHostOperatingSystem})!void = switch (need_writable_dance) {
+                        .no => {},
+                        .lf_only => lf.makeWritable(),
+                        .lf_and_debug => res: {
+                            lf.makeWritable() catch |err| break :res err;
+                            lf.reopenDebugInfo() catch |err| break :res err;
+                        },
+                    };
+                    result catch |err| {
+                        return comp.setMiscFailure(
+                            .rename_results,
+                            "failed to re-open renamed compilation results ('{f}{s}'): {t}",
+                            .{ comp.dirs.local_cache, o_sub_path, err },
+                        );
+                    };
+                }
+
+                try flush(comp, arena);
+
+                // Calling `flush` may have produced errors, in which case the
+                // cache manifest must not be written.
+                if (anyErrors(comp)) return;
+
+                // Release the lock and close the file before writing the manifest.
+                // This avoids the potential of another process getting a cache hit and
+                // trying to spawn a process with it while there's still an open fd to it.
+                if (comp.bin_file) |lf| {
+                    lf.releaseLock();
+                    if (lf.file) |f| {
+                        f.close(io);
+                        lf.file = null;
+                    }
                 }
             }
 
@@ -3211,7 +3260,18 @@ pub fn resolveEmitPathFlush(
             },
             .sub_path = path,
         },
-        .incremental, .whole => return .{
+        .whole => |whole| if (whole.tmp_artifact_directory) |tmp_dir| return .{
+            .root_dir = tmp_dir,
+            .sub_path = path,
+        } else return .{
+            .root_dir = comp.dirs.local_cache,
+            .sub_path = try fs.path.join(arena, &.{
+                "o",
+                &Cache.binToHex(comp.digest.?),
+                path,
+            }),
+        },
+        .incremental => return .{
             .root_dir = comp.dirs.local_cache,
             .sub_path = try fs.path.join(arena, &.{
                 "o",
@@ -3343,8 +3403,12 @@ fn renameTmpIntoCache(
                 else => return error.AccessDenied,
             },
             error.DirNotEmpty => {
-                try cache_directory.handle.deleteTree(io, o_sub_path);
-                continue;
+                if (replaceExistingCacheDirFiles(io, cache_directory, tmp_dir_sub_path, o_sub_path)) |_| {
+                    break;
+                } else |_| {
+                    try cache_directory.handle.deleteTree(io, o_sub_path);
+                    continue;
+                }
             },
             error.FileNotFound => {
                 try cache_directory.handle.createDirPath(io, "o");
@@ -3354,6 +3418,32 @@ fn renameTmpIntoCache(
         };
         break;
     }
+}
+
+fn replaceExistingCacheDirFiles(
+    io: Io,
+    cache_directory: Cache.Directory,
+    tmp_dir_sub_path: []const u8,
+    o_sub_path: []const u8,
+) !void {
+    {
+        var tmp_dir = try cache_directory.handle.openDir(io, tmp_dir_sub_path, .{ .iterate = true });
+        defer tmp_dir.close(io);
+        var o_dir = try cache_directory.handle.openDir(io, o_sub_path, .{});
+        defer o_dir.close(io);
+
+        var check_it = tmp_dir.iterateAssumeFirstIteration();
+        while (try check_it.next(io)) |entry| {
+            if (entry.kind != .file) return error.Unexpected;
+        }
+
+        var move_it = tmp_dir.iterate();
+        while (try move_it.next(io)) |entry| {
+            if (entry.kind != .file) return error.Unexpected;
+            try Io.Dir.rename(tmp_dir, entry.name, o_dir, entry.name, io);
+        }
+    }
+    cache_directory.handle.deleteTree(io, tmp_dir_sub_path) catch {};
 }
 
 /// This is only observed at compile-time and used to emit a compile error

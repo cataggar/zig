@@ -5494,3 +5494,9 @@ test "shouldExportStackPointerForConfig" {
     try std.testing.expect(!shouldExportStackPointerForConfig(.Obj, .static, true, .reactor, .wasip3));
     try std.testing.expect(!shouldExportStackPointerForConfig(.Lib, .static, true, .reactor, .wasip3));
 }
+
+test {
+    _ = Archive;
+    _ = Object;
+}
+
