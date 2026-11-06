@@ -1939,3 +1939,272 @@ test "128-bit and non-128-bit vector constants, arithmetic, comparisons, select,
     try S.doTheTest();
     try comptime S.doTheTest();
 }
+
+test "128-bit SIMD fused cmp_vector + @reduce, non-fused bool vector @reduce, and horizontal @reduce" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+
+    const S = struct {
+        const CmpRes = struct { any: bool, all: bool };
+        const BoolVecRes = struct { any: bool, all: bool, lane: bool };
+
+        noinline fn fusedCmpF32(a: @Vector(4, f32), b: @Vector(4, f32)) CmpRes {
+            return .{
+                .any = @reduce(.Or, a < b),
+                .all = @reduce(.And, a < b),
+            };
+        }
+
+        noinline fn fusedCmpI32(a: @Vector(4, i32), b: @Vector(4, i32)) CmpRes {
+            return .{
+                .any = @reduce(.Or, a == b),
+                .all = @reduce(.And, a <= b),
+            };
+        }
+
+        noinline fn fusedCmpU16(a: @Vector(8, u16), b: @Vector(8, u16)) CmpRes {
+            return .{
+                .any = @reduce(.Or, a > b),
+                .all = @reduce(.And, a >= b),
+            };
+        }
+
+        noinline fn fusedCmpU8(a: @Vector(16, u8), b: @Vector(16, u8)) CmpRes {
+            return .{
+                .any = @reduce(.Or, a != b),
+                .all = @reduce(.And, a == b),
+            };
+        }
+
+        noinline fn fusedCmpF64(a: @Vector(2, f64), b: @Vector(2, f64)) CmpRes {
+            return .{
+                .any = @reduce(.Or, a < b),
+                .all = @reduce(.And, a <= b),
+            };
+        }
+
+        noinline fn sharedMaskReduceOnly(a: @Vector(4, f32), b: @Vector(4, f32), flag: bool, count: usize) CmpRes {
+            const mask = a < b;
+            var any = @reduce(.Or, mask);
+            var all = @reduce(.And, mask);
+            if (flag) {
+                any = any and @reduce(.Or, mask);
+            } else {
+                all = all or @reduce(.And, mask);
+            }
+            var i: usize = 0;
+            while (i < count) : (i += 1) {
+                if (!@reduce(.Or, mask)) any = false;
+            }
+            return .{ .any = any, .all = all };
+        }
+
+        noinline fn mixedMaskReduceAndSelect(a: @Vector(4, f32), b: @Vector(4, f32)) struct { any: bool, selected: @Vector(4, f32) } {
+            const mask = a < b;
+            return .{
+                .any = @reduce(.Or, mask),
+                .selected = @select(f32, mask, a, b),
+            };
+        }
+
+        noinline fn nonFusedBoolVec4(a: @Vector(4, i32), b: @Vector(4, i32)) BoolVecRes {
+            var m: @Vector(4, bool) = a < b;
+            _ = &m;
+            return .{
+                .any = @reduce(.Or, m),
+                .all = @reduce(.And, m),
+                .lane = m[1],
+            };
+        }
+
+        noinline fn nonFusedBoolVec8(a: @Vector(8, u16), b: @Vector(8, u16)) BoolVecRes {
+            var m: @Vector(8, bool) = a < b;
+            _ = &m;
+            return .{
+                .any = @reduce(.Or, m),
+                .all = @reduce(.And, m),
+                .lane = m[3],
+            };
+        }
+
+        noinline fn nonFusedBoolVec16(a: @Vector(16, u8), b: @Vector(16, u8)) BoolVecRes {
+            var m: @Vector(16, bool) = a < b;
+            _ = &m;
+            return .{
+                .any = @reduce(.Or, m),
+                .all = @reduce(.And, m),
+                .lane = m[7],
+            };
+        }
+
+        noinline fn reduceF32x4(v: @Vector(4, f32)) struct { sum: f32, prod: f32, min: f32, max: f32 } {
+            return .{
+                .sum = @reduce(.Add, v),
+                .prod = @reduce(.Mul, v),
+                .min = @reduce(.Min, v),
+                .max = @reduce(.Max, v),
+            };
+        }
+
+        noinline fn reduceI32x4(v: @Vector(4, i32)) struct { sum: i32, prod: i32, min: i32, max: i32, band: i32, bor: i32, bxor: i32 } {
+            return .{
+                .sum = @reduce(.Add, v),
+                .prod = @reduce(.Mul, v),
+                .min = @reduce(.Min, v),
+                .max = @reduce(.Max, v),
+                .band = @reduce(.And, v),
+                .bor = @reduce(.Or, v),
+                .bxor = @reduce(.Xor, v),
+            };
+        }
+
+        noinline fn reduceU32x4(v: @Vector(4, u32)) struct { sum: u32, prod: u32, min: u32, max: u32, band: u32, bor: u32, bxor: u32 } {
+            return .{
+                .sum = @reduce(.Add, v),
+                .prod = @reduce(.Mul, v),
+                .min = @reduce(.Min, v),
+                .max = @reduce(.Max, v),
+                .band = @reduce(.And, v),
+                .bor = @reduce(.Or, v),
+                .bxor = @reduce(.Xor, v),
+            };
+        }
+
+        noinline fn reduceF64x2(v: @Vector(2, f64)) struct { sum: f64, prod: f64, min: f64, max: f64 } {
+            return .{
+                .sum = @reduce(.Add, v),
+                .prod = @reduce(.Mul, v),
+                .min = @reduce(.Min, v),
+                .max = @reduce(.Max, v),
+            };
+        }
+
+        noinline fn reduceI64x2(v: @Vector(2, i64)) struct { sum: i64, prod: i64, band: i64, bor: i64, bxor: i64 } {
+            return .{
+                .sum = @reduce(.Add, v),
+                .prod = @reduce(.Mul, v),
+                .band = @reduce(.And, v),
+                .bor = @reduce(.Or, v),
+                .bxor = @reduce(.Xor, v),
+            };
+        }
+
+        fn doTheTest() !void {
+            // 1. Fused cmp_vector + @reduce(.And / .Or)
+            try expectEqual(CmpRes{ .any = true, .all = false }, fusedCmpF32(.{ 1.0, 5.0, 3.0, 4.0 }, .{ 2.0, 2.0, 4.0, 5.0 }));
+            try expectEqual(CmpRes{ .any = true, .all = true }, fusedCmpF32(.{ 1.0, 1.0, 3.0, 4.0 }, .{ 2.0, 2.0, 4.0, 5.0 }));
+            try expectEqual(CmpRes{ .any = false, .all = false }, fusedCmpF32(.{ 3.0, 5.0, 4.0, 6.0 }, .{ 2.0, 2.0, 4.0, 5.0 }));
+
+            try expectEqual(CmpRes{ .any = true, .all = true }, fusedCmpI32(.{ -5, 0, 10, 20 }, .{ -3, 0, 15, 25 }));
+            try expectEqual(CmpRes{ .any = false, .all = false }, fusedCmpI32(.{ -1, 1, 10, 20 }, .{ -3, 0, 15, 25 }));
+
+            try expectEqual(CmpRes{ .any = true, .all = true }, fusedCmpU16(.{ 10, 20, 30, 40, 50, 60, 70, 80 }, .{ 10, 15, 30, 40, 50, 60, 70, 80 }));
+            try expectEqual(CmpRes{ .any = false, .all = false }, fusedCmpU16(.{ 10, 10, 30, 40, 50, 60, 70, 79 }, .{ 10, 15, 30, 40, 50, 60, 70, 80 }));
+
+            try expectEqual(CmpRes{ .any = false, .all = true }, fusedCmpU8(@splat(42), @splat(42)));
+            try expectEqual(CmpRes{ .any = true, .all = false }, fusedCmpU8(.{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, @splat(1)));
+
+            try expectEqual(CmpRes{ .any = true, .all = true }, fusedCmpF64(.{ -2.5, 4.0 }, .{ -1.0, 4.0 }));
+            try expectEqual(CmpRes{ .any = false, .all = false }, fusedCmpF64(.{ 2.5, 5.0 }, .{ -1.0, 4.0 }));
+
+            try expectEqual(CmpRes{ .any = true, .all = false }, sharedMaskReduceOnly(.{ 1.0, 5.0, 3.0, 4.0 }, .{ 2.0, 2.0, 4.0, 5.0 }, true, 2));
+            try expectEqual(CmpRes{ .any = true, .all = true }, sharedMaskReduceOnly(.{ 1.0, 1.0, 3.0, 4.0 }, .{ 2.0, 2.0, 4.0, 5.0 }, false, 3));
+            try expectEqual(CmpRes{ .any = false, .all = false }, sharedMaskReduceOnly(.{ 3.0, 5.0, 4.0, 6.0 }, .{ 2.0, 2.0, 4.0, 5.0 }, true, 1));
+
+            const mixed = mixedMaskReduceAndSelect(.{ 1.0, 5.0, 3.0, 6.0 }, .{ 2.0, 2.0, 4.0, 5.0 });
+            try expect(mixed.any);
+            try expectEqual(@Vector(4, f32){ 1.0, 2.0, 3.0, 5.0 }, mixed.selected);
+            const mixed_none = mixedMaskReduceAndSelect(.{ 3.0, 5.0, 4.0, 6.0 }, .{ 2.0, 2.0, 4.0, 5.0 });
+            try expect(!mixed_none.any);
+            try expectEqual(@Vector(4, f32){ 2.0, 2.0, 4.0, 5.0 }, mixed_none.selected);
+
+            // 2. Non-fused @Vector(4/8/16, bool) stored to memory and reduced
+            try expectEqual(BoolVecRes{ .any = true, .all = false, .lane = true }, nonFusedBoolVec4(.{ 5, 1, 5, 5 }, .{ 2, 3, 2, 2 }));
+            try expectEqual(BoolVecRes{ .any = true, .all = true, .lane = true }, nonFusedBoolVec4(.{ 1, 1, 1, 1 }, .{ 2, 3, 2, 2 }));
+            try expectEqual(BoolVecRes{ .any = false, .all = false, .lane = false }, nonFusedBoolVec4(.{ 5, 5, 5, 5 }, .{ 2, 3, 2, 2 }));
+
+            try expectEqual(BoolVecRes{ .any = true, .all = false, .lane = true }, nonFusedBoolVec8(.{ 5, 5, 5, 1, 5, 5, 5, 5 }, @splat(3)));
+            try expectEqual(BoolVecRes{ .any = true, .all = true, .lane = true }, nonFusedBoolVec8(@splat(1), @splat(3)));
+            try expectEqual(BoolVecRes{ .any = false, .all = false, .lane = false }, nonFusedBoolVec8(@splat(5), @splat(3)));
+
+            try expectEqual(BoolVecRes{ .any = true, .all = false, .lane = true }, nonFusedBoolVec16(.{ 5, 5, 5, 5, 5, 5, 5, 1, 5, 5, 5, 5, 5, 5, 5, 5 }, @splat(3)));
+            try expectEqual(BoolVecRes{ .any = true, .all = true, .lane = true }, nonFusedBoolVec16(@splat(1), @splat(3)));
+            try expectEqual(BoolVecRes{ .any = false, .all = false, .lane = false }, nonFusedBoolVec16(@splat(5), @splat(3)));
+
+            // 3. Horizontal @reduce on @Vector(4, f32), including NaN in lane 0 and lane 2
+            const r_f32 = reduceF32x4(.{ -2.0, 3.0, -4.0, 5.0 });
+            try expectEqual(@as(f32, 2.0), r_f32.sum);
+            try expectEqual(@as(f32, 120.0), r_f32.prod);
+            try expectEqual(@as(f32, -4.0), r_f32.min);
+            try expectEqual(@as(f32, 5.0), r_f32.max);
+
+            const nan32 = math.nan(f32);
+            const r_f32_nan0 = reduceF32x4(.{ nan32, 3.0, -4.0, 5.0 });
+            try expect(math.isNan(r_f32_nan0.sum));
+            try expect(math.isNan(r_f32_nan0.prod));
+            try expectEqual(@as(f32, -4.0), r_f32_nan0.min);
+            try expectEqual(@as(f32, 5.0), r_f32_nan0.max);
+
+            const r_f32_nan2 = reduceF32x4(.{ -1.9, 5.1, nan32, 100.0 });
+            try expect(math.isNan(r_f32_nan2.sum));
+            try expect(math.isNan(r_f32_nan2.prod));
+            try expectEqual(@as(f32, -1.9), r_f32_nan2.min);
+            try expectEqual(@as(f32, 100.0), r_f32_nan2.max);
+
+            // 4. Horizontal @reduce on @Vector(4, i32) and @Vector(4, u32)
+            const r_i32 = reduceI32x4(.{ -10, 3, -4, 7 });
+            try expectEqual(@as(i32, -4), r_i32.sum);
+            try expectEqual(@as(i32, 840), r_i32.prod);
+            try expectEqual(@as(i32, -10), r_i32.min);
+            try expectEqual(@as(i32, 7), r_i32.max);
+            try expectEqual(@as(i32, (-10) & 3 & (-4) & 7), r_i32.band);
+            try expectEqual(@as(i32, (-10) | 3 | (-4) | 7), r_i32.bor);
+            try expectEqual(@as(i32, (-10) ^ 3 ^ (-4) ^ 7), r_i32.bxor);
+
+            const r_u32 = reduceU32x4(.{ 0x80000005, 1, 1, 1 });
+            try expectEqual(@as(u32, 0x80000008), r_u32.sum);
+            try expectEqual(@as(u32, 0x80000005), r_u32.prod);
+            try expectEqual(@as(u32, 1), r_u32.min);
+            try expectEqual(@as(u32, 0x80000005), r_u32.max);
+            try expectEqual(@as(u32, 1), r_u32.band);
+            try expectEqual(@as(u32, 0x80000005), r_u32.bor);
+            try expectEqual(@as(u32, 0x80000004), r_u32.bxor);
+
+            const r_u32_b = reduceU32x4(.{ 15, 2, 4, 3 });
+            try expectEqual(@as(u32, 24), r_u32_b.sum);
+            try expectEqual(@as(u32, 360), r_u32_b.prod);
+            try expectEqual(@as(u32, 2), r_u32_b.min);
+            try expectEqual(@as(u32, 15), r_u32_b.max);
+            try expectEqual(@as(u32, 15 & 2 & 4 & 3), r_u32_b.band);
+            try expectEqual(@as(u32, 15 | 2 | 4 | 3), r_u32_b.bor);
+            try expectEqual(@as(u32, 15 ^ 2 ^ 4 ^ 3), r_u32_b.bxor);
+
+            // 5. Horizontal @reduce on @Vector(2, f64) and @Vector(2, i64)
+            const r_f64 = reduceF64x2(.{ -3.5, 8.0 });
+            try expectEqual(@as(f64, 4.5), r_f64.sum);
+            try expectEqual(@as(f64, -28.0), r_f64.prod);
+            try expectEqual(@as(f64, -3.5), r_f64.min);
+            try expectEqual(@as(f64, 8.0), r_f64.max);
+
+            const nan64 = math.nan(f64);
+            const r_f64_nan0 = reduceF64x2(.{ nan64, -3.5 });
+            try expectEqual(@as(f64, -3.5), r_f64_nan0.min);
+            try expectEqual(@as(f64, -3.5), r_f64_nan0.max);
+            const r_f64_nan1 = reduceF64x2(.{ -3.5, nan64 });
+            try expectEqual(@as(f64, -3.5), r_f64_nan1.min);
+            try expectEqual(@as(f64, -3.5), r_f64_nan1.max);
+
+            const r_i64 = reduceI64x2(.{ -100_000, 300_007 });
+            try expectEqual(@as(i64, 200_007), r_i64.sum);
+            try expectEqual(@as(i64, -30_000_700_000), r_i64.prod);
+            try expectEqual(@as(i64, (-100_000) & 300_007), r_i64.band);
+            try expectEqual(@as(i64, (-100_000) | 300_007), r_i64.bor);
+            try expectEqual(@as(i64, (-100_000) ^ 300_007), r_i64.bxor);
+        }
+    };
+
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}
