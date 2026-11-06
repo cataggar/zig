@@ -1781,9 +1781,23 @@ fn wasmLink(lld: *Lld, arena: Allocator) !void {
         }
 
         // Users are allowed to specify which symbols they want to export to the wasm host.
+        var exports_stack_pointer = false;
         for (wasm.export_symbol_names) |symbol_name| {
+            if (mem.eql(u8, symbol_name, "__stack_pointer")) exports_stack_pointer = true;
             const arg = try arena.print("--export={s}", .{symbol_name});
             try argv.append(arg);
+        }
+
+        if (!exports_stack_pointer and
+            link.File.Wasm.shouldExportStackPointerForConfig(
+                comp.config.output_mode,
+                comp.config.link_mode,
+                comp.config.rdynamic,
+                comp.config.wasi_exec_model,
+                target.os.tag,
+            ))
+        {
+            try argv.append("--export-if-defined=__stack_pointer");
         }
 
         if (target.os.tag == .wasip2 or target.os.tag == .wasip3) {
