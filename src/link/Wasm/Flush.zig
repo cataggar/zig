@@ -621,6 +621,20 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
     if (!is_obj) {
         try wasm.exportSyntheticObjectGlobals(gpa, &f.missing_exports);
 
+        if (wasm.shouldExportStackPointer()) {
+            const sp_defined_by_object = if (wasm.object_global_imports.get(wasm.preloaded_strings.__stack_pointer)) |imp|
+                imp.resolution != .unresolved and imp.resolution.unpack(wasm) == .object_global
+            else
+                false;
+            if (!sp_defined_by_object) {
+                try wasm.globals.put(gpa, .__stack_pointer, {});
+                try wasm.appendGlobalExportUnique(gpa, .{
+                    .name = wasm.preloaded_strings.__stack_pointer,
+                    .global_index = Wasm.GlobalIndex.fromResolution(wasm, .__stack_pointer).?,
+                });
+            }
+        }
+
         var exp_i: usize = 0;
         while (exp_i < f.missing_exports.entries.len) {
             const exp_name = f.missing_exports.keys()[exp_i];

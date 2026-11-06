@@ -387,6 +387,33 @@ pub const GlobalExport = extern struct {
     global_index: GlobalIndex,
 };
 
+pub fn shouldExportStackPointerForConfig(
+    output_mode: std.lang.OutputMode,
+    link_mode: std.lang.LinkMode,
+    rdynamic: bool,
+    wasi_exec_model: std.lang.WasiExecModel,
+    os_tag: std.Target.Os.Tag,
+) bool {
+    if (output_mode == .Obj or (output_mode == .Lib and link_mode == .static)) return false;
+    return rdynamic or
+        wasi_exec_model == .reactor or
+        (output_mode == .Lib and os_tag.isWasi()) or
+        os_tag == .wasip3;
+}
+
+pub fn shouldExportStackPointer(wasm: *const Wasm) bool {
+    if (wasm.base.isRelocatable()) return false;
+    const comp = wasm.base.comp;
+    const target = &comp.root_mod.resolved_target.result;
+    return shouldExportStackPointerForConfig(
+        comp.config.output_mode,
+        comp.config.link_mode,
+        comp.config.rdynamic,
+        comp.config.wasi_exec_model,
+        target.os.tag,
+    );
+}
+
 pub fn appendGlobalExportUnique(wasm: *Wasm, gpa: Allocator, exp: GlobalExport) Allocator.Error!void {
     for (wasm.global_exports.items) |existing| {
         if (existing.name == exp.name) return;
@@ -4101,7 +4128,8 @@ pub fn prelink(wasm: *Wasm, prog_node: std.Progress.Node) link.Error!void {
             false;
         if (!sp_defined_by_object and
             (wasm.object_global_imports.contains(wasm.preloaded_strings.__stack_pointer) or
-                wasm.missing_exports.contains(wasm.preloaded_strings.__stack_pointer)))
+                wasm.missing_exports.contains(wasm.preloaded_strings.__stack_pointer) or
+                wasm.shouldExportStackPointer()))
         {
             try wasm.globals.put(gpa, .__stack_pointer, {});
             assert(wasm.globals.entries.len - 1 == @backingInt(GlobalIndex.stack_pointer));
@@ -5441,4 +5469,18 @@ test "exportSyntheticObjectGlobals and appendGlobalExportUnique export __stack_p
     try std.testing.expectEqual(GlobalIndex.stack_pointer, wasm.global_exports.items[0].global_index);
     try std.testing.expectEqual(hb_name, wasm.global_exports.items[1].name);
     try std.testing.expectEqual(@as(GlobalIndex, @fromBackingInt(1)), wasm.global_exports.items[1].global_index);
+}
+
+test "shouldExportStackPointerForConfig" {
+    try std.testing.expect(shouldExportStackPointerForConfig(.Exe, .static, true, .command, .freestanding));
+    try std.testing.expect(shouldExportStackPointerForConfig(.Exe, .static, false, .reactor, .wasi));
+    try std.testing.expect(shouldExportStackPointerForConfig(.Exe, .static, false, .reactor, .wasip2));
+    try std.testing.expect(shouldExportStackPointerForConfig(.Lib, .dynamic, false, .command, .wasi));
+    try std.testing.expect(shouldExportStackPointerForConfig(.Exe, .static, false, .command, .wasip3));
+
+    try std.testing.expect(!shouldExportStackPointerForConfig(.Exe, .static, false, .command, .freestanding));
+    try std.testing.expect(!shouldExportStackPointerForConfig(.Exe, .static, false, .command, .wasi));
+    try std.testing.expect(!shouldExportStackPointerForConfig(.Exe, .static, false, .command, .wasip2));
+    try std.testing.expect(!shouldExportStackPointerForConfig(.Obj, .static, true, .reactor, .wasip3));
+    try std.testing.expect(!shouldExportStackPointerForConfig(.Lib, .static, true, .reactor, .wasip3));
 }
