@@ -2315,6 +2315,8 @@ const TrivialLeaf = struct {
     needs_local_zero_init: [max_inline_locals]bool = @splat(false),
     needs_result_block: bool = false,
     has_early_return: bool = false,
+    uses_global_op: bool = false,
+    inner_callee: ?u32 = null,
 };
 
 const TrivialKind = union(enum) {
@@ -2429,6 +2431,10 @@ fn classifyTrivialFunc(
 
     var needs_result_block: bool = false;
     var has_early_return: bool = false;
+    var uses_global_op: bool = false;
+    var has_loop: bool = false;
+    var seen_cond_branch: bool = false;
+    var inner_callee: ?u32 = null;
 
     while (pos < body_end) {
         const instr_start = pos;
@@ -2465,8 +2471,27 @@ fn classifyTrivialFunc(
         if (op_count > 91) return .none;
 
         if (decoded.prefix == 0) {
+            if (decoded.code == 0x23 or decoded.code == 0x24) {
+                uses_global_op = true;
+            }
             switch (decoded.code) {
-                0x10, 0x11, 0x12, 0x13 => return .none,
+                0x11, 0x12, 0x13 => return .none,
+                0x10 => {
+                    leading_still_matching = false;
+                    const callee = readU32(bytes, &pos) catch return .none;
+                    if (optimize_mode != .fast or
+                        depth == 0 or
+                        !seen_cond_branch or
+                        has_loop or
+                        inner_callee != null or
+                        callee >= module.funcs.items.len or
+                        callee == fidx)
+                    {
+                        return .none;
+                    }
+                    inner_callee = callee;
+                    continue;
+                },
                 0x00 => {
                     if (depth == 0) return .none;
                     leading_still_matching = false;
@@ -2474,6 +2499,12 @@ fn classifyTrivialFunc(
                 },
                 0x02, 0x03, 0x04 => {
                     leading_still_matching = false;
+                    if (decoded.code == 0x03) {
+                        has_loop = true;
+                        if (inner_callee != null) return .none;
+                    } else if (decoded.code == 0x04) {
+                        seen_cond_branch = true;
+                    }
                     if (depth >= block_types.len or pos >= body_end) return .none;
                     const bt_byte = bytes[pos];
                     var bt_val: i64 = 0;
@@ -2517,6 +2548,7 @@ fn classifyTrivialFunc(
                 },
                 0x0c, 0x0d => {
                     leading_still_matching = false;
+                    if (decoded.code == 0x0d) seen_cond_branch = true;
                     const target = readU32(bytes, &pos) catch return .none;
                     if (target > depth) return .none;
                     if (target == depth) needs_result_block = true;
@@ -2531,6 +2563,7 @@ fn classifyTrivialFunc(
                 },
                 0x0e => {
                     leading_still_matching = false;
+                    seen_cond_branch = true;
                     const count = readU32(bytes, &pos) catch return .none;
                     for (0..@as(usize, count) + 1) |_| {
                         const target = readU32(bytes, &pos) catch return .none;
@@ -2604,16 +2637,35 @@ fn classifyTrivialFunc(
 
     switch (optimize_mode) {
         .small => {
-            _ = call_count;
-            _ = is_externally_used;
-            if (op_count > 6 or func.local_types.items.len != 0 or sig.params.len > 2) return .none;
-            const allowed_params = sig.params.len == 0 or
-                prefix_params == sig.params.len or
-                (sig.params.len == 1 and op_count <= 4);
-            if (!allowed_params) return .none;
+            if (inner_callee != null) return .none;
+            if (call_count == 1 and !is_externally_used) {
+                if (op_count > 45 or func.local_types.items.len > 8 or sig.params.len > max_inline_params) return .none;
+            } else {
+                if (uses_global_op) return .none;
+                const allow_zero_local = func.local_types.items.len == 0 and
+                    op_count <= 7 and
+                    sig.params.len <= 2;
+                const allow_one_local = func.local_types.items.len <= 1 and
+                    op_count <= 10 and
+                    sig.params.len <= 3 and
+                    (prefix_params == sig.params.len or (sig.params.len <= 2 and op_count <= 9));
+                if (!allow_zero_local and !allow_one_local) return .none;
+            }
         },
         .fast => {
-            if (op_count > 90 or sig.params.len > max_inline_params or func.local_types.items.len > max_inline_locals) return .none;
+            if (inner_callee != null) {
+                if (uses_global_op or
+                    has_loop or
+                    !seen_cond_branch or
+                    op_count > 28 or
+                    func.local_types.items.len > 4 or
+                    sig.params.len > 4)
+                {
+                    return .none;
+                }
+            } else {
+                if (op_count > 90 or sig.params.len > max_inline_params or func.local_types.items.len > max_inline_locals) return .none;
+            }
         },
     }
 
@@ -2629,6 +2681,8 @@ fn classifyTrivialFunc(
         .needs_local_zero_init = needs_local_zero_init,
         .needs_result_block = needs_result_block,
         .has_early_return = has_early_return,
+        .uses_global_op = uses_global_op,
+        .inner_callee = inner_callee,
     };
     @memcpy(leaf.param_types[0..sig.params.len], sig.params);
     @memcpy(leaf.result_types[0..sig.results.len], sig.results);
@@ -2750,9 +2804,9 @@ fn inlineTrivialFunctions(
 
     // Resolve forwarding chains (e.g. getFactoryThunk -> host.getFactoryThunk -> export.getFactoryThunk).
     for (module.num_func_imports..num_funcs) |i| {
-        if (trivials[i] != .forward) continue;
-        var curr = trivials[i].forward.callee;
-        const orig_tail = trivials[i].forward.is_tail;
+        if (orig_forwards[i] != .forward) continue;
+        var curr = orig_forwards[i].forward.callee;
+        const orig_tail = orig_forwards[i].forward.is_tail;
         var chain_single_use: bool = (@as(u32, @intFromBool(is_externally_used[i])) + call_counts[i]) <= 1;
         var resolved: TrivialKind = .none;
         for (0..16) |_| {
@@ -2760,19 +2814,20 @@ fn inlineTrivialFunctions(
                 resolved = .{ .forward = .{ .callee = curr, .is_tail = orig_tail } };
                 break;
             }
-            if (is_externally_used[curr] or call_counts[curr] > 1) {
+            if ((@as(u32, @intFromBool(is_externally_used[curr])) + call_counts[curr]) > 1) {
                 chain_single_use = false;
             }
-            switch (trivials[curr]) {
+            switch (orig_forwards[curr]) {
                 .leaf => |leaf| {
                     const small_leaf_ok = (optimize_mode == .fast) or
                         chain_single_use or
-                        (leaf.op_count <= 6 and leaf.local_count == 0);
+                        (leaf.op_count <= 7 and leaf.local_count == 0 and !leaf.uses_global_op);
                     if (small_leaf_ok and
                         leaf.param_count == 0 and
                         leaf.local_count == 0 and
                         !leaf.needs_result_block and
-                        !leaf.has_early_return)
+                        !leaf.has_early_return and
+                        leaf.inner_callee == null)
                     {
                         resolved = .{ .leaf = leaf };
                     } else {
@@ -2794,6 +2849,16 @@ fn inlineTrivialFunctions(
             }
         }
         trivials[i] = resolved;
+    }
+
+    for (module.num_func_imports..num_funcs) |i| {
+        if (trivials[i] == .leaf) {
+            if (trivials[i].leaf.inner_callee) |inner_c| {
+                if (trivials[inner_c] != .none or orig_forwards[inner_c] != .none) {
+                    trivials[i] = .none;
+                }
+            }
+        }
     }
 
     var any_inlined = false;
@@ -4824,6 +4889,497 @@ test "Optimizer: stage2_wasm assert inner-block and Rect.x shadow-stack copy inl
     // Subsec 1 (func names) is preserved, while stale subsec 2 (local names for compacted func 0) is dropped!
     try testing.expectEqualSlices(u8, &[_]u8{ 1, 5, 1, 0, 2, 'i', 'd' }, mod_names_opt.customs.items[0].data);
 }
+
+test "Optimizer: .small mode single-caller leaf and multi-caller 7-op/1-local accessor inlining" {
+    const allocator = testing.allocator;
+
+    // 1. Single-caller internal leaf with 18 ops and 2 locals is inlined in .small mode and removed:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        // func 0: single-caller internal leaf (2 params, 2 locals, 18 ops)
+        const single_caller_leaf = [_]u8{
+            0x20, 0x00, // 1: local.get 0
+            0x28, 0x02, 0x00, // 2: i32.load align=2 offset=0
+            0x22, 0x02, // 3: local.tee 2
+            0x20, 0x01, // 4: local.get 1
+            0x6a, // 5: i32.add
+            0x22, 0x03, // 6: local.tee 3
+            0x20, 0x00, // 7: local.get 0
+            0x28, 0x02, 0x04, // 8: i32.load align=2 offset=4
+            0x73, // 9: i32.xor
+            0x20, 0x02, // 10: local.get 2
+            0x6c, // 11: i32.mul
+            0x20, 0x03, // 12: local.get 3
+            0x41, 0x03, // 13: i32.const 3
+            0x74, // 14: i32.shl
+            0x6a, // 15: i32.add
+            0x20, 0x01, // 16: local.get 1
+            0x73, // 17: i32.xor
+            0x0f, // 18: return (stripped at effective_end)
+            0x0b, // end
+        };
+        const sole_caller = [_]u8{
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x10, 0x00, // call 0
+            0x41, 0x01, // i32.const 1
+            0x6a, // i32.add
+            0x0b, // end
+        };
+
+        var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &single_caller_leaf };
+        try f0.local_types.appendSlice(allocator, &.{ .i32, .i32 });
+        try mod.funcs.append(allocator, f0);
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &sole_caller });
+        try mod.exports.append(allocator, .{ .name = "entry", .kind = .func, .var_ = .{ .index = 1 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt_small = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+        defer allocator.free(opt_small);
+        var opt_mod = try reader.readModule(allocator, opt_small);
+        defer opt_mod.deinit();
+
+        // Single-caller leaf (func 0) was inlined into `entry` and pruned by removeDeadFunctions!
+        try testing.expectEqual(@as(usize, 1), opt_mod.funcs.items.len);
+    }
+
+    // 2. Multi-caller 7-op, 2-param, 0-local accessor with prefix_params == 0 (like ArrayList.appendAssumeCapacity)
+    //    and multi-caller 9-op, 2-param, 1-local accessor (like ElementPool.get) are inlined in .small mode,
+    //    while a multi-caller accessor touching globals (`uses_global_op`) is NOT inlined:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.globals.append(allocator, .{
+            .type = .{ .val_type = .i32, .mutability = .mutable },
+            .init_expr_bytes = &[_]u8{ 0x41, 0x00 },
+        });
+
+        // Type 0: (param i32, i32) -> ()
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+            .results = &.{},
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        // Type 1: (param i32, i32) -> (result i32)
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        // func 0 (appendAssumeCapacity-like): 2 params, 0 locals, 7 ops, reads param 0 twice (prefix_params == 0)
+        //   local.get 0; local.get 0; i32.load offset=4; i32.add; local.get 1; i32.store offset=0; return; end
+        const append_assume_cap = [_]u8{
+            0x20, 0x00, // 1: local.get 0
+            0x20, 0x00, // 2: local.get 0
+            0x28, 0x02, 0x04, // 3: i32.load align=2 offset=4
+            0x6a, // 4: i32.add
+            0x20, 0x01, // 5: local.get 1
+            0x36, 0x02, 0x00, // 6: i32.store align=2 offset=0
+            0x0f, // 7: return
+            0x0b, // end
+        };
+
+        // func 1 (ElementPool.get-like): 2 params, 1 local, 9 ops
+        //   local.get 0; i32.load offset=0; local.get 1; i32.const 12; i32.mul; local.tee 2; i32.add; i32.load offset=0; return; end
+        const pool_get = [_]u8{
+            0x20, 0x00, // 1: local.get 0
+            0x28, 0x02, 0x00, // 2: i32.load align=2 offset=0
+            0x20, 0x01, // 3: local.get 1
+            0x41, 12, // 4: i32.const 12
+            0x6c, // 5: i32.mul
+            0x22, 0x02, // 6: local.tee 2
+            0x6a, // 7: i32.add
+            0x20, 0x02, // 8: local.get 2
+            0x73, // 9: i32.xor
+            0x0f, // return (stripped -> 9 ops)
+            0x0b, // end
+        };
+
+        // func 2 (global-touching helper): 1 param, 0 locals, 4 ops, uses global.get 0
+        const global_helper = [_]u8{
+            0x20, 0x00, // 1: local.get 0
+            0x23, 0x00, // 2: global.get 0
+            0x6a, // 3: i32.add
+            0x20, 0x01, // 4: local.get 1
+            0x6a, // 5: i32.add
+            0x0f, // return
+            0x0b, // end
+        };
+
+        // func 3 (exported caller calling each helper twice):
+        const multi_caller = [_]u8{
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x00, // call $append_assume_cap (1)
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x00, // call $append_assume_cap (2)
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x01, // call $pool_get (1)
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x01, // call $pool_get (2)
+            0x6a,
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x02, // call $global_helper (1)
+            0x6a,
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x02, // call $global_helper (2)
+            0x6a,
+            0x0b,
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &append_assume_cap });
+        var f1 = Mod.Func{ .decl = .{ .type_var = .{ .index = 1 } }, .code_bytes = &pool_get };
+        try f1.local_types.append(allocator, .i32);
+        try mod.funcs.append(allocator, f1);
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 1 } }, .code_bytes = &global_helper });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 1 } }, .code_bytes = &multi_caller });
+        try mod.exports.append(allocator, .{ .name = "run", .kind = .func, .var_ = .{ .index = 3 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt_small = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+        defer allocator.free(opt_small);
+        var opt_mod = try reader.readModule(allocator, opt_small);
+        defer opt_mod.deinit();
+
+        // `append_assume_cap` (func 0) and `pool_get` (func 1) were inlined and pruned;
+        // only `global_helper` (now func 0) and `run` (now func 1) remain!
+        try testing.expectEqual(@as(usize, 2), opt_mod.funcs.items.len);
+    }
+}
+
+test "Optimizer: .fast mode 1-cold-call wrapper inlining and trivial inner-callee chaining" {
+    const allocator = testing.allocator;
+
+    // 1. 1-cold-call wrapper (`if (len == cap) call $slow_grow`) is inlined in .fast mode,
+    //    NOT inlined in .small mode, and a depth-0 call wrapper is NOT inlined as a 1-cold-call wrapper:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        // Imported slow-path function (index 0): (param i32, i32) -> ()
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+            .results = &.{},
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        try mod.imports.append(allocator, .{
+            .module_name = "env",
+            .field_name = "slow_grow",
+            .kind = .func,
+            .func = .{ .type_var = .{ .index = 0 } },
+        });
+        try mod.funcs.append(allocator, .{
+            .is_import = true,
+            .decl = .{ .type_var = .{ .index = 0 } },
+        });
+        mod.num_func_imports = 1;
+
+        // func 1 (ensureUnusedCapacity):
+        //   local.get 0; i32.load offset=4 (len); local.get 0; i32.load offset=8 (cap); i32.eq;
+        //   if (empty) { local.get 0; local.get 1; call $slow_grow } end; return; end
+        const ensure_cap_wrapper = [_]u8{
+            0x20, 0x00, // local.get 0
+            0x28, 0x02, 0x04, // i32.load align=2 offset=4
+            0x20, 0x00, // local.get 0
+            0x28, 0x02, 0x08, // i32.load align=2 offset=8
+            0x46, // i32.eq
+            0x04, 0x40, // if (empty) (depth becomes 1 > 0)
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x10, 0x00, // call $slow_grow (at depth 1)
+            0x0b, // end if
+            0x0f, // return
+            0x0b, // end
+        };
+
+        // func 2 (depth-0 unconditional call wrapper — must NOT be inlined):
+        const depth0_call_wrapper = [_]u8{
+            0x20, 0x00, // local.get 0
+            0x28, 0x02, 0x04, // i32.load align=2 offset=4
+            0x20, 0x01, // local.get 1
+            0x6a, // i32.add
+            0x20, 0x00, // local.get 0
+            0x10, 0x00, // call $slow_grow (at depth 0 -> rejected!)
+            0x0f, // return
+            0x0b, // end
+        };
+
+        // func 3 (exported caller): calls both func 1 and func 2
+        const caller_code = [_]u8{
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x01, // call $ensure_cap_wrapper
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x02, // call $depth0_call_wrapper
+            0x0b,
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &ensure_cap_wrapper });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &depth0_call_wrapper });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &caller_code });
+        try mod.exports.append(allocator, .{ .name = "push", .kind = .func, .var_ = .{ .index = 3 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+
+        // In .small mode, neither wrapper is inlined (all 4 funcs remain: 1 import + 3 defined).
+        const opt_small = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+        defer allocator.free(opt_small);
+        var mod_small = try reader.readModule(allocator, opt_small);
+        defer mod_small.deinit();
+        try testing.expectEqual(@as(usize, 4), mod_small.funcs.items.len);
+
+        // In .fast mode, `ensure_cap_wrapper` (func 1) IS inlined and pruned, while `depth0_call_wrapper` (func 2) is NOT!
+        const opt_fast = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt_fast);
+        var mod_fast = try reader.readModule(allocator, opt_fast);
+        defer mod_fast.deinit();
+        try testing.expectEqual(@as(usize, 3), mod_fast.funcs.items.len);
+    }
+
+    // 2. Chained case: 1-cold-call wrapper calls a trivial leaf/forward function (verifies no UAF across rounds):
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        // Type 0: (param i32, i32) -> ()
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+            .results = &.{},
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        // func 0 (wrapper): 1-cold-call wrapper calling trivial leaf func 1 at depth 1
+        //   Placed BEFORE func 1 and before caller func 2 so if func 0 were inlined in the same round
+        //   that func 0 inlines func 1, freeing func 0's code_bytes would UAF when func 2 inlines func 0!
+        const wrapper_code = [_]u8{
+            0x20, 0x00, // local.get 0
+            0x28, 0x02, 0x04, // i32.load align=2 offset=4
+            0x04, 0x40, // if (empty)
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x10, 0x01, // call $trivial_leaf (func 1)
+            0x0b, // end if
+            0x0f, // return
+            0x0b, // end
+        };
+
+        // func 1 (trivial_leaf): `local.get 0; local.get 1; i32.store offset=0; return; end`
+        const trivial_leaf_code = [_]u8{
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x36, 0x02, 0x00, // i32.store align=2 offset=0
+            0x0f, // return
+            0x0b, // end
+        };
+
+        // func 2 (exported caller): calls wrapper (func 0) twice
+        const caller_code = [_]u8{
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x00, // call $wrapper
+            0x20, 0x00,
+            0x41, 42,
+            0x10, 0x00, // call $wrapper
+            0x0b,
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &wrapper_code });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &trivial_leaf_code });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &caller_code });
+        try mod.exports.append(allocator, .{ .name = "run_chained", .kind = .func, .var_ = .{ .index = 2 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+
+        const opt_fast = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt_fast);
+        var mod_fast = try reader.readModule(allocator, opt_fast);
+        defer mod_fast.deinit();
+
+        // Round 1: `trivial_leaf` (func 1) is inlined into `wrapper` (func 0).
+        // Round 2: `wrapper` (func 0, now a pure leaf) is inlined into `run_chained` (func 2).
+        // Both helpers are pruned, leaving only `run_chained`!
+        try testing.expectEqual(@as(usize, 1), mod_fast.funcs.items.len);
+    }
+
+    // 3. Conditional guard (`seen_cond_branch`) and `!has_loop` requirements for .fast 1-cold-call wrappers,
+    //    plus multi-hop forward-chain `orig_forwards` / `!leaf.uses_global_op` check in .small mode:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+            .results = &.{},
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        try mod.imports.append(allocator, .{
+            .module_name = "env",
+            .field_name = "slow_grow",
+            .kind = .func,
+            .func = .{ .type_var = .{ .index = 0 } },
+        });
+        try mod.funcs.append(allocator, .{
+            .is_import = true,
+            .decl = .{ .type_var = .{ .index = 0 } },
+        });
+        mod.num_func_imports = 1;
+
+        // func 1 (br_if guarded block wrapper — `seen_cond_branch == true, !has_loop` -> inlined in .fast):
+        const br_if_wrapper = [_]u8{
+            0x02, 0x40, // block (empty)
+            0x20, 0x00, // local.get 0
+            0x28, 0x02, 0x04, // i32.load align=2 offset=4
+            0x20, 0x01, // local.get 1
+            0x49, // i32.lt_u
+            0x0d, 0x00, // br_if 0 (sets seen_cond_branch = true)
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x10, 0x00, // call $slow_grow
+            0x0b, // end block
+            0x0f, // return
+            0x0b, // end
+        };
+
+        // func 2 (unconditional block wrapper — `seen_cond_branch == false` -> rejected!):
+        const uncond_block_wrapper = [_]u8{
+            0x02, 0x40, // block (empty)
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x10, 0x00, // call $slow_grow (depth 1, but seen_cond_branch == false!)
+            0x0b, // end block
+            0x0f, // return
+            0x0b, // end
+        };
+
+        // func 3 (loop wrapper — `has_loop == true` -> rejected!):
+        const loop_wrapper = [_]u8{
+            0x03, 0x40, // loop (empty)
+            0x20, 0x00, // local.get 0
+            0x04, 0x40, // if (empty)
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x10, 0x00, // call $slow_grow (inside loop -> rejected!)
+            0x0b, // end if
+            0x0b, // end loop
+            0x0f, // return
+            0x0b, // end
+        };
+
+        // func 4 (exported caller): calls funcs 1, 2, 3
+        const caller_code = [_]u8{
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x01, // call $br_if_wrapper (inlined)
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x02, // call $uncond_block_wrapper (not inlined)
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x03, // call $loop_wrapper (not inlined)
+            0x0b,
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &br_if_wrapper });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &uncond_block_wrapper });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &loop_wrapper });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &caller_code });
+        try mod.exports.append(allocator, .{ .name = "test_guards", .kind = .func, .var_ = .{ .index = 4 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+
+        const opt_fast = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt_fast);
+        var mod_fast = try reader.readModule(allocator, opt_fast);
+        defer mod_fast.deinit();
+
+        // Only `br_if_wrapper` (func 1) was inlined and pruned; import (0), uncond_block_wrapper, loop_wrapper, and caller remain (4 funcs).
+        try testing.expectEqual(@as(usize, 4), mod_fast.funcs.items.len);
+    }
+
+    // 4. Multi-hop forward chain `F2 -> F1 -> F0 -> L` in .small mode where F0 has 2 callers and L uses a global:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = &.{},
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+        try mod.globals.append(allocator, .{
+            .type = .{ .val_type = .i32, .mutability = .mutable },
+            .init_expr_bytes = &[_]u8{ 0x41, 0x00 },
+        });
+
+        // func 0 (L): 5-op leaf using global.get 0 (called once by F0, so classified as single-caller .leaf in round 1)
+        const leaf_global = [_]u8{
+            0x23, 0x00, // 1: global.get 0
+            0x41, 0x07, // 2: i32.const 7
+            0x73, // 3: i32.xor
+            0x23, 0x00, // 4: global.get 0
+            0x6a, // 5: i32.add
+            0x0f, // return
+            0x0b, // end
+        };
+        // func 1 (F0): forwards to L (0), called twice (by F1 and directly by caller)
+        const f0_code = [_]u8{ 0x10, 0x00, 0x0f, 0x0b };
+        // func 2 (F1): forwards to F0 (1), called once (by F2)
+        const f1_code = [_]u8{ 0x10, 0x01, 0x0f, 0x0b };
+        // func 3 (F2): forwards to F1 (2), called once (by caller)
+        const f2_code = [_]u8{ 0x10, 0x02, 0x0f, 0x0b };
+        // func 4 (exported caller): calls F0 (1) and F2 (3)
+        const caller_code = [_]u8{ 0x10, 0x01, 0x10, 0x03, 0x6a, 0x0b };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &leaf_global });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &f0_code });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &f1_code });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &f2_code });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &caller_code });
+        try mod.exports.append(allocator, .{ .name = "main", .kind = .func, .var_ = .{ .index = 4 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+
+        const opt_small = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+        defer allocator.free(opt_small);
+        var mod_small = try reader.readModule(allocator, opt_small);
+        defer mod_small.deinit();
+
+        // F0, F1, F2 are bypassed and pruned, but L (func 0, uses_global_op) is NOT inlined twice into `main`!
+        try testing.expectEqual(@as(usize, 2), mod_small.funcs.items.len);
+        try testing.expectEqualSlices(u8, &[_]u8{ 0x10, 0x00, 0x10, 0x00, 0x6a, 0x0b }, mod_small.funcs.items[1].code_bytes);
+    }
+}
+
 
 
 
