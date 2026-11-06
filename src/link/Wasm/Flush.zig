@@ -1958,7 +1958,11 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
     }
 
     if (!is_obj and !wasm.base.isStaticLib()) {
-        if (Wasm.component.Optimizer.optimize(gpa, binary_bytes.items, .{ .custom_sections = .preserve })) |opt_bytes| {
+        const opt_mode: Wasm.component.Optimizer.OptimizeMode = if (comp.root_mod.optimize_mode == .fast) .fast else .small;
+        if (Wasm.component.Optimizer.optimize(gpa, binary_bytes.items, .{
+            .custom_sections = .preserve,
+            .optimize_mode = opt_mode,
+        })) |opt_bytes| {
             defer gpa.free(opt_bytes);
             binary_bytes.clearRetainingCapacity();
             try binary_bytes.appendSlice(gpa, opt_bytes);
