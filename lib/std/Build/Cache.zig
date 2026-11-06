@@ -274,6 +274,7 @@ pub const Manifest = struct {
     hash: HashHelper,
     /// When this is null, `Manifest` is in "pre-check" phase. Otherwise it is in "post-check" phase.
     manifest_file: ?Io.File,
+    manifest_hex_digest: HexDigest = undefined,
     state: State,
     /// Set this flag to true before calling `check` in order to indicate that upon a cache hit, the code
     /// using the cache will not modify the files within the cache directory. This allows multiple processes
@@ -911,6 +912,7 @@ pub const Manifest = struct {
         var input_digest: BinDigest = undefined;
         man.hash.hasher.final(&input_digest);
         const input_hex_digest = binToHex(input_digest);
+        man.manifest_hex_digest = input_hex_digest;
 
         const manifest_file_path = &input_hex_digest;
         const io = man.cache.io;
@@ -946,7 +948,7 @@ pub const Manifest = struct {
                     // disambiguates by returning EEXIST, indicating original
                     // failure was a race, or ENOENT, indicating deletion of
                     // the directory of our open handle.
-                    if (!builtin.os.tag.isDarwin()) return fail(diag, .{ .manifest_create = error.FileNotFound });
+                    if (!builtin.os.tag.isDarwin() and builtin.os.tag != .wasi) return fail(diag, .{ .manifest_create = error.FileNotFound });
 
                     if (man.cache.manifest_dir.createFile(io, manifest_file_path, .{
                         .read = true,
@@ -2023,8 +2025,21 @@ pub const Manifest = struct {
             m.contents.appendAssumeCapacity(0);
             defer _ = m.contents.pop().?;
 
-            try manifest_file.setLength(io, m.contents.items.len);
-            try manifest_file.writePositionalAll(io, m.contents.items, 0);
+            if (builtin.os.tag == .wasi) {
+                var rand_int: u64 = undefined;
+                io.random(@ptrCast(&rand_int));
+                const tmp_name = "tmp_" ++ std.fmt.hex(rand_int);
+                const tmp_file = try m.cache.manifest_dir.createFile(io, tmp_name, .{ .truncate = true });
+                errdefer m.cache.manifest_dir.deleteFile(io, tmp_name) catch {};
+                errdefer tmp_file.close(io);
+                try tmp_file.writePositionalAll(io, m.contents.items, 0);
+                try Io.Dir.rename(m.cache.manifest_dir, tmp_name, m.cache.manifest_dir, &m.manifest_hex_digest, io);
+                manifest_file.close(io);
+                m.manifest_file = tmp_file;
+            } else {
+                try manifest_file.setLength(io, m.contents.items.len);
+                try manifest_file.writePositionalAll(io, m.contents.items, 0);
+            }
 
             m.state = .miss_finalized;
         }

@@ -122,8 +122,16 @@ pub const Builder = struct {
 
     fn collectSymbols(b: *Builder, gpa: Allocator, data: []const u8, member_offset: u32) !void {
         var reader: std.Io.Reader = .fixed(data);
-        if (!mem.eql(u8, try reader.take(4), &std.wasm.magic)) return error.BadObjectMagic;
-        if (!mem.eql(u8, try reader.take(4), &std.wasm.version)) return error.UnsupportedVersion;
+        const magic = reader.take(4) catch |err| switch (err) {
+            error.EndOfStream => return error.BadObjectMagic,
+            else => return error.ReadFailed,
+        };
+        if (!mem.eql(u8, magic, &std.wasm.magic)) return error.BadObjectMagic;
+        const version = reader.take(4) catch |err| switch (err) {
+            error.EndOfStream => return error.BadObjectMagic,
+            else => return error.ReadFailed,
+        };
+        if (!mem.eql(u8, version, &std.wasm.version)) return error.BadObjectMagic;
 
         while (reader.seek < data.len) {
             const section_tag = try reader.takeEnum(std.wasm.Section, .little);
@@ -218,7 +226,9 @@ fn deinitToc(gpa: Allocator, toc: *Toc) void {
 pub fn parse(gpa: Allocator, file_contents: []const u8) !Archive {
     var pos: usize = 0;
 
-    if (!mem.eql(u8, file_contents[0..ARMAG.len], ARMAG)) return error.BadArchiveMagic;
+    if (file_contents.len < ARMAG.len + @sizeOf(Header) or !mem.eql(u8, file_contents[0..ARMAG.len], ARMAG)) {
+        return error.BadArchiveMagic;
+    }
     pos += ARMAG.len;
 
     const header = mem.bytesAsValue(Header, file_contents[pos..][0..@sizeOf(Header)]);
@@ -229,23 +239,29 @@ pub fn parse(gpa: Allocator, file_contents: []const u8) !Archive {
     // the end, so we trim those first before parsing the ASCII value.
     const size_trimmed = mem.trim(u8, &header.size, " ");
     const sym_tab_size = try std.fmt.parseInt(u32, size_trimmed, 10);
+    if (sym_tab_size < 4 or file_contents.len - pos < sym_tab_size) return error.BadArchiveMagic;
 
     const num_symbols = mem.readInt(u32, file_contents[pos..][0..4], .big);
     pos += 4;
 
-    const symbol_positions_size = @sizeOf(u32) * num_symbols;
+    if (num_symbols > (sym_tab_size - 4) / @sizeOf(u32)) return error.BadArchiveMagic;
+    const symbol_positions_size = @as(usize, @sizeOf(u32)) * num_symbols;
     const symbol_positions_be = mem.bytesAsSlice(u32, file_contents[pos..][0..symbol_positions_size]);
     pos += symbol_positions_size;
 
-    const sym_tab = file_contents[pos..][0 .. sym_tab_size - 4 - symbol_positions_size];
+    const sym_tab_len = sym_tab_size - 4 - symbol_positions_size;
+    const sym_tab = file_contents[pos..][0..sym_tab_len];
     pos += sym_tab.len;
-    pos = mem.alignForward(usize, pos, 2);
+    if (pos < file_contents.len) {
+        pos = mem.alignForward(usize, pos, 2);
+    }
 
     var toc: Toc = .empty;
     errdefer deinitToc(gpa, &toc);
 
     var sym_tab_pos: usize = 0;
     for (0..num_symbols) |i| {
+        if (sym_tab_pos >= sym_tab.len) return error.BadArchiveMagic;
         const name = mem.sliceTo(sym_tab[sym_tab_pos..], 0);
         sym_tab_pos += name.len + 1;
         if (name.len == 0) continue;
@@ -259,17 +275,18 @@ pub fn parse(gpa: Allocator, file_contents: []const u8) !Archive {
     }
 
     const long_file_names: RelativeSlice = s: {
-        if (pos + @sizeOf(Header) > file_contents.len) break :s .{ .off = 0, .len = 0 };
+        if (file_contents.len - pos < @sizeOf(Header)) break :s .{ .off = 0, .len = 0 };
         const sub_header = mem.bytesAsValue(Header, file_contents[pos..][0..@sizeOf(Header)]);
 
         if (!mem.eql(u8, &sub_header.fmag, ARFMAG)) return error.BadHeaderDelimiter;
         if (!mem.eql(u8, sub_header.name[0..2], "//")) break :s .{ .off = 0, .len = 0 };
         pos += @sizeOf(Header);
-        const table_size = try sub_header.parsedSize();
+        const file_name_table_size = try sub_header.parsedSize();
+        if (file_contents.len - pos < file_name_table_size) return error.BadArchiveMagic;
 
         break :s .{
             .off = @intCast(pos),
-            .len = table_size,
+            .len = file_name_table_size,
         };
     };
 
@@ -292,6 +309,9 @@ pub fn parseObject(
     must_link: bool,
     gc_sections: bool,
 ) !Object {
+    if (file_contents.len < @sizeOf(Header) or object_offset > file_contents.len - @sizeOf(Header)) {
+        return error.BadArchiveMagic;
+    }
     const header = mem.bytesAsValue(Header, file_contents[object_offset..][0..@sizeOf(Header)]);
     if (!mem.eql(u8, &header.fmag, ARFMAG)) return error.BadHeaderDelimiter;
 
@@ -299,16 +319,59 @@ pub fn parseObject(
     const object_name = switch (name_or_index) {
         .name => |name| name,
         .index => |index| n: {
+            if (archive.long_file_names.off > file_contents.len or
+                archive.long_file_names.len > file_contents.len - archive.long_file_names.off)
+            {
+                return error.BadArchiveMagic;
+            }
             const long_file_names = file_contents[archive.long_file_names.off..][0..archive.long_file_names.len];
+            if (index >= long_file_names.len) return error.BadArchiveMagic;
             const name = mem.sliceTo(long_file_names[index..], 0x0a);
             break :n mem.trimEnd(u8, name, "/");
         },
     };
 
     const object_file_size = try header.parsedSize();
+    if (file_contents.len - @sizeOf(Header) - object_offset < object_file_size) {
+        return error.BadArchiveMagic;
+    }
     const contents = file_contents[object_offset + @sizeOf(Header) ..][0..object_file_size];
 
     return Object.parse(wasm, contents, path, object_name, host_name, scratch_space, must_link, gc_sections);
+}
+
+test "Archive.parse bounds checking on empty and truncated inputs" {
+    const gpa = std.testing.allocator;
+
+    // 0-byte input
+    try std.testing.expectError(error.BadArchiveMagic, Archive.parse(gpa, &.{}));
+
+    // < 8-byte magic
+    try std.testing.expectError(error.BadArchiveMagic, Archive.parse(gpa, "!<arch>"));
+
+    // Magic only, missing Header
+    try std.testing.expectError(error.BadArchiveMagic, Archive.parse(gpa, ARMAG));
+
+    // Header claiming larger symbol table than file contents
+    var truncated_buf: [ARMAG.len + @sizeOf(Header) + 4]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&truncated_buf);
+    try w.writeAll(ARMAG);
+    try writeHeader(&w, "/", 100);
+    try w.writeInt(u32, 10, .big);
+    try std.testing.expectError(error.BadArchiveMagic, Archive.parse(gpa, &truncated_buf));
+
+    // Header with num_symbols that would overflow 32-bit multiplication (4 * num_symbols)
+    w = .fixed(&truncated_buf);
+    try w.writeAll(ARMAG);
+    try writeHeader(&w, "/", 4);
+    try w.writeInt(u32, 0x4000_0000, .big);
+    try std.testing.expectError(error.BadArchiveMagic, Archive.parse(gpa, &truncated_buf));
+
+    // Truncated object input to Builder.append
+    var builder: Builder = .{};
+    defer builder.deinit(gpa);
+    try std.testing.expectError(error.BadObjectMagic, builder.append(gpa, "empty.o", &.{}));
+    try std.testing.expectError(error.BadObjectMagic, builder.append(gpa, "short.o", "\x00asm"));
 }
 
 const Archive = @This();
