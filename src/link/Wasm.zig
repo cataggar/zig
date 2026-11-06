@@ -5235,6 +5235,16 @@ fn convertZcuFnType(
                     try returns_buffer.append(gpa, CodeGen.typeToValtype(vector.elem_type, zcu, target));
                 },
             }
+        } else if (cc == .auto) {
+            switch (CodeGen.classifyAutoReturn(return_type, zcu, target)) {
+                .scalar => try returns_buffer.append(gpa, CodeGen.typeToValtype(return_type, zcu, target)),
+                .one_field => |f| try returns_buffer.append(gpa, CodeGen.typeToValtype(f.ty, zcu, target)),
+                .two_fields => |fields| {
+                    try returns_buffer.append(gpa, CodeGen.typeToValtype(fields[0].ty, zcu, target));
+                    try returns_buffer.append(gpa, CodeGen.typeToValtype(fields[1].ty, zcu, target));
+                },
+                .sret => unreachable,
+            }
         } else {
             try returns_buffer.append(gpa, CodeGen.typeToValtype(return_type, zcu, target));
         }

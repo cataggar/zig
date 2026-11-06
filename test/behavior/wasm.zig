@@ -921,3 +921,112 @@ test "sroa aggregate promotion and escape fallback" {
     try S.exerciseFixedArraysAndOverflow(2, 5);
     try S.exerciseUavConstantsAndEscapes(3);
 }
+
+test "small 1-scalar and 2-scalar aggregate returns avoid sret" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+
+    const S = struct {
+        const Vec2 = struct {
+            x: f32,
+            y: f32,
+        };
+
+        const SingleWrap = struct {
+            x: f32,
+        };
+
+        const MixedPair = struct {
+            a: u32,
+            b: u64,
+        };
+
+        const NestedPair = struct {
+            first: SingleWrap,
+            second: struct {
+                tag: void = {},
+                y: i32,
+            },
+        };
+
+        noinline fn curveExtent(p0: f32, p1: f32, p2: f32) [2]f32 {
+            return .{ @min(p0, p1, p2), @max(p0, p1, p2) };
+        }
+
+        noinline fn makeConstPair() [2]f32 {
+            return .{ 3.5, -7.25 };
+        }
+
+        noinline fn makeVec2(x: f32, y: f32) Vec2 {
+            var v: Vec2 = .{ .x = x, .y = y };
+            v.x += 1.5;
+            v.y -= 0.5;
+            return v;
+        }
+
+        noinline fn makePairMixed(a: u32, b: u64) MixedPair {
+            return .{ .a = a + 10, .b = b * 3 };
+        }
+
+        noinline fn makeSingleWrap(x: f32) SingleWrap {
+            var w: SingleWrap = .{ .x = x * 2.0 };
+            w.x += 0.25;
+            return w;
+        }
+
+        noinline fn makeNestedPair(x: f32, y: i32) NestedPair {
+            return .{
+                .first = .{ .x = x },
+                .second = .{ .y = y },
+            };
+        }
+
+        noinline fn inspectEscapedVec2(ptr: *const Vec2) f32 {
+            return ptr.x + ptr.y;
+        }
+
+        fn readSp() u32 {
+            return asm (
+                \\ .globaltype __stack_pointer, i32
+                \\ global.get __stack_pointer
+                \\ local.set %[ret]
+                : [ret] "=r" (-> u32),
+            );
+        }
+    };
+
+    const sp_before = S.readSp();
+
+    const ext = S.curveExtent(3.5, -2.0, 9.25);
+    try expect(ext[0] == -2.0);
+    try expect(ext[1] == 9.25);
+
+    const const_pair = S.makeConstPair();
+    try expect(const_pair[0] == 3.5);
+    try expect(const_pair[1] == -7.25);
+
+    const v = S.makeVec2(4.0, 10.0);
+    try expect(v.x == 5.5);
+    try expect(v.y == 9.5);
+
+    const mixed = S.makePairMixed(7, 100);
+    try expect(mixed.a == 17);
+    try expect(mixed.b == 300);
+
+    const single = S.makeSingleWrap(3.0);
+    try expect(single.x == 6.25);
+
+    const nested = S.makeNestedPair(1.25, -42);
+    try expect(nested.first.x == 1.25);
+    try expect(nested.second.y == -42);
+
+    // Unused return value (exercises drop path)
+    _ = S.makeVec2(1.0, 2.0);
+    _ = S.makeSingleWrap(1.0);
+
+    // Escaped caller result (exercises non-promoted caller destination path)
+    const escaped_v = S.makeVec2(2.0, 6.0);
+    try expect(S.inspectEscapedVec2(&escaped_v) == 9.0);
+
+    const sp_after = S.readSp();
+    try expect(sp_before == sp_after);
+}
