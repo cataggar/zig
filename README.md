@@ -42,13 +42,13 @@ flavors:
 * **`wazig`**: Zig compiler with self-hosted backends (without LLVM):
 
 ```sh
-ghr install cataggar/zig@v0.17.0-wazig.3
+ghr install cataggar/zig@v0.17.0-wazig.4
 ```
 
 * **`wazigl`**: Zig compiler with LLVM, Clang, and LLD statically linked in:
 
 ```sh
-ghr install cataggar/zig@v0.17.0-wazigl.3
+ghr install cataggar/zig@v0.17.0-wazigl.4
 ```
 
 Run `wazig`:
