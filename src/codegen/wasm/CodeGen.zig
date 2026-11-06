@@ -1372,6 +1372,112 @@ fn resolveCallingConventionValues(
     return result;
 }
 
+pub const AutoReturnField = struct {
+    offset: u32,
+    ty: Type,
+};
+
+pub const AutoReturn = union(enum) {
+    scalar,
+    one_field: AutoReturnField,
+    two_fields: [2]AutoReturnField,
+    sret,
+};
+
+fn collectAutoReturnFields(
+    ty: Type,
+    base_offset: u32,
+    zcu: *const Zcu,
+    target: *const std.Target,
+    fields: *[2]AutoReturnField,
+    count: *usize,
+) bool {
+    if (!ty.hasRuntimeBits(zcu)) return true;
+    if (!isByRef(ty, zcu, target)) {
+        const leaf_ty = canonicalScalarLeafTypeForTarget(ty, zcu, target) orelse return false;
+        if (leaf_ty.zigTypeTag(zcu) == .vector) return false;
+        const sz = leaf_ty.abiSize(zcu);
+        if (sz == 0 or sz > 8) return false;
+        if (count.* >= 2) return false;
+        fields[count.*] = .{
+            .offset = base_offset,
+            .ty = leaf_ty,
+        };
+        count.* += 1;
+        return true;
+    }
+    switch (ty.zigTypeTag(zcu)) {
+        .@"struct" => {
+            const layout = ty.containerLayout(zcu);
+            if (layout != .auto and layout != .@"extern") return false;
+            const field_count = ty.structFieldCount(zcu);
+            for (0..field_count) |field_idx| {
+                if (ty.structFieldIsComptime(field_idx, zcu)) continue;
+                const field_ty = ty.fieldType(field_idx, zcu);
+                if (!field_ty.hasRuntimeBits(zcu)) continue;
+                const field_off: u32 = @intCast(ty.structFieldOffset(field_idx, zcu));
+                if (!collectAutoReturnFields(field_ty, base_offset + field_off, zcu, target, fields, count)) {
+                    return false;
+                }
+            }
+            return true;
+        },
+        .array => {
+            const elem_ty = ty.childType(zcu);
+            if (!elem_ty.hasRuntimeBits(zcu)) return true;
+            const elem_size: u32 = @intCast(elem_ty.abiSize(zcu));
+            const len = ty.arrayLenIncludingSentinel(zcu);
+            if (len > 2) return false;
+            for (0..@as(usize, @intCast(len))) |idx| {
+                const elem_off = base_offset + @as(u32, @intCast(idx)) * elem_size;
+                if (!collectAutoReturnFields(elem_ty, elem_off, zcu, target, fields, count)) {
+                    return false;
+                }
+            }
+            return true;
+        },
+        else => return false,
+    }
+}
+
+pub fn classifyAutoReturn(
+    ret_ty: Type,
+    zcu: *const Zcu,
+    target: *const std.Target,
+) AutoReturn {
+    if (!ret_ty.hasRuntimeBits(zcu) or !isByRef(ret_ty, zcu, target)) return .scalar;
+    const ret_size = ret_ty.abiSize(zcu);
+    if (ret_size > 16) return .sret;
+
+    var fields: [2]AutoReturnField = undefined;
+    var count: usize = 0;
+    if (!collectAutoReturnFields(ret_ty, 0, zcu, target, &fields, &count)) return .sret;
+
+    const ret_align = ret_ty.abiAlignment(zcu);
+    for (fields[0..count]) |f| {
+        const f_align = f.ty.abiAlignment(zcu);
+        if (f_align.compareStrict(.gt, ret_align)) return .sret;
+        const align_bytes: u32 = @intCast(f_align.toByteUnits() orelse 1);
+        if (f.offset % align_bytes != 0) return .sret;
+        if (f.offset + @as(u32, @intCast(f.ty.abiSize(zcu))) > @as(u32, @intCast(ret_size))) return .sret;
+    }
+
+    return switch (count) {
+        1 => .{ .one_field = fields[0] },
+        2 => blk: {
+            if (!target.cpu.has(.wasm, .multivalue)) break :blk .sret;
+            if (fields[0].offset > fields[1].offset) {
+                std.mem.swap(AutoReturnField, &fields[0], &fields[1]);
+            }
+            if (fields[0].offset + @as(u32, @intCast(fields[0].ty.abiSize(zcu))) > fields[1].offset) {
+                break :blk .sret;
+            }
+            break :blk .{ .two_fields = fields };
+        },
+        else => .sret,
+    };
+}
+
 pub fn firstParamSRet(
     cc: std.lang.CallingConvention,
     return_type: Type,
@@ -1381,7 +1487,7 @@ pub fn firstParamSRet(
     if (!return_type.hasRuntimeBits(zcu)) return false;
     switch (cc) {
         .@"inline" => unreachable,
-        .auto => return isByRef(return_type, zcu, target),
+        .auto => return classifyAutoReturn(return_type, zcu, target) == .sret,
         .wasm_mvp => switch (abi.classifyType(return_type, zcu, target)) {
             .direct => return false,
             .double_i64, .indirect => return true,
@@ -2454,6 +2560,16 @@ fn airRet(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 _ = try cg.load(operand, vector.elem_type, .{});
             },
         }
+    } else if (fn_info.cc == .auto and ret_ty.hasRuntimeBits(zcu)) {
+        switch (classifyAutoReturn(ret_ty, zcu, cg.target)) {
+            .scalar => try cg.emitWValue(operand),
+            .one_field => |f| _ = try cg.load(operand, f.ty, .{ .offset = f.offset }),
+            .two_fields => |fs| {
+                _ = try cg.load(operand, fs[0].ty, .{ .offset = fs[0].offset });
+                _ = try cg.load(operand, fs[1].ty, .{ .offset = fs[1].offset });
+            },
+            .sret => unreachable,
+        }
     } else {
         if (!ret_ty.hasRuntimeBits(zcu) and ret_ty.isError(zcu)) {
             try cg.addImm32(0);
@@ -2508,6 +2624,16 @@ fn airRetLoad(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                     assert(vector.len == 1);
                     _ = try cg.load(operand, vector.elem_type, .{});
                 },
+            }
+        } else if (fn_info.cc == .auto) {
+            switch (classifyAutoReturn(ret_ty, zcu, cg.target)) {
+                .scalar => _ = try cg.load(operand, ret_ty, .{}),
+                .one_field => |f| _ = try cg.load(operand, f.ty, .{ .offset = f.offset }),
+                .two_fields => |fs| {
+                    _ = try cg.load(operand, fs[0].ty, .{ .offset = fs[0].offset });
+                    _ = try cg.load(operand, fs[1].ty, .{ .offset = fs[1].offset });
+                },
+                .sret => unreachable,
             }
         } else {
             _ = try cg.load(operand, ret_ty, .{});
@@ -2666,6 +2792,56 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) 
                     try cg.store(result, result_local, vector.elem_type, .{});
                     break :result_value result;
                 },
+            }
+        } else if (fn_info.cc == .auto and ret_ty.hasRuntimeBits(zcu)) {
+            switch (classifyAutoReturn(ret_ty, zcu, cg.target)) {
+                .scalar => {
+                    const result_local = try cg.allocLocal(ret_ty);
+                    try cg.addLocal(.local_set, result_local.local);
+                    break :result_value result_local;
+                },
+                .one_field => |f| {
+                    if (cg.liveness.isUnused(inst)) {
+                        try cg.addTag(.drop);
+                        break :result_value .none;
+                    }
+                    const result = try cg.allocStack(ret_ty);
+                    if (result == .promoted) {
+                        const pf0 = cg.findPromotedField(result.promoted.slot, f.offset, @intCast(f.ty.abiSize(zcu)));
+                        try cg.addLocal(.local_set, pf0.local);
+                    } else {
+                        var local0 = try cg.allocLocal(f.ty);
+                        defer local0.free(cg);
+                        try cg.addLocal(.local_set, local0.local);
+                        try cg.store(result, local0, f.ty, .{ .offset = f.offset });
+                    }
+                    break :result_value result;
+                },
+                .two_fields => |fs| {
+                    if (cg.liveness.isUnused(inst)) {
+                        try cg.addTag(.drop);
+                        try cg.addTag(.drop);
+                        break :result_value .none;
+                    }
+                    const result = try cg.allocStack(ret_ty);
+                    if (result == .promoted) {
+                        const pf0 = cg.findPromotedField(result.promoted.slot, fs[0].offset, @intCast(fs[0].ty.abiSize(zcu)));
+                        const pf1 = cg.findPromotedField(result.promoted.slot, fs[1].offset, @intCast(fs[1].ty.abiSize(zcu)));
+                        try cg.addLocal(.local_set, pf1.local);
+                        try cg.addLocal(.local_set, pf0.local);
+                    } else {
+                        var local1 = try cg.allocLocal(fs[1].ty);
+                        defer local1.free(cg);
+                        try cg.addLocal(.local_set, local1.local);
+                        var local0 = try cg.allocLocal(fs[0].ty);
+                        defer local0.free(cg);
+                        try cg.addLocal(.local_set, local0.local);
+                        try cg.store(result, local0, fs[0].ty, .{ .offset = fs[0].offset });
+                        try cg.store(result, local1, fs[1].ty, .{ .offset = fs[1].offset });
+                    }
+                    break :result_value result;
+                },
+                .sret => unreachable,
             }
         } else {
             const result_local = try cg.allocLocal(ret_ty);
@@ -2942,6 +3118,19 @@ fn load(cg: *CodeGen, operand: WValue, ty: Type, memarg: MemArg) InnerError!WVal
         const f = cg.findPromotedField(operand.promoted.slot, target_offset, @intCast(ty.abiSize(zcu)));
         try cg.addLocal(.local_get, f.local);
         return .stack;
+    }
+
+    if (operand == .uav_ref and operand.uav_ref.orig_ptr_ty == .none and ty.zigTypeTag(zcu) != .vector) {
+        const root_val: Value = .fromInterned(operand.uav_ref.ip_index);
+        if (isByRef(root_val.typeOf(zcu), zcu, cg.target)) {
+            const signed_off = @as(i64, operand.uav_ref.offset) + @as(i64, @intCast(memarg.offset));
+            if (std.math.cast(u32, signed_off)) |target_off| {
+                if (try cg.extractComptimeLeafWValue(root_val, target_off, ty)) |wval| {
+                    try cg.emitWValue(wval);
+                    return .stack;
+                }
+            }
+        }
     }
 
     const base_offset = operand.memOffset();
@@ -10501,9 +10690,12 @@ fn typeOfIndex(cg: *CodeGen, inst: Air.Inst.Index) Type {
 }
 
 fn canonicalScalarLeafType(cg: *const CodeGen, ty: Type) ?Type {
-    const zcu = cg.pt.zcu;
+    return canonicalScalarLeafTypeForTarget(ty, cg.pt.zcu, cg.target);
+}
+
+fn canonicalScalarLeafTypeForTarget(ty: Type, zcu: *const Zcu, target: *const std.Target) ?Type {
     if (!ty.hasRuntimeBits(zcu)) return null;
-    if (isByRef(ty, zcu, cg.target)) return null;
+    if (isByRef(ty, zcu, target)) return null;
 
     return switch (ty.zigTypeTag(zcu)) {
         .bool => .bool,
@@ -10514,7 +10706,7 @@ fn canonicalScalarLeafType(cg: *const CodeGen, ty: Type) ?Type {
             if (bits == 0 or bits > 64) return null;
             return ty;
         },
-        .float => switch (ty.floatBits(cg.target)) {
+        .float => switch (ty.floatBits(target)) {
             16, 32, 64 => ty,
             else => null,
         },
@@ -10529,14 +10721,14 @@ fn canonicalScalarLeafType(cg: *const CodeGen, ty: Type) ?Type {
                 if (!ty.optionalChild(zcu).hasRuntimeBits(zcu)) return .bool;
                 return null;
             }
-            return cg.canonicalScalarLeafType(ty.optionalChild(zcu));
+            return canonicalScalarLeafTypeForTarget(ty.optionalChild(zcu), zcu, target);
         },
         .error_union => {
             if (ty.errorUnionPayload(zcu).hasRuntimeBits(zcu)) return null;
             return .anyerror;
         },
         .vector => {
-            if (determineSimdStoreStrategy(ty, zcu, cg.target) != .direct) return null;
+            if (determineSimdStoreStrategy(ty, zcu, target) != .direct) return null;
             return ty;
         },
         else => null,
@@ -11894,6 +12086,16 @@ const SroaAnalysis = struct {
                             {
                                 return;
                             }
+                        } else if (fn_info.cc == .auto) {
+                            const ok = switch (classifyAutoReturn(ret_ty, zcu, self.cg.target)) {
+                                .scalar => !isByRef(ret_ty, zcu, self.cg.target) and
+                                    self.checkScalarAccess(ref.root_id, ref.offset, ret_ty),
+                                .one_field => |f| self.checkScalarAccess(ref.root_id, ref.offset + f.offset, f.ty),
+                                .two_fields => |fs| self.checkScalarAccess(ref.root_id, ref.offset + fs[0].offset, fs[0].ty) and
+                                    self.checkScalarAccess(ref.root_id, ref.offset + fs[1].offset, fs[1].ty),
+                                .sret => unreachable,
+                            };
+                            if (ok) return;
                         } else if (!isByRef(ret_ty, zcu, self.cg.target) and
                             self.checkScalarAccess(ref.root_id, ref.offset, ret_ty))
                         {
@@ -11928,6 +12130,15 @@ const SroaAnalysis = struct {
                             {
                                 return;
                             }
+                        } else if (fn_info.cc == .auto) {
+                            const ok = switch (classifyAutoReturn(ret_ty, zcu, self.cg.target)) {
+                                .scalar => false,
+                                .one_field => |f| self.checkScalarAccess(ref.root_id, ref.offset + f.offset, f.ty),
+                                .two_fields => |fs| self.checkScalarAccess(ref.root_id, ref.offset + fs[0].offset, fs[0].ty) and
+                                    self.checkScalarAccess(ref.root_id, ref.offset + fs[1].offset, fs[1].ty),
+                                .sret => unreachable,
+                            };
+                            if (ok) return;
                         }
                     }
                     self.markEscaped(op);
@@ -12084,6 +12295,26 @@ const SroaAnalysis = struct {
             },
 
             .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => {},
+
+            .call, .call_always_tail, .call_never_tail, .call_never_inline => {
+                self.escapeAllOperands(inst);
+                const call = self.cg.air.unwrapCall(inst);
+                const callee_ty = self.cg.typeOf(call.callee);
+                const fn_ty = switch (callee_ty.zigTypeTag(zcu)) {
+                    .@"fn" => callee_ty,
+                    .pointer => callee_ty.childType(zcu),
+                    else => unreachable,
+                };
+                const cc = zcu.typeToFunc(fn_ty).?.cc;
+                const ret_ty = self.cg.typeOfIndex(inst);
+                if (cc == .auto and !self.cg.liveness.isUnused(inst) and
+                    !ret_ty.isNoReturn(zcu) and ret_ty.hasRuntimeBits(zcu) and
+                    isByRef(ret_ty, zcu, self.cg.target) and
+                    !firstParamSRet(cc, ret_ty, zcu, self.cg.target))
+                {
+                    _ = try self.tryAddCandidateRoot(inst, ret_ty, .byref_val);
+                }
+            },
 
             else => self.escapeAllOperands(inst),
         }

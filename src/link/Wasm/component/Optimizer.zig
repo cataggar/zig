@@ -2306,7 +2306,7 @@ const TrivialLeaf = struct {
     op_count: u32 = 0,
     param_types: [max_inline_params]types.ValType = undefined,
     param_count: u8 = 0,
-    result_types: [1]types.ValType = undefined,
+    result_types: [2]types.ValType = undefined,
     result_count: u8 = 0,
     local_types: [max_inline_locals]types.ValType = undefined,
     local_count: u8 = 0,
@@ -2374,7 +2374,7 @@ fn classifyTrivialFunc(
     if (func.is_import or func.code_bytes.len == 0) return .none;
     if (func.local_types.items.len > max_inline_locals) return .none;
     const sig = getFuncSignature(module, func) orelse return .none;
-    if (sig.params.len > max_inline_params or sig.results.len > 1) return .none;
+    if (sig.params.len > max_inline_params or sig.results.len > 2) return .none;
 
     for (sig.params, 0..) |p, i| {
         if (!isAllowedValType(p, Mod.FuncSignature.concreteIdxAt(sig.param_type_idxs, i))) return .none;
@@ -2624,6 +2624,9 @@ fn classifyTrivialFunc(
     }
 
     if (pos != body_end or depth != 0) return .none;
+    if (sig.results.len > 1 and (needs_result_block or has_early_return or !depth0_stack_exact or depth0_stack != @as(i32, @intCast(sig.results.len)))) {
+        return .none;
+    }
     if (sig.params.len == 0 and op_count <= 1 and !had_trailing_return and !std.mem.eql(u8, bytes, &.{ 0x01, 0x0b })) {
         return .none;
     }
@@ -4888,6 +4891,57 @@ test "Optimizer: stage2_wasm assert inner-block and Rect.x shadow-stack copy inl
     try testing.expectEqual(@as(usize, 1), mod_names_opt.customs.items.len);
     // Subsec 1 (func names) is preserved, while stale subsec 2 (local names for compacted func 0) is dropped!
     try testing.expectEqualSlices(u8, &[_]u8{ 1, 5, 1, 0, 2, 'i', 'd' }, mod_names_opt.customs.items[0].data);
+
+    // 4. 2-result leaf function without early returns is inlined in .fast mode:
+    var mod_mv = Mod.Module.init(allocator);
+    defer mod_mv.deinit();
+    try mod_mv.module_types.append(allocator, .{ .func_type = .{
+        .params = try allocator.dupe(types.ValType, &.{ .f32, .f32, .f32 }),
+        .results = try allocator.dupe(types.ValType, &.{ .f32, .f32 }),
+    } });
+    try mod_mv.type_meta.append(allocator, .{});
+    try mod_mv.module_types.append(allocator, .{ .func_type = .{
+        .params = try allocator.dupe(types.ValType, &.{ .f32, .f32, .f32 }),
+        .results = try allocator.dupe(types.ValType, &.{.f32}),
+    } });
+    try mod_mv.type_meta.append(allocator, .{});
+
+    const curve_extent_code = [_]u8{
+        0x20, 0x00, // local.get 0
+        0x20, 0x01, // local.get 1
+        0x96, // f32.min
+        0x20, 0x02, // local.get 2
+        0x96, // f32.min
+        0x20, 0x00, // local.get 0
+        0x20, 0x01, // local.get 1
+        0x97, // f32.max
+        0x20, 0x02, // local.get 2
+        0x97, // f32.max
+        0x0f, // return
+        0x0b, // end
+    };
+    const mv_caller_code = [_]u8{
+        0x20, 0x00, // local.get 0
+        0x20, 0x01, // local.get 1
+        0x20, 0x02, // local.get 2
+        0x10, 0x00, // call $curveExtent
+        0x92, // f32.add
+        0x0f, // return
+        0x0b, // end
+    };
+    try mod_mv.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &curve_extent_code });
+    try mod_mv.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 1 } }, .code_bytes = &mv_caller_code });
+    try mod_mv.exports.append(allocator, .{ .name = "sum_extent", .kind = .func, .var_ = .{ .index = 1 } });
+
+    const wasm_mv = try writer.writeModule(allocator, &mod_mv);
+    defer allocator.free(wasm_mv);
+    const opt_mv = try optimize(allocator, wasm_mv, .{ .optimize_mode = .fast });
+    defer allocator.free(opt_mv);
+    var mod_mv_opt = try reader.readModule(allocator, opt_mv);
+    defer mod_mv_opt.deinit();
+
+    // `curveExtent` was inlined into `sum_extent` and pruned by dead-function removal!
+    try testing.expectEqual(@as(usize, 1), mod_mv_opt.funcs.items.len);
 }
 
 test "Optimizer: .small mode single-caller leaf and multi-caller 7-op/1-local accessor inlining" {
@@ -5379,7 +5433,4 @@ test "Optimizer: .fast mode 1-cold-call wrapper inlining and trivial inner-calle
         try testing.expectEqualSlices(u8, &[_]u8{ 0x10, 0x00, 0x10, 0x00, 0x6a, 0x0b }, mod_small.funcs.items[1].code_bytes);
     }
 }
-
-
-
 
