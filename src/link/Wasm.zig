@@ -387,6 +387,55 @@ pub const GlobalExport = extern struct {
     global_index: GlobalIndex,
 };
 
+pub fn appendGlobalExportUnique(wasm: *Wasm, gpa: Allocator, exp: GlobalExport) Allocator.Error!void {
+    for (wasm.global_exports.items) |existing| {
+        if (existing.name == exp.name) return;
+    }
+    try wasm.global_exports.append(gpa, exp);
+}
+
+pub fn exportSyntheticObjectGlobals(
+    wasm: *Wasm,
+    gpa: Allocator,
+    missing_exports: *std.array_hash_map.Auto(String, void),
+) Allocator.Error!void {
+    for (wasm.object_global_imports.keys(), wasm.object_global_imports.values()) |name, import| {
+        if (!import.flags.exported) continue;
+        const maybe_global_res: ?GlobalImport.Resolution = switch (import.resolution.unpack(wasm)) {
+            .__heap_base,
+            .__heap_end,
+            .__stack_pointer,
+            .__tls_align,
+            .__tls_base,
+            .__tls_size,
+            => import.resolution,
+            .unresolved => if (name == wasm.preloaded_strings.__heap_base)
+                .__heap_base
+            else if (name == wasm.preloaded_strings.__heap_end)
+                .__heap_end
+            else if (name == wasm.preloaded_strings.__stack_pointer)
+                .__stack_pointer
+            else if (name == wasm.preloaded_strings.__tls_align)
+                .__tls_align
+            else if (name == wasm.preloaded_strings.__tls_base)
+                .__tls_base
+            else if (name == wasm.preloaded_strings.__tls_size)
+                .__tls_size
+            else
+                null,
+            else => null,
+        };
+        if (maybe_global_res) |global_res| {
+            try wasm.globals.put(gpa, global_res, {});
+            try wasm.appendGlobalExportUnique(gpa, .{
+                .name = name,
+                .global_index = GlobalIndex.fromResolution(wasm, global_res).?,
+            });
+            _ = missing_exports.swapRemove(name);
+        }
+    }
+}
+
 /// 0. Index into `Flush.function_imports`
 /// 1. Index into `Flush.intrinsic_function_imports`
 /// 2. Index into `functions`.
@@ -3986,12 +4035,12 @@ pub fn prelink(wasm: *Wasm, prog_node: std.Progress.Node) link.Error!void {
         if (wasm.object_function_imports.getPtr(exp_name_interned)) |import| {
             if (import.resolution != .unresolved) {
                 import.flags.exported = true;
-                continue;
+                if (import.resolution.unpack(wasm) == .object_function) continue;
             }
         }
         if (wasm.object_global_imports.getPtr(exp_name_interned)) |import| {
-            if (import.resolution != .unresolved) {
-                import.flags.exported = true;
+            import.flags.exported = true;
+            if (import.resolution != .unresolved and import.resolution.unpack(wasm) == .object_global) {
                 continue;
             }
         }
@@ -4042,6 +4091,18 @@ pub fn prelink(wasm: *Wasm, prog_node: std.Progress.Node) link.Error!void {
                 .__stack_pointer,
             );
         } else {
+            try wasm.globals.put(gpa, .__stack_pointer, {});
+            assert(wasm.globals.entries.len - 1 == @backingInt(GlobalIndex.stack_pointer));
+        }
+    } else if (!is_obj) {
+        const sp_defined_by_object = if (wasm.object_global_imports.get(wasm.preloaded_strings.__stack_pointer)) |imp|
+            imp.resolution != .unresolved and imp.resolution.unpack(wasm) == .object_global
+        else
+            false;
+        if (!sp_defined_by_object and
+            (wasm.object_global_imports.contains(wasm.preloaded_strings.__stack_pointer) or
+                wasm.missing_exports.contains(wasm.preloaded_strings.__stack_pointer)))
+        {
             try wasm.globals.put(gpa, .__stack_pointer, {});
             assert(wasm.globals.entries.len - 1 == @backingInt(GlobalIndex.stack_pointer));
         }
@@ -4209,6 +4270,13 @@ pub fn markGlobalImport(
         }
     } else switch (import.resolution.unpack(wasm)) {
         .object_global => try markGlobal(wasm, import.resolution.unpack(wasm).object_global, import.flags.exported),
+        .__heap_base,
+        .__heap_end,
+        .__stack_pointer,
+        .__tls_align,
+        .__tls_base,
+        .__tls_size,
+        => if (!is_obj) wasm.globals.putAssumeCapacity(import.resolution, {}),
         else => return,
     }
 }
@@ -4224,7 +4292,7 @@ fn markGlobal(wasm: *Wasm, i: ObjectGlobalIndex, override_export: bool) link.Err
     const global = i.ptr(wasm);
     try markObject(wasm, global.object_index);
 
-    if (!is_obj and (override_export or global.flags.isExported(rdynamic))) try wasm.global_exports.append(gpa, .{
+    if (!is_obj and (override_export or global.flags.isExported(rdynamic))) try wasm.appendGlobalExportUnique(gpa, .{
         .name = global.name.unwrap().?,
         .global_index = @fromBackingInt(@intCast(gop.index)),
     });
@@ -5304,4 +5372,73 @@ pub fn addFunction(
         .params = try wasm.internValtypeList(params),
         .returns = try wasm.internValtypeList(returns),
     });
+}
+
+test "exportSyntheticObjectGlobals and appendGlobalExportUnique export __stack_pointer and __heap_base without duplicates" {
+    const gpa = std.testing.allocator;
+    const sp_name: String = @fromBackingInt(1);
+    const hb_name: String = @fromBackingInt(2);
+
+    var preloaded: PreloadedStrings = undefined;
+    inline for (@typeInfo(PreloadedStrings).@"struct".field_names) |field_name| {
+        @field(preloaded, field_name) = @fromBackingInt(100);
+    }
+    preloaded.__stack_pointer = sp_name;
+    preloaded.__heap_base = hb_name;
+
+    var wasm: Wasm = .{
+        .base = undefined,
+        .string_bytes = .empty,
+        .string_table = .empty,
+        .entry_name = .none,
+        .import_symbols = false,
+        .export_symbol_names = &.{},
+        .global_base = null,
+        .initial_memory = null,
+        .max_memory = null,
+        .import_table = false,
+        .export_table = false,
+        .growable_table = false,
+        .name = "test.wasm",
+        .object_host_name = .none,
+        .dump_argv_list = .empty,
+        .preloaded_strings = preloaded,
+    };
+    defer wasm.global_exports.deinit(gpa);
+    defer wasm.globals.deinit(gpa);
+    defer wasm.object_global_imports.deinit(gpa);
+    defer wasm.flush_buffer.missing_exports.deinit(gpa);
+
+    try wasm.globals.put(gpa, .__stack_pointer, {});
+    try wasm.object_global_imports.put(gpa, sp_name, .{
+        .source_location = undefined,
+        .module_name = .none,
+        .name = sp_name,
+        .flags = .{ .exported = true },
+        .resolution = .__stack_pointer,
+    });
+    try wasm.object_global_imports.put(gpa, hb_name, .{
+        .source_location = undefined,
+        .module_name = .none,
+        .name = hb_name,
+        .flags = .{ .exported = true },
+        .resolution = .unresolved,
+    });
+    try wasm.flush_buffer.missing_exports.put(gpa, sp_name, {});
+    try wasm.flush_buffer.missing_exports.put(gpa, hb_name, {});
+
+    try wasm.exportSyntheticObjectGlobals(gpa, &wasm.flush_buffer.missing_exports);
+
+    // Duplicate appendGlobalExportUnique calls must not create duplicate export entries.
+    try wasm.appendGlobalExportUnique(gpa, .{
+        .name = sp_name,
+        .global_index = GlobalIndex.fromResolution(&wasm, .__stack_pointer).?,
+    });
+
+    try std.testing.expectEqual(@as(usize, 0), wasm.flush_buffer.missing_exports.entries.len);
+    try std.testing.expectEqual(@as(usize, 2), wasm.global_exports.items.len);
+    try std.testing.expectEqual(sp_name, wasm.global_exports.items[0].name);
+    try std.testing.expectEqual(GlobalIndex.stack_pointer, wasm.global_exports.items[0].global_index);
+    try std.testing.expectEqual(hb_name, wasm.global_exports.items[1].name);
+    try std.testing.expectEqual(@as(GlobalIndex, @fromBackingInt(1)), wasm.global_exports.items[1].global_index);
 }

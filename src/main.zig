@@ -38,6 +38,7 @@ test {
     _ = @import("codegen.zig");
     _ = link.MappedFile;
     _ = link.File.Lld;
+    _ = link.File.Wasm;
 }
 
 const thread_stack_size = 60 << 20;
