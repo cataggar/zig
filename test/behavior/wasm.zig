@@ -545,3 +545,379 @@ test "leaf and non-leaf functions with stack frames and mixed-type locals preser
     try expect(non_leaf_res.wf32 == (2.75 + 1.0) + pref32 + 1.5);
     try expect(non_leaf_res.wf64 == (6.0 + 2.0) + pref64 + 3.5);
 }
+
+test "sroa aggregate promotion and escape fallback" {
+    const S = struct {
+        const Vec2 = struct {
+            x: f32,
+            y: f32,
+        };
+
+        const Rect = struct {
+            x: i32,
+            y: i32,
+            w: i32,
+            h: i32,
+        };
+
+        const Transform = struct {
+            offset: Vec2,
+            scale: f32,
+        };
+
+        const BatchEntry = struct {
+            rect: Rect,
+            transform: Transform,
+            color: u32,
+            active: bool,
+        };
+
+        const Holder = struct {
+            ptr: *Rect,
+            tag: u32,
+        };
+
+        const Error = error{
+            OutOfBounds,
+            EmptySlice,
+            InvalidState,
+        };
+
+        const default_batch: BatchEntry = .{
+            .rect = .{ .x = 10, .y = 20, .w = 30, .h = 40 },
+            .transform = .{ .offset = .{ .x = 1.5, .y = -2.5 }, .scale = 2.0 },
+            .color = 0xdead_beef,
+            .active = true,
+        };
+
+        const default_opt_rect: ?Rect = .{ .x = 7, .y = 8, .w = 9, .h = 10 };
+        const default_arr_vec: [2]Vec2 = .{
+            .{ .x = 3.0, .y = 4.0 },
+            .{ .x = 5.0, .y = 6.0 },
+        };
+
+        noinline fn makeRectNoInline(x: i32, fail: bool) Error!Rect {
+            if (fail) return error.OutOfBounds;
+            return .{ .x = x, .y = x + 1, .w = x * 2, .h = x * 3 };
+        }
+
+        inline fn checkVoidInline(ok: bool) Error!void {
+            if (!ok) return error.InvalidState;
+        }
+
+        noinline fn subSliceNoInline(input: []const u8, skip: usize) Error![]const u8 {
+            if (skip > input.len) return error.EmptySlice;
+            return input[skip..];
+        }
+
+        noinline fn mutateEscapedRect(r: *Rect, dx: i32, dy: i32) i32 {
+            r.x += dx;
+            r.y += dy;
+            return r.x + r.y + r.w + r.h;
+        }
+
+        noinline fn exerciseNestedAndCopies(seed: i32) !void {
+            var r: Rect = .{ .x = 1, .y = 2, .w = 3, .h = 4 };
+            var r2 = r;
+            r.x = 99;
+            try expect(r2.x == 1);
+            try expect(r2.y == 2);
+            try expect(r2.w == 3);
+            try expect(r2.h == 4);
+            r2.h = 40;
+            try expect(r.h == 4);
+            r2.h = 4;
+
+            if (seed > 0) {
+                r.y += seed;
+                r.w *= 2;
+            } else {
+                r.y -= seed;
+                r.h *= 3;
+            }
+
+            var i: i32 = 0;
+            while (i < 3) : (i += 1) {
+                r.x += i;
+                r.h += 1;
+            }
+
+            const deltas = [_]i32{ 2, 4, 6 };
+            for (deltas) |d| {
+                r.w += d;
+            }
+
+            try expect(r.x == 99 + 3);
+            try expect(r.y == 2 + seed);
+            try expect(r.w == 6 + 12);
+            try expect(r.h == 4 + 3);
+
+            var outer: BatchEntry = .{
+                .rect = r2,
+                .transform = .{ .offset = .{ .x = 0.5, .y = 1.5 }, .scale = 4.0 },
+                .color = 0x1122_3344,
+                .active = false,
+            };
+            var outer_copy = outer;
+            outer.rect.x += 10;
+            outer.transform.offset.y += 2.5;
+            outer.active = true;
+
+            try expect(outer_copy.rect.x == 1);
+            try expect(outer_copy.transform.offset.y == 1.5);
+            try expect(!outer_copy.active);
+            outer_copy.color += 1;
+            try expect(outer.color == 0x1122_3344);
+            try expect(outer.rect.x == 11);
+            try expect(outer.transform.offset.y == 4.0);
+            try expect(outer.active);
+
+            var tup: struct { u32, u64, Rect } = .{ 10, 100, r2 };
+            const tup_snapshot = tup;
+            tup[0] += 5;
+            tup[1] += 50;
+            tup[2].w = 77;
+            try expect(tup_snapshot[0] == 10);
+            try expect(tup_snapshot[1] == 100);
+            try expect(tup_snapshot[2].w == 3);
+            try expect(tup[0] == 15);
+            try expect(tup[1] == 150);
+            try expect(tup[2].w == 77);
+        }
+
+        noinline fn exerciseSlices(text: []const u8) !void {
+            var s: []const u8 = text;
+            var acc: u32 = 0;
+            while (s.len > 0) {
+                acc = acc *% 31 +% s.ptr[0] +% @as(u32, @truncate(s.len));
+                s = s[1..];
+            }
+            try expect(s.len == 0);
+            try expect(acc != 0);
+
+            var backing: [4]u32 = .{ 10, 20, 30, 40 };
+            var nums: []u32 = backing[0..];
+            var idx: usize = 0;
+            while (idx < nums.len) : (idx += 1) {
+                nums[idx] += @as(u32, @truncate(idx + 1));
+            }
+            nums = nums[1..3];
+            try expect(nums.len == 2);
+            try expect(nums.ptr[0] == 22);
+            try expect(nums[1] == 33);
+
+            var opt_slice: ?[]const u8 = null;
+            try expect(opt_slice == null);
+            opt_slice = text[1..4];
+            if (opt_slice) |*ps| {
+                ps.* = ps.*[1..];
+            }
+            const unwrapped = opt_slice orelse "";
+            try expect(unwrapped.len == 2);
+            try expect(unwrapped[0] == text[2]);
+            try expect(unwrapped[1] == text[3]);
+        }
+
+        noinline fn exerciseOptionals(seed: u32) !void {
+            var opt_rect: ?Rect = null;
+            try expect(opt_rect == null);
+
+            const fallback = opt_rect orelse Rect{ .x = -1, .y = -2, .w = -3, .h = -4 };
+            try expect(fallback.x == -1);
+
+            opt_rect = .{
+                .x = @intCast(seed),
+                .y = @intCast(seed + 1),
+                .w = 10,
+                .h = 20,
+            };
+            if (opt_rect) |*payload| {
+                payload.x += 10;
+                payload.h += 5;
+            }
+            if (opt_rect) |payload| {
+                try expect(payload.x == @as(i32, @intCast(seed)) + 10);
+                try expect(payload.y == @as(i32, @intCast(seed + 1)));
+                try expect(payload.w == 10);
+                try expect(payload.h == 25);
+            } else {
+                return error.TestUnexpectedResult;
+            }
+
+            var opt_u64: ?u64 = null;
+            try expect((opt_u64 orelse 99) == 99);
+            opt_u64 = @as(u64, seed) * 1000;
+            if (opt_u64) |*v| {
+                v.* += 7;
+            }
+            try expect((opt_u64 orelse 0) == @as(u64, seed) * 1000 + 7);
+
+            var nested_opt: ??u32 = null;
+            try expect(nested_opt == null);
+            nested_opt = @as(?u32, null);
+            if (nested_opt) |inner| {
+                try expect(inner == null);
+            } else {
+                return error.TestUnexpectedResult;
+            }
+            nested_opt = @as(?u32, seed + 42);
+            if (nested_opt) |inner| {
+                try expect((inner orelse 0) == seed + 42);
+            } else {
+                return error.TestUnexpectedResult;
+            }
+        }
+
+        noinline fn exerciseErrorUnions(seed: i32) !void {
+            try checkVoidInline(true);
+            try std.testing.expectError(error.InvalidState, checkVoidInline(false));
+
+            var eu_rect: Error!Rect = makeRectNoInline(seed, false);
+            if (eu_rect) |*r_ptr| {
+                r_ptr.x += 100;
+                r_ptr.h += 50;
+            } else |_| {
+                return error.TestUnexpectedResult;
+            }
+            const r_ok = try eu_rect;
+            try expect(r_ok.x == seed + 100);
+            try expect(r_ok.y == seed + 1);
+            try expect(r_ok.w == seed * 2);
+            try expect(r_ok.h == seed * 3 + 50);
+
+            eu_rect = makeRectNoInline(seed, true);
+            const r_caught = eu_rect catch Rect{ .x = 0, .y = 0, .w = 1, .h = 1 };
+            try expect(r_caught.x == 0);
+            try expect(r_caught.w == 1);
+
+            var eu_slice: Error![]const u8 = subSliceNoInline("wasm_sroa", 5);
+            if (eu_slice) |*s_ptr| {
+                s_ptr.* = s_ptr.*[1..];
+            } else |_| {
+                return error.TestUnexpectedResult;
+            }
+            try std.testing.expectEqualStrings("roa", try eu_slice);
+
+            eu_slice = subSliceNoInline("wasm", 10);
+            const fallback_slice = eu_slice catch "fallback";
+            try std.testing.expectEqualStrings("fallback", fallback_slice);
+        }
+
+        noinline fn exerciseFixedArraysAndOverflow(runtime_i: usize, base: u32) !void {
+            var arr_f32: [4]f32 = .{ 1.0, 2.0, 3.0, 4.0 };
+            const arr_snapshot = arr_f32;
+            arr_f32[0] = arr_f32[3] + 0.5;
+            arr_f32[3] = arr_f32[1] * 3.0;
+            try expect(arr_snapshot[0] == 1.0);
+            try expect(arr_snapshot[3] == 4.0);
+            try expect(arr_f32[0] == 4.5);
+            try expect(arr_f32[1] == 2.0);
+            try expect(arr_f32[2] == 3.0);
+            try expect(arr_f32[3] == 6.0);
+
+            var vecs: [2]Vec2 = .{
+                .{ .x = 1.0, .y = 2.0 },
+                .{ .x = 10.0, .y = 20.0 },
+            };
+            vecs[0].x += vecs[1].y;
+            vecs[1].x -= vecs[0].y;
+            try expect(vecs[0].x == 21.0);
+            try expect(vecs[1].x == 8.0);
+
+            var arr_dyn: [4]u32 = .{ base, base + 10, base + 20, base + 30 };
+            arr_dyn[runtime_i] += 100;
+            try expect(arr_dyn[2] == base + 120);
+            try expect(arr_dyn[0] == base);
+
+            var sum: u8 = 200;
+            var overflow_count: u32 = 0;
+            const increments = [_]u8{ 30, 40, 10 };
+            for (increments) |inc| {
+                const add_ov = @addWithOverflow(sum, inc);
+                sum = add_ov[0];
+                if (add_ov[1] != 0) {
+                    overflow_count += 1;
+                }
+            }
+            try expect(overflow_count == 1);
+            try expect(sum == (@as(u8, 200) +% 30 +% 40 +% 10));
+
+            const mul_ok = @mulWithOverflow(@as(u16, @intCast(base)), @as(u16, 10));
+            try expect(mul_ok[0] == base * 10);
+            try expect(mul_ok[1] == 0);
+
+            const mul_ov = @mulWithOverflow(@as(u16, 1000), @as(u16, 100));
+            try expect(mul_ov[0] == @as(u16, @truncate(@as(u32, 100_000))));
+            try expect(mul_ov[1] == 1);
+        }
+
+        noinline fn exerciseUavConstantsAndEscapes(seed: i32) !void {
+            // Comptime aggregate constants (.uav_ref decomposition) into mutable locals
+            var batch = default_batch;
+            batch.rect.w = 999;
+            batch.transform.scale = 8.0;
+            try expect(batch.rect.x == 10);
+            try expect(batch.rect.y == 20);
+            try expect(batch.rect.w == 999);
+            try expect(batch.rect.h == 40);
+            try expect(batch.transform.offset.x == 1.5);
+            try expect(batch.transform.offset.y == -2.5);
+            try expect(batch.transform.scale == 8.0);
+            try expect(batch.color == 0xdead_beef);
+            try expect(batch.active);
+
+            var opt_from_uav = default_opt_rect;
+            if (opt_from_uav) |*r| {
+                r.y = 88;
+            }
+            try expect((opt_from_uav orelse unreachable).x == 7);
+            try expect((opt_from_uav orelse unreachable).y == 88);
+            try expect((opt_from_uav orelse unreachable).w == 9);
+            try expect((opt_from_uav orelse unreachable).h == 10);
+
+            var arr_from_uav = default_arr_vec;
+            arr_from_uav[1].x = 55.0;
+            try expect(arr_from_uav[0].x == 3.0);
+            try expect(arr_from_uav[0].y == 4.0);
+            try expect(arr_from_uav[1].x == 55.0);
+            try expect(arr_from_uav[1].y == 6.0);
+
+            var slice_from_uav: []const u8 = "constant_slice_payload";
+            slice_from_uav = slice_from_uav[9..14];
+            try std.testing.expectEqualStrings("slice", slice_from_uav);
+
+            // Escaped aggregates alongside promoted aggregates in the same function
+            var promoted: Rect = .{ .x = seed, .y = seed * 2, .w = 5, .h = 6 };
+            var escaped_call: Rect = .{ .x = 10, .y = 20, .w = 30, .h = 40 };
+            var escaped_int: Rect = .{ .x = 1, .y = 2, .w = 3, .h = 4 };
+            var escaped_field: Rect = .{ .x = 7, .y = 8, .w = 9, .h = 10 };
+
+            const call_sum = mutateEscapedRect(&escaped_call, promoted.x, promoted.y);
+            try expect(escaped_call.x == 10 + seed);
+            try expect(escaped_call.y == 20 + seed * 2);
+            try expect(call_sum == (10 + seed) + (20 + seed * 2) + 30 + 40);
+
+            const addr = @intFromPtr(&escaped_int);
+            try expect(addr != 0);
+            escaped_int.w += promoted.w;
+            try expect(escaped_int.w == 8);
+
+            var holder: Holder = .{
+                .ptr = &escaped_field,
+                .tag = 42,
+            };
+            holder.ptr.h += promoted.h;
+            promoted.x += holder.ptr.x;
+            try expect(escaped_field.h == 16);
+            try expect(promoted.x == seed + 7);
+            try expect(holder.tag == 42);
+        }
+    };
+
+    try S.exerciseNestedAndCopies(5);
+    try S.exerciseSlices("zig_wasm");
+    try S.exerciseOptionals(12);
+    try S.exerciseErrorUnions(4);
+    try S.exerciseFixedArraysAndOverflow(2, 5);
+    try S.exerciseUavConstantsAndEscapes(3);
+}

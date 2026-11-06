@@ -204,10 +204,33 @@ stack_alignment: Alignment = .@"16",
 local_pool: LocalPool = .{},
 wasm_param_count: u32 = undefined,
 
+promoted_slots: std.ArrayList(PromotedSlot) = .empty,
+promoted_fields: std.ArrayList(PromotedField) = .empty,
+promoted_insts: std.AutoArrayHashMapUnmanaged(Air.Inst.Index, u32) = .empty,
+current_air_inst: ?Air.Inst.Index = null,
+
 /// When in debug mode, this tracks if no `finishAir` was missed.
 /// Forgetting to call `finishAir` will cause the result to not be
 /// stored in our `values` map and therefore cause bugs.
 air_bookkeeping: @TypeOf(bookkeeping_init) = bookkeeping_init,
+
+const max_sroa_bytes: u32 = 128;
+const max_sroa_leaves: u32 = 32;
+
+const PromotedField = struct {
+    offset: u32,
+    size: u32,
+    ty: Type,
+    local: u32,
+};
+
+const PromotedSlot = struct {
+    ty: Type,
+    size: u32,
+    fields_start: u32,
+    fields_len: u32,
+    claimed: bool = false,
+};
 
 /// Wasm Value, created when generating an instruction
 const WValue = union(enum) {
@@ -245,6 +268,11 @@ const WValue = union(enum) {
     stack_offset: struct {
         /// Contains the actual value of the offset
         value: u64,
+    },
+    /// Scalarized aggregate or stack slot promoted to one or more Wasm locals.
+    promoted: struct {
+        slot: u32,
+        offset: u32 = 0,
     },
 
     /// Returns the offset from the bottom of the stack.
@@ -371,6 +399,9 @@ pub fn deinit(cg: *CodeGen) void {
     cg.loops.deinit(gpa);
     cg.simd_immediates.deinit(gpa);
     cg.local_pool.deinit(gpa);
+    cg.promoted_slots.deinit(gpa);
+    cg.promoted_fields.deinit(gpa);
+    cg.promoted_insts.deinit(gpa);
     cg.mir_instructions.deinit(gpa);
     cg.mir_extra.deinit(gpa);
     cg.mir_locals.deinit(gpa);
@@ -715,6 +746,12 @@ fn genBlockType(ty: Type, zcu: *const Zcu, target: *const std.Target) std.wasm.B
 
 /// Returns `ptr` with `offset` applied.
 fn offsetPointer(cg: *CodeGen, ptr: WValue, offset: u64) InnerError!WValue {
+    if (ptr == .promoted) {
+        return .{ .promoted = .{
+            .slot = ptr.promoted.slot,
+            .offset = ptr.promoted.offset + @as(u32, @intCast(offset)),
+        } };
+    }
     if (offset == 0) return ptr;
     return switch (ptr) {
         .stack_offset => |stack_offset| .{ .stack_offset = .{
@@ -775,7 +812,7 @@ fn emitScaledPointerOffset(cg: *CodeGen, offset: WValue, scale: u64, op: Pointer
 /// Writes the bytecode depending on the given `WValue` in `val`
 fn emitWValue(cg: *CodeGen, value: WValue) InnerError!void {
     switch (value) {
-        .dead => unreachable, // reference to free'd `WValue`
+        .dead, .promoted => unreachable,
         .none, .stack => {}, // no-op
         .local => |idx| try cg.addLocal(.local_get, idx),
         .imm32 => |val| try cg.addImm32(val),
@@ -968,6 +1005,7 @@ fn generateInner(cg: *CodeGen, any_returns: bool) InnerError!Mir {
     cg.bottom_stack_value = try cg.ensureAllocLocal(Type.usize);
     cg.initial_stack_value = try cg.ensureAllocLocal(Type.usize);
     defer assert(cg.branches.items.len == 0);
+    try cg.analyzeSroa(cg.air.getMainBody());
     // Generate MIR for function body
     try cg.genBody(cg.air.getMainBody());
 
@@ -1289,11 +1327,58 @@ fn restoreStackPointer(cg: *CodeGen) !void {
 /// that points to the position on the virtual stack. This function should be used instead of
 /// moveStack unless a local was already created to store the pointer.
 ///
+fn claimPromotedSlot(cg: *CodeGen, inst: Air.Inst.Index, ty: Type) ?WValue {
+    const slot_idx = cg.promoted_insts.get(inst) orelse return null;
+    const slot = &cg.promoted_slots.items[slot_idx];
+    if (slot.claimed) return null;
+    if (slot.ty.toIntern() != ty.toIntern()) return null;
+    if (slot.size != @as(u32, @intCast(ty.abiSize(cg.pt.zcu)))) return null;
+    slot.claimed = true;
+    return .{ .promoted = .{ .slot = slot_idx, .offset = 0 } };
+}
+
+fn promotedSlotFields(cg: *const CodeGen, slot_idx: u32) []const PromotedField {
+    const slot = cg.promoted_slots.items[slot_idx];
+    return cg.promoted_fields.items[slot.fields_start..][0..slot.fields_len];
+}
+
+fn promotedSlotFieldsInRange(cg: *const CodeGen, slot_idx: u32, start_offset: u32, byte_len: u32) []const PromotedField {
+    const fields = cg.promotedSlotFields(slot_idx);
+    const end_offset = start_offset + byte_len;
+    var first: usize = fields.len;
+    var last: usize = fields.len;
+    for (fields, 0..) |f, i| {
+        if (f.offset >= start_offset and f.offset < end_offset) {
+            assert(f.offset + f.size <= end_offset);
+            if (first == fields.len) first = i;
+            last = i + 1;
+        } else {
+            assert(f.offset + f.size <= start_offset or f.offset >= end_offset);
+        }
+    }
+    if (first == fields.len) return &.{};
+    return fields[first..last];
+}
+
+fn findPromotedField(cg: *const CodeGen, slot_idx: u32, offset: u32, size: u32) PromotedField {
+    for (cg.promotedSlotFields(slot_idx)) |f| {
+        if (f.offset == offset) {
+            assert(f.size == size);
+            return f;
+        }
+    }
+    unreachable;
+}
+
 /// Asserts Type has codegenbits
 fn allocStack(cg: *CodeGen, ty: Type) !WValue {
     const pt = cg.pt;
     const zcu = pt.zcu;
     assert(ty.hasRuntimeBits(zcu));
+
+    if (cg.current_air_inst) |inst| {
+        if (cg.claimPromotedSlot(inst, ty)) |promoted| return promoted;
+    }
 
     const abi_size = std.math.cast(u32, ty.abiSize(zcu)) orelse {
         return cg.fail("Type {f} with ABI size of {d} exceeds stack frame size", .{
@@ -1334,6 +1419,8 @@ fn allocStackPtr(cg: *CodeGen, inst: Air.Inst.Index) !WValue {
     const zcu = pt.zcu;
     const ptr_ty = cg.typeOfIndex(inst);
     const pointee_ty = ptr_ty.childType(zcu);
+
+    if (cg.claimPromotedSlot(inst, pointee_ty)) |promoted| return promoted;
 
     const abi_alignment = ptr_ty.ptrAlignment(zcu);
     const abi_size = std.math.cast(u32, pointee_ty.abiSize(zcu)) orelse {
@@ -1393,7 +1480,81 @@ fn emitMemoryCopy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) !void
     }
 }
 
-fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) !void {
+fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!void {
+    if (dst == .promoted or src == .promoted) {
+        const copy_len: u32 = switch (raw_len) {
+            .imm32 => |v| v,
+            .imm64 => |v| @intCast(v),
+            else => unreachable,
+        };
+        if (copy_len == 0) return;
+
+        if (dst == .promoted and src == .promoted) {
+            const dst_fields = cg.promotedSlotFieldsInRange(dst.promoted.slot, dst.promoted.offset, copy_len);
+            const src_fields = cg.promotedSlotFieldsInRange(src.promoted.slot, src.promoted.offset, copy_len);
+            assert(dst_fields.len == src_fields.len);
+            for (dst_fields, src_fields) |dst_f, src_f| {
+                assert(dst_f.offset - dst.promoted.offset == src_f.offset - src.promoted.offset);
+                assert(dst_f.size == src_f.size);
+                if (src_f.local == dst_f.local) continue;
+                try cg.addLocal(.local_get, src_f.local);
+                try cg.addLocal(.local_set, dst_f.local);
+            }
+            return;
+        }
+
+        if (dst == .promoted and src == .uav_ref and src.uav_ref.orig_ptr_ty == .none) {
+            const dst_fields = cg.promotedSlotFieldsInRange(dst.promoted.slot, dst.promoted.offset, copy_len);
+            var leaf_wvals: [max_sroa_leaves]WValue = undefined;
+            const root_val = Value.fromInterned(src.uav_ref.ip_index);
+            const base_src_off: u32 = @intCast(src.uav_ref.offset);
+            var all_ok = true;
+            for (dst_fields, 0..) |dst_f, i| {
+                const target_off = base_src_off + (dst_f.offset - dst.promoted.offset);
+                if (try cg.extractComptimeLeafWValue(root_val, target_off, dst_f.ty)) |wval| {
+                    leaf_wvals[i] = wval;
+                } else {
+                    all_ok = false;
+                    break;
+                }
+            }
+            if (all_ok) {
+                for (dst_fields, 0..) |dst_f, i| {
+                    try cg.emitWValue(leaf_wvals[i]);
+                    try cg.addLocal(.local_set, dst_f.local);
+                }
+                return;
+            }
+        }
+
+        if (dst == .promoted) {
+            const dst_fields = cg.promotedSlotFieldsInRange(dst.promoted.slot, dst.promoted.offset, copy_len);
+            if (dst_fields.len == 0) return;
+            const owns_src = src == .stack;
+            var src_base = try src.toLocal(cg, .usize);
+            defer if (owns_src) src_base.free(cg);
+            for (dst_fields) |dst_f| {
+                const rel_off = dst_f.offset - dst.promoted.offset;
+                _ = try cg.load(src_base, dst_f.ty, .{ .offset = rel_off, .alignment = .@"1" });
+                try cg.addLocal(.local_set, dst_f.local);
+            }
+            return;
+        }
+
+        if (src == .promoted) {
+            const src_fields = cg.promotedSlotFieldsInRange(src.promoted.slot, src.promoted.offset, copy_len);
+            if (src_fields.len == 0) return;
+            const owns_dst = dst == .stack;
+            var dst_base = try dst.toLocal(cg, .usize);
+            defer if (owns_dst) dst_base.free(cg);
+            for (src_fields) |src_f| {
+                const rel_off = src_f.offset - src.promoted.offset;
+                try cg.store(dst_base, .{ .local = src_f.local }, src_f.ty, .{ .offset = rel_off, .alignment = .@"1" });
+            }
+            return;
+        }
+    }
+
     const len: WValue = if (cg.ptr_size == .wasm64 and raw_len == .imm32)
         .{ .imm64 = raw_len.imm32 }
     else
@@ -1504,6 +1665,7 @@ pub fn determineSimdStoreStrategy(ty: Type, zcu: *const Zcu, target: *const std.
 }
 
 fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
+    cg.current_air_inst = inst;
     const zcu = cg.pt.zcu;
     const air_tags = cg.air.instructions.items(.tag);
     return switch (air_tags[@backingInt(inst)]) {
@@ -2538,6 +2700,14 @@ fn store(cg: *CodeGen, lhs: WValue, rhs: WValue, ty: Type, memarg: MemArg) Inner
         return cg.memcpy(offset_ptr, rhs, cg.usizeImm(abi_size));
     }
 
+    if (lhs == .promoted) {
+        const target_offset = lhs.promoted.offset + @as(u32, @intCast(memarg.offset));
+        const f = cg.findPromotedField(lhs.promoted.slot, target_offset, @intCast(abi_size));
+        try cg.emitWValue(rhs);
+        try cg.addLocal(.local_set, f.local);
+        return;
+    }
+
     const base_offset = lhs.memOffset();
     try cg.emitMemBase(lhs);
 
@@ -2631,6 +2801,13 @@ fn load(cg: *CodeGen, operand: WValue, ty: Type, memarg: MemArg) InnerError!WVal
         const new_ptr = try cg.allocStack(ty);
         try cg.memcpy(new_ptr, src_ptr, cg.usizeImm(ty.abiSize(zcu)));
         return new_ptr;
+    }
+
+    if (operand == .promoted) {
+        const target_offset = operand.promoted.offset + @as(u32, @intCast(memarg.offset));
+        const f = cg.findPromotedField(operand.promoted.slot, target_offset, @intCast(ty.abiSize(zcu)));
+        try cg.addLocal(.local_get, f.local);
+        return .stack;
     }
 
     const base_offset = operand.memOffset();
@@ -2743,7 +2920,7 @@ const IntType = struct {
 
     // Adapted from x86_64 backend
     // Differ from Type.intInfo as it treats pointers/booleans/packed/enums/errors as integer
-    fn fromType(cg: *CodeGen, ty: Type) IntType {
+    fn fromType(cg: *const CodeGen, ty: Type) IntType {
         const zcu = cg.pt.zcu;
         const ip = &zcu.intern_pool;
         var ty_index = ty.ip_index;
@@ -4617,7 +4794,7 @@ fn toLocalInt(cg: *CodeGen, value: WValue, int_ty: IntType) InnerError!WValue {
             try cg.addLocal(.local_set, new_local.local);
             return new_local;
         },
-        .local, .stack_offset => return value,
+        .local, .stack_offset, .promoted => return value,
         else => unreachable,
     }
 }
@@ -5706,7 +5883,7 @@ fn lowerPtr(cg: *CodeGen, ptr_val: InternPool.Index, prev_offset: u64) InnerErro
         .eu_payload => |eu_ptr| try cg.lowerPtr(
             eu_ptr,
             offset + codegen.errUnionPayloadOffset(
-                Value.fromInterned(eu_ptr).typeOf(zcu).childType(zcu),
+                Value.fromInterned(eu_ptr).typeOf(zcu).childType(zcu).errorUnionPayload(zcu),
                 zcu,
             ),
         ),
@@ -5735,7 +5912,13 @@ fn lowerPtr(cg: *CodeGen, ptr_val: InternPool.Index, prev_offset: u64) InnerErro
             };
             return cg.lowerPtr(field.base, offset + field_off);
         },
-        .arr_elem, .comptime_field, .comptime_alloc => unreachable,
+        .arr_elem => |arr_elem| {
+            const base_ptr_ty = Value.fromInterned(arr_elem.base).typeOf(zcu);
+            assert(base_ptr_ty.ptrSize(zcu) == .many);
+            const elem_size = base_ptr_ty.childType(zcu).abiSize(zcu);
+            return cg.lowerPtr(arr_elem.base, offset + elem_size * arr_elem.index);
+        },
+        .comptime_field, .comptime_alloc => unreachable,
     };
 }
 
@@ -5867,39 +6050,188 @@ fn storeSimdImmd(cg: *CodeGen, value: [16]u8) !WValue {
 }
 
 fn emitUndefined(cg: *CodeGen, ty: Type) InnerError!WValue {
+    return cg.emitBytePatternForLeaf(ty, 0xaa);
+}
+
+fn emitBytePatternForLeaf(cg: *CodeGen, ty: Type, byte_val: u8) InnerError!WValue {
     const zcu = cg.pt.zcu;
+    const pattern32: u32 = @as(u32, byte_val) * 0x01010101;
+    const pattern64: u64 = @as(u64, byte_val) * 0x0101010101010101;
     switch (ty.zigTypeTag(zcu)) {
-        .bool, .error_set => return .{ .imm32 = 0xaaaaaaaa },
-        .int, .@"enum" => switch (ty.intInfo(zcu).bits) {
-            0...32 => return .{ .imm32 = 0xaaaaaaaa },
-            33...64 => return .{ .imm64 = 0xaaaaaaaaaaaaaaaa },
-            else => unreachable,
+        .bool => return .{ .imm32 = byte_val & 1 },
+        .error_set => return .{ .imm32 = pattern32 & 0xffff },
+        .int, .@"enum" => {
+            const int_info = ty.intInfo(zcu);
+            switch (int_info.bits) {
+                0 => return .{ .imm32 = 0 },
+                1...32 => {
+                    const normalized: u32 = if (int_info.bits == 32)
+                        pattern32
+                    else if (int_info.signedness == .signed) blk: {
+                        const shift: u5 = @intCast(32 - int_info.bits);
+                        break :blk @bitCast((@as(i32, @bitCast(pattern32)) << shift) >> shift);
+                    } else blk: {
+                        const mask = (@as(u32, 1) << @intCast(int_info.bits)) - 1;
+                        break :blk pattern32 & mask;
+                    };
+                    return .{ .imm32 = normalized };
+                },
+                33...64 => {
+                    const normalized: u64 = if (int_info.bits == 64)
+                        pattern64
+                    else if (int_info.signedness == .signed) blk: {
+                        const shift: u6 = @intCast(64 - int_info.bits);
+                        break :blk @bitCast((@as(i64, @bitCast(pattern64)) << shift) >> shift);
+                    } else blk: {
+                        const mask = (@as(u64, 1) << @intCast(int_info.bits)) - 1;
+                        break :blk pattern64 & mask;
+                    };
+                    return .{ .imm64 = normalized };
+                },
+                else => unreachable,
+            }
         },
         .float => switch (ty.floatBits(cg.target)) {
-            16 => return .{ .imm32 = 0xaaaaaaaa },
-            32 => return .{ .float32 = @as(f32, @bitCast(@as(u32, 0xaaaaaaaa))) },
-            64 => return .{ .float64 = @as(f64, @bitCast(@as(u64, 0xaaaaaaaaaaaaaaaa))) },
+            16 => return .{ .imm32 = pattern32 & 0xffff },
+            32 => return .{ .float32 = @as(f32, @bitCast(pattern32)) },
+            64 => return .{ .float64 = @as(f64, @bitCast(pattern64)) },
             else => unreachable,
         },
-        .pointer => switch (cg.ptr_size) {
-            .wasm32 => return .{ .imm32 = 0xaaaaaaaa },
-            .wasm64 => return .{ .imm64 = 0xaaaaaaaaaaaaaaaa },
+        .pointer, .@"fn" => switch (cg.ptr_size) {
+            .wasm32 => return .{ .imm32 = pattern32 },
+            .wasm64 => return .{ .imm64 = pattern64 },
         },
         .optional => {
             const pl_ty = ty.optionalChild(zcu);
             if (ty.optionalReprIsPayload(zcu)) {
-                return cg.emitUndefined(pl_ty);
+                return cg.emitBytePatternForLeaf(pl_ty, byte_val);
             }
-            return .{ .imm32 = 0xaaaaaaaa };
+            return .{ .imm32 = byte_val & 1 };
         },
         .error_union => {
-            return .{ .imm32 = 0xaaaaaaaa };
+            return .{ .imm32 = pattern32 & 0xffff };
         },
         .@"struct", .@"union" => {
             const backing_int_ty = ty.backingIntType(zcu);
-            return cg.emitUndefined(backing_int_ty);
+            return cg.emitBytePatternForLeaf(backing_int_ty, byte_val);
+        },
+        .vector => {
+            return cg.storeSimdImmd(@splat(byte_val));
         },
         else => return cg.fail("Wasm TODO: emitUndefined for type: {t}\n", .{ty.zigTypeTag(zcu)}),
+    }
+}
+
+fn extractComptimeLeafWValue(
+    cg: *CodeGen,
+    root_val: Value,
+    target_byte_offset: u32,
+    leaf_ty: Type,
+) InnerError!?WValue {
+    const pt = cg.pt;
+    const zcu = pt.zcu;
+    const ip = &zcu.intern_pool;
+
+    if (root_val.isUndef(zcu)) {
+        return try cg.emitUndefined(leaf_ty);
+    }
+
+    const root_ty = root_val.typeOf(zcu);
+    if (!isByRef(root_ty, zcu, cg.target)) {
+        if (target_byte_offset != 0 or !cg.scalarLeafTypesCompatible(leaf_ty, root_ty)) return null;
+        return try cg.lowerConstant(root_val);
+    }
+
+    switch (ip.indexToKey(root_val.toIntern())) {
+        .slice => |slice| {
+            const ptr_bytes = cg.ptrSize();
+            if (target_byte_offset == 0 and leaf_ty.abiSize(zcu) == ptr_bytes) {
+                return try cg.lowerConstant(.fromInterned(slice.ptr));
+            }
+            if (target_byte_offset == ptr_bytes and leaf_ty.abiSize(zcu) == ptr_bytes) {
+                return try cg.lowerConstant(.fromInterned(slice.len));
+            }
+            return null;
+        },
+        .opt => |opt| {
+            const pl_ty = root_ty.optionalChild(zcu);
+            if (root_ty.optionalReprIsPayload(zcu)) {
+                if (opt.val == .none) {
+                    if (pl_ty.isSlice(zcu) and (target_byte_offset == 0 or target_byte_offset == cg.ptrSize()) and
+                        leaf_ty.abiSize(zcu) == cg.ptrSize())
+                    {
+                        return cg.usizeImm(0);
+                    }
+                    return null;
+                }
+                return cg.extractComptimeLeafWValue(.fromInterned(opt.val), target_byte_offset, leaf_ty);
+            }
+            const pl_size: u32 = @intCast(pl_ty.abiSize(zcu));
+            if (target_byte_offset == pl_size and leaf_ty.abiSize(zcu) == 1) {
+                return .{ .imm32 = @intFromBool(opt.val != .none) };
+            }
+            if (target_byte_offset < pl_size) {
+                if (opt.val == .none) {
+                    return try cg.emitUndefined(leaf_ty);
+                }
+                return cg.extractComptimeLeafWValue(.fromInterned(opt.val), target_byte_offset, leaf_ty);
+            }
+            return null;
+        },
+        .error_union => |eu| {
+            const pl_ty = root_ty.errorUnionPayload(zcu);
+            const err_off: u32 = @intCast(errUnionErrorOffset(pl_ty, zcu));
+            const pl_off: u32 = @intCast(errUnionPayloadOffset(pl_ty, zcu));
+            if (target_byte_offset == err_off and leaf_ty.abiSize(zcu) == 2) {
+                switch (eu.val) {
+                    .err_name => |err_name| {
+                        const int = try pt.getErrorValue(err_name);
+                        return .{ .imm32 = int };
+                    },
+                    .payload => return .{ .imm32 = 0 },
+                }
+            }
+            const pl_size: u32 = @intCast(pl_ty.abiSize(zcu));
+            if (target_byte_offset >= pl_off and target_byte_offset < pl_off + pl_size) {
+                switch (eu.val) {
+                    .err_name => return try cg.emitUndefined(leaf_ty),
+                    .payload => |pl_ip| return cg.extractComptimeLeafWValue(.fromInterned(pl_ip), target_byte_offset - pl_off, leaf_ty),
+                }
+            }
+            return null;
+        },
+        .aggregate => switch (root_ty.zigTypeTag(zcu)) {
+            .@"struct" => {
+                const layout = root_ty.containerLayout(zcu);
+                if (layout != .auto and layout != .@"extern") return null;
+                const field_count = root_ty.structFieldCount(zcu);
+                for (0..field_count) |field_idx| {
+                    if ((try root_ty.structFieldValueComptime(pt, field_idx)) != null) continue;
+                    const field_ty = root_ty.fieldType(field_idx, zcu);
+                    if (!field_ty.hasRuntimeBits(zcu)) continue;
+                    const field_off: u32 = @intCast(root_ty.structFieldOffset(field_idx, zcu));
+                    const field_size: u32 = @intCast(field_ty.abiSize(zcu));
+                    if (target_byte_offset >= field_off and target_byte_offset < field_off + field_size) {
+                        const field_val = try root_val.fieldValue(pt, field_idx);
+                        return cg.extractComptimeLeafWValue(field_val, target_byte_offset - field_off, leaf_ty);
+                    }
+                }
+                return null;
+            },
+            .array => {
+                const elem_ty = root_ty.childType(zcu);
+                const elem_size: u32 = @intCast(elem_ty.abiSize(zcu));
+                if (elem_size == 0) return null;
+                const elem_idx = target_byte_offset / elem_size;
+                const rem_off = target_byte_offset % elem_size;
+                const total_len = root_ty.arrayLenIncludingSentinel(zcu);
+                if (elem_idx >= total_len) return null;
+                const elem_val = try root_val.elemValue(pt, elem_idx);
+                return cg.extractComptimeLeafWValue(elem_val, rem_off, leaf_ty);
+            },
+            else => return null,
+        },
+        else => return null,
     }
 }
 
@@ -5917,12 +6249,15 @@ fn lowerBlock(cg: *CodeGen, inst: Air.Inst.Index, block_ty: Type, body: []const 
         return cg.finishAir(inst, .none, &.{});
     }
 
-    const block_result: WValue = if (block_ty.hasRuntimeBits(zcu))
+    const promoted_block = if (block_ty.hasRuntimeBits(zcu)) cg.claimPromotedSlot(inst, block_ty) else null;
+    const block_result: WValue = if (promoted_block) |p|
+        p
+    else if (block_ty.hasRuntimeBits(zcu))
         .stack
     else
         .none;
 
-    try cg.startBlock(.block, genBlockType(block_ty, zcu, cg.target));
+    try cg.startBlock(.block, if (promoted_block != null) .empty else genBlockType(block_ty, zcu, cg.target));
     // Here we set the current block idx, so breaks know the depth to jump
     // to when breaking out.
     try cg.blocks.putNoClobber(cg.gpa, inst, .{
@@ -6267,6 +6602,10 @@ fn airBr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .stack => {
             const operand = try cg.resolveInst(br.operand);
             try cg.emitWValue(operand);
+        },
+        .promoted => {
+            const operand = try cg.resolveInst(br.operand);
+            try cg.store(block.value, operand, cg.typeOf(br.operand), .{});
         },
         else => unreachable,
     }
@@ -6798,9 +7137,8 @@ fn airIsErr(cg: *CodeGen, inst: Air.Inst.Index, opcode: std.wasm.Opcode, op_kind
         }
 
         if (op_kind == .ptr or pl_ty.hasRuntimeBits(zcu)) {
-            try cg.emitMemBase(operand);
-            try cg.addMemArg(.i32_load16_u, .{
-                .offset = operand.memOffset() + errUnionErrorOffset(pl_ty, zcu),
+            _ = try cg.load(operand, .anyerror, .{
+                .offset = errUnionErrorOffset(pl_ty, zcu),
                 .alignment = Type.anyerror.abiAlignment(zcu),
             });
         } else {
@@ -6891,11 +7229,9 @@ fn airWrapErrUnionPayload(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         try cg.store(err_union, operand, pl_ty, .{ .offset = errUnionPayloadOffset(pl_ty, zcu) });
 
         // ensure we also write '0' to the error part, so any present stack value gets overwritten by it.
-        try cg.emitMemBase(err_union);
-        try cg.addImm32(0);
         const err_val_offset = errUnionErrorOffset(pl_ty, zcu);
-        try cg.addMemArg(.i32_store16, .{
-            .offset = err_union.memOffset() + err_val_offset,
+        try cg.store(err_union, .{ .imm32 = 0 }, .anyerror, .{
+            .offset = err_val_offset,
             .alignment = .@"2",
         });
         break :result err_union;
@@ -6959,43 +7295,23 @@ fn isNull(cg: *CodeGen, operand: WValue, op_ty: Type, opcode: std.wasm.Opcode, o
             const offset = std.math.cast(u32, payload_ty.abiSize(zcu)) orelse {
                 return cg.fail("Optional type {f} too big to fit into stack frame", .{optional_ty.fmt(zcu)});
             };
-            try cg.emitMemBase(operand);
-            try cg.addMemArg(.i32_load8_u, .{ .offset = operand.memOffset() + offset, .alignment = .@"1" });
+            _ = try cg.load(operand, .u8, .{ .offset = offset, .alignment = .@"1" });
         } else {
             try cg.emitWValue(operand);
         }
     } else if (payload_ty.isSlice(zcu)) {
         is_ptr_width = true;
-        const base_offset = operand.memOffset();
-        try cg.emitMemBase(operand);
-        switch (cg.ptr_size) {
-            .wasm32 => try cg.addMemArg(.i32_load, .{ .offset = base_offset, .alignment = .@"4" }),
-            .wasm64 => try cg.addMemArg(.i64_load, .{ .offset = base_offset, .alignment = .@"8" }),
-        }
+        _ = try cg.load(operand, .usize, .{});
     } else if (payload_ty.zigTypeTag(zcu) == .error_set) {
         if (op_kind == .ptr) {
-            try cg.emitMemBase(operand);
-            try cg.addMemArg(.i32_load16_u, .{
-                .offset = operand.memOffset(),
-                .alignment = .@"2",
-            });
+            _ = try cg.load(operand, .anyerror, .{ .alignment = .@"2" });
         } else {
             try cg.emitWValue(operand);
         }
     } else {
         is_ptr_width = true;
         if (op_kind == .ptr) {
-            try cg.emitMemBase(operand);
-            switch (cg.ptr_size) {
-                .wasm32 => try cg.addMemArg(.i32_load, .{
-                    .offset = operand.memOffset(),
-                    .alignment = .@"4",
-                }),
-                .wasm64 => try cg.addMemArg(.i64_load, .{
-                    .offset = operand.memOffset(),
-                    .alignment = .@"8",
-                }),
-            }
+            _ = try cg.load(operand, .usize, .{});
         } else {
             try cg.emitWValue(operand);
         }
@@ -7072,9 +7388,7 @@ fn airOptionalPayloadPtrSet(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void 
         return cg.fail("Optional type {f} too big to fit into stack frame", .{opt_ty.fmt(zcu)});
     };
 
-    try cg.emitMemBase(operand);
-    try cg.addImm32(1);
-    try cg.addMemArg(.i32_store8, .{ .offset = operand.memOffset() + offset, .alignment = .@"1" });
+    try cg.store(operand, .{ .imm32 = 1 }, .u8, .{ .offset = offset, .alignment = .@"1" });
 
     return cg.finishAir(inst, operand, &.{ty_op.operand});
 }
@@ -7101,9 +7415,7 @@ fn airWrapOptional(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
         // Create optional type, set the non-null bit, and store the operand inside the optional type
         const result_ptr = try cg.allocStack(op_ty);
-        try cg.emitMemBase(result_ptr);
-        try cg.addImm32(1);
-        try cg.addMemArg(.i32_store8, .{ .offset = result_ptr.memOffset() + offset, .alignment = .@"1" });
+        try cg.store(result_ptr, .{ .imm32 = 1 }, .u8, .{ .offset = offset, .alignment = .@"1" });
 
         try cg.store(result_ptr, operand, payload_ty, .{});
         break :result result_ptr;
@@ -7220,6 +7532,16 @@ fn airPtrElemVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const elem_ty = ptr_ty.childType(zcu);
     const elem_size = elem_ty.abiSize(zcu);
 
+    if (!ptr_ty.isSlice(zcu) and ptr == .promoted) {
+        const idx: u64 = switch (index) {
+            .imm32 => |v| v,
+            .imm64 => |v| v,
+            else => unreachable,
+        };
+        const elem_result = try cg.load(ptr, elem_ty, .{ .offset = idx * elem_size });
+        return cg.finishAir(inst, elem_result, &.{ bin_op.lhs, bin_op.rhs });
+    }
+
     // load pointer onto the stack
     if (ptr_ty.isSlice(zcu)) {
         _ = try cg.load(ptr, .usize, .{});
@@ -7246,6 +7568,16 @@ fn airPtrElemPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
     const ptr = try cg.resolveInst(bin_op.lhs);
     const index = try cg.resolveInst(bin_op.rhs);
+
+    if (!ptr_ty.isSlice(zcu) and ptr == .promoted) {
+        const idx: u64 = switch (index) {
+            .imm32 => |v| v,
+            .imm64 => |v| v,
+            else => unreachable,
+        };
+        const elem_ptr = try cg.offsetPointer(ptr, idx * elem_size);
+        return cg.finishAir(inst, elem_ptr, &.{ bin_op.lhs, bin_op.rhs });
+    }
 
     // load pointer onto the stack
     if (ptr_ty.isSlice(zcu)) {
@@ -7325,6 +7657,30 @@ fn memset(cg: *CodeGen, elem_ty: Type, ptr: WValue, raw_len: WValue, value: WVal
         .imm64 => |imm| if (imm != 0) true else return,
         else => false,
     };
+    if (ptr == .promoted) {
+        const count: u32 = switch (len) {
+            .imm32 => |imm| imm,
+            .imm64 => |imm| @intCast(imm),
+            else => unreachable,
+        };
+        if (elem_ty.toIntern() == .u8_type and value == .imm32) {
+            const byte_len = count * abi_size;
+            const byte_val: u8 = @truncate(value.imm32);
+            const leaves = cg.promotedSlotFieldsInRange(ptr.promoted.slot, ptr.promoted.offset, byte_len);
+            for (leaves) |f| {
+                const leaf_wval = try cg.emitBytePatternForLeaf(f.ty, byte_val);
+                try cg.emitWValue(leaf_wval);
+                try cg.addLocal(.local_set, f.local);
+            }
+            return;
+        }
+        var val = if (isByRef(elem_ty, zcu, cg.target)) value else try value.toLocal(cg, elem_ty);
+        defer if (value == .stack) val.free(cg);
+        for (0..count) |i| {
+            try cg.store(ptr, val, elem_ty, .{ .offset = @as(u64, @intCast(i)) * abi_size });
+        }
+        return;
+    }
     // When bulk_memory_opt is enabled, we lower it to wasm's memset instruction.
     // If not, we lower it ourselves.
     if (cg.target.cpu.has(.wasm, .bulk_memory_opt) and abi_size == 1) {
@@ -7451,6 +7807,19 @@ fn airArrayElemVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const elem_size = elem_ty.abiSize(zcu);
 
     if (isByRef(array_ty, zcu, cg.target)) {
+        if (array == .promoted) {
+            const idx: u64 = switch (index) {
+                .imm32 => |v| v,
+                .imm64 => |v| v,
+                else => unreachable,
+            };
+            const off = idx * elem_size;
+            const result = if (isByRef(elem_ty, zcu, cg.target))
+                try cg.offsetPointer(array, off)
+            else
+                try cg.load(array, elem_ty, .{ .offset = off });
+            return cg.finishAir(inst, result, &.{ bin_op.lhs, bin_op.rhs });
+        }
         try cg.emitWValue(array);
         try cg.emitScaledPointerOffset(index, elem_size, .add);
     } else {
@@ -8112,10 +8481,9 @@ fn lowerTry(
 
         // check if the error tag is set for the error union.
         if (pl_has_bits or operand_is_ptr) {
-            try cg.emitMemBase(err_union);
             const err_offset = errUnionErrorOffset(pl_ty, zcu);
-            try cg.addMemArg(.i32_load16_u, .{
-                .offset = err_union.memOffset() + err_offset,
+            _ = try cg.load(err_union, .anyerror, .{
+                .offset = err_offset,
                 .alignment = Type.anyerror.abiAlignment(zcu),
             });
         } else {
@@ -8804,6 +9172,1654 @@ fn typeOf(cg: *CodeGen, inst: Air.Inst.Ref) Type {
 fn typeOfIndex(cg: *CodeGen, inst: Air.Inst.Index) Type {
     const zcu = cg.pt.zcu;
     return cg.air.typeOfIndex(inst, &zcu.intern_pool);
+}
+
+fn canonicalScalarLeafType(cg: *const CodeGen, ty: Type) ?Type {
+    const zcu = cg.pt.zcu;
+    if (!ty.hasRuntimeBits(zcu)) return null;
+    if (isByRef(ty, zcu, cg.target)) return null;
+
+    return switch (ty.zigTypeTag(zcu)) {
+        .bool => .bool,
+        .error_set => .anyerror,
+        .pointer, .@"fn" => .usize,
+        .int, .@"enum" => {
+            const bits = ty.intInfo(zcu).bits;
+            if (bits == 0 or bits > 64) return null;
+            return ty;
+        },
+        .float => switch (ty.floatBits(cg.target)) {
+            16, 32, 64 => ty,
+            else => null,
+        },
+        .@"struct", .@"union" => {
+            if (ty.containerLayout(zcu) != .@"packed") return null;
+            const backing_ty = ty.backingIntType(zcu);
+            if (backing_ty.intInfo(zcu).bits > 64) return null;
+            return backing_ty;
+        },
+        .optional => {
+            if (!ty.optionalReprIsPayload(zcu)) {
+                if (!ty.optionalChild(zcu).hasRuntimeBits(zcu)) return .bool;
+                return null;
+            }
+            return cg.canonicalScalarLeafType(ty.optionalChild(zcu));
+        },
+        .error_union => {
+            if (ty.errorUnionPayload(zcu).hasRuntimeBits(zcu)) return null;
+            return .anyerror;
+        },
+        .vector => {
+            if (determineSimdStoreStrategy(ty, zcu, cg.target) != .direct) return null;
+            return ty;
+        },
+        else => null,
+    };
+}
+
+fn scalarLeafTypesCompatible(cg: *const CodeGen, leaf_ty: Type, access_ty: Type) bool {
+    const zcu = cg.pt.zcu;
+    const canon_leaf = cg.canonicalScalarLeafType(leaf_ty) orelse return false;
+    const canon_access = cg.canonicalScalarLeafType(access_ty) orelse return false;
+
+    if (canon_leaf.abiSize(zcu) != canon_access.abiSize(zcu)) return false;
+    if (typeToValtype(canon_leaf, zcu, cg.target) != typeToValtype(canon_access, zcu, cg.target)) return false;
+
+    const leaf_tag = canon_leaf.zigTypeTag(zcu);
+    const access_tag = canon_access.zigTypeTag(zcu);
+
+    if (canon_leaf.toIntern() == canon_access.toIntern()) return true;
+
+    if ((leaf_tag == .error_set or canon_leaf.toIntern() == .u16_type) and
+        (access_tag == .error_set or canon_access.toIntern() == .u16_type))
+    {
+        return true;
+    }
+
+    if (canon_leaf.isAbiInt(zcu) and canon_access.isAbiInt(zcu)) {
+        const leaf_int = IntType.fromType(cg, canon_leaf);
+        const access_int = IntType.fromType(cg, canon_access);
+        return leaf_int.bits == access_int.bits and leaf_int.is_signed == access_int.is_signed;
+    }
+
+    return false;
+}
+
+fn flattenScalarizableType(
+    cg: *const CodeGen,
+    ty: Type,
+    base_offset: u32,
+    out_fields: *std.ArrayList(PromotedField),
+) !bool {
+    const zcu = cg.pt.zcu;
+    const abi_size = ty.abiSize(zcu);
+    if (abi_size > max_sroa_bytes) return false;
+    if (!ty.hasRuntimeBits(zcu)) return true;
+
+    const start_idx = out_fields.items.len;
+    if (!(try cg.flattenScalarizableTypeInner(ty, base_offset, out_fields))) return false;
+
+    const slice = out_fields.items[start_idx..];
+    std.mem.sort(PromotedField, slice, {}, struct {
+        fn lessThan(_: void, a: PromotedField, b: PromotedField) bool {
+            return a.offset < b.offset;
+        }
+    }.lessThan);
+
+    for (slice, 0..) |f, i| {
+        if (f.size == 0) return false;
+        if (f.offset < base_offset or f.offset + f.size > base_offset + @as(u32, @intCast(abi_size))) return false;
+        if (i > 0) {
+            const prev = slice[i - 1];
+            if (prev.offset + prev.size > f.offset) return false;
+        }
+    }
+    return true;
+}
+
+fn flattenScalarizableTypeInner(
+    cg: *const CodeGen,
+    ty: Type,
+    base_offset: u32,
+    out_fields: *std.ArrayList(PromotedField),
+) !bool {
+    const pt = cg.pt;
+    const zcu = pt.zcu;
+
+    if (!ty.hasRuntimeBits(zcu)) return true;
+    if (ty.abiSize(zcu) > max_sroa_bytes) return false;
+
+    if (!isByRef(ty, zcu, cg.target)) {
+        const canon_ty = cg.canonicalScalarLeafType(ty) orelse return false;
+        if (out_fields.items.len >= max_sroa_leaves) return false;
+        try out_fields.append(cg.gpa, .{
+            .offset = base_offset,
+            .size = @intCast(canon_ty.abiSize(zcu)),
+            .ty = canon_ty,
+            .local = 0,
+        });
+        return true;
+    }
+
+    if (ty.isSlice(zcu)) {
+        if (out_fields.items.len + 2 > max_sroa_leaves) return false;
+        const ptr_bytes = cg.ptrSize();
+        try out_fields.append(cg.gpa, .{
+            .offset = base_offset,
+            .size = ptr_bytes,
+            .ty = .usize,
+            .local = 0,
+        });
+        try out_fields.append(cg.gpa, .{
+            .offset = base_offset + ptr_bytes,
+            .size = ptr_bytes,
+            .ty = .usize,
+            .local = 0,
+        });
+        return true;
+    }
+
+    switch (ty.zigTypeTag(zcu)) {
+        .@"struct" => {
+            const layout = ty.containerLayout(zcu);
+            if (layout != .auto and layout != .@"extern") return false;
+            const field_count = ty.structFieldCount(zcu);
+            for (0..field_count) |field_idx| {
+                if ((try ty.structFieldValueComptime(pt, field_idx)) != null) continue;
+                const field_ty = ty.fieldType(field_idx, zcu);
+                if (!field_ty.hasRuntimeBits(zcu)) continue;
+                const field_off: u32 = @intCast(ty.structFieldOffset(field_idx, zcu));
+                if (!(try cg.flattenScalarizableTypeInner(field_ty, base_offset + field_off, out_fields))) {
+                    return false;
+                }
+            }
+            return true;
+        },
+        .array => {
+            const elem_ty = ty.childType(zcu);
+            if (!elem_ty.hasRuntimeBits(zcu)) return true;
+            const elem_size: u32 = @intCast(elem_ty.abiSize(zcu));
+            const len = ty.arrayLenIncludingSentinel(zcu);
+            if (len > max_sroa_leaves) return false;
+            for (0..@as(usize, @intCast(len))) |idx| {
+                const elem_off = base_offset + @as(u32, @intCast(idx)) * elem_size;
+                if (!(try cg.flattenScalarizableTypeInner(elem_ty, elem_off, out_fields))) {
+                    return false;
+                }
+            }
+            return true;
+        },
+        .optional => {
+            const pl_ty = ty.optionalChild(zcu);
+            if (ty.optionalReprIsPayload(zcu)) {
+                return cg.flattenScalarizableTypeInner(pl_ty, base_offset, out_fields);
+            }
+            if (pl_ty.hasRuntimeBits(zcu)) {
+                if (!(try cg.flattenScalarizableTypeInner(pl_ty, base_offset, out_fields))) {
+                    return false;
+                }
+            }
+            if (out_fields.items.len >= max_sroa_leaves) return false;
+            try out_fields.append(cg.gpa, .{
+                .offset = base_offset + @as(u32, @intCast(pl_ty.abiSize(zcu))),
+                .size = 1,
+                .ty = .u8,
+                .local = 0,
+            });
+            return true;
+        },
+        .error_union => {
+            const pl_ty = ty.errorUnionPayload(zcu);
+            const err_off: u32 = @intCast(errUnionErrorOffset(pl_ty, zcu));
+            const pl_off: u32 = @intCast(errUnionPayloadOffset(pl_ty, zcu));
+            if (out_fields.items.len >= max_sroa_leaves) return false;
+            try out_fields.append(cg.gpa, .{
+                .offset = base_offset + err_off,
+                .size = 2,
+                .ty = .anyerror,
+                .local = 0,
+            });
+            if (pl_ty.hasRuntimeBits(zcu)) {
+                if (!(try cg.flattenScalarizableTypeInner(pl_ty, base_offset + pl_off, out_fields))) {
+                    return false;
+                }
+            }
+            return true;
+        },
+        else => return false,
+    }
+}
+
+const SroaAnalysis = struct {
+    const RefKind = enum { ptr, byref_val };
+
+    const RefInfo = struct {
+        root_id: u32,
+        offset: u32,
+        kind: RefKind,
+    };
+
+    const CandidateRoot = struct {
+        inst: Air.Inst.Index,
+        ty: Type,
+        size: u32,
+        fields_start: u32,
+        fields_len: u32,
+        escaped: bool = false,
+    };
+
+    const EscapeEdge = struct {
+        from_root: u32,
+        to_root: u32,
+    };
+
+    cg: *CodeGen,
+    roots: std.ArrayList(CandidateRoot) = .empty,
+    all_fields: std.ArrayList(PromotedField) = .empty,
+    temp_fields: std.ArrayList(PromotedField) = .empty,
+    inst_refs: std.AutoHashMapUnmanaged(Air.Inst.Index, RefInfo) = .empty,
+    escape_edges: std.ArrayList(EscapeEdge) = .empty,
+
+    fn deinit(self: *SroaAnalysis) void {
+        const gpa = self.cg.gpa;
+        self.roots.deinit(gpa);
+        self.all_fields.deinit(gpa);
+        self.temp_fields.deinit(gpa);
+        self.inst_refs.deinit(gpa);
+        self.escape_edges.deinit(gpa);
+    }
+
+    fn rootFields(self: *const SroaAnalysis, root_id: u32) []const PromotedField {
+        const r = self.roots.items[root_id];
+        return self.all_fields.items[r.fields_start..][0..r.fields_len];
+    }
+
+    fn tryAddCandidateRoot(self: *SroaAnalysis, inst: Air.Inst.Index, ty: Type, kind: RefKind) !bool {
+        const zcu = self.cg.pt.zcu;
+        if (!ty.hasRuntimeBits(zcu)) return false;
+
+        self.temp_fields.clearRetainingCapacity();
+        if (!(try self.cg.flattenScalarizableType(ty, 0, &self.temp_fields))) return false;
+        if (self.temp_fields.items.len == 0) return false;
+
+        const root_id: u32 = @intCast(self.roots.items.len);
+        const fields_start: u32 = @intCast(self.all_fields.items.len);
+        const fields_len: u32 = @intCast(self.temp_fields.items.len);
+
+        try self.all_fields.appendSlice(self.cg.gpa, self.temp_fields.items);
+        try self.roots.append(self.cg.gpa, .{
+            .inst = inst,
+            .ty = ty,
+            .size = @intCast(ty.abiSize(zcu)),
+            .fields_start = fields_start,
+            .fields_len = fields_len,
+        });
+        try self.inst_refs.put(self.cg.gpa, inst, .{
+            .root_id = root_id,
+            .offset = 0,
+            .kind = kind,
+        });
+        return true;
+    }
+
+    fn getRef(self: *const SroaAnalysis, op: Air.Inst.Ref) ?RefInfo {
+        const idx = op.toIndex() orelse return null;
+        return self.inst_refs.get(idx);
+    }
+
+    fn markEscaped(self: *SroaAnalysis, op: Air.Inst.Ref) void {
+        if (self.getRef(op)) |ref| {
+            self.roots.items[ref.root_id].escaped = true;
+        }
+    }
+
+    fn checkScalarAccess(self: *const SroaAnalysis, root_id: u32, offset: u32, access_ty: Type) bool {
+        const zcu = self.cg.pt.zcu;
+        if (!access_ty.hasRuntimeBits(zcu)) return true;
+        const fields = self.rootFields(root_id);
+        for (fields) |f| {
+            if (f.offset == offset) {
+                return self.cg.scalarLeafTypesCompatible(f.ty, access_ty);
+            }
+            if (f.offset > offset) break;
+        }
+        return false;
+    }
+
+    fn checkSubAggregateAccess(self: *SroaAnalysis, root_id: u32, offset: u32, sub_ty: Type) !bool {
+        const zcu = self.cg.pt.zcu;
+        if (!sub_ty.hasRuntimeBits(zcu)) return true;
+        const sub_size: u32 = @intCast(sub_ty.abiSize(zcu));
+        const root = self.roots.items[root_id];
+        if (offset + sub_size > root.size) return false;
+
+        self.temp_fields.clearRetainingCapacity();
+        if (!(try self.cg.flattenScalarizableType(sub_ty, offset, &self.temp_fields))) return false;
+
+        const root_fields = self.rootFields(root_id);
+        const end = offset + sub_size;
+        var start_idx: usize = root_fields.len;
+        var end_idx: usize = root_fields.len;
+        for (root_fields, 0..) |f, i| {
+            if (f.offset < offset and f.offset + f.size > offset) return false;
+            if (f.offset < end and f.offset + f.size > end) return false;
+            if (start_idx == root_fields.len and f.offset >= offset) start_idx = i;
+            if (f.offset >= end) {
+                end_idx = i;
+                break;
+            }
+        }
+        const sub_root_fields = if (start_idx <= end_idx) root_fields[start_idx..end_idx] else root_fields[0..0];
+        if (sub_root_fields.len != self.temp_fields.items.len) return false;
+        for (sub_root_fields, self.temp_fields.items) |rf, tf| {
+            if (rf.offset != tf.offset or rf.size != tf.size) return false;
+            if (!self.cg.scalarLeafTypesCompatible(rf.ty, tf.ty)) return false;
+        }
+        return true;
+    }
+
+    fn checkAccess(self: *SroaAnalysis, root_id: u32, offset: u32, ty: Type) !bool {
+        const zcu = self.cg.pt.zcu;
+        if (!ty.hasRuntimeBits(zcu)) return true;
+        if (isByRef(ty, zcu, self.cg.target)) {
+            return self.checkSubAggregateAccess(root_id, offset, ty);
+        } else {
+            return self.checkScalarAccess(root_id, offset, ty);
+        }
+    }
+
+    fn checkIsNullAccess(self: *const SroaAnalysis, root_id: u32, offset: u32, optional_ty: Type) bool {
+        const zcu = self.cg.pt.zcu;
+        const payload_ty = optional_ty.optionalChild(zcu);
+        if (!optional_ty.optionalReprIsPayload(zcu)) {
+            if (!payload_ty.hasRuntimeBits(zcu)) return false;
+            const tag_off = offset + @as(u32, @intCast(payload_ty.abiSize(zcu)));
+            return self.checkScalarAccess(root_id, tag_off, .u8);
+        } else if (payload_ty.isSlice(zcu)) {
+            return self.checkScalarAccess(root_id, offset, .usize);
+        } else if (payload_ty.zigTypeTag(zcu) == .error_set) {
+            return self.checkScalarAccess(root_id, offset, .anyerror);
+        } else {
+            return self.checkScalarAccess(root_id, offset, .usize);
+        }
+    }
+
+    fn constIndex(self: *const SroaAnalysis, op: Air.Inst.Ref) ?u32 {
+        const zcu = self.cg.pt.zcu;
+        const ip_idx = op.toInterned() orelse return null;
+        const val = Value.fromInterned(ip_idx);
+        if (val.isUndef(zcu)) return null;
+        const int_val = val.toUnsignedInt(zcu);
+        return std.math.cast(u32, int_val);
+    }
+
+    fn scanBody(self: *SroaAnalysis, body: []const Air.Inst.Index) InnerError!void {
+        for (body) |inst| {
+            try self.scanInst(inst);
+        }
+    }
+
+    fn escapeAllOperands(self: *SroaAnalysis, inst: Air.Inst.Index) void {
+        const tags = self.cg.air.instructions.items(.tag);
+        const datas = self.cg.air.instructions.items(.data);
+        const tag = tags[@backingInt(inst)];
+        const data = datas[@backingInt(inst)];
+
+        switch (tag) {
+            .arg,
+            .alloc,
+            .ret_ptr,
+            .breakpoint,
+            .dbg_stmt,
+            .dbg_empty_stmt,
+            .unreach,
+            .trap,
+            .repeat,
+            .wasm_memory_size,
+            .err_return_trace,
+            .save_err_return_trace_index,
+            .frame_addr,
+            .ret_addr,
+            .c_va_end,
+            .c_va_start,
+            .work_item_id,
+            .work_group_size,
+            .work_group_id,
+            .runtime_nav_ptr,
+            => {},
+
+            .not,
+            .bit_cast,
+            .bit_cast_safe,
+            .ptr_cast,
+            .ptr_from_int,
+            .int_from_ptr,
+            .error_cast,
+            .error_from_int,
+            .int_from_error,
+            .union_from_enum,
+            .load,
+            .fpext,
+            .fptrunc,
+            .int_cast,
+            .int_cast_safe,
+            .trunc,
+            .optional_payload,
+            .optional_payload_ptr,
+            .optional_payload_ptr_set,
+            .wrap_optional,
+            .unwrap_errunion_payload,
+            .unwrap_errunion_err,
+            .unwrap_errunion_payload_ptr,
+            .unwrap_errunion_err_ptr,
+            .errunion_payload_ptr_set,
+            .wrap_errunion_payload,
+            .wrap_errunion_err,
+            .slice_ptr,
+            .slice_len,
+            .ptr_slice_len_ptr,
+            .ptr_slice_ptr_ptr,
+            .array_to_slice,
+            .array_to_vector,
+            .int_from_float,
+            .int_from_float_optimized,
+            .int_from_float_safe,
+            .int_from_float_optimized_safe,
+            .float_from_int,
+            .splat,
+            .get_union_tag,
+            .clz,
+            .ctz,
+            .popcount,
+            .byte_swap,
+            .bit_reverse,
+            .abs,
+            .addrspace_cast,
+            .error_set_has_value,
+            .c_va_arg,
+            .c_va_copy,
+            => self.markEscaped(data.ty_op.operand),
+
+            .is_null,
+            .is_non_null,
+            .is_null_ptr,
+            .is_non_null_ptr,
+            .is_err,
+            .is_non_err,
+            .is_err_ptr,
+            .is_non_err_ptr,
+            .ret,
+            .ret_safe,
+            .ret_load,
+            .is_named_enum_value,
+            .tag_name,
+            .error_name,
+            .sqrt,
+            .sin,
+            .cos,
+            .tan,
+            .exp,
+            .exp2,
+            .log,
+            .log2,
+            .log10,
+            .floor,
+            .ceil,
+            .round,
+            .trunc_float,
+            .neg,
+            .neg_optimized,
+            .cmp_lte_errors_len,
+            .set_err_return_trace,
+            => self.markEscaped(data.un_op),
+
+            .add,
+            .add_safe,
+            .add_optimized,
+            .add_wrap,
+            .add_sat,
+            .sub,
+            .sub_safe,
+            .sub_optimized,
+            .sub_wrap,
+            .sub_sat,
+            .mul,
+            .mul_safe,
+            .mul_optimized,
+            .mul_wrap,
+            .mul_sat,
+            .div_float,
+            .div_float_optimized,
+            .div_trunc,
+            .div_trunc_optimized,
+            .div_floor,
+            .div_floor_optimized,
+            .div_ceil,
+            .div_ceil_optimized,
+            .div_exact,
+            .div_exact_optimized,
+            .rem,
+            .rem_optimized,
+            .mod,
+            .mod_optimized,
+            .bit_and,
+            .bit_or,
+            .xor,
+            .cmp_lt,
+            .cmp_lt_optimized,
+            .cmp_lte,
+            .cmp_lte_optimized,
+            .cmp_eq,
+            .cmp_eq_optimized,
+            .cmp_gte,
+            .cmp_gte_optimized,
+            .cmp_gt,
+            .cmp_gt_optimized,
+            .cmp_neq,
+            .cmp_neq_optimized,
+            .store,
+            .store_safe,
+            .array_elem_val,
+            .slice_elem_val,
+            .ptr_elem_val,
+            .legalize_vec_elem_val,
+            .shl,
+            .shl_exact,
+            .shl_sat,
+            .shr,
+            .shr_exact,
+            .set_union_tag,
+            .min,
+            .max,
+            .memcpy,
+            .memmove,
+            .memset,
+            .memset_safe,
+            .atomic_store_unordered,
+            .atomic_store_monotonic,
+            .atomic_store_release,
+            .atomic_store_seq_cst,
+            => {
+                self.markEscaped(data.bin_op.lhs);
+                self.markEscaped(data.bin_op.rhs);
+            },
+
+            .ptr_add,
+            .ptr_sub,
+            .add_with_overflow,
+            .sub_with_overflow,
+            .mul_with_overflow,
+            .shl_with_overflow,
+            .slice,
+            .slice_elem_ptr,
+            .ptr_elem_ptr,
+            => {
+                const bin = self.cg.air.extraData(Air.Bin, data.ty_pl.payload).data;
+                self.markEscaped(bin.lhs);
+                self.markEscaped(bin.rhs);
+            },
+
+            .block, .loop => {},
+            .dbg_inline_block => {},
+
+            .struct_field_ptr, .agg_field_val, .spirv_runtime_array_len => {
+                const extra = self.cg.air.extraData(Air.StructField, data.ty_pl.payload).data;
+                self.markEscaped(extra.struct_operand);
+            },
+            .struct_field_ptr_index_0,
+            .struct_field_ptr_index_1,
+            .struct_field_ptr_index_2,
+            .struct_field_ptr_index_3,
+            => self.markEscaped(data.ty_op.operand),
+
+            .field_parent_ptr => {
+                const extra = self.cg.air.extraData(Air.FieldParentPtr, data.ty_pl.payload).data;
+                self.markEscaped(extra.field_ptr);
+            },
+
+            .br, .switch_dispatch => self.markEscaped(data.br.operand),
+
+            .cond_br,
+            .switch_br,
+            .loop_switch_br,
+            .@"try",
+            .try_cold,
+            .wasm_memory_grow,
+            .dbg_var_ptr,
+            .dbg_var_val,
+            .dbg_arg_inline,
+            => self.markEscaped(data.pl_op.operand),
+
+            .try_ptr, .try_ptr_cold => {
+                const extra = self.cg.air.extraData(Air.TryPtr, data.ty_pl.payload).data;
+                self.markEscaped(extra.ptr);
+            },
+
+            .call, .call_always_tail, .call_never_tail, .call_never_inline => {
+                self.markEscaped(data.pl_op.operand);
+                const extra = self.cg.air.extraData(Air.Call, data.pl_op.payload);
+                const args: []const Air.Inst.Ref = @ptrCast(self.cg.air.extra.items[extra.end..][0..extra.data.args_len]);
+                for (args) |arg| self.markEscaped(arg);
+            },
+
+            .legalize_compiler_rt_call => {
+                const unwrapped = self.cg.air.unwrapCompilerRtCall(inst);
+                for (unwrapped.args) |arg| self.markEscaped(arg);
+            },
+
+            .aggregate_init => {
+                const res_ty = self.cg.typeOfIndex(inst);
+                const elements_len = @as(usize, @intCast(res_ty.arrayLen(self.cg.pt.zcu)));
+                const elements: []const Air.Inst.Ref = @ptrCast(self.cg.air.extra.items[data.ty_pl.payload..][0..elements_len]);
+                for (elements) |elem| self.markEscaped(elem);
+            },
+
+            .union_init => {
+                const extra = self.cg.air.extraData(Air.UnionInit, data.ty_pl.payload).data;
+                self.markEscaped(extra.init);
+            },
+
+            .prefetch => self.markEscaped(data.prefetch.ptr),
+
+            .mul_add, .select, .legalize_vec_store_elem => {
+                const bin = self.cg.air.extraData(Air.Bin, data.pl_op.payload).data;
+                self.markEscaped(data.pl_op.operand);
+                self.markEscaped(bin.lhs);
+                self.markEscaped(bin.rhs);
+            },
+
+            .shuffle_one => {
+                const unwrapped = self.cg.air.unwrapShuffleOne(self.cg.pt.zcu, inst);
+                self.markEscaped(unwrapped.operand);
+            },
+            .shuffle_two => {
+                const unwrapped = self.cg.air.unwrapShuffleTwo(self.cg.pt.zcu, inst);
+                self.markEscaped(unwrapped.operand_a);
+                self.markEscaped(unwrapped.operand_b);
+            },
+            .cmp_vector, .cmp_vector_optimized => {
+                const extra = self.cg.air.extraData(Air.VectorCmp, data.ty_pl.payload).data;
+                self.markEscaped(extra.lhs);
+                self.markEscaped(extra.rhs);
+            },
+            .reduce, .reduce_optimized => self.markEscaped(data.reduce.operand),
+
+            .atomic_load => self.markEscaped(data.atomic_load.ptr),
+            .atomic_rmw => {
+                const extra = self.cg.air.extraData(Air.AtomicRmw, data.pl_op.payload).data;
+                self.markEscaped(data.pl_op.operand);
+                self.markEscaped(extra.operand);
+            },
+            .cmpxchg_weak, .cmpxchg_strong => {
+                const extra = self.cg.air.extraData(Air.Cmpxchg, data.ty_pl.payload).data;
+                self.markEscaped(extra.ptr);
+                self.markEscaped(extra.expected_value);
+                self.markEscaped(extra.new_value);
+            },
+
+            .assembly => {
+                const unwrapped = self.cg.air.unwrapAsm(inst);
+                for (unwrapped.outputs) |out| if (out != .none) self.markEscaped(out);
+                for (unwrapped.inputs) |in| self.markEscaped(in);
+            },
+
+            .inferred_alloc, .inferred_alloc_comptime => unreachable,
+        }
+    }
+
+    fn scanInst(self: *SroaAnalysis, inst: Air.Inst.Index) InnerError!void {
+        const zcu = self.cg.pt.zcu;
+        const tags = self.cg.air.instructions.items(.tag);
+        const datas = self.cg.air.instructions.items(.data);
+        const tag = tags[@backingInt(inst)];
+        const data = datas[@backingInt(inst)];
+
+        switch (tag) {
+            .alloc => {
+                const ptr_ty = self.cg.typeOfIndex(inst);
+                const child_ty = ptr_ty.childType(zcu);
+                _ = try self.tryAddCandidateRoot(inst, child_ty, .ptr);
+            },
+
+            .ret_ptr => {
+                const ptr_ty = self.cg.typeOfIndex(inst);
+                const child_ty = ptr_ty.childType(zcu);
+                const fn_info = zcu.typeToFunc(zcu.navValue(self.cg.owner_nav).typeOf(zcu)).?;
+                const ret_ty: Type = .fromInterned(fn_info.return_type);
+                const sret = firstParamSRet(fn_info.cc, ret_ty, zcu, self.cg.target);
+                if (!sret) {
+                    _ = try self.tryAddCandidateRoot(inst, child_ty, .ptr);
+                }
+            },
+
+            .block => {
+                const block = self.cg.air.unwrapBlock(inst);
+                if (!block.ty.isNoReturn(zcu) and isByRef(block.ty, zcu, self.cg.target)) {
+                    _ = try self.tryAddCandidateRoot(inst, block.ty, .byref_val);
+                }
+                try self.scanBody(block.body);
+            },
+
+            .dbg_inline_block => {
+                const block = self.cg.air.unwrapDbgBlock(inst);
+                if (!block.ty.isNoReturn(zcu) and isByRef(block.ty, zcu, self.cg.target)) {
+                    _ = try self.tryAddCandidateRoot(inst, block.ty, .byref_val);
+                }
+                try self.scanBody(block.body);
+            },
+
+            .loop => {
+                const block = self.cg.air.unwrapBlock(inst);
+                try self.scanBody(block.body);
+            },
+
+            .cond_br => {
+                self.markEscaped(data.pl_op.operand);
+                const branch = self.cg.air.unwrapCondBr(inst);
+                try self.scanBody(branch.then_body);
+                try self.scanBody(branch.else_body);
+            },
+
+            .switch_br, .loop_switch_br => {
+                self.markEscaped(data.pl_op.operand);
+                const switch_br = self.cg.air.unwrapSwitch(inst);
+                var it = switch_br.iterateCases();
+                while (it.next()) |case| {
+                    try self.scanBody(case.body);
+                }
+                try self.scanBody(it.elseBody());
+            },
+
+            .struct_field_ptr => {
+                const extra = self.cg.air.extraData(Air.StructField, data.ty_pl.payload).data;
+                try self.handleStructFieldPtr(inst, extra.struct_operand, extra.field_index);
+            },
+            .struct_field_ptr_index_0 => try self.handleStructFieldPtr(inst, data.ty_op.operand, 0),
+            .struct_field_ptr_index_1 => try self.handleStructFieldPtr(inst, data.ty_op.operand, 1),
+            .struct_field_ptr_index_2 => try self.handleStructFieldPtr(inst, data.ty_op.operand, 2),
+            .struct_field_ptr_index_3 => try self.handleStructFieldPtr(inst, data.ty_op.operand, 3),
+
+            .agg_field_val => {
+                const extra = self.cg.air.extraData(Air.StructField, data.ty_pl.payload).data;
+                const operand = extra.struct_operand;
+                const field_idx = extra.field_index;
+                if (self.getRef(operand)) |ref| {
+                    const struct_ty = self.cg.typeOf(operand);
+                    const field_ty = self.cg.typeOfIndex(inst);
+                    const layout = struct_ty.containerLayout(zcu);
+                    if (ref.kind == .byref_val and struct_ty.zigTypeTag(zcu) == .@"struct" and
+                        (layout == .auto or layout == .@"extern"))
+                    {
+                        const f_off = ref.offset + @as(u32, @intCast(struct_ty.structFieldOffset(field_idx, zcu)));
+                        if (try self.checkAccess(ref.root_id, f_off, field_ty)) {
+                            if (field_ty.hasRuntimeBits(zcu) and isByRef(field_ty, zcu, self.cg.target)) {
+                                try self.inst_refs.put(self.cg.gpa, inst, .{
+                                    .root_id = ref.root_id,
+                                    .offset = f_off,
+                                    .kind = .byref_val,
+                                });
+                            }
+                            return;
+                        }
+                    }
+                    self.markEscaped(operand);
+                }
+            },
+
+            .load => {
+                const ty_op = data.ty_op;
+                const elem_ty = ty_op.ty;
+                if (self.getRef(ty_op.operand)) |ref| {
+                    const ptr_info = self.cg.typeOf(ty_op.operand).ptrInfo(zcu);
+                    if (ref.kind == .ptr and !ptr_info.flags.is_volatile and
+                        ptr_info.flags.vector_index == .none and ptr_info.packed_offset.host_size == 0 and
+                        (try self.checkAccess(ref.root_id, ref.offset, elem_ty)))
+                    {
+                        // Valid load from promoted slot.
+                    } else {
+                        self.markEscaped(ty_op.operand);
+                    }
+                }
+                if (isByRef(elem_ty, zcu, self.cg.target)) {
+                    _ = try self.tryAddCandidateRoot(inst, elem_ty, .byref_val);
+                }
+            },
+
+            .store, .store_safe => {
+                const bin_op = data.bin_op;
+                const ptr_ty = self.cg.typeOf(bin_op.lhs);
+                const ptr_info = ptr_ty.ptrInfo(zcu);
+                const elem_ty = ptr_ty.childType(zcu);
+
+                if (self.getRef(bin_op.rhs)) |rhs_ref| {
+                    if (rhs_ref.kind == .byref_val and isByRef(elem_ty, zcu, self.cg.target) and
+                        (try self.checkSubAggregateAccess(rhs_ref.root_id, rhs_ref.offset, elem_ty)))
+                    {
+                        // Valid by-ref value source in store.
+                    } else {
+                        self.markEscaped(bin_op.rhs);
+                    }
+                }
+
+                if (self.getRef(bin_op.lhs)) |lhs_ref| {
+                    if (lhs_ref.kind == .ptr and !ptr_info.flags.is_volatile and
+                        ptr_info.flags.vector_index == .none and ptr_info.packed_offset.host_size == 0 and
+                        (try self.checkAccess(lhs_ref.root_id, lhs_ref.offset, elem_ty)))
+                    {
+                        // Valid store into promoted slot.
+                    } else {
+                        self.markEscaped(bin_op.lhs);
+                    }
+                }
+            },
+
+            .slice_ptr => {
+                const op = data.ty_op.operand;
+                if (self.getRef(op)) |ref| {
+                    if (ref.kind == .byref_val and self.checkScalarAccess(ref.root_id, ref.offset, .usize)) {
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .slice_len => {
+                const op = data.ty_op.operand;
+                if (self.getRef(op)) |ref| {
+                    if (ref.kind == .byref_val and self.checkScalarAccess(ref.root_id, ref.offset + self.cg.ptrSize(), .usize)) {
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .ptr_slice_ptr_ptr => {
+                const op = data.ty_op.operand;
+                if (self.getRef(op)) |ref| {
+                    if (ref.kind == .ptr and self.checkScalarAccess(ref.root_id, ref.offset, .usize)) {
+                        try self.inst_refs.put(self.cg.gpa, inst, ref);
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .ptr_slice_len_ptr => {
+                const op = data.ty_op.operand;
+                if (self.getRef(op)) |ref| {
+                    const len_off = ref.offset + self.cg.ptrSize();
+                    if (ref.kind == .ptr and self.checkScalarAccess(ref.root_id, len_off, .usize)) {
+                        try self.inst_refs.put(self.cg.gpa, inst, .{
+                            .root_id = ref.root_id,
+                            .offset = len_off,
+                            .kind = .ptr,
+                        });
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .slice_elem_val => {
+                const bin_op = data.bin_op;
+                self.markEscaped(bin_op.rhs);
+                if (self.getRef(bin_op.lhs)) |ref| {
+                    if (!(ref.kind == .byref_val and self.checkScalarAccess(ref.root_id, ref.offset, .usize))) {
+                        self.markEscaped(bin_op.lhs);
+                    }
+                }
+                const elem_ty = self.cg.typeOfIndex(inst);
+                if (isByRef(elem_ty, zcu, self.cg.target)) {
+                    _ = try self.tryAddCandidateRoot(inst, elem_ty, .byref_val);
+                }
+            },
+
+            .slice_elem_ptr => {
+                const bin_op = self.cg.air.extraData(Air.Bin, data.ty_pl.payload).data;
+                self.markEscaped(bin_op.rhs);
+                if (self.getRef(bin_op.lhs)) |ref| {
+                    if (!(ref.kind == .byref_val and self.checkScalarAccess(ref.root_id, ref.offset, .usize))) {
+                        self.markEscaped(bin_op.lhs);
+                    }
+                }
+            },
+
+            .ptr_elem_val => {
+                const bin_op = data.bin_op;
+                const ptr_ty = self.cg.typeOf(bin_op.lhs);
+                const elem_ty = ptr_ty.childType(zcu);
+                const elem_size: u32 = @intCast(elem_ty.abiSize(zcu));
+                self.markEscaped(bin_op.rhs);
+
+                if (self.getRef(bin_op.lhs)) |ref| {
+                    if (ptr_ty.isSlice(zcu)) {
+                        if (ref.kind == .byref_val and !ptr_ty.isVolatilePtr(zcu) and
+                            self.checkScalarAccess(ref.root_id, ref.offset, .usize))
+                        {
+                            // Valid slice ptr load.
+                        } else {
+                            self.markEscaped(bin_op.lhs);
+                        }
+                    } else if (ref.kind == .ptr and !ptr_ty.isVolatilePtr(zcu)) {
+                        if (self.constIndex(bin_op.rhs)) |idx| {
+                            const elem_off = ref.offset + idx * elem_size;
+                            if (elem_off + elem_size <= self.roots.items[ref.root_id].size and
+                                (try self.checkAccess(ref.root_id, elem_off, elem_ty)))
+                            {
+                                // Valid constant-indexed element load from promoted slot.
+                            } else {
+                                self.markEscaped(bin_op.lhs);
+                            }
+                        } else {
+                            self.markEscaped(bin_op.lhs);
+                        }
+                    } else {
+                        self.markEscaped(bin_op.lhs);
+                    }
+                }
+
+                if (isByRef(elem_ty, zcu, self.cg.target)) {
+                    _ = try self.tryAddCandidateRoot(inst, elem_ty, .byref_val);
+                }
+            },
+
+            .ptr_elem_ptr => {
+                const bin_op = self.cg.air.extraData(Air.Bin, data.ty_pl.payload).data;
+                const ptr_ty = self.cg.typeOf(bin_op.lhs);
+                const elem_ty = data.ty_pl.ty.childType(zcu);
+                const elem_size: u32 = @intCast(elem_ty.abiSize(zcu));
+                self.markEscaped(bin_op.rhs);
+
+                if (self.getRef(bin_op.lhs)) |ref| {
+                    if (ptr_ty.isSlice(zcu)) {
+                        if (!(ref.kind == .byref_val and !ptr_ty.isVolatilePtr(zcu) and
+                            self.checkScalarAccess(ref.root_id, ref.offset, .usize)))
+                        {
+                            self.markEscaped(bin_op.lhs);
+                        }
+                    } else if (ref.kind == .ptr and !ptr_ty.isVolatilePtr(zcu)) {
+                        if (self.constIndex(bin_op.rhs)) |idx| {
+                            const elem_off = ref.offset + idx * elem_size;
+                            if (elem_off + elem_size <= self.roots.items[ref.root_id].size) {
+                                try self.inst_refs.put(self.cg.gpa, inst, .{
+                                    .root_id = ref.root_id,
+                                    .offset = elem_off,
+                                    .kind = .ptr,
+                                });
+                            } else {
+                                self.markEscaped(bin_op.lhs);
+                            }
+                        } else {
+                            self.markEscaped(bin_op.lhs);
+                        }
+                    } else {
+                        self.markEscaped(bin_op.lhs);
+                    }
+                }
+            },
+
+            .array_elem_val => {
+                const bin_op = data.bin_op;
+                const array_ty = self.cg.typeOf(bin_op.lhs);
+                const elem_ty = array_ty.childType(zcu);
+                const elem_size: u32 = @intCast(elem_ty.abiSize(zcu));
+                self.markEscaped(bin_op.rhs);
+
+                if (self.getRef(bin_op.lhs)) |ref| {
+                    if (ref.kind == .byref_val and isByRef(array_ty, zcu, self.cg.target)) {
+                        if (self.constIndex(bin_op.rhs)) |idx| {
+                            const elem_off = ref.offset + idx * elem_size;
+                            if (elem_off + elem_size <= self.roots.items[ref.root_id].size and
+                                (try self.checkAccess(ref.root_id, elem_off, elem_ty)))
+                            {
+                                if (isByRef(elem_ty, zcu, self.cg.target)) {
+                                    try self.inst_refs.put(self.cg.gpa, inst, .{
+                                        .root_id = ref.root_id,
+                                        .offset = elem_off,
+                                        .kind = .byref_val,
+                                    });
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    self.markEscaped(bin_op.lhs);
+                }
+            },
+
+            .slice => {
+                const bin_op = self.cg.air.extraData(Air.Bin, data.ty_pl.payload).data;
+                self.markEscaped(bin_op.lhs);
+                self.markEscaped(bin_op.rhs);
+                const slice_ty = self.cg.typeOfIndex(inst);
+                _ = try self.tryAddCandidateRoot(inst, slice_ty, .byref_val);
+            },
+
+            .array_to_slice => {
+                self.markEscaped(data.ty_op.operand);
+                const slice_ty = data.ty_op.ty;
+                _ = try self.tryAddCandidateRoot(inst, slice_ty, .byref_val);
+            },
+
+            .aggregate_init => {
+                const res_ty = self.cg.typeOfIndex(inst);
+                if (!res_ty.isVector(zcu)) {
+                    const elements_len = @as(usize, @intCast(res_ty.arrayLen(zcu)));
+                    const elements: []const Air.Inst.Ref = @ptrCast(self.cg.air.extra.items[data.ty_pl.payload..][0..elements_len]);
+                    for (elements, 0..) |elem, elem_idx| {
+                        if (self.getRef(elem)) |elem_ref| {
+                            const elem_ty = switch (res_ty.zigTypeTag(zcu)) {
+                                .array => res_ty.childType(zcu),
+                                .@"struct" => res_ty.fieldType(elem_idx, zcu),
+                                else => unreachable,
+                            };
+                            if (elem_ref.kind == .byref_val and isByRef(elem_ty, zcu, self.cg.target) and
+                                (try self.checkSubAggregateAccess(elem_ref.root_id, elem_ref.offset, elem_ty)))
+                            {
+                                // Valid byref element copied into aggregate_init.
+                            } else {
+                                self.markEscaped(elem);
+                            }
+                        }
+                    }
+                    if (isByRef(res_ty, zcu, self.cg.target)) {
+                        _ = try self.tryAddCandidateRoot(inst, res_ty, .byref_val);
+                    }
+                } else {
+                    self.escapeAllOperands(inst);
+                }
+            },
+
+            .optional_payload_ptr => {
+                const op = data.ty_op.operand;
+                if (self.getRef(op)) |ref| {
+                    if (ref.kind == .ptr) {
+                        try self.inst_refs.put(self.cg.gpa, inst, ref);
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .optional_payload_ptr_set => {
+                const op = data.ty_op.operand;
+                if (self.getRef(op)) |ref| {
+                    const opt_ty = self.cg.typeOf(op).childType(zcu);
+                    const pl_ty = opt_ty.optionalChild(zcu);
+                    if (ref.kind == .ptr) {
+                        const tag_ok = opt_ty.optionalReprIsPayload(zcu) or
+                            self.checkScalarAccess(ref.root_id, ref.offset + @as(u32, @intCast(pl_ty.abiSize(zcu))), .u8);
+                        if (tag_ok) {
+                            try self.inst_refs.put(self.cg.gpa, inst, ref);
+                            return;
+                        }
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .optional_payload => {
+                const op = data.ty_op.operand;
+                if (self.getRef(op)) |ref| {
+                    const opt_ty = self.cg.typeOf(op);
+                    const pl_ty = self.cg.typeOfIndex(inst);
+                    if (ref.kind == .byref_val and (try self.checkAccess(ref.root_id, ref.offset, pl_ty))) {
+                        if (pl_ty.hasRuntimeBits(zcu) and (opt_ty.optionalReprIsPayload(zcu) or isByRef(pl_ty, zcu, self.cg.target))) {
+                            try self.inst_refs.put(self.cg.gpa, inst, ref);
+                        }
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .wrap_optional => {
+                const op = data.ty_op.operand;
+                const payload_ty = self.cg.typeOf(op);
+                const opt_ty = self.cg.typeOfIndex(inst);
+
+                if (!payload_ty.hasRuntimeBits(zcu)) return;
+                if (opt_ty.optionalReprIsPayload(zcu)) {
+                    if (self.getRef(op)) |ref| {
+                        if (ref.kind == .byref_val) {
+                            try self.inst_refs.put(self.cg.gpa, inst, ref);
+                        } else {
+                            self.markEscaped(op);
+                        }
+                    }
+                    return;
+                }
+
+                if (self.getRef(op)) |ref| {
+                    if (ref.kind == .byref_val and isByRef(payload_ty, zcu, self.cg.target) and
+                        (try self.checkSubAggregateAccess(ref.root_id, ref.offset, payload_ty)))
+                    {
+                        // Valid payload copy into wrap_optional.
+                    } else {
+                        self.markEscaped(op);
+                    }
+                }
+                _ = try self.tryAddCandidateRoot(inst, opt_ty, .byref_val);
+            },
+
+            .is_null, .is_non_null => {
+                const op = data.un_op;
+                if (self.getRef(op)) |ref| {
+                    const opt_ty = self.cg.typeOf(op);
+                    if (ref.kind == .byref_val and self.checkIsNullAccess(ref.root_id, ref.offset, opt_ty)) {
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .is_null_ptr, .is_non_null_ptr => {
+                const op = data.un_op;
+                if (self.getRef(op)) |ref| {
+                    const opt_ty = self.cg.typeOf(op).childType(zcu);
+                    if (ref.kind == .ptr and self.checkIsNullAccess(ref.root_id, ref.offset, opt_ty)) {
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .is_err, .is_non_err => {
+                const op = data.un_op;
+                if (self.getRef(op)) |ref| {
+                    const eu_ty = self.cg.typeOf(op);
+                    const pl_ty = eu_ty.errorUnionPayload(zcu);
+                    const err_off = ref.offset + @as(u32, @intCast(errUnionErrorOffset(pl_ty, zcu)));
+                    if (ref.kind == .byref_val and pl_ty.hasRuntimeBits(zcu) and
+                        self.checkScalarAccess(ref.root_id, err_off, .anyerror))
+                    {
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .is_err_ptr, .is_non_err_ptr => {
+                const op = data.un_op;
+                if (self.getRef(op)) |ref| {
+                    const eu_ty = self.cg.typeOf(op).childType(zcu);
+                    const pl_ty = eu_ty.errorUnionPayload(zcu);
+                    const err_off = ref.offset + @as(u32, @intCast(errUnionErrorOffset(pl_ty, zcu)));
+                    if (ref.kind == .ptr and self.checkScalarAccess(ref.root_id, err_off, .anyerror)) {
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .unwrap_errunion_err => {
+                const op = data.ty_op.operand;
+                if (self.getRef(op)) |ref| {
+                    const eu_ty = self.cg.typeOf(op);
+                    const pl_ty = eu_ty.errorUnionPayload(zcu);
+                    const err_off = ref.offset + @as(u32, @intCast(errUnionErrorOffset(pl_ty, zcu)));
+                    if (ref.kind == .byref_val and pl_ty.hasRuntimeBits(zcu) and
+                        self.checkScalarAccess(ref.root_id, err_off, .anyerror))
+                    {
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .unwrap_errunion_err_ptr => {
+                const op = data.ty_op.operand;
+                if (self.getRef(op)) |ref| {
+                    const eu_ty = self.cg.typeOf(op).childType(zcu);
+                    const pl_ty = eu_ty.errorUnionPayload(zcu);
+                    const err_off = ref.offset + @as(u32, @intCast(errUnionErrorOffset(pl_ty, zcu)));
+                    if (ref.kind == .ptr and self.checkScalarAccess(ref.root_id, err_off, .anyerror)) {
+                        try self.inst_refs.put(self.cg.gpa, inst, .{
+                            .root_id = ref.root_id,
+                            .offset = err_off,
+                            .kind = .ptr,
+                        });
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .unwrap_errunion_payload => {
+                const op = data.ty_op.operand;
+                if (self.getRef(op)) |ref| {
+                    const eu_ty = self.cg.typeOf(op);
+                    const pl_ty = eu_ty.errorUnionPayload(zcu);
+                    const pl_off = ref.offset + @as(u32, @intCast(errUnionPayloadOffset(pl_ty, zcu)));
+                    if (ref.kind == .byref_val and (try self.checkAccess(ref.root_id, pl_off, pl_ty))) {
+                        if (pl_ty.hasRuntimeBits(zcu) and isByRef(pl_ty, zcu, self.cg.target)) {
+                            try self.inst_refs.put(self.cg.gpa, inst, .{
+                                .root_id = ref.root_id,
+                                .offset = pl_off,
+                                .kind = .byref_val,
+                            });
+                        }
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .unwrap_errunion_payload_ptr => {
+                const op = data.ty_op.operand;
+                if (self.getRef(op)) |ref| {
+                    const eu_ty = self.cg.typeOf(op).childType(zcu);
+                    const pl_ty = eu_ty.errorUnionPayload(zcu);
+                    const pl_off = if (pl_ty.hasRuntimeBits(zcu))
+                        ref.offset + @as(u32, @intCast(errUnionPayloadOffset(pl_ty, zcu)))
+                    else
+                        ref.offset;
+                    if (ref.kind == .ptr) {
+                        try self.inst_refs.put(self.cg.gpa, inst, .{
+                            .root_id = ref.root_id,
+                            .offset = pl_off,
+                            .kind = .ptr,
+                        });
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .errunion_payload_ptr_set => {
+                const op = data.ty_op.operand;
+                if (self.getRef(op)) |ref| {
+                    const eu_ty = self.cg.typeOf(op).childType(zcu);
+                    const pl_ty = eu_ty.errorUnionPayload(zcu);
+                    const err_off = ref.offset + @as(u32, @intCast(errUnionErrorOffset(pl_ty, zcu)));
+                    const pl_off = if (pl_ty.hasRuntimeBits(zcu))
+                        ref.offset + @as(u32, @intCast(errUnionPayloadOffset(pl_ty, zcu)))
+                    else
+                        ref.offset;
+                    if (ref.kind == .ptr and self.checkScalarAccess(ref.root_id, err_off, .anyerror)) {
+                        try self.inst_refs.put(self.cg.gpa, inst, .{
+                            .root_id = ref.root_id,
+                            .offset = pl_off,
+                            .kind = .ptr,
+                        });
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .wrap_errunion_payload => {
+                const op = data.ty_op.operand;
+                const pl_ty = self.cg.typeOf(op);
+                const err_ty = self.cg.typeOfIndex(inst);
+                if (!pl_ty.hasRuntimeBits(zcu)) {
+                    self.markEscaped(op);
+                    return;
+                }
+                if (self.getRef(op)) |ref| {
+                    if (ref.kind == .byref_val and isByRef(pl_ty, zcu, self.cg.target) and
+                        (try self.checkSubAggregateAccess(ref.root_id, ref.offset, pl_ty)))
+                    {
+                        // Valid payload copy into wrap_errunion_payload.
+                    } else {
+                        self.markEscaped(op);
+                    }
+                }
+                _ = try self.tryAddCandidateRoot(inst, err_ty, .byref_val);
+            },
+
+            .wrap_errunion_err => {
+                const op = data.ty_op.operand;
+                self.markEscaped(op);
+                const err_ty = data.ty_op.ty;
+                const pl_ty = err_ty.errorUnionPayload(zcu);
+                if (pl_ty.hasRuntimeBits(zcu)) {
+                    _ = try self.tryAddCandidateRoot(inst, err_ty, .byref_val);
+                }
+            },
+
+            .@"try", .try_cold => {
+                const unwrapped = self.cg.air.unwrapTry(inst);
+                const op = unwrapped.error_union;
+                if (self.getRef(op)) |ref| {
+                    const eu_ty = self.cg.typeOf(op);
+                    const pl_ty = eu_ty.errorUnionPayload(zcu);
+                    const err_off = ref.offset + @as(u32, @intCast(errUnionErrorOffset(pl_ty, zcu)));
+                    const pl_off = ref.offset + @as(u32, @intCast(errUnionPayloadOffset(pl_ty, zcu)));
+                    if (ref.kind == .byref_val and pl_ty.hasRuntimeBits(zcu) and
+                        self.checkScalarAccess(ref.root_id, err_off, .anyerror) and
+                        (try self.checkAccess(ref.root_id, pl_off, pl_ty)))
+                    {
+                        if (isByRef(pl_ty, zcu, self.cg.target)) {
+                            try self.inst_refs.put(self.cg.gpa, inst, .{
+                                .root_id = ref.root_id,
+                                .offset = pl_off,
+                                .kind = .byref_val,
+                            });
+                        }
+                    } else {
+                        self.markEscaped(op);
+                    }
+                }
+                try self.scanBody(unwrapped.else_body);
+            },
+
+            .try_ptr, .try_ptr_cold => {
+                const unwrapped = self.cg.air.unwrapTryPtr(inst);
+                const op = unwrapped.error_union_ptr;
+                if (self.getRef(op)) |ref| {
+                    const eu_ty = self.cg.typeOf(op).childType(zcu);
+                    const pl_ty = eu_ty.errorUnionPayload(zcu);
+                    const err_off = ref.offset + @as(u32, @intCast(errUnionErrorOffset(pl_ty, zcu)));
+                    const pl_off = ref.offset + @as(u32, @intCast(errUnionPayloadOffset(pl_ty, zcu)));
+                    if (ref.kind == .ptr and self.checkScalarAccess(ref.root_id, err_off, .anyerror)) {
+                        if (pl_ty.hasRuntimeBits(zcu)) {
+                            try self.inst_refs.put(self.cg.gpa, inst, .{
+                                .root_id = ref.root_id,
+                                .offset = pl_off,
+                                .kind = .ptr,
+                            });
+                        }
+                    } else {
+                        self.markEscaped(op);
+                    }
+                }
+                try self.scanBody(unwrapped.else_body);
+            },
+
+            .add_with_overflow,
+            .sub_with_overflow,
+            .mul_with_overflow,
+            .shl_with_overflow,
+            => {
+                const bin = self.cg.air.extraData(Air.Bin, data.ty_pl.payload).data;
+                self.markEscaped(bin.lhs);
+                self.markEscaped(bin.rhs);
+                const lhs_ty = self.cg.typeOf(bin.lhs);
+                if (!lhs_ty.isVector(zcu) and IntType.fromType(self.cg, lhs_ty).bits <= 64) {
+                    const tuple_ty = self.cg.typeOfIndex(inst);
+                    _ = try self.tryAddCandidateRoot(inst, tuple_ty, .byref_val);
+                }
+            },
+
+            .ret_load => {
+                const op = data.un_op;
+                if (self.getRef(op)) |ref| {
+                    const fn_info = zcu.typeToFunc(zcu.navValue(self.cg.owner_nav).typeOf(zcu)).?;
+                    const ret_ty: Type = .fromInterned(fn_info.return_type);
+                    const sret = firstParamSRet(fn_info.cc, ret_ty, zcu, self.cg.target);
+                    if (ref.kind == .ptr and !sret and ret_ty.hasRuntimeBits(zcu)) {
+                        if (fn_info.cc == .wasm_mvp) {
+                            const scalar_ty = switch (abi.classifyType(ret_ty, zcu, self.cg.target)) {
+                                .direct => |scalar_type| scalar_type,
+                                .double_i64, .indirect => unreachable,
+                                .unrolled => |vector| vector.elem_type,
+                            };
+                            if (!isByRef(scalar_ty, zcu, self.cg.target) and
+                                self.checkScalarAccess(ref.root_id, ref.offset, scalar_ty))
+                            {
+                                return;
+                            }
+                        } else if (!isByRef(ret_ty, zcu, self.cg.target) and
+                            self.checkScalarAccess(ref.root_id, ref.offset, ret_ty))
+                        {
+                            return;
+                        }
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .ret, .ret_safe => {
+                const op = data.un_op;
+                if (self.getRef(op)) |ref| {
+                    const fn_info = zcu.typeToFunc(zcu.navValue(self.cg.owner_nav).typeOf(zcu)).?;
+                    const ret_ty: Type = .fromInterned(fn_info.return_type);
+                    const sret = firstParamSRet(fn_info.cc, ret_ty, zcu, self.cg.target);
+                    if (ref.kind == .byref_val and ret_ty.hasRuntimeBits(zcu)) {
+                        if (sret) {
+                            if (isByRef(ret_ty, zcu, self.cg.target) and
+                                (try self.checkSubAggregateAccess(ref.root_id, ref.offset, ret_ty)))
+                            {
+                                return;
+                            }
+                        } else if (fn_info.cc == .wasm_mvp) {
+                            const scalar_ty = switch (abi.classifyType(ret_ty, zcu, self.cg.target)) {
+                                .direct => |scalar_type| scalar_type,
+                                .double_i64, .indirect => unreachable,
+                                .unrolled => |vector| vector.elem_type,
+                            };
+                            if (!isByRef(scalar_ty, zcu, self.cg.target) and
+                                self.checkScalarAccess(ref.root_id, ref.offset, scalar_ty))
+                            {
+                                return;
+                            }
+                        }
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .memset, .memset_safe => {
+                const bin_op = data.bin_op;
+                const ptr_ty = self.cg.typeOf(bin_op.lhs);
+                if (self.getRef(bin_op.lhs)) |lhs_ref| {
+                    var allowed = false;
+                    if (ptr_ty.isSlice(zcu)) {
+                        if (lhs_ref.kind == .byref_val and
+                            self.checkScalarAccess(lhs_ref.root_id, lhs_ref.offset, .usize) and
+                            self.checkScalarAccess(lhs_ref.root_id, lhs_ref.offset + self.cg.ptrSize(), .usize))
+                        {
+                            allowed = true;
+                        }
+                    } else if (lhs_ref.kind == .ptr and ptr_ty.ptrSize(zcu) == .one) {
+                        const array_ty = ptr_ty.childType(zcu);
+                        const elem_ty = array_ty.childType(zcu);
+                        if (elem_ty.toIntern() == .u8_type) {
+                            if (bin_op.rhs.toInterned() != null) {
+                                const array_bytes: u32 = @intCast(array_ty.abiSize(zcu));
+                                const end = lhs_ref.offset + array_bytes;
+                                if (end <= self.roots.items[lhs_ref.root_id].size) {
+                                    var straddles = false;
+                                    for (self.rootFields(lhs_ref.root_id)) |f| {
+                                        if (f.offset < lhs_ref.offset and f.offset + f.size > lhs_ref.offset) straddles = true;
+                                        if (f.offset < end and f.offset + f.size > end) straddles = true;
+                                    }
+                                    if (!straddles) {
+                                        allowed = true;
+                                    }
+                                }
+                            }
+                        }
+                        if (!allowed and (try self.checkSubAggregateAccess(lhs_ref.root_id, lhs_ref.offset, array_ty))) {
+                            allowed = true;
+                        }
+                    }
+                    if (!allowed) self.markEscaped(bin_op.lhs);
+                }
+
+                if (self.getRef(bin_op.rhs)) |rhs_ref| {
+                    const elem_ty = if (ptr_ty.ptrSize(zcu) == .one)
+                        ptr_ty.childType(zcu).childType(zcu)
+                    else
+                        ptr_ty.childType(zcu);
+                    if (rhs_ref.kind == .byref_val and isByRef(elem_ty, zcu, self.cg.target) and
+                        (try self.checkSubAggregateAccess(rhs_ref.root_id, rhs_ref.offset, elem_ty)))
+                    {
+                        // Valid by-ref element value for memset.
+                    } else {
+                        self.markEscaped(bin_op.rhs);
+                    }
+                }
+            },
+
+            .memcpy, .memmove => {
+                const bin_op = data.bin_op;
+                for ([_]Air.Inst.Ref{ bin_op.lhs, bin_op.rhs }) |op| {
+                    if (self.getRef(op)) |ref| {
+                        const op_ty = self.cg.typeOf(op);
+                        if (op_ty.isSlice(zcu) and ref.kind == .byref_val and
+                            self.checkScalarAccess(ref.root_id, ref.offset, .usize) and
+                            self.checkScalarAccess(ref.root_id, ref.offset + self.cg.ptrSize(), .usize))
+                        {
+                            // Valid slice ptr + len read.
+                        } else {
+                            self.markEscaped(op);
+                        }
+                    }
+                }
+            },
+
+            .cmp_eq, .cmp_neq, .cmp_eq_optimized, .cmp_neq_optimized => {
+                const bin_op = data.bin_op;
+                const op_ty = self.cg.typeOf(bin_op.lhs);
+                if (op_ty.zigTypeTag(zcu) == .optional and !op_ty.optionalReprIsPayload(zcu)) {
+                    const pl_ty = op_ty.optionalChild(zcu);
+                    if (pl_ty.hasRuntimeBits(zcu) and !isByRef(pl_ty, zcu, self.cg.target)) {
+                        for ([_]Air.Inst.Ref{ bin_op.lhs, bin_op.rhs }) |op| {
+                            if (self.getRef(op)) |ref| {
+                                if (!(ref.kind == .byref_val and
+                                    self.checkIsNullAccess(ref.root_id, ref.offset, op_ty) and
+                                    self.checkScalarAccess(ref.root_id, ref.offset, pl_ty)))
+                                {
+                                    self.markEscaped(op);
+                                }
+                            }
+                        }
+                        return;
+                    }
+                }
+                self.markEscaped(bin_op.lhs);
+                self.markEscaped(bin_op.rhs);
+            },
+
+            .ptr_cast => {
+                const op = data.ty_op.operand;
+                const operand_ty = self.cg.typeOf(op);
+                const dest_ty = self.cg.typeOfIndex(inst);
+                if (self.getRef(op)) |ref| {
+                    if (operand_ty.zigTypeTag(zcu) == .pointer and dest_ty.zigTypeTag(zcu) == .pointer and
+                        !operand_ty.isSlice(zcu) and !dest_ty.isSlice(zcu))
+                    {
+                        const src_info = operand_ty.ptrInfo(zcu);
+                        const dst_info = dest_ty.ptrInfo(zcu);
+                        if (ref.kind == .ptr and !src_info.flags.is_volatile and !dst_info.flags.is_volatile and
+                            src_info.packed_offset.host_size == 0 and dst_info.packed_offset.host_size == 0)
+                        {
+                            try self.inst_refs.put(self.cg.gpa, inst, ref);
+                            return;
+                        }
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .bit_cast => {
+                const op = data.ty_op.operand;
+                const operand_ty = self.cg.typeOf(op);
+                const dest_ty = self.cg.typeOfIndex(inst);
+                if (self.getRef(op)) |ref| {
+                    if (ref.kind == .byref_val and isByRef(operand_ty, zcu, self.cg.target) and
+                        isByRef(dest_ty, zcu, self.cg.target) and
+                        (try self.checkSubAggregateAccess(ref.root_id, ref.offset, dest_ty)))
+                    {
+                        try self.inst_refs.put(self.cg.gpa, inst, ref);
+                        return;
+                    }
+                    self.markEscaped(op);
+                }
+            },
+
+            .br => {
+                const br = data.br;
+                if (self.getRef(br.operand)) |op_ref| {
+                    const block_ty = self.cg.typeOfIndex(br.block_inst);
+                    if (self.inst_refs.get(br.block_inst)) |block_ref| {
+                        if (block_ref.kind == .byref_val and op_ref.kind == .byref_val and
+                            (try self.checkSubAggregateAccess(op_ref.root_id, op_ref.offset, block_ty)))
+                        {
+                            try self.escape_edges.append(self.cg.gpa, .{
+                                .from_root = block_ref.root_id,
+                                .to_root = op_ref.root_id,
+                            });
+                            return;
+                        }
+                    }
+                    self.markEscaped(br.operand);
+                }
+            },
+
+            .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => {},
+
+            else => self.escapeAllOperands(inst),
+        }
+    }
+
+    fn handleStructFieldPtr(self: *SroaAnalysis, inst: Air.Inst.Index, operand: Air.Inst.Ref, field_idx: u32) !void {
+        const zcu = self.cg.pt.zcu;
+        if (self.getRef(operand)) |ref| {
+            const struct_ty = self.cg.typeOf(operand).childType(zcu);
+            const ptr_info = self.cg.typeOfIndex(inst).ptrInfo(zcu);
+            const layout = struct_ty.containerLayout(zcu);
+            if (ref.kind == .ptr and struct_ty.zigTypeTag(zcu) == .@"struct" and
+                (layout == .auto or layout == .@"extern") and
+                !ptr_info.flags.is_volatile and ptr_info.packed_offset.host_size == 0)
+            {
+                const f_off = ref.offset + @as(u32, @intCast(struct_ty.structFieldOffset(field_idx, zcu)));
+                try self.inst_refs.put(self.cg.gpa, inst, .{
+                    .root_id = ref.root_id,
+                    .offset = f_off,
+                    .kind = .ptr,
+                });
+                return;
+            }
+            self.markEscaped(operand);
+        }
+    }
+};
+
+fn analyzeSroa(cg: *CodeGen, main_body: []const Air.Inst.Index) InnerError!void {
+    var analysis: SroaAnalysis = .{ .cg = cg };
+    defer analysis.deinit();
+
+    try analysis.scanBody(main_body);
+
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (analysis.escape_edges.items) |edge| {
+            if (analysis.roots.items[edge.from_root].escaped and !analysis.roots.items[edge.to_root].escaped) {
+                analysis.roots.items[edge.to_root].escaped = true;
+                changed = true;
+            }
+        }
+    }
+
+    for (analysis.roots.items, 0..) |root, root_id| {
+        if (root.escaped) continue;
+
+        const slot_idx: u32 = @intCast(cg.promoted_slots.items.len);
+        const fields_start: u32 = @intCast(cg.promoted_fields.items.len);
+        const src_fields = analysis.rootFields(@intCast(root_id));
+
+        for (src_fields) |f| {
+            const local = try cg.ensureAllocLocal(f.ty);
+            try cg.promoted_fields.append(cg.gpa, .{
+                .offset = f.offset,
+                .size = f.size,
+                .ty = f.ty,
+                .local = local.local,
+            });
+        }
+
+        try cg.promoted_slots.append(cg.gpa, .{
+            .ty = root.ty,
+            .size = root.size,
+            .fields_start = fields_start,
+            .fields_len = root.fields_len,
+        });
+        try cg.promoted_insts.putNoClobber(cg.gpa, root.inst, slot_idx);
+    }
 }
 
 test {

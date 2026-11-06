@@ -349,19 +349,8 @@ fn Pass(comptime Inst: type) type {
 
         fn isPureZeroPopTag(tag: Inst.Tag) bool {
             return switch (tag) {
-                .local_get,
-                .global_get,
-                .uav_ref,
-                .uav_ref_off,
-                .nav_ref,
-                .nav_ref_off,
-                .func_ref,
-                .tls_nav_ref,
-                .errors_len,
-                .error_name_table_ref,
-                .enum_tag_name_table_ref,
-                => true,
-                else => false,
+                .local_get, .global_get => true,
+                else => isConstTag(tag),
             };
         }
 
@@ -422,6 +411,45 @@ fn Pass(comptime Inst: type) type {
             return false;
         }
 
+        fn invalidateLocal(known_locals: *std.AutoArrayHashMapUnmanaged(u32, Inst), local: u32) void {
+            _ = known_locals.swapRemove(local);
+            var idx: usize = known_locals.count();
+            while (idx > 0) {
+                idx -= 1;
+                const val = known_locals.values()[idx];
+                if (val.tag == .local_get and val.data.local == local) {
+                    known_locals.swapRemoveAt(idx);
+                }
+            }
+        }
+
+        fn recordLocalSet(
+            gpa: Allocator,
+            known_locals: *std.AutoArrayHashMapUnmanaged(u32, Inst),
+            local: u32,
+            prev_inst: ?Inst,
+        ) Allocator.Error!void {
+            invalidateLocal(known_locals, local);
+            const prev = prev_inst orelse return;
+            if (isConstTag(prev.tag)) {
+                try known_locals.put(gpa, local, prev);
+            } else if (prev.tag == .local_get) {
+                const resolved = if (known_locals.get(prev.data.local)) |known| known else prev;
+                if (!(resolved.tag == .local_get and resolved.data.local == local)) {
+                    try known_locals.put(gpa, local, resolved);
+                }
+            } else if (prev.tag == .local_tee) {
+                const tee_local = prev.data.local;
+                const resolved = if (known_locals.get(tee_local)) |known|
+                    known
+                else
+                    Inst{ .tag = .local_get, .data = .{ .local = tee_local } };
+                if (!(resolved.tag == .local_get and resolved.data.local == local)) {
+                    try known_locals.put(gpa, local, resolved);
+                }
+            }
+        }
+
         fn simplifyLocals(
             gpa: Allocator,
             insts: []const Inst,
@@ -430,11 +458,45 @@ fn Pass(comptime Inst: type) type {
             out.clearRetainingCapacity();
             try out.ensureTotalCapacity(gpa, insts.len);
 
+            var known_locals: std.AutoArrayHashMapUnmanaged(u32, Inst) = .empty;
+            defer known_locals.deinit(gpa);
+
             var changed = false;
             var i: usize = 0;
             while (i < insts.len) {
                 const inst = insts[i];
+                switch (inst.tag) {
+                    .block,
+                    .loop,
+                    .end,
+                    .br,
+                    .br_if,
+                    .br_table,
+                    .@"return",
+                    .@"unreachable",
+                    => known_locals.clearRetainingCapacity(),
+                    else => {},
+                }
+                if (inst.tag == .local_get) {
+                    if (!(i + 1 < insts.len and insts[i + 1].tag == .local_set and insts[i + 1].data.local == inst.data.local)) {
+                        if (known_locals.get(inst.data.local)) |replacement| {
+                            out.appendAssumeCapacity(replacement);
+                            changed = true;
+                            i += 1;
+                            continue;
+                        }
+                    }
+                }
                 if (inst.tag == .local_set) {
+                    if (out.items.len >= 1 and
+                        out.items[out.items.len - 1].tag == .local_get and
+                        out.items[out.items.len - 1].data.local == inst.data.local)
+                    {
+                        _ = out.pop();
+                        changed = true;
+                        i += 1;
+                        continue;
+                    }
                     const has_num_const_prev = out.items.len >= 1 and switch (out.items[out.items.len - 1].tag) {
                         .i32_const, .i64_const, .f32_const, .f64_const => true,
                         else => false,
@@ -454,18 +516,25 @@ fn Pass(comptime Inst: type) type {
                         inst.data.local == insts[k].data.local)
                     {
                         const local = inst.data.local;
+                        const keep_set = isLocalReadBeforeOverwriteOrExit(insts, k + 1, local, k);
                         if (crossed_block) {
+                            known_locals.clearRetainingCapacity();
                             const const_inst = out.pop().?;
                             for (insts[i + 1 .. k]) |inter_inst| {
                                 out.appendAssumeCapacity(inter_inst);
                             }
                             out.appendAssumeCapacity(const_inst);
-                            if (isLocalReadBeforeOverwriteOrExit(insts, k + 1, local, k)) {
+                            if (keep_set) {
                                 out.appendAssumeCapacity(.{ .tag = .local_tee, .data = .{ .local = local } });
+                                try recordLocalSet(gpa, &known_locals, local, const_inst);
                             }
                         } else {
-                            if (isLocalReadBeforeOverwriteOrExit(insts, k + 1, local, k)) {
+                            const val_inst: ?Inst = if (out.items.len >= 1) out.items[out.items.len - 1] else null;
+                            if (keep_set) {
                                 out.appendAssumeCapacity(.{ .tag = .local_tee, .data = .{ .local = local } });
+                                try recordLocalSet(gpa, &known_locals, local, val_inst);
+                            } else {
+                                invalidateLocal(&known_locals, local);
                             }
                             for (insts[i + 1 .. k]) |dbg_inst| {
                                 out.appendAssumeCapacity(dbg_inst);
@@ -476,22 +545,28 @@ fn Pass(comptime Inst: type) type {
                         continue;
                     }
                     if (out.items.len >= 1 and
-                        isConstTag(out.items[out.items.len - 1].tag) and
+                        isPureZeroPopTag(out.items[out.items.len - 1].tag) and
                         !isLocalReadBeforeOverwriteOrExit(insts, i + 1, inst.data.local, null))
                     {
                         _ = out.pop();
+                        invalidateLocal(&known_locals, inst.data.local);
                         changed = true;
                         i += 1;
                         continue;
                     }
+                    const prev_inst: ?Inst = if (out.items.len >= 1) out.items[out.items.len - 1] else null;
+                    try recordLocalSet(gpa, &known_locals, inst.data.local, prev_inst);
                 }
                 if (inst.tag == .local_tee) {
                     const local = inst.data.local;
                     if (!isLocalReadBeforeOverwriteOrExit(insts, i + 1, local, null)) {
+                        invalidateLocal(&known_locals, local);
                         changed = true;
                         i += 1;
                         continue;
                     }
+                    const prev_inst: ?Inst = if (out.items.len >= 1) out.items[out.items.len - 1] else null;
+                    try recordLocalSet(gpa, &known_locals, local, prev_inst);
                 }
                 out.appendAssumeCapacity(inst);
                 i += 1;
@@ -1772,7 +1847,7 @@ fn Pass(comptime Inst: type) type {
                     br_idx = idx;
                 } else if (inst.tag == .dbg_line) {
                     continue;
-                } else if (br_idx == null and isConstTag(inst.tag) and idx + 1 < body.len and body[idx + 1].tag == .local_set) {
+                } else if (br_idx == null and (isConstTag(inst.tag) or inst.tag == .local_get) and idx + 1 < body.len and body[idx + 1].tag == .local_set) {
                     idx += 1;
                 } else {
                     return null;
@@ -3466,10 +3541,8 @@ test "uav_ref, uav_ref_off, and reference constant pruning across DCE, drop, sel
         try testing.expectEqualSlices(
             Mir.Inst.Tag,
             &.{
-                .uav_ref,
-                .local_set,
                 .uav_ref_off,
-                .local_get,
+                .uav_ref,
                 .i32_add,
                 .@"return",
                 .end,
@@ -3477,8 +3550,8 @@ test "uav_ref, uav_ref_off, and reference constant pruning across DCE, drop, sel
             },
             tags,
         );
-        try testing.expectEqual(@as(u32, 11), datas[0].payload);
-        try testing.expectEqual(@as(u32, 44), datas[2].payload);
+        try testing.expectEqual(@as(u32, 44), datas[0].payload);
+        try testing.expectEqual(@as(u32, 11), datas[1].payload);
     }
 
     // 4. Multi-round elimination of dead `uav_ref; local_set X` after the branch reading X is eliminated by DCE
@@ -4275,4 +4348,221 @@ test "peepholes: constant reassociation and MemArg offset integration" {
     try testing.expectEqual(@as(u64, 20), m.memOffsetAt(5));
     try testing.expectEqual(@as(u64, 20), m.memOffsetAt(10));
     try testing.expectEqual(@as(i32, 0x0f), datas[13].imm32);
+}
+
+test "simplifyLocals: dead zero-pop local_set, self-set elimination, and intra-block constant/copy propagation" {
+    // 1. Dead `local_get src; local_set dst`, `global_get G; local_set dst`, and self-set `local_get X; local_set X`
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Dead local copy: local 5 is never read
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_set, 5);
+
+        // Dead global_get into local 6 (overwritten before any read)
+        try m.addPayload(.global_get, 0);
+        try m.addLocal(.local_set, 6);
+        try m.addLocal(.local_get, 1);
+        try m.addLocal(.local_set, 6);
+
+        // Self-set `local_get 0; local_set 0` is a no-op
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_set, 0);
+
+        try m.addLocal(.local_get, 0);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{ .local_get, .@"return", .end, .dbg_epilogue_begin },
+            tags,
+        );
+        try testing.expectEqual(@as(u32, 0), datas[0].local);
+    }
+
+    // 2. Multi-field promoted aggregate constant & copy propagation chain
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Promoted 2-field struct initialized with constants (L2=10, L3=20), copied to (L4, L5),
+        // then copied to (L6, L7), then summed:
+        try m.addI32(10);
+        try m.addLocal(.local_set, 2);
+        try m.addI32(20);
+        try m.addLocal(.local_set, 3);
+
+        try m.addLocal(.local_get, 2);
+        try m.addLocal(.local_set, 4);
+        try m.addLocal(.local_get, 3);
+        try m.addLocal(.local_set, 5);
+
+        try m.addLocal(.local_get, 4);
+        try m.addLocal(.local_set, 6);
+        try m.addLocal(.local_get, 5);
+        try m.addLocal(.local_set, 7);
+
+        try m.addLocal(.local_get, 6);
+        try m.addLocal(.local_get, 7);
+        try m.addTag(.i32_add);
+
+        // Promoted 2-field struct from runtime params (0, 1) copied through (L8, L9) -> (L10, L11):
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_set, 8);
+        try m.addLocal(.local_get, 1);
+        try m.addLocal(.local_set, 9);
+
+        try m.addLocal(.local_get, 8);
+        try m.addLocal(.local_set, 10);
+        try m.addLocal(.local_get, 9);
+        try m.addLocal(.local_set, 11);
+
+        try m.addLocal(.local_get, 10);
+        try m.addLocal(.local_get, 11);
+        try m.addTag(.i32_sub);
+        try m.addTag(.i32_add);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .i32_const,
+                .local_get,
+                .local_get,
+                .i32_sub,
+                .i32_add,
+                .@"return",
+                .end,
+                .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(i32, 30), datas[0].imm32);
+        try testing.expectEqual(@as(u32, 0), datas[1].local);
+        try testing.expectEqual(@as(u32, 1), datas[2].local);
+    }
+
+    // 3. Invalidation when source local Y is overwritten after `local_get Y; local_set X`,
+    // and invalidation across basic-block boundaries (`.block`, `.loop`, `.end`, `.br_if`).
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // X (local 2) = Y (local 0); then Y (local 0) is overwritten with 99;
+        // reading X (local 2) MUST NOT propagate local 0 (which now holds 99) or 99!
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_set, 2);
+        try m.addI32(99);
+        try m.addLocal(.local_set, 0);
+        try m.addLocal(.local_get, 2);
+        try m.addLocal(.local_get, 0);
+        try m.addTag(.i32_add);
+
+        // Local 3 set to 77 before a loop must NOT propagate inside the loop (across `.loop` boundary)
+        // when the loop modifies local 3.
+        try m.addI32(77);
+        try m.addLocal(.local_set, 3);
+        try m.addBlock(.loop, .empty);
+        try m.addLocal(.local_get, 3);
+        try m.addI32(1);
+        try m.addTag(.i32_sub);
+        try m.addLocal(.local_tee, 3);
+        try m.addLabel(.br_if, 0);
+        try m.addTag(.end);
+
+        // Local 3 read after `.end` must NOT propagate 77 from before the loop
+        try m.addLocal(.local_get, 3);
+        try m.addTag(.i32_add);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get,
+                .local_set,
+                .i32_const,
+                .local_set,
+                .local_get,
+                .i32_const,
+                .i32_add,
+                .i32_const,
+                .local_set,
+                .loop,
+                .local_get,
+                .i32_const,
+                .i32_sub,
+                .local_tee,
+                .br_if,
+                .end,
+                .local_get,
+                .i32_add,
+                .@"return",
+                .end,
+                .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(u32, 0), datas[0].local);
+        try testing.expectEqual(@as(u32, 2), datas[1].local);
+        try testing.expectEqual(@as(u32, 2), datas[4].local);
+        try testing.expectEqual(@as(i32, 99), datas[5].imm32);
+        try testing.expectEqual(@as(u32, 3), datas[16].local);
+    }
+
+    // 4. `simplifyBlocks` collapses `.empty` block containing `local_get; local_set` pairs + `br 0`,
+    // unlocking subsequent copy propagation and dead-local elimination.
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Simulates an inlined function returning a promoted 2-field struct via `block (.empty)`:
+        try m.addBlock(.block, .empty);
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_set, 4);
+        try m.addLocal(.local_get, 1);
+        try m.addLocal(.local_set, 5);
+        try m.addLabel(.br, 0);
+        try m.addTag(.end);
+
+        try m.addLocal(.local_get, 4);
+        try m.addLocal(.local_get, 5);
+        try m.addTag(.i32_add);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get,
+                .local_get,
+                .i32_add,
+                .@"return",
+                .end,
+                .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(u32, 0), datas[0].local);
+        try testing.expectEqual(@as(u32, 1), datas[1].local);
+    }
 }
