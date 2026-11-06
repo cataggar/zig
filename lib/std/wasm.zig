@@ -187,6 +187,14 @@ pub const Opcode = enum(u8) {
     i64_extend16_s = 0xC3,
     i64_extend32_s = 0xC4,
 
+    cont_new = 0xE0,
+    cont_bind = 0xE1,
+    @"suspend" = 0xE2,
+    @"resume" = 0xE3,
+    resume_throw = 0xE4,
+    resume_throw_ref = 0xE5,
+    @"switch" = 0xE6,
+
     misc_prefix = 0xFC,
     simd_prefix = 0xFD,
     atomics_prefix = 0xFE,
@@ -570,8 +578,10 @@ pub const Valtype = enum(u8) {
 /// Reference types, where the funcref references to a function regardless of its type
 /// and ref references an object from the embedder.
 pub const RefType = enum(u8) {
+    nullcontref = 0x75,
     funcref = 0x70,
     externref = 0x6F,
+    contref = 0x68,
 };
 
 /// Limits classify the size range of resizeable storage associated with memory types and table types.
@@ -653,6 +663,7 @@ pub const NameSubsection = enum(u8) {
 // type constants
 pub const element_type: u8 = 0x70;
 pub const function_type: u8 = 0x60;
+pub const cont_type: u8 = 0x5d;
 pub const result_type: u8 = 0x40;
 
 /// Represents a block which will not return a value

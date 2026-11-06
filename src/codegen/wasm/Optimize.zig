@@ -2561,8 +2561,15 @@ const StandaloneMir = struct {
             i64_extend8_s = 0xC2,
             i64_extend16_s = 0xC3,
             i64_extend32_s = 0xC4,
-            misc_prefix,
-            simd_prefix,
+            cont_new = 0xE0,
+            cont_bind = 0xE1,
+            @"suspend" = 0xE2,
+            @"resume" = 0xE3,
+            resume_throw = 0xE4,
+            resume_throw_ref = 0xE5,
+            @"switch" = 0xE6,
+            misc_prefix = 0xFC,
+            simd_prefix = 0xFD,
             atomics_prefix = 0xFE,
         };
 

@@ -22,6 +22,7 @@ pub const Feature = enum {
     relaxed_simd,
     sign_ext,
     simd128,
+    stack_switching,
     tail_call,
     wide_arithmetic,
 };
@@ -125,6 +126,14 @@ pub const all_features = blk: {
         .llvm_name = "simd128",
         .description = "Enable 128-bit SIMD",
         .dependencies = featureSet(&[_]Feature{}),
+    };
+    result[@backingInt(Feature.stack_switching)] = .{
+        .llvm_name = null,
+        .description = "Enable stack switching (WasmFX) instructions",
+        .dependencies = featureSet(&[_]Feature{
+            .exception_handling,
+            .reference_types,
+        }),
     };
     result[@backingInt(Feature.tail_call)] = .{
         .llvm_name = "tail-call",

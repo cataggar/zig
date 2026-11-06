@@ -262,12 +262,309 @@ pub const CanonDirectoryEntry = extern struct {
     }
 };
 
+// ============================================================================
+// Shadow Stack Management, Canary Checks & Dual-Stack Fiber Context Switching
+// ============================================================================
+
+threadlocal var simulated_sp: usize = 0;
+
+/// Reads the WebAssembly linear-memory shadow stack pointer (`__stack_pointer`,
+/// `global[0]`). On non-Wasm targets (for host unit testing), reads a
+/// thread-local simulated stack pointer.
+pub inline fn getStackPointer() usize {
+    return switch (builtin.cpu.arch) {
+        .wasm32 => asm volatile (
+            \\.globaltype __stack_pointer, i32
+            \\global.get __stack_pointer
+            \\local.set %[out]
+            : [out] "=r" (-> usize),
+        ),
+        .wasm64 => asm volatile (
+            \\.globaltype __stack_pointer, i64
+            \\global.get __stack_pointer
+            \\local.set %[out]
+            : [out] "=r" (-> usize),
+        ),
+        else => simulated_sp,
+    };
+}
+
+/// Writes the WebAssembly linear-memory shadow stack pointer (`__stack_pointer`,
+/// `global[0]`). On non-Wasm targets (for host unit testing), updates the
+/// thread-local simulated stack pointer.
+pub inline fn setStackPointer(sp: usize) void {
+    switch (builtin.cpu.arch) {
+        .wasm32 => asm volatile (
+            \\.globaltype __stack_pointer, i32
+            \\local.get %[sp]
+            \\global.set __stack_pointer
+            :
+            : [sp] "r" (sp),
+        ),
+        .wasm64 => asm volatile (
+            \\.globaltype __stack_pointer, i64
+            \\local.get %[sp]
+            \\global.set __stack_pointer
+            :
+            : [sp] "r" (sp),
+        ),
+        else => {
+            simulated_sp = sp;
+        },
+    }
+}
+
+pub const stack_canary: u64 = 0xDEAD_BEEF_CAFE_BABE;
+
+/// Per-task / per-fiber linear-memory shadow stack region.
+///
+/// The stack grows downward from `stack_top` (`@intFromPtr(memory.ptr) + memory.len`)
+/// toward `stack_base` (`@intFromPtr(memory.ptr)`). The lowest 16 bytes
+/// (`memory[0..16]`) hold two 64-bit `stack_canary` words so `usableBase()`
+/// (`stack_base + 16`) preserves 16-byte stack frame alignment while detecting
+/// downward stack overflow.
+pub const ShadowStack = struct {
+    pub const canary_word: u64 = stack_canary;
+    pub const canary_size: usize = 16;
+
+    memory: []align(16) u8,
+    stack_base: usize,
+    stack_top: usize,
+    saved_sp: usize,
+
+    pub inline fn init(memory: []align(16) u8) ShadowStack {
+        std.debug.assert(memory.len >= canary_size and (memory.len & 0xf) == 0);
+        const base = @intFromPtr(memory.ptr);
+        const top = base + memory.len;
+        var self: ShadowStack = .{
+            .memory = memory,
+            .stack_base = base,
+            .stack_top = top,
+            .saved_sp = top,
+        };
+        self.writeCanary();
+        return self;
+    }
+
+    pub inline fn usableBase(self: *const ShadowStack) usize {
+        return self.stack_base + canary_size;
+    }
+
+    pub inline fn writeCanary(self: *ShadowStack) void {
+        std.debug.assert(self.memory.len >= canary_size);
+        std.mem.writeInt(u64, self.memory[0..8], stack_canary, .little);
+        std.mem.writeInt(u64, self.memory[8..16], stack_canary, .little);
+    }
+
+    pub inline fn checkCanaryAndBounds(self: *const ShadowStack) bool {
+        if (self.memory.len < canary_size) return false;
+        const w0 = std.mem.readInt(u64, self.memory[0..8], .little);
+        const w1 = std.mem.readInt(u64, self.memory[8..16], .little);
+        if (w0 != stack_canary or w1 != stack_canary) return false;
+        if (self.saved_sp < self.usableBase() or self.saved_sp > self.stack_top) return false;
+        return true;
+    }
+
+    pub inline fn verifyCanaryAndBounds(self: *const ShadowStack) void {
+        if (!self.checkCanaryAndBounds()) {
+            @panic("wasm fiber shadow stack overflow");
+        }
+    }
+};
+
+/// Bounded free-list pool of 16-byte aligned linear-memory shadow stacks.
+pub const ShadowStackPool = struct {
+    pub const default_max_cached: usize = 16;
+    pub const default_stack_size: usize = 64 * 1024;
+    pub const max_capacity: usize = 64;
+
+    cached: [max_capacity]ShadowStack = undefined,
+    cached_count: usize = 0,
+    max_cached: usize = default_max_cached,
+    stack_size: usize = default_stack_size,
+
+    pub fn acquire(self: *ShadowStackPool, allocator: std.mem.Allocator) std.mem.Allocator.Error!ShadowStack {
+        if (self.cached_count > 0) {
+            self.cached_count -= 1;
+            var stack = self.cached[self.cached_count];
+            stack.saved_sp = stack.stack_top;
+            stack.writeCanary();
+            return stack;
+        }
+        const aligned_size = std.mem.alignForward(usize, @max(self.stack_size, ShadowStack.canary_size + 16), 16);
+        const mem = try allocator.alignedAlloc(u8, .@"16", aligned_size);
+        return ShadowStack.init(mem);
+    }
+
+    pub fn release(self: *ShadowStackPool, allocator: std.mem.Allocator, stack: ShadowStack) void {
+        if (builtin.mode == .debug or builtin.mode == .safe) {
+            stack.verifyCanaryAndBounds();
+        }
+        const cap = @min(self.max_cached, max_capacity);
+        if (self.cached_count < cap and stack.memory.len == std.mem.alignForward(usize, @max(self.stack_size, ShadowStack.canary_size + 16), 16)) {
+            var reset_stack = stack;
+            reset_stack.saved_sp = reset_stack.stack_top;
+            reset_stack.writeCanary();
+            self.cached[self.cached_count] = reset_stack;
+            self.cached_count += 1;
+        } else {
+            allocator.free(stack.memory);
+        }
+    }
+
+    pub fn deinit(self: *ShadowStackPool, allocator: std.mem.Allocator) void {
+        for (self.cached[0..self.cached_count]) |stack| {
+            allocator.free(stack.memory);
+        }
+        self.cached_count = 0;
+    }
+};
+
+/// Returns the currently active WASI Preview 3 stackful task/fiber, if any.
+pub inline fn getActiveTask() ?*TaskContext {
+    return globalState().active_task;
+}
+
+/// Sets the currently active WASI Preview 3 stackful task/fiber.
+pub inline fn setActiveTask(task: ?*TaskContext) void {
+    globalState().active_task = task;
+}
+
+/// Tracks a WASI Preview 3 stackful async task or fiber and coordinates
+/// saving/restoring `__stack_pointer` (`global[0]`) across suspensions.
+pub const TaskContext = struct {
+    pub const Status = enum(u8) {
+        initial,
+        running,
+        suspended,
+        completed,
+
+        pub const idle: Status = .initial;
+    };
+    pub const Subtask = i32;
+    pub const WaitableSet = i32;
+
+    shadow_stack: ShadowStack,
+    caller_sp: usize = 0,
+    prev_task: ?*TaskContext = null,
+    subtask: ?Subtask = null,
+    waitable_set: ?WaitableSet = null,
+    status: Status = .initial,
+
+    pub inline fn init(shadow_stack: ShadowStack) TaskContext {
+        return .{
+            .shadow_stack = shadow_stack,
+        };
+    }
+
+    pub inline fn enter(self: *TaskContext) void {
+        std.debug.assert(self.status == .initial);
+        if (builtin.mode == .debug or builtin.mode == .safe) {
+            self.shadow_stack.verifyCanaryAndBounds();
+        }
+        self.prev_task = getActiveTask();
+        setActiveTask(self);
+        self.caller_sp = getStackPointer();
+        self.status = .running;
+        setStackPointer(self.shadow_stack.saved_sp);
+    }
+
+    pub inline fn suspendTask(self: *TaskContext) void {
+        std.debug.assert(self.status == .running);
+        self.shadow_stack.saved_sp = getStackPointer();
+        if (builtin.mode == .debug or builtin.mode == .safe) {
+            self.shadow_stack.verifyCanaryAndBounds();
+        }
+        self.status = .suspended;
+        setActiveTask(self.prev_task);
+        setStackPointer(self.caller_sp);
+    }
+
+    pub inline fn resumeTask(self: *TaskContext) void {
+        std.debug.assert(self.status == .suspended);
+        if (builtin.mode == .debug or builtin.mode == .safe) {
+            self.shadow_stack.verifyCanaryAndBounds();
+        }
+        self.prev_task = getActiveTask();
+        setActiveTask(self);
+        self.caller_sp = getStackPointer();
+        self.status = .running;
+        setStackPointer(self.shadow_stack.saved_sp);
+    }
+
+    pub inline fn complete(self: *TaskContext, pool: *ShadowStackPool, allocator: std.mem.Allocator) void {
+        std.debug.assert(self.status == .running or self.status == .suspended);
+        if (self.status == .running) {
+            self.shadow_stack.saved_sp = getStackPointer();
+        }
+        if (builtin.mode == .debug or builtin.mode == .safe) {
+            self.shadow_stack.verifyCanaryAndBounds();
+        }
+        self.status = .completed;
+        setActiveTask(self.prev_task);
+        self.prev_task = null;
+        setStackPointer(self.caller_sp);
+        pool.release(allocator, self.shadow_stack);
+    }
+
+    /// Acquires a `ShadowStack` from `pool`, enters a new `TaskContext`, invokes
+    /// `body_fn` across a `noinline` trampoline boundary so the task body's Wasm
+    /// prologue/epilogue operates on the shadow stack without clobbering the
+    /// caller's `__stack_pointer`, and completes the task on return.
+    pub fn run(
+        pool: *ShadowStackPool,
+        allocator: std.mem.Allocator,
+        ctx: anytype,
+        comptime body_fn: anytype,
+    ) !BodyReturnType(@TypeOf(body_fn)) {
+        const stack = try pool.acquire(allocator);
+        var task = TaskContext.init(stack);
+        task.enter();
+        defer task.complete(pool, allocator);
+        return callBodyOnShadowStack(@TypeOf(ctx), body_fn, ctx, &task);
+    }
+
+    fn BodyReturnType(comptime Fn: type) type {
+        const ret = @typeInfo(Fn).@"fn".return_type.?;
+        return switch (@typeInfo(ret)) {
+            .error_union => |eu| eu.payload,
+            else => ret,
+        };
+    }
+
+    noinline fn callBodyOnShadowStack(
+        comptime Ctx: type,
+        comptime body_fn: anytype,
+        ctx: Ctx,
+        task: *TaskContext,
+    ) @typeInfo(@TypeOf(body_fn)).@"fn".return_type.? {
+        const param_types = @typeInfo(@TypeOf(body_fn)).@"fn".param_types;
+        if (param_types.len == 1) {
+            return body_fn(ctx);
+        } else if (param_types.len == 2) {
+            return body_fn(ctx, task);
+        } else {
+            @compileError("TaskContext.run body_fn must take (ctx) or (ctx, *TaskContext)");
+        }
+    }
+};
+
 fn waitReady(waitable_handle: i32) u32 {
     const ws = waitable_set.new();
     defer waitable_set.drop(ws);
     waitable.join(waitable_handle, ws);
     var payload: [2]i32 = .{ 0, 0 };
-    _ = waitable_set.wait(ws, &payload);
+    if (getActiveTask()) |task| {
+        task.waitable_set = ws;
+        task.suspendTask();
+        defer {
+            task.resumeTask();
+            task.waitable_set = null;
+        }
+        _ = waitable_set.wait(ws, &payload);
+    } else {
+        _ = waitable_set.wait(ws, &payload);
+    }
     waitable.join(waitable_handle, 0);
     return @bitCast(payload[1]);
 }
@@ -282,7 +579,19 @@ pub fn awaitAsyncCall(callstatus: i32) void {
         waitable.join(subtask_handle, ws);
         var payload: [2]i32 = .{ 0, 0 };
         while (true) {
-            _ = waitable_set.wait(ws, &payload);
+            if (getActiveTask()) |task| {
+                task.subtask = subtask_handle;
+                task.waitable_set = ws;
+                task.suspendTask();
+                defer {
+                    task.resumeTask();
+                    task.waitable_set = null;
+                    task.subtask = null;
+                }
+                _ = waitable_set.wait(ws, &payload);
+            } else {
+                _ = waitable_set.wait(ws, &payload);
+            }
             if (payload[0] == subtask_handle and (@as(u32, @bitCast(payload[1])) & 0xf) == 2) break;
         }
         subtask.drop(subtask_handle);
@@ -674,6 +983,7 @@ pub const State = extern struct {
     args_initialized: bool = false,
     cached_env: CanonEnvList = .{ .ptr = 0, .len = 0 },
     env_initialized: bool = false,
+    active_task: ?*TaskContext = null,
 };
 
 pub var local_state: State = .{};
@@ -1948,3 +2258,283 @@ test "stripPreopenPrefix and resolvePathEntry" {
     try std.testing.expectEqual(@as(i32, 10), unmatched.entry.handle);
     try std.testing.expectEqualStrings("/nonexistent", unmatched.path[0..unmatched.path_len]);
 }
+
+test "ShadowStackPool bounded reuse over 1,000+ acquire/release cycles without leaks" {
+    const allocator = std.testing.allocator;
+    var pool: ShadowStackPool = .{
+        .max_cached = 4,
+        .stack_size = 4096,
+    };
+    defer pool.deinit(allocator);
+
+    var first_base: usize = 0;
+    for (0..1024) |iter| {
+        var s1 = try pool.acquire(allocator);
+        try std.testing.expectEqual(@as(usize, 0), s1.stack_base & 0xf);
+        try std.testing.expectEqual(@as(usize, 0), s1.stack_top & 0xf);
+        try std.testing.expectEqual(s1.stack_top, s1.saved_sp);
+        try std.testing.expect(s1.checkCanaryAndBounds());
+
+        if (iter == 0) {
+            first_base = s1.stack_base;
+        } else {
+            // Reused from bounded pool LIFO slot
+            try std.testing.expectEqual(first_base, s1.stack_base);
+        }
+
+        // Simulate pushing a 32-byte frame and releasing
+        s1.saved_sp -= 32;
+        try std.testing.expect(s1.checkCanaryAndBounds());
+        pool.release(allocator, s1);
+        try std.testing.expectEqual(@as(usize, 1), pool.cached_count);
+    }
+
+    // Acquire 6 stacks concurrently (> max_cached = 4), then release all 6.
+    // Only 4 should be retained in the pool; the remaining 2 must be freed immediately.
+    var stacks: [6]ShadowStack = undefined;
+    for (&stacks) |*s| {
+        s.* = try pool.acquire(allocator);
+    }
+    try std.testing.expectEqual(@as(usize, 0), pool.cached_count);
+    for (stacks) |s| {
+        pool.release(allocator, s);
+    }
+    try std.testing.expectEqual(@as(usize, 4), pool.cached_count);
+}
+
+test "TaskContext dual-stack __stack_pointer switching isolates interleaved fiber frames" {
+    const allocator = std.testing.allocator;
+    var pool: ShadowStackPool = .{
+        .max_cached = 4,
+        .stack_size = 4096,
+    };
+    defer pool.deinit(allocator);
+
+    const orig_sp = getStackPointer();
+    defer setStackPointer(orig_sp);
+
+    // On non-wasm targets, initialize the simulated host SP to a sentinel value.
+    if (!builtin.cpu.arch.isWasm()) {
+        setStackPointer(0x7FFF_0000);
+    }
+    const host_sp = getStackPointer();
+
+    var fiber_a = TaskContext.init(try pool.acquire(allocator));
+    var fiber_b = TaskContext.init(try pool.acquire(allocator));
+    try std.testing.expect(fiber_a.shadow_stack.stack_base != fiber_b.shadow_stack.stack_base);
+
+    // 1. Enter Fiber A, allocate a 64-byte frame on Fiber A's shadow stack, write pattern A1
+    fiber_a.enter();
+    try std.testing.expectEqual(TaskContext.Status.running, fiber_a.status);
+    try std.testing.expectEqual(host_sp, fiber_a.caller_sp);
+    try std.testing.expectEqual(fiber_a.shadow_stack.stack_top, getStackPointer());
+
+    const sp_a1 = getStackPointer() - 64;
+    setStackPointer(sp_a1);
+    const frame_a1: *[8]u64 = @ptrFromInt(sp_a1);
+    for (frame_a1, 0..) |*slot, i| {
+        slot.* = 0xA1A1_0000_0000_0000 | @as(u64, i);
+    }
+
+    // Suspend Fiber A back to host
+    fiber_a.suspendTask();
+    try std.testing.expectEqual(TaskContext.Status.suspended, fiber_a.status);
+    try std.testing.expectEqual(sp_a1, fiber_a.shadow_stack.saved_sp);
+    try std.testing.expectEqual(host_sp, getStackPointer());
+
+    // 2. Enter Fiber B, allocate a 64-byte frame on Fiber B's shadow stack, write pattern B1
+    fiber_b.enter();
+    try std.testing.expectEqual(TaskContext.Status.running, fiber_b.status);
+    try std.testing.expectEqual(host_sp, fiber_b.caller_sp);
+    try std.testing.expectEqual(fiber_b.shadow_stack.stack_top, getStackPointer());
+
+    const sp_b1 = getStackPointer() - 64;
+    setStackPointer(sp_b1);
+    const frame_b1: *[8]u64 = @ptrFromInt(sp_b1);
+    for (frame_b1, 0..) |*slot, i| {
+        slot.* = 0xB1B1_0000_0000_0000 | @as(u64, i);
+    }
+
+    // Suspend Fiber B back to host
+    fiber_b.suspendTask();
+    try std.testing.expectEqual(TaskContext.Status.suspended, fiber_b.status);
+    try std.testing.expectEqual(sp_b1, fiber_b.shadow_stack.saved_sp);
+    try std.testing.expectEqual(host_sp, getStackPointer());
+
+    // 3. Resume Fiber A, verify frame A1 is intact, push nested frame A2, suspend again
+    fiber_a.resumeTask();
+    try std.testing.expectEqual(TaskContext.Status.running, fiber_a.status);
+    try std.testing.expectEqual(sp_a1, getStackPointer());
+    for (frame_a1, 0..) |slot, i| {
+        try std.testing.expectEqual(0xA1A1_0000_0000_0000 | @as(u64, i), slot);
+    }
+
+    const sp_a2 = getStackPointer() - 32;
+    setStackPointer(sp_a2);
+    const frame_a2: *[4]u64 = @ptrFromInt(sp_a2);
+    for (frame_a2, 0..) |*slot, i| {
+        slot.* = 0xA2A2_0000_0000_0000 | @as(u64, i);
+    }
+    fiber_a.suspendTask();
+    try std.testing.expectEqual(sp_a2, fiber_a.shadow_stack.saved_sp);
+    try std.testing.expectEqual(host_sp, getStackPointer());
+
+    // 4. Resume Fiber B, verify frame B1 is untouched by Fiber A's nested frame, then complete B
+    fiber_b.resumeTask();
+    try std.testing.expectEqual(sp_b1, getStackPointer());
+    for (frame_b1, 0..) |slot, i| {
+        try std.testing.expectEqual(0xB1B1_0000_0000_0000 | @as(u64, i), slot);
+    }
+    setStackPointer(fiber_b.shadow_stack.stack_top);
+    fiber_b.complete(&pool, allocator);
+    try std.testing.expectEqual(TaskContext.Status.completed, fiber_b.status);
+    try std.testing.expectEqual(host_sp, getStackPointer());
+
+    // 5. Resume Fiber A, verify both A2 and A1 frames are intact, pop frames and complete A
+    fiber_a.resumeTask();
+    try std.testing.expectEqual(sp_a2, getStackPointer());
+    for (frame_a2, 0..) |slot, i| {
+        try std.testing.expectEqual(0xA2A2_0000_0000_0000 | @as(u64, i), slot);
+    }
+    for (frame_a1, 0..) |slot, i| {
+        try std.testing.expectEqual(0xA1A1_0000_0000_0000 | @as(u64, i), slot);
+    }
+    setStackPointer(fiber_a.shadow_stack.stack_top);
+    fiber_a.complete(&pool, allocator);
+    try std.testing.expectEqual(TaskContext.Status.completed, fiber_a.status);
+    try std.testing.expectEqual(host_sp, getStackPointer());
+}
+
+test "ShadowStack canary and bounds verification detects corruption and overflow" {
+    const allocator = std.testing.allocator;
+    var pool: ShadowStackPool = .{
+        .max_cached = 2,
+        .stack_size = 1024,
+    };
+    defer pool.deinit(allocator);
+
+    var stack = try pool.acquire(allocator);
+    defer allocator.free(stack.memory);
+
+    try std.testing.expectEqual(stack.stack_base + 16, stack.usableBase());
+    try std.testing.expect(stack.checkCanaryAndBounds());
+    stack.verifyCanaryAndBounds();
+
+    // SP at exact usableBase is valid
+    stack.saved_sp = stack.usableBase();
+    try std.testing.expect(stack.checkCanaryAndBounds());
+
+    // SP below usableBase (into canary region) is detected as overflow
+    stack.saved_sp = stack.usableBase() - 1;
+    try std.testing.expect(!stack.checkCanaryAndBounds());
+
+    // SP above stack_top is detected as out-of-bounds
+    stack.saved_sp = stack.stack_top + 16;
+    try std.testing.expect(!stack.checkCanaryAndBounds());
+
+    // Restore valid SP, then corrupt low canary word
+    stack.saved_sp = stack.stack_top;
+    try std.testing.expect(stack.checkCanaryAndBounds());
+    stack.memory[0] ^= 0xFF;
+    try std.testing.expect(!stack.checkCanaryAndBounds());
+
+    // Restore canary and corrupt second 64-bit canary word
+    stack.writeCanary();
+    try std.testing.expect(stack.checkCanaryAndBounds());
+    stack.memory[15] ^= 0x01;
+    try std.testing.expect(!stack.checkCanaryAndBounds());
+
+    // Re-writing canary restores validity
+    stack.writeCanary();
+    try std.testing.expect(stack.checkCanaryAndBounds());
+}
+
+test "TaskContext.run trampoline, status transitions, and nested active_task binding" {
+    const allocator = std.testing.allocator;
+    var pool: ShadowStackPool = .{
+        .max_cached = 4,
+        .stack_size = 4096,
+    };
+    defer pool.deinit(allocator);
+
+    const orig_sp = getStackPointer();
+    defer setStackPointer(orig_sp);
+    const orig_active = getActiveTask();
+    defer setActiveTask(orig_active);
+    setActiveTask(null);
+
+    if (!builtin.cpu.arch.isWasm()) {
+        setStackPointer(0x7FFF_8000);
+    }
+    const host_sp = getStackPointer();
+
+    const RunState = struct {
+        pool: *ShadowStackPool,
+        allocator: std.mem.Allocator,
+        host_sp: usize,
+        outer_sp_recorded: usize = 0,
+        inner_sp_recorded: usize = 0,
+        resumed_sp_recorded: usize = 0,
+
+        fn innerBody(self: *@This(), inner_task: *TaskContext) !void {
+            try std.testing.expectEqual(inner_task, getActiveTask().?);
+            try std.testing.expectEqual(TaskContext.Status.running, inner_task.status);
+            self.inner_sp_recorded = getStackPointer();
+            try std.testing.expect(self.inner_sp_recorded >= inner_task.shadow_stack.usableBase());
+            try std.testing.expect(self.inner_sp_recorded <= inner_task.shadow_stack.stack_top);
+        }
+
+        fn outerBody(self: *@This(), outer_task: *TaskContext) !u64 {
+            const entry_sp = getStackPointer();
+            try std.testing.expect(entry_sp >= outer_task.shadow_stack.usableBase());
+            try std.testing.expect(entry_sp <= outer_task.shadow_stack.stack_top);
+            try std.testing.expectEqual(outer_task, getActiveTask().?);
+            try std.testing.expectEqual(TaskContext.Status.running, outer_task.status);
+            try std.testing.expectEqual(@as(?*TaskContext, null), outer_task.prev_task);
+
+            // Push a frame on the outer task's shadow stack
+            const outer_frame_sp = entry_sp - 32;
+            setStackPointer(outer_frame_sp);
+            const slot: *u64 = @ptrFromInt(outer_frame_sp);
+            slot.* = 0xCAFE_1234_5678_9ABC;
+            self.outer_sp_recorded = outer_frame_sp;
+
+            // Simulate a suspension (as waitReady / awaitAsyncCall does)
+            outer_task.suspendTask();
+            try std.testing.expectEqual(TaskContext.Status.suspended, outer_task.status);
+            try std.testing.expectEqual(@as(?*TaskContext, null), getActiveTask());
+            try std.testing.expectEqual(outer_task.caller_sp, getStackPointer());
+
+            // While outer_task is suspended, run a nested inner task via TaskContext.run
+            try TaskContext.run(self.pool, self.allocator, self, innerBody);
+            try std.testing.expectEqual(@as(?*TaskContext, null), getActiveTask());
+            try std.testing.expectEqual(outer_task.caller_sp, getStackPointer());
+
+            // Resume outer_task and verify its active_task binding and shadow stack frame
+            outer_task.resumeTask();
+            try std.testing.expectEqual(outer_task, getActiveTask().?);
+            try std.testing.expectEqual(TaskContext.Status.running, outer_task.status);
+            self.resumed_sp_recorded = getStackPointer();
+            try std.testing.expectEqual(outer_frame_sp, self.resumed_sp_recorded);
+            const read_back = slot.*;
+
+            // Restore SP to entry_sp so outerBody's epilogue balances to stack_top
+            setStackPointer(entry_sp);
+            return read_back;
+        }
+    };
+
+    var state: RunState = .{
+        .pool = &pool,
+        .allocator = allocator,
+        .host_sp = host_sp,
+    };
+    const result = try TaskContext.run(&pool, allocator, &state, RunState.outerBody);
+    try std.testing.expectEqual(@as(u64, 0xCAFE_1234_5678_9ABC), result);
+    try std.testing.expect(state.outer_sp_recorded != state.inner_sp_recorded);
+    try std.testing.expectEqual(state.outer_sp_recorded, state.resumed_sp_recorded);
+    try std.testing.expectEqual(@as(?*TaskContext, null), getActiveTask());
+    try std.testing.expectEqual(host_sp, getStackPointer());
+}
+
+

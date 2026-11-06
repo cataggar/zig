@@ -612,18 +612,46 @@ pub const Inst = struct {
         i64_extend16_s = 0xC3,
         /// Uses `tag`
         i64_extend32_s = 0xC4,
+        /// Creates a new continuation from a function reference.
+        ///
+        /// Uses `label` (`type_idx`).
+        cont_new = 0xE0,
+        /// Partially applies arguments to a continuation, producing a new continuation.
+        ///
+        /// Uses `payload` of type `IndexPair` (`src_type_idx`, `dst_type_idx`).
+        cont_bind = 0xE1,
+        /// Suspends the current continuation with the given tag.
+        ///
+        /// Uses `label` (`tag_idx`).
+        @"suspend" = 0xE2,
+        /// Resumes a continuation with a handler table.
+        ///
+        /// Uses `label` (`type_idx`).
+        @"resume" = 0xE3,
+        /// Resumes a continuation by throwing an exception with the given tag.
+        ///
+        /// Uses `payload` of type `IndexPair` (`type_idx`, `tag_idx`).
+        resume_throw = 0xE4,
+        /// Resumes a continuation by throwing an exception reference.
+        ///
+        /// Uses `label` (`type_idx`).
+        resume_throw_ref = 0xE5,
+        /// Performs a direct stack switch to a target continuation with the given tag.
+        ///
+        /// Uses `payload` of type `IndexPair` (`type_idx`, `tag_idx`).
+        @"switch" = 0xE6,
         /// The instruction consists of a prefixed opcode.
         /// The prefixed opcode can be found at payload's index.
         ///
         /// The `data` field depends on the extension instruction and
         /// may contain additional data.
-        misc_prefix,
+        misc_prefix = 0xFC,
         /// The instruction consists of a simd opcode.
         /// The actual simd-opcode is found at payload's index.
         ///
         /// The `data` field depends on the simd instruction and
         /// may contain additional data.
-        simd_prefix,
+        simd_prefix = 0xFD,
         /// The instruction consists of an atomics opcode.
         /// The actual atomics-opcode is found at payload's index.
         ///
@@ -772,6 +800,11 @@ pub const Float64 = struct {
 pub const MemArg = struct {
     offset: u64,
     alignment: Alignment,
+};
+
+pub const IndexPair = struct {
+    first: u32,
+    second: u32,
 };
 
 pub const UavRefOff = struct {

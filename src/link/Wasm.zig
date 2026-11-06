@@ -720,7 +720,7 @@ pub const SymbolFlags = packed struct(u32) {
 
     // Above here matches the tooling conventions ABI.
 
-    padding1: u13 = 0,
+    padding1: u12 = 0,
     /// Zig-specific. Dead things are allowed to be garbage collected.
     alive: bool = false,
     /// Zig-specific. This symbol comes from an object that must be included in
@@ -1520,14 +1520,18 @@ pub const ObjectGlobal = extern struct {
     }
 };
 
-pub const RefType1 = enum(u1) {
+pub const RefType1 = enum(u2) {
     funcref,
     externref,
+    contref,
+    nullcontref,
 
     pub fn from(rt: std.wasm.RefType) RefType1 {
         return switch (rt) {
             .funcref => .funcref,
             .externref => .externref,
+            .contref => .contref,
+            .nullcontref => .nullcontref,
         };
     }
 
@@ -1535,6 +1539,8 @@ pub const RefType1 = enum(u1) {
         return switch (rt) {
             .funcref => .funcref,
             .externref => .externref,
+            .contref => .contref,
+            .nullcontref => .nullcontref,
         };
     }
 };
@@ -3381,6 +3387,7 @@ pub const Feature = packed struct(u8) {
         @"relaxed-simd",
         @"sign-ext",
         simd128,
+        @"stack-switching",
         @"tail-call",
         @"shared-mem",
         @"wide-arithmetic",
@@ -3404,6 +3411,7 @@ pub const Feature = packed struct(u8) {
                 .relaxed_simd => .@"relaxed-simd",
                 .sign_ext => .@"sign-ext",
                 .simd128 => .simd128,
+                .stack_switching => .@"stack-switching",
                 .tail_call => .@"tail-call",
                 .wide_arithmetic => .@"wide-arithmetic",
             };
@@ -3429,6 +3437,7 @@ pub const Feature = packed struct(u8) {
                 .@"relaxed-simd" => .relaxed_simd,
                 .@"sign-ext" => .sign_ext,
                 .simd128 => .simd128,
+                .@"stack-switching" => .stack_switching,
                 .@"tail-call" => .tail_call,
                 .@"shared-mem" => null, // Linker-only feature.
                 .@"wide-arithmetic" => .wide_arithmetic,

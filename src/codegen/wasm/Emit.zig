@@ -188,10 +188,40 @@ pub fn lower(emit: *Emit) Error!void {
                 continue :loop tags[inst];
             }
         },
-        .br_if, .br, .memory_grow, .memory_size => {
+        .br_if, .br, .memory_grow, .memory_size, .cont_new, .@"suspend" => {
             try code.ensureUnusedCapacity(gpa, 11);
             code.appendAssumeCapacity(@backingInt(tags[inst]));
             writeUleb128(code, datas[inst].label);
+
+            inst += 1;
+            continue :loop tags[inst];
+        },
+        .cont_bind, .@"switch" => {
+            const pair = mir.extraData(Mir.IndexPair, datas[inst].payload).data;
+            try code.ensureUnusedCapacity(gpa, 16);
+            code.appendAssumeCapacity(@backingInt(tags[inst]));
+            writeUleb128(code, pair.first);
+            writeUleb128(code, pair.second);
+
+            inst += 1;
+            continue :loop tags[inst];
+        },
+        .@"resume", .resume_throw_ref => {
+            try code.ensureUnusedCapacity(gpa, 16);
+            code.appendAssumeCapacity(@backingInt(tags[inst]));
+            writeUleb128(code, datas[inst].label);
+            writeUleb128(code, @as(u32, 0));
+
+            inst += 1;
+            continue :loop tags[inst];
+        },
+        .resume_throw => {
+            const pair = mir.extraData(Mir.IndexPair, datas[inst].payload).data;
+            try code.ensureUnusedCapacity(gpa, 21);
+            code.appendAssumeCapacity(@backingInt(tags[inst]));
+            writeUleb128(code, pair.first);
+            writeUleb128(code, pair.second);
+            writeUleb128(code, @as(u32, 0));
 
             inst += 1;
             continue :loop tags[inst];
