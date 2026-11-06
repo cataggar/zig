@@ -1697,6 +1697,11 @@ const targets = [_]ArchTarget{
                 .desc = "Bulk memory operations with a zero length do not trap",
                 .deps = &.{"bulk_memory_opt"},
             },
+            .{
+                .zig_name = "stack_switching",
+                .desc = "Enable stack switching (WasmFX) instructions",
+                .deps = &.{ "exception_handling", "reference_types" },
+            },
         },
     },
     .{

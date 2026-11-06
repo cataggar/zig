@@ -182,7 +182,7 @@ fn preflightDeclarations(module: *const Mod.Module) Error!void {
     }
     for (module.module_types.items) |entry| {
         switch (entry) {
-            .struct_type, .array_type => return error.UnsupportedFeature,
+            .struct_type, .array_type, .cont_type => return error.UnsupportedFeature,
             .func_type => |ft| {
                 for (ft.params, 0..) |p, i| {
                     if (!isAllowedValType(p, Mod.FuncSignature.concreteIdxAt(ft.param_type_idxs, i))) {
@@ -390,7 +390,7 @@ fn preflightInstrBytes(module: *const Mod.Module, bytes: []const u8) Error!void 
                     return error.UnsupportedFeature;
                 }
             },
-            0x06...0x0a, 0x14, 0x15, 0x18, 0x19, 0x1f, 0xd3...0xd6 => {
+            0x06...0x0a, 0x14, 0x15, 0x18, 0x19, 0x1f, 0xd3...0xd6, 0xe0...0xe6 => {
                 return error.UnsupportedOpcode;
             },
             else => return error.InvalidInput,

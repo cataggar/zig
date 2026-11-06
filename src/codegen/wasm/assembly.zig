@@ -647,6 +647,27 @@ pub fn assemble(
         } else if (mem.eql(u8, inst, "i64.atomic.rmw32.cmpxchg_u")) {
             const mem_arg = try parseMemArg(cg, inst, &word_it);
             try cg.addAtomicMemArg(.i64_atomic_rmw32_cmpxchg_u, mem_arg);
+        } else if (mem.eql(u8, inst, "cont.new")) {
+            const type_idx = try parseLabel(cg, inst, &word_it);
+            try cg.addLabel(.cont_new, type_idx);
+        } else if (mem.eql(u8, inst, "cont.bind")) {
+            const pair = try parseIndexPair(cg, inst, &word_it);
+            try cg.addIndexPair(.cont_bind, pair);
+        } else if (mem.eql(u8, inst, "suspend")) {
+            const tag_idx = try parseLabel(cg, inst, &word_it);
+            try cg.addLabel(.@"suspend", tag_idx);
+        } else if (mem.eql(u8, inst, "resume")) {
+            const type_idx = try parseLabel(cg, inst, &word_it);
+            try cg.addLabel(.@"resume", type_idx);
+        } else if (mem.eql(u8, inst, "resume_throw")) {
+            const pair = try parseIndexPair(cg, inst, &word_it);
+            try cg.addIndexPair(.resume_throw, pair);
+        } else if (mem.eql(u8, inst, "resume_throw_ref")) {
+            const type_idx = try parseLabel(cg, inst, &word_it);
+            try cg.addLabel(.resume_throw_ref, type_idx);
+        } else if (mem.eql(u8, inst, "switch")) {
+            const pair = try parseIndexPair(cg, inst, &word_it);
+            try cg.addIndexPair(.@"switch", pair);
         } else {
             if (mem.startsWith(u8, inst, "#")) continue :next_line;
             if (mem.startsWith(u8, inst, "//")) continue :next_line;
@@ -760,6 +781,23 @@ fn parseLabel(cg: *CodeGen, inst: []const u8, word_it: *mem.TokenIterator(u8, .a
     return (try parseImmOrInt(u32, cg, label_str)) orelse {
         return cg.fail("Malformed assembly, malformed label \"{s}\"", .{label_str});
     };
+}
+
+fn parseIndexPair(cg: *CodeGen, inst: []const u8, word_it: *mem.TokenIterator(u8, .any)) !Mir.IndexPair {
+    const raw_first = word_it.next() orelse {
+        return cg.fail("Malformed assembly, index not found for \"{s}\"", .{inst});
+    };
+    const first_str = if (mem.endsWith(u8, raw_first, ",")) raw_first[0 .. raw_first.len - 1] else raw_first;
+    const first = (try parseImmOrInt(u32, cg, first_str)) orelse {
+        return cg.fail("Malformed assembly, malformed index \"{s}\"", .{first_str});
+    };
+    const raw_second = word_it.next() orelse {
+        return cg.fail("Malformed assembly, second index not found for \"{s}\"", .{inst});
+    };
+    const second = (try parseImmOrInt(u32, cg, raw_second)) orelse {
+        return cg.fail("Malformed assembly, malformed index \"{s}\"", .{raw_second});
+    };
+    return .{ .first = first, .second = second };
 }
 
 fn parseImmOrInt(comptime T: type, cg: *CodeGen, arg: []const u8) !?T {

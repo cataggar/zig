@@ -692,6 +692,11 @@ pub fn addLabel(cg: *CodeGen, tag: Mir.Inst.Tag, label: u32) error{OutOfMemory}!
     try cg.addInst(.{ .tag = tag, .data = .{ .label = label } });
 }
 
+pub fn addIndexPair(cg: *CodeGen, tag: Mir.Inst.Tag, pair: Mir.IndexPair) error{OutOfMemory}!void {
+    const extra_index = try cg.addExtra(pair);
+    try cg.addInst(.{ .tag = tag, .data = .{ .payload = extra_index } });
+}
+
 pub fn addLocal(cg: *CodeGen, tag: Mir.Inst.Tag, local: u32) error{OutOfMemory}!void {
     try cg.addInst(.{ .tag = tag, .data = .{ .local = local } });
 }
@@ -1195,7 +1200,16 @@ fn generateInner(cg: *CodeGen, any_returns: bool) InnerError!Mir {
                         has_sp_global_access = true;
                     }
                 },
-                .call_nav, .call_indirect, .call_tag_index, .call_intrinsic => {
+                .call_nav,
+                .call_indirect,
+                .call_tag_index,
+                .call_intrinsic,
+                .@"suspend",
+                .@"resume",
+                .resume_throw,
+                .resume_throw_ref,
+                .@"switch",
+                => {
                     has_calls = true;
                 },
                 else => {},

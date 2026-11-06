@@ -2213,8 +2213,9 @@ fn emitFeaturesSection(
         safety_count -= 1;
 
         try appendLeb128(gpa, binary_bytes, @as(u32, '+'));
-        // Depends on llvm_name for the hyphenated version that matches wasm tooling conventions.
-        const name = feature.llvm_name.?;
+        // Depends on llvm_name or Wasm.Feature.Tag for the hyphenated version that matches wasm tooling conventions.
+        const cpu_feature: std.Target.wasm.Feature = @fromBackingInt(@intCast(i));
+        const name = feature.llvm_name orelse @tagName(Wasm.Feature.Tag.fromCpuFeature(cpu_feature));
         try appendLeb128(gpa, binary_bytes, @as(u32, @intCast(name.len)));
         try binary_bytes.appendSlice(gpa, name);
     }
