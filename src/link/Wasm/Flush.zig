@@ -372,7 +372,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                         nav_export.nav_index,
                     );
                     try wasm.globals.put(gpa, global_resolution, {});
-                    try wasm.global_exports.append(gpa, .{
+                    try wasm.appendGlobalExportUnique(gpa, .{
                         .name = nav_export.name,
                         .global_index = Wasm.GlobalIndex.fromResolution(wasm, global_resolution).?,
                     });
@@ -406,7 +406,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                     uav_export.uav_index,
                 );
                 try wasm.globals.put(gpa, global_resolution, {});
-                try wasm.global_exports.append(gpa, .{
+                try wasm.appendGlobalExportUnique(gpa, .{
                     .name = uav_export.name,
                     .global_index = Wasm.GlobalIndex.fromResolution(wasm, global_resolution).?,
                 });
@@ -616,67 +616,69 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                 f.data_imports.putAssumeCapacity(name, id);
             }
         }
+    }
 
-        if (!is_obj) {
-            var exp_i: usize = 0;
-            while (exp_i < f.missing_exports.entries.len) {
-                const exp_name = f.missing_exports.keys()[exp_i];
-                const maybe_global_res: ?Wasm.GlobalImport.Resolution = if (exp_name == wasm.preloaded_strings.__heap_base)
-                    .__heap_base
-                else if (exp_name == wasm.preloaded_strings.__heap_end)
-                    .__heap_end
-                else if (exp_name == wasm.preloaded_strings.__stack_pointer)
-                    .__stack_pointer
-                else if (exp_name == wasm.preloaded_strings.__tls_align)
-                    .__tls_align
-                else if (exp_name == wasm.preloaded_strings.__tls_base)
-                    .__tls_base
-                else if (exp_name == wasm.preloaded_strings.__tls_size)
-                    .__tls_size
-                else if (wasm.asm_globals.getIndex(exp_name)) |asm_global_index|
-                    .pack(wasm, .{ .asm_global = @fromBackingInt(@intCast(asm_global_index)) })
-                else
-                    null;
+    if (!is_obj) {
+        try wasm.exportSyntheticObjectGlobals(gpa, &f.missing_exports);
 
-                if (maybe_global_res) |global_res| {
-                    try wasm.globals.put(gpa, global_res, {});
-                    try wasm.global_exports.append(gpa, .{
-                        .name = exp_name,
-                        .global_index = Wasm.GlobalIndex.fromResolution(wasm, global_res).?,
-                    });
-                    f.missing_exports.swapRemoveAt(exp_i);
-                    continue;
-                }
+        var exp_i: usize = 0;
+        while (exp_i < f.missing_exports.entries.len) {
+            const exp_name = f.missing_exports.keys()[exp_i];
+            const maybe_global_res: ?Wasm.GlobalImport.Resolution = if (exp_name == wasm.preloaded_strings.__heap_base)
+                .__heap_base
+            else if (exp_name == wasm.preloaded_strings.__heap_end)
+                .__heap_end
+            else if (exp_name == wasm.preloaded_strings.__stack_pointer)
+                .__stack_pointer
+            else if (exp_name == wasm.preloaded_strings.__tls_align)
+                .__tls_align
+            else if (exp_name == wasm.preloaded_strings.__tls_base)
+                .__tls_base
+            else if (exp_name == wasm.preloaded_strings.__tls_size)
+                .__tls_size
+            else if (wasm.asm_globals.getIndex(exp_name)) |asm_global_index|
+                .pack(wasm, .{ .asm_global = @fromBackingInt(@intCast(asm_global_index)) })
+            else
+                null;
 
-                if (exp_name == wasm.preloaded_strings.__wasm_call_ctors) {
-                    try wasm.addFunction(.__wasm_call_ctors, &.{}, &.{});
-                    try wasm.function_exports.put(gpa, exp_name, Wasm.FunctionIndex.fromResolution(wasm, .__wasm_call_ctors).?);
-                    f.missing_exports.swapRemoveAt(exp_i);
-                    continue;
-                } else if (exp_name == wasm.preloaded_strings.__wasm_init_memory) {
-                    try wasm.addFunction(.__wasm_init_memory, &.{}, &.{});
-                    try wasm.function_exports.put(gpa, exp_name, Wasm.FunctionIndex.fromResolution(wasm, .__wasm_init_memory).?);
-                    f.missing_exports.swapRemoveAt(exp_i);
-                    continue;
-                } else if (exp_name == wasm.preloaded_strings.__wasm_apply_global_tls_relocs) {
-                    try wasm.addFunction(.__wasm_apply_global_tls_relocs, &.{}, &.{});
-                    try wasm.function_exports.put(gpa, exp_name, Wasm.FunctionIndex.fromResolution(wasm, .__wasm_apply_global_tls_relocs).?);
-                    f.missing_exports.swapRemoveAt(exp_i);
-                    continue;
-                } else if (exp_name == wasm.preloaded_strings.__wasm_init_tls) {
-                    try wasm.addFunction(.__wasm_init_tls, &.{if (is64) .i64 else .i32}, &.{});
-                    try wasm.function_exports.put(gpa, exp_name, Wasm.FunctionIndex.fromResolution(wasm, .__wasm_init_tls).?);
-                    f.missing_exports.swapRemoveAt(exp_i);
-                    continue;
-                }
-
-                exp_i += 1;
+            if (maybe_global_res) |global_res| {
+                try wasm.globals.put(gpa, global_res, {});
+                try wasm.appendGlobalExportUnique(gpa, .{
+                    .name = exp_name,
+                    .global_index = Wasm.GlobalIndex.fromResolution(wasm, global_res).?,
+                });
+                f.missing_exports.swapRemoveAt(exp_i);
+                continue;
             }
-        }
 
-        for (f.missing_exports.keys()) |exp_name| {
-            diags.addError("manually specified export name '{s}' undefined", .{exp_name.slice(wasm)});
+            if (exp_name == wasm.preloaded_strings.__wasm_call_ctors) {
+                try wasm.addFunction(.__wasm_call_ctors, &.{}, &.{});
+                try wasm.function_exports.put(gpa, exp_name, Wasm.FunctionIndex.fromResolution(wasm, .__wasm_call_ctors).?);
+                f.missing_exports.swapRemoveAt(exp_i);
+                continue;
+            } else if (exp_name == wasm.preloaded_strings.__wasm_init_memory) {
+                try wasm.addFunction(.__wasm_init_memory, &.{}, &.{});
+                try wasm.function_exports.put(gpa, exp_name, Wasm.FunctionIndex.fromResolution(wasm, .__wasm_init_memory).?);
+                f.missing_exports.swapRemoveAt(exp_i);
+                continue;
+            } else if (exp_name == wasm.preloaded_strings.__wasm_apply_global_tls_relocs) {
+                try wasm.addFunction(.__wasm_apply_global_tls_relocs, &.{}, &.{});
+                try wasm.function_exports.put(gpa, exp_name, Wasm.FunctionIndex.fromResolution(wasm, .__wasm_apply_global_tls_relocs).?);
+                f.missing_exports.swapRemoveAt(exp_i);
+                continue;
+            } else if (exp_name == wasm.preloaded_strings.__wasm_init_tls) {
+                try wasm.addFunction(.__wasm_init_tls, &.{if (is64) .i64 else .i32}, &.{});
+                try wasm.function_exports.put(gpa, exp_name, Wasm.FunctionIndex.fromResolution(wasm, .__wasm_init_tls).?);
+                f.missing_exports.swapRemoveAt(exp_i);
+                continue;
+            }
+
+            exp_i += 1;
         }
+    }
+
+    for (f.missing_exports.keys()) |exp_name| {
+        diags.addError("manually specified export name '{s}' undefined", .{exp_name.slice(wasm)});
     }
 
     if (entry_name.unwrap()) |name| {
