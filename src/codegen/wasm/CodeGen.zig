@@ -281,6 +281,7 @@ wasm_param_count: u32 = undefined,
 promoted_slots: std.ArrayList(PromotedSlot) = .empty,
 promoted_fields: std.ArrayList(PromotedField) = .empty,
 promoted_insts: std.AutoArrayHashMapUnmanaged(Air.Inst.Index, u32) = .empty,
+cmp_vector_reduce_only: std.AutoHashMapUnmanaged(Air.Inst.Index, void) = .empty,
 current_air_inst: ?Air.Inst.Index = null,
 
 /// When in debug mode, this tracks if no `finishAir` was missed.
@@ -476,6 +477,7 @@ pub fn deinit(cg: *CodeGen) void {
     cg.promoted_slots.deinit(gpa);
     cg.promoted_fields.deinit(gpa);
     cg.promoted_insts.deinit(gpa);
+    cg.cmp_vector_reduce_only.deinit(gpa);
     cg.mir_instructions.deinit(gpa);
     cg.mir_extra.deinit(gpa);
     cg.mir_locals.deinit(gpa);
@@ -1766,6 +1768,10 @@ const SimdStoreStrategy = enum {
     direct,
     unrolled,
 };
+
+fn hasSimd(cg: *const CodeGen) bool {
+    return cg.target.cpu.has(.wasm, .relaxed_simd) or cg.target.cpu.has(.wasm, .simd128);
+}
 
 /// For a given vector type, returns the `SimdStoreStrategy`.
 /// This means when a given type is 128 bits and either the simd128 or relaxed-simd
@@ -6803,10 +6809,15 @@ fn airCmpVector(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     if (!res_ty.hasRuntimeBits(zcu)) return cg.finishAir(inst, .none, &.{ payload.lhs, payload.rhs });
 
     const vec_len: usize = @intCast(res_ty.vectorLen(zcu));
-    const res_alloc = try cg.allocStack(res_ty);
 
     if (determineSimdStoreStrategy(operand_ty, zcu, cg.target) == .direct) {
         if (simdCmpOpcode(elem_ty, op, zcu, cg.target)) |cmp_opcode| {
+            if (cg.cmp_vector_reduce_only.contains(inst)) {
+                const mask = try cg.emitBinSimd(operand_ty, lhs, rhs, cmp_opcode);
+                const result = try mask.toLocal(cg, operand_ty);
+                return cg.finishAir(inst, result, &.{ payload.lhs, payload.rhs });
+            }
+            const res_alloc = try cg.allocStack(res_ty);
             const mask = try cg.emitBinSimd(operand_ty, lhs, rhs, cmp_opcode);
             if (vec_len == 16 and res_alloc != .promoted) {
                 const ones = try cg.storeSimdImmd(@splat(1));
@@ -6815,6 +6826,37 @@ fn airCmpVector(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 var bool_vec = try (WValue{ .stack = {} }).toLocal(cg, operand_ty);
                 defer bool_vec.free(cg);
                 try cg.store(res_alloc, bool_vec, operand_ty, .{ .alignment = .@"1" });
+            } else if (vec_len == 8 and res_alloc != .promoted) {
+                var mask_loc = try mask.toLocal(cg, operand_ty);
+                defer mask_loc.free(cg);
+                try cg.emitWValue(mask_loc);
+                try cg.emitWValue(mask_loc);
+                try cg.addSimd(.i8x16_narrow_i16x8_s);
+                try cg.addImm32(1);
+                try cg.addSimd(.i8x16_splat);
+                try cg.addSimd(.v128_and);
+                try cg.addSimdLane(.i64x2_extract_lane, 0);
+                var bool_val = try (WValue{ .stack = {} }).toLocal(cg, .u64);
+                defer bool_val.free(cg);
+                try cg.store(res_alloc, bool_val, .u64, .{ .alignment = .@"1" });
+            } else if (vec_len == 4 and res_alloc != .promoted) {
+                var mask_loc = try mask.toLocal(cg, operand_ty);
+                defer mask_loc.free(cg);
+                try cg.emitWValue(mask_loc);
+                try cg.emitWValue(mask_loc);
+                try cg.addSimd(.i16x8_narrow_i32x4_s);
+                var narrow16 = try (WValue{ .stack = {} }).toLocal(cg, operand_ty);
+                defer narrow16.free(cg);
+                try cg.emitWValue(narrow16);
+                try cg.emitWValue(narrow16);
+                try cg.addSimd(.i8x16_narrow_i16x8_s);
+                try cg.addImm32(1);
+                try cg.addSimd(.i8x16_splat);
+                try cg.addSimd(.v128_and);
+                try cg.addSimdLane(.i32x4_extract_lane, 0);
+                var bool_val = try (WValue{ .stack = {} }).toLocal(cg, .u32);
+                defer bool_val.free(cg);
+                try cg.store(res_alloc, bool_val, .u32, .{ .alignment = .@"1" });
             } else {
                 var mask_loc = try mask.toLocal(cg, operand_ty);
                 defer mask_loc.free(cg);
@@ -6832,6 +6874,8 @@ fn airCmpVector(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             return cg.finishAir(inst, res_alloc, &.{ payload.lhs, payload.rhs });
         }
     }
+
+    const res_alloc = try cg.allocStack(res_ty);
 
     var rhs_val = if (rhs == .stack) try rhs.toLocal(cg, operand_ty) else rhs;
     defer if (rhs == .stack) rhs_val.free(cg);
@@ -9049,8 +9093,205 @@ fn airReduce(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const vec_len: usize = @intCast(operand_ty.vectorLen(zcu));
     const op: std.builtin.ReduceOp = reduce.operation;
 
+    if (reduce.operand.toIndex()) |op_inst| {
+        if (cg.cmp_vector_reduce_only.contains(op_inst)) {
+            try cg.emitWValue(operand);
+            switch (op) {
+                .Or => try cg.addSimd(.v128_any_true),
+                .And => {
+                    const cmp_ty_pl = cg.air.instructions.items(.data)[@backingInt(op_inst)].ty_pl;
+                    const cmp_pl = cg.air.extraData(Air.VectorCmp, cmp_ty_pl.payload).data;
+                    const cmp_elem_bits = cg.typeOf(cmp_pl.lhs).childType(zcu).bitSize(zcu);
+                    try cg.addSimd(switch (cmp_elem_bits) {
+                        8 => .i8x16_all_true,
+                        16 => .i16x8_all_true,
+                        32 => .i32x4_all_true,
+                        64 => .i64x2_all_true,
+                        else => unreachable,
+                    });
+                },
+                else => unreachable,
+            }
+            return cg.finishAir(inst, .stack, &.{reduce.operand});
+        }
+    }
+
     var op_val = if (operand == .stack) try operand.toLocal(cg, operand_ty) else operand;
     defer if (operand == .stack) op_val.free(cg);
+
+    if (res_ty.toIntern() == .bool_type and op_val != .promoted and (op == .And or op == .Or)) {
+        if (vec_len == 16 and cg.hasSimd()) {
+            const base_offset = op_val.memOffset();
+            try cg.emitMemBase(op_val);
+            const extra_index: u32 = @intCast(cg.mir_extra.items.len);
+            try cg.mir_extra.ensureUnusedCapacity(cg.gpa, 4);
+            cg.mir_extra.appendAssumeCapacity(@backingInt(std.wasm.SimdOpcode.v128_load));
+            _ = try cg.addExtraAssumeCapacity(Mir.MemArg{
+                .offset = base_offset,
+                .alignment = .@"1",
+            });
+            try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
+            try cg.addSimd(switch (op) {
+                .Or => .v128_any_true,
+                .And => .i8x16_all_true,
+                else => unreachable,
+            });
+            return cg.finishAir(inst, .stack, &.{reduce.operand});
+        } else if (vec_len == 8) {
+            const base_offset = op_val.memOffset();
+            try cg.emitMemBase(op_val);
+            try cg.addMemArg(.i64_load, .{ .offset = base_offset, .alignment = .@"1" });
+            switch (op) {
+                .Or => {
+                    try cg.addImm64(0);
+                    try cg.addTag(.i64_ne);
+                },
+                .And => {
+                    try cg.addImm64(0x0101010101010101);
+                    try cg.addTag(.i64_and);
+                    try cg.addImm64(0x0101010101010101);
+                    try cg.addTag(.i64_eq);
+                },
+                else => unreachable,
+            }
+            return cg.finishAir(inst, .stack, &.{reduce.operand});
+        } else if (vec_len == 4) {
+            const base_offset = op_val.memOffset();
+            try cg.emitMemBase(op_val);
+            try cg.addMemArg(.i32_load, .{ .offset = base_offset, .alignment = .@"1" });
+            switch (op) {
+                .Or => {
+                    try cg.addImm32(0);
+                    try cg.addTag(.i32_ne);
+                },
+                .And => {
+                    try cg.addImm32(0x01010101);
+                    try cg.addTag(.i32_and);
+                    try cg.addImm32(0x01010101);
+                    try cg.addTag(.i32_eq);
+                },
+                else => unreachable,
+            }
+            return cg.finishAir(inst, .stack, &.{reduce.operand});
+        }
+    }
+
+    if (determineSimdStoreStrategy(operand_ty, zcu, cg.target) == .direct) {
+        if (res_ty.zigTypeTag(zcu) == .float) {
+            switch (vec_len) {
+                4 => {
+                    switch (op) {
+                        .Add, .Mul => {
+                            const simd_op: std.wasm.SimdOpcode = if (op == .Add) .f32x4_add else .f32x4_mul;
+                            try cg.emitWValue(op_val);
+                            try cg.emitWValue(op_val);
+                            try cg.emitWValue(op_val);
+                            try cg.addSimdShuffle(.{ 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7 });
+                            try cg.addSimd(simd_op);
+                            var step1 = try (WValue{ .stack = {} }).toLocal(cg, operand_ty);
+                            defer step1.free(cg);
+
+                            try cg.emitWValue(step1);
+                            try cg.emitWValue(step1);
+                            try cg.emitWValue(step1);
+                            try cg.addSimdShuffle(.{ 4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11 });
+                            try cg.addSimd(simd_op);
+                        },
+                        .Min, .Max => {
+                            const cmp_op: std.wasm.SimdOpcode = if (op == .Min) .f32x4_lt else .f32x4_gt;
+                            try cg.emitWValue(op_val);
+                            try cg.emitWValue(op_val);
+                            try cg.addSimdShuffle(.{ 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7 });
+                            _ = try cg.emitFloatMinMaxSimd(operand_ty, op_val, .stack, cmp_op, .f32x4_ne);
+                            var step1 = try (WValue{ .stack = {} }).toLocal(cg, operand_ty);
+                            defer step1.free(cg);
+
+                            try cg.emitWValue(step1);
+                            try cg.emitWValue(step1);
+                            try cg.addSimdShuffle(.{ 4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11 });
+                            _ = try cg.emitFloatMinMaxSimd(operand_ty, step1, .stack, cmp_op, .f32x4_ne);
+                        },
+                        .And, .Or, .Xor => unreachable,
+                    }
+                    try cg.addSimdLane(.f32x4_extract_lane, 0);
+                    return cg.finishAir(inst, .stack, &.{reduce.operand});
+                },
+                2 => {
+                    switch (op) {
+                        .Add, .Mul => {
+                            const simd_op: std.wasm.SimdOpcode = if (op == .Add) .f64x2_add else .f64x2_mul;
+                            try cg.emitWValue(op_val);
+                            try cg.emitWValue(op_val);
+                            try cg.emitWValue(op_val);
+                            try cg.addSimdShuffle(.{ 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7 });
+                            try cg.addSimd(simd_op);
+                        },
+                        .Min, .Max => {
+                            const cmp_op: std.wasm.SimdOpcode = if (op == .Min) .f64x2_lt else .f64x2_gt;
+                            try cg.emitWValue(op_val);
+                            try cg.emitWValue(op_val);
+                            try cg.addSimdShuffle(.{ 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7 });
+                            _ = try cg.emitFloatMinMaxSimd(operand_ty, op_val, .stack, cmp_op, .f64x2_ne);
+                        },
+                        .And, .Or, .Xor => unreachable,
+                    }
+                    try cg.addSimdLane(.f64x2_extract_lane, 0);
+                    return cg.finishAir(inst, .stack, &.{reduce.operand});
+                },
+                else => {},
+            }
+        } else if (res_ty.isAbiInt(zcu)) {
+            const is_signed = res_ty.intInfo(zcu).signedness == .signed;
+            switch (vec_len) {
+                4 => {
+                    const simd_op: std.wasm.SimdOpcode = switch (op) {
+                        .Add => .i32x4_add,
+                        .Mul => .i32x4_mul,
+                        .And => .v128_and,
+                        .Or => .v128_or,
+                        .Xor => .v128_xor,
+                        .Min => if (is_signed) .i32x4_min_s else .i32x4_min_u,
+                        .Max => if (is_signed) .i32x4_max_s else .i32x4_max_u,
+                    };
+                    try cg.emitWValue(op_val);
+                    try cg.emitWValue(op_val);
+                    try cg.emitWValue(op_val);
+                    try cg.addSimdShuffle(.{ 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7 });
+                    try cg.addSimd(simd_op);
+                    var step1 = try (WValue{ .stack = {} }).toLocal(cg, operand_ty);
+                    defer step1.free(cg);
+
+                    try cg.emitWValue(step1);
+                    try cg.emitWValue(step1);
+                    try cg.emitWValue(step1);
+                    try cg.addSimdShuffle(.{ 4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11 });
+                    try cg.addSimd(simd_op);
+                    try cg.addSimdLane(.i32x4_extract_lane, 0);
+                    return cg.finishAir(inst, .stack, &.{reduce.operand});
+                },
+                2 => {
+                    const maybe_simd_op: ?std.wasm.SimdOpcode = switch (op) {
+                        .Add => .i64x2_add,
+                        .Mul => .i64x2_mul,
+                        .And => .v128_and,
+                        .Or => .v128_or,
+                        .Xor => .v128_xor,
+                        .Min, .Max => null,
+                    };
+                    if (maybe_simd_op) |simd_op| {
+                        try cg.emitWValue(op_val);
+                        try cg.emitWValue(op_val);
+                        try cg.emitWValue(op_val);
+                        try cg.addSimdShuffle(.{ 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7 });
+                        try cg.addSimd(simd_op);
+                        try cg.addSimdLane(.i64x2_extract_lane, 0);
+                        return cg.finishAir(inst, .stack, &.{reduce.operand});
+                    }
+                },
+                else => {},
+            }
+        }
+    }
 
     const elem0 = try cg.loadVecElem(op_val, operand_ty, 0);
     if (isByRef(res_ty, zcu, cg.target)) {
@@ -10927,7 +11168,15 @@ const SroaAnalysis = struct {
                 self.markEscaped(extra.lhs);
                 self.markEscaped(extra.rhs);
             },
-            .reduce, .reduce_optimized => self.markEscaped(data.reduce.operand),
+            .reduce, .reduce_optimized => {
+                if (data.reduce.operand.toIndex()) |op_idx| {
+                    if (!self.cg.cmp_vector_reduce_only.contains(op_idx)) {
+                        self.markEscaped(data.reduce.operand);
+                    }
+                } else {
+                    self.markEscaped(data.reduce.operand);
+                }
+            },
 
             .atomic_load => self.markEscaped(data.atomic_load.ptr),
             .atomic_rmw => {
@@ -11863,7 +12112,401 @@ const SroaAnalysis = struct {
     }
 };
 
+const CmpVectorReduceAnalysis = struct {
+    const Counts = struct {
+        total_uses: u32 = 0,
+        reduce_and_or_uses: u32 = 0,
+    };
+
+    cg: *CodeGen,
+    candidates: std.AutoHashMapUnmanaged(Air.Inst.Index, Counts) = .empty,
+
+    fn deinit(self: *CmpVectorReduceAnalysis) void {
+        self.candidates.deinit(self.cg.gpa);
+    }
+
+    fn noteUse(self: *CmpVectorReduceAnalysis, op: Air.Inst.Ref) void {
+        const idx = op.toIndex() orelse return;
+        if (self.candidates.getPtr(idx)) |counts| {
+            counts.total_uses += 1;
+        }
+    }
+
+    fn scanBody(self: *CmpVectorReduceAnalysis, body: []const Air.Inst.Index) InnerError!void {
+        for (body) |inst| {
+            try self.scanInst(inst);
+        }
+    }
+
+    fn scanInst(self: *CmpVectorReduceAnalysis, inst: Air.Inst.Index) InnerError!void {
+        const zcu = self.cg.pt.zcu;
+        const tags = self.cg.air.instructions.items(.tag);
+        const datas = self.cg.air.instructions.items(.data);
+        const tag = tags[@backingInt(inst)];
+        const data = datas[@backingInt(inst)];
+
+        switch (tag) {
+            .arg,
+            .alloc,
+            .ret_ptr,
+            .breakpoint,
+            .dbg_stmt,
+            .dbg_empty_stmt,
+            .unreach,
+            .trap,
+            .repeat,
+            .wasm_memory_size,
+            .err_return_trace,
+            .save_err_return_trace_index,
+            .frame_addr,
+            .ret_addr,
+            .c_va_start,
+            .work_item_id,
+            .work_group_size,
+            .work_group_id,
+            .runtime_nav_ptr,
+            .dbg_var_ptr,
+            .dbg_var_val,
+            .dbg_arg_inline,
+            => {},
+
+            .not,
+            .bit_cast,
+            .bit_cast_safe,
+            .ptr_cast,
+            .ptr_from_int,
+            .int_from_ptr,
+            .error_cast,
+            .error_from_int,
+            .int_from_error,
+            .union_from_enum,
+            .load,
+            .fpext,
+            .fptrunc,
+            .int_cast,
+            .int_cast_safe,
+            .trunc,
+            .optional_payload,
+            .optional_payload_ptr,
+            .optional_payload_ptr_set,
+            .wrap_optional,
+            .unwrap_errunion_payload,
+            .unwrap_errunion_err,
+            .unwrap_errunion_payload_ptr,
+            .unwrap_errunion_err_ptr,
+            .errunion_payload_ptr_set,
+            .wrap_errunion_payload,
+            .wrap_errunion_err,
+            .slice_ptr,
+            .slice_len,
+            .ptr_slice_len_ptr,
+            .ptr_slice_ptr_ptr,
+            .array_to_slice,
+            .array_to_vector,
+            .int_from_float,
+            .int_from_float_optimized,
+            .int_from_float_safe,
+            .int_from_float_optimized_safe,
+            .float_from_int,
+            .splat,
+            .get_union_tag,
+            .clz,
+            .ctz,
+            .popcount,
+            .byte_swap,
+            .bit_reverse,
+            .abs,
+            .addrspace_cast,
+            .error_set_has_value,
+            .c_va_arg,
+            .c_va_copy,
+            .struct_field_ptr_index_0,
+            .struct_field_ptr_index_1,
+            .struct_field_ptr_index_2,
+            .struct_field_ptr_index_3,
+            => self.noteUse(data.ty_op.operand),
+
+            .is_null,
+            .is_non_null,
+            .is_null_ptr,
+            .is_non_null_ptr,
+            .is_err,
+            .is_non_err,
+            .is_err_ptr,
+            .is_non_err_ptr,
+            .ret,
+            .ret_safe,
+            .ret_load,
+            .is_named_enum_value,
+            .tag_name,
+            .error_name,
+            .sqrt,
+            .sin,
+            .cos,
+            .tan,
+            .exp,
+            .exp2,
+            .log,
+            .log2,
+            .log10,
+            .floor,
+            .ceil,
+            .round,
+            .trunc_float,
+            .neg,
+            .neg_optimized,
+            .cmp_lte_errors_len,
+            .set_err_return_trace,
+            .c_va_end,
+            => self.noteUse(data.un_op),
+
+            .add,
+            .add_safe,
+            .add_optimized,
+            .add_wrap,
+            .add_sat,
+            .sub,
+            .sub_safe,
+            .sub_optimized,
+            .sub_wrap,
+            .sub_sat,
+            .mul,
+            .mul_safe,
+            .mul_optimized,
+            .mul_wrap,
+            .mul_sat,
+            .div_float,
+            .div_float_optimized,
+            .div_trunc,
+            .div_trunc_optimized,
+            .div_floor,
+            .div_floor_optimized,
+            .div_ceil,
+            .div_ceil_optimized,
+            .div_exact,
+            .div_exact_optimized,
+            .rem,
+            .rem_optimized,
+            .mod,
+            .mod_optimized,
+            .bit_and,
+            .bit_or,
+            .xor,
+            .cmp_lt,
+            .cmp_lt_optimized,
+            .cmp_lte,
+            .cmp_lte_optimized,
+            .cmp_eq,
+            .cmp_eq_optimized,
+            .cmp_gte,
+            .cmp_gte_optimized,
+            .cmp_gt,
+            .cmp_gt_optimized,
+            .cmp_neq,
+            .cmp_neq_optimized,
+            .store,
+            .store_safe,
+            .array_elem_val,
+            .slice_elem_val,
+            .ptr_elem_val,
+            .legalize_vec_elem_val,
+            .shl,
+            .shl_exact,
+            .shl_sat,
+            .shr,
+            .shr_exact,
+            .set_union_tag,
+            .min,
+            .max,
+            .memcpy,
+            .memmove,
+            .memset,
+            .memset_safe,
+            .atomic_store_unordered,
+            .atomic_store_monotonic,
+            .atomic_store_release,
+            .atomic_store_seq_cst,
+            => {
+                self.noteUse(data.bin_op.lhs);
+                self.noteUse(data.bin_op.rhs);
+            },
+
+            .ptr_add,
+            .ptr_sub,
+            .add_with_overflow,
+            .sub_with_overflow,
+            .mul_with_overflow,
+            .shl_with_overflow,
+            .slice,
+            .slice_elem_ptr,
+            .ptr_elem_ptr,
+            => {
+                const bin = self.cg.air.extraData(Air.Bin, data.ty_pl.payload).data;
+                self.noteUse(bin.lhs);
+                self.noteUse(bin.rhs);
+            },
+
+            .block, .loop => {
+                const block = self.cg.air.unwrapBlock(inst);
+                try self.scanBody(block.body);
+            },
+            .dbg_inline_block => {
+                const block = self.cg.air.unwrapDbgBlock(inst);
+                try self.scanBody(block.body);
+            },
+
+            .struct_field_ptr, .agg_field_val, .spirv_runtime_array_len => {
+                const extra = self.cg.air.extraData(Air.StructField, data.ty_pl.payload).data;
+                self.noteUse(extra.struct_operand);
+            },
+
+            .field_parent_ptr => {
+                const extra = self.cg.air.extraData(Air.FieldParentPtr, data.ty_pl.payload).data;
+                self.noteUse(extra.field_ptr);
+            },
+
+            .br, .switch_dispatch => self.noteUse(data.br.operand),
+
+            .cond_br => {
+                self.noteUse(data.pl_op.operand);
+                const branch = self.cg.air.unwrapCondBr(inst);
+                try self.scanBody(branch.then_body);
+                try self.scanBody(branch.else_body);
+            },
+            .switch_br, .loop_switch_br => {
+                self.noteUse(data.pl_op.operand);
+                const switch_br = self.cg.air.unwrapSwitch(inst);
+                var it = switch_br.iterateCases();
+                while (it.next()) |case| {
+                    try self.scanBody(case.body);
+                }
+                try self.scanBody(it.elseBody());
+            },
+            .@"try", .try_cold => {
+                const unwrapped = self.cg.air.unwrapTry(inst);
+                self.noteUse(unwrapped.error_union);
+                try self.scanBody(unwrapped.else_body);
+            },
+            .try_ptr, .try_ptr_cold => {
+                const unwrapped = self.cg.air.unwrapTryPtr(inst);
+                self.noteUse(unwrapped.error_union_ptr);
+                try self.scanBody(unwrapped.else_body);
+            },
+            .wasm_memory_grow => self.noteUse(data.pl_op.operand),
+
+            .call, .call_always_tail, .call_never_tail, .call_never_inline => {
+                self.noteUse(data.pl_op.operand);
+                const extra = self.cg.air.extraData(Air.Call, data.pl_op.payload);
+                const args: []const Air.Inst.Ref = @ptrCast(self.cg.air.extra.items[extra.end..][0..extra.data.args_len]);
+                for (args) |arg| self.noteUse(arg);
+            },
+
+            .legalize_compiler_rt_call => {
+                const unwrapped = self.cg.air.unwrapCompilerRtCall(inst);
+                for (unwrapped.args) |arg| self.noteUse(arg);
+            },
+
+            .aggregate_init => {
+                const res_ty = self.cg.typeOfIndex(inst);
+                const elements_len = @as(usize, @intCast(res_ty.arrayLen(zcu)));
+                const elements: []const Air.Inst.Ref = @ptrCast(self.cg.air.extra.items[data.ty_pl.payload..][0..elements_len]);
+                for (elements) |elem| self.noteUse(elem);
+            },
+
+            .union_init => {
+                const extra = self.cg.air.extraData(Air.UnionInit, data.ty_pl.payload).data;
+                self.noteUse(extra.init);
+            },
+
+            .prefetch => self.noteUse(data.prefetch.ptr),
+
+            .mul_add, .select, .legalize_vec_store_elem => {
+                const bin = self.cg.air.extraData(Air.Bin, data.pl_op.payload).data;
+                self.noteUse(data.pl_op.operand);
+                self.noteUse(bin.lhs);
+                self.noteUse(bin.rhs);
+            },
+
+            .shuffle_one => {
+                const unwrapped = self.cg.air.unwrapShuffleOne(zcu, inst);
+                self.noteUse(unwrapped.operand);
+            },
+            .shuffle_two => {
+                const unwrapped = self.cg.air.unwrapShuffleTwo(zcu, inst);
+                self.noteUse(unwrapped.operand_a);
+                self.noteUse(unwrapped.operand_b);
+            },
+            .cmp_vector => {
+                const extra = self.cg.air.extraData(Air.VectorCmp, data.ty_pl.payload).data;
+                self.noteUse(extra.lhs);
+                self.noteUse(extra.rhs);
+                const res_ty = self.cg.typeOfIndex(inst);
+                const operand_ty = self.cg.typeOf(extra.lhs);
+                const elem_ty = operand_ty.childType(zcu);
+                const op = extra.compareOperator();
+                if (res_ty.hasRuntimeBits(zcu) and
+                    determineSimdStoreStrategy(operand_ty, zcu, self.cg.target) == .direct and
+                    simdCmpOpcode(elem_ty, op, zcu, self.cg.target) != null)
+                {
+                    try self.candidates.put(self.cg.gpa, inst, .{});
+                }
+            },
+            .cmp_vector_optimized => {
+                const extra = self.cg.air.extraData(Air.VectorCmp, data.ty_pl.payload).data;
+                self.noteUse(extra.lhs);
+                self.noteUse(extra.rhs);
+            },
+            .reduce => {
+                self.noteUse(data.reduce.operand);
+                if (data.reduce.operation == .And or data.reduce.operation == .Or) {
+                    if (data.reduce.operand.toIndex()) |op_idx| {
+                        if (self.candidates.getPtr(op_idx)) |counts| {
+                            counts.reduce_and_or_uses += 1;
+                        }
+                    }
+                }
+            },
+            .reduce_optimized => self.noteUse(data.reduce.operand),
+
+            .atomic_load => self.noteUse(data.atomic_load.ptr),
+            .atomic_rmw => {
+                const extra = self.cg.air.extraData(Air.AtomicRmw, data.pl_op.payload).data;
+                self.noteUse(data.pl_op.operand);
+                self.noteUse(extra.operand);
+            },
+            .cmpxchg_weak, .cmpxchg_strong => {
+                const extra = self.cg.air.extraData(Air.Cmpxchg, data.ty_pl.payload).data;
+                self.noteUse(extra.ptr);
+                self.noteUse(extra.expected_value);
+                self.noteUse(extra.new_value);
+            },
+
+            .assembly => {
+                const unwrapped = self.cg.air.unwrapAsm(inst);
+                for (unwrapped.outputs) |out| if (out != .none) self.noteUse(out);
+                for (unwrapped.inputs) |in| self.noteUse(in);
+            },
+
+            .inferred_alloc, .inferred_alloc_comptime => unreachable,
+        }
+    }
+};
+
 fn analyzeSroa(cg: *CodeGen, main_body: []const Air.Inst.Index) InnerError!void {
+    cg.cmp_vector_reduce_only.clearRetainingCapacity();
+    if (cg.hasSimd()) {
+        var cmp_analysis: CmpVectorReduceAnalysis = .{ .cg = cg };
+        defer cmp_analysis.deinit();
+        try cmp_analysis.scanBody(main_body);
+        var it = cmp_analysis.candidates.iterator();
+        while (it.next()) |entry| {
+            const counts = entry.value_ptr.*;
+            if (counts.total_uses > 0 and counts.total_uses == counts.reduce_and_or_uses) {
+                try cg.cmp_vector_reduce_only.put(cg.gpa, entry.key_ptr.*, {});
+            }
+        }
+    }
+
     var analysis: SroaAnalysis = .{ .cg = cg };
     defer analysis.deinit();
 
