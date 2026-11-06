@@ -29,8 +29,14 @@ pub const LlvmClass = union(enum) {
 
 pub fn classifyType(ty: Type, zcu: *const Zcu, target: *const Target) Class {
     if (ty.zigTypeTag(zcu) == .vector) {
-        if (!(ty.bitSize(zcu) == 128 and target.cpu.has(.wasm, .simd128))) {
-            const elem_type = ty.childType(zcu);
+        const elem_type = ty.childType(zcu);
+        const is_v128 = (target.cpu.has(.wasm, .simd128) or target.cpu.has(.wasm, .relaxed_simd)) and
+            ty.bitSize(zcu) == 128 and ty.abiSize(zcu) == 16 and
+            switch (elem_type.bitSize(zcu)) {
+                8, 16, 32, 64 => true,
+                else => false,
+            };
+        if (!is_v128) {
             return .{ .unrolled = .{
                 .elem_type = elem_type,
                 .len = ty.vectorLen(zcu),
@@ -40,7 +46,9 @@ pub fn classifyType(ty: Type, zcu: *const Zcu, target: *const Target) Class {
     }
 
     return switch (classifyTypeForLlvm(ty, zcu)) {
-        .direct => |scalar_ty| if (scalar_ty.bitSize(zcu) > 64)
+        .direct => |scalar_ty| if (scalar_ty.zigTypeTag(zcu) == .vector)
+            classifyType(scalar_ty, zcu, target)
+        else if (scalar_ty.bitSize(zcu) > 64)
             .double_i64
         else
             .{ .direct = scalar_ty },

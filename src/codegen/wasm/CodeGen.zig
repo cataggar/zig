@@ -24,7 +24,81 @@ const Alignment = InternPool.Alignment;
 const errUnionPayloadOffset = codegen.errUnionPayloadOffset;
 const errUnionErrorOffset = codegen.errUnionErrorOffset;
 
-pub fn legalizeFeatures(_: *const std.Target) *const Air.Legalize.Features {
+pub fn legalizeFeatures(target: *const std.Target) *const Air.Legalize.Features {
+    @setEvalBranchQuota(4000);
+    if (target.cpu.has(.wasm, .simd128) or target.cpu.has(.wasm, .relaxed_simd)) {
+        return comptime &.initMany(&.{
+            .expand_bit_cast_safe,
+            .expand_int_cast_safe,
+            .expand_int_from_float_safe,
+            .expand_int_from_float_optimized_safe,
+            .expand_add_safe,
+            .expand_sub_safe,
+            .expand_mul_safe,
+
+            .expand_packed_load,
+            .expand_packed_store,
+            .expand_packed_agg_field_val,
+            .expand_packed_aggregate_init,
+            .expand_array_splat,
+            .expand_array_to_vector,
+
+            .scalarize_add_optimized,
+            .scalarize_sub_optimized,
+            .scalarize_mul_optimized,
+            .scalarize_mul_sat,
+            .scalarize_div_float_optimized,
+            .scalarize_div_trunc,
+            .scalarize_div_trunc_optimized,
+            .scalarize_div_floor,
+            .scalarize_div_floor_optimized,
+            .scalarize_div_ceil,
+            .scalarize_div_ceil_optimized,
+            .scalarize_div_exact,
+            .scalarize_div_exact_optimized,
+            .scalarize_rem,
+            .scalarize_rem_optimized,
+            .scalarize_mod,
+            .scalarize_mod_optimized,
+            .scalarize_add_with_overflow,
+            .scalarize_sub_with_overflow,
+            .scalarize_mul_with_overflow,
+            .scalarize_shl_with_overflow,
+            .scalarize_shl_sat,
+            .scalarize_clz,
+            .scalarize_ctz,
+            .scalarize_popcount,
+            .scalarize_byte_swap,
+            .scalarize_bit_reverse,
+            .scalarize_sin,
+            .scalarize_cos,
+            .scalarize_tan,
+            .scalarize_exp,
+            .scalarize_exp2,
+            .scalarize_log,
+            .scalarize_log2,
+            .scalarize_log10,
+            .scalarize_round,
+            .scalarize_neg_optimized,
+            .scalarize_cmp_vector_optimized,
+            .scalarize_fptrunc,
+            .scalarize_fpext,
+            .scalarize_int_cast,
+            .scalarize_ptr_cast,
+            .scalarize_ptr_from_int,
+            .scalarize_int_from_ptr,
+            .scalarize_trunc,
+            .scalarize_int_from_float,
+            .scalarize_int_from_float_optimized,
+            .scalarize_float_from_int,
+            .scalarize_reduce_optimized,
+            .scalarize_shuffle_one,
+            .scalarize_shuffle_two,
+            .scalarize_mul_add,
+
+            .scalarize_bit_cast_padded_elems,
+        });
+    }
     return comptime &.initMany(&.{
         .expand_bit_cast_safe,
         .expand_int_cast_safe,
@@ -447,7 +521,11 @@ fn resolveInst(cg: *CodeGen, ref: Air.Inst.Ref) InnerError!WValue {
     else
         try cg.lowerConstant(val);
 
-    gop.value_ptr.* = result;
+    if (result == .local) {
+        _ = cg.values.orderedRemove(ref);
+    } else {
+        gop.value_ptr.* = result;
+    }
     return result;
 }
 
@@ -584,6 +662,30 @@ pub fn addExtended(cg: *CodeGen, opcode: std.wasm.MiscOpcode) error{OutOfMemory}
     const extra_index: u32 = @intCast(cg.mir_extra.items.len);
     try cg.mir_extra.append(cg.gpa, @backingInt(opcode));
     try cg.addInst(.{ .tag = .misc_prefix, .data = .{ .payload = extra_index } });
+}
+
+pub fn addSimd(cg: *CodeGen, opcode: std.wasm.SimdOpcode) error{OutOfMemory}!void {
+    const extra_index: u32 = @intCast(cg.mir_extra.items.len);
+    try cg.mir_extra.append(cg.gpa, @backingInt(opcode));
+    try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
+}
+
+pub fn addSimdLane(cg: *CodeGen, opcode: std.wasm.SimdOpcode, lane: u8) error{OutOfMemory}!void {
+    const extra_index: u32 = @intCast(cg.mir_extra.items.len);
+    try cg.mir_extra.appendSlice(cg.gpa, &.{ @backingInt(opcode), lane });
+    try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
+}
+
+pub fn addSimdShuffle(cg: *CodeGen, lanes: [16]u8) error{OutOfMemory}!void {
+    const extra_index: u32 = @intCast(cg.mir_extra.items.len);
+    try cg.mir_extra.appendSlice(cg.gpa, &.{
+        @backingInt(std.wasm.SimdOpcode.i8x16_shuffle),
+        @bitCast(lanes[0..4].*),
+        @bitCast(lanes[4..8].*),
+        @bitCast(lanes[8..12].*),
+        @bitCast(lanes[12..16].*),
+    });
+    try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
 }
 
 pub fn addLabel(cg: *CodeGen, tag: Mir.Inst.Tag, label: u32) error{OutOfMemory}!void {
@@ -1657,7 +1759,11 @@ const SimdStoreStrategy = enum {
 /// it using a instruction, rather than an unrolled version.
 pub fn determineSimdStoreStrategy(ty: Type, zcu: *const Zcu, target: *const std.Target) SimdStoreStrategy {
     assert(ty.zigTypeTag(zcu) == .vector);
-    if (ty.bitSize(zcu) != 128) return .unrolled;
+    if (ty.bitSize(zcu) != 128 or ty.abiSize(zcu) != 16) return .unrolled;
+    switch (ty.childType(zcu).bitSize(zcu)) {
+        8, 16, 32, 64 => {},
+        else => return .unrolled,
+    }
     if (target.cpu.has(.wasm, .relaxed_simd) or target.cpu.has(.wasm, .simd128)) {
         return .direct;
     }
@@ -1715,7 +1821,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             const type_tag = ty.zigTypeTag(zcu);
 
             if (type_tag == .vector) {
-                return cg.fail("TODO: implement AIR op: {s} for vectors", .{@tagName(tag)});
+                const result = try cg.vecBinOp(tag, ty, bin_op.lhs, bin_op.rhs, lhs, rhs);
+                return cg.finishAir(inst, result, &.{ bin_op.lhs, bin_op.rhs });
             }
 
             if (type_tag == .float) {
@@ -1770,7 +1877,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             const ty = cg.typeOfIndex(inst);
 
             if (ty.zigTypeTag(zcu) == .vector) {
-                return cg.fail("TODO: implement AIR op: div_float for vectors", .{});
+                const result = try cg.vecBinOp(.div_float, ty, bin_op.lhs, bin_op.rhs, lhs, rhs);
+                return cg.finishAir(inst, result, &.{ bin_op.lhs, bin_op.rhs });
             }
 
             const result = try cg.floatDiv(.fromType(cg, ty), lhs, rhs);
@@ -1784,7 +1892,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             const type_tag = ty.zigTypeTag(zcu);
 
             if (type_tag == .vector) {
-                return cg.fail("TODO: implement AIR op: abs for vectors", .{});
+                const result = try cg.vecUnOp(.abs, ty, operand);
+                return cg.finishAir(inst, result, &.{ty_op.operand});
             }
 
             if (type_tag == .float) {
@@ -1824,7 +1933,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             const ty = cg.typeOfIndex(inst);
 
             if (ty.zigTypeTag(cg.pt.zcu) == .vector) {
-                return cg.fail("TODO: implement AIR op: {s} for vectors", .{@tagName(tag)});
+                const result = try cg.vecBinOp(tag, ty, bin_op.lhs, bin_op.rhs, lhs, rhs);
+                return cg.finishAir(inst, result, &.{ bin_op.lhs, bin_op.rhs });
             }
 
             const int_ty: IntType = .fromType(cg, ty);
@@ -1883,7 +1993,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             const ty = cg.typeOfIndex(inst);
 
             if (ty.zigTypeTag(zcu) == .vector) {
-                return cg.fail("TODO: implement AIR op: {s} for vectors", .{@tagName(tag)});
+                const result = try cg.vecBinOp(tag, ty, bin_op.lhs, bin_op.rhs, lhs, rhs);
+                return cg.finishAir(inst, result, &.{ bin_op.lhs, bin_op.rhs });
             }
 
             const int_ty: IntType = .fromType(cg, ty);
@@ -1909,7 +2020,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             const ty = cg.typeOfIndex(inst);
 
             if (ty.zigTypeTag(zcu) == .vector) {
-                return cg.fail("TODO: implement AIR op: {s} for vectors", .{@tagName(tag)});
+                const result = try cg.vecBinOp(tag, ty, bin_op.lhs, bin_op.rhs, lhs, rhs);
+                return cg.finishAir(inst, result, &.{ bin_op.lhs, bin_op.rhs });
             }
 
             const int_ty: IntType = .fromType(cg, ty);
@@ -1931,7 +2043,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             const ty = cg.typeOf(ty_op.operand);
 
             if (ty.zigTypeTag(zcu) == .vector) {
-                return cg.fail("TODO: implement AIR op: not for vectors", .{});
+                const result = try cg.vecUnOp(.not, ty, operand);
+                return cg.finishAir(inst, result, &.{ty_op.operand});
             }
 
             const result = try cg.intNot(.fromType(cg, ty), operand);
@@ -2062,7 +2175,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             const ty = cg.typeOfIndex(inst);
 
             if (ty.zigTypeTag(zcu) == .vector) {
-                return cg.fail("TODO: implement AIR op: {s} for vectors", .{@tagName(tag)});
+                const result = try cg.vecUnOp(tag, ty, operand);
+                return cg.finishAir(inst, result, &.{un_op});
             }
 
             const float_ty: FloatType = .fromType(cg, ty);
@@ -6029,7 +6143,20 @@ fn lowerConstant(cg: *CodeGen, val: Value) InnerError!WValue {
             .vector_type => {
                 assert(determineSimdStoreStrategy(ty, zcu, cg.target) == .direct);
                 var buf: [16]u8 = undefined;
-                val.writeToMemory(zcu, &buf) catch unreachable;
+                const elem_ty = ty.childType(zcu);
+                const elem_size: usize = @intCast(elem_ty.abiSize(zcu));
+                const vec_len: usize = @intCast(ty.vectorLen(zcu));
+                for (0..vec_len) |idx| {
+                    const elem_val = try val.elemValue(pt, idx);
+                    elem_val.writeToMemory(zcu, buf[idx * elem_size ..][0..elem_size]) catch |err| switch (err) {
+                        error.ReinterpretDeclRef => {
+                            const loaded = try cg.load(.{ .uav_ref = .{ .ip_index = val.toIntern() } }, ty, .{});
+                            return loaded.toLocal(cg, ty);
+                        },
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.IllDefinedMemoryLayout => unreachable,
+                    };
+                }
                 return cg.storeSimdImmd(buf);
             },
             .struct_type => unreachable, // packed structs use `bitpack`
@@ -6139,6 +6266,7 @@ fn extractComptimeLeafWValue(
     const root_ty = root_val.typeOf(zcu);
     if (!isByRef(root_ty, zcu, cg.target)) {
         if (target_byte_offset != 0 or !cg.scalarLeafTypesCompatible(leaf_ty, root_ty)) return null;
+        if (root_ty.zigTypeTag(zcu) == .vector and root_ty.childType(zcu).isPtrAtRuntime(zcu)) return null;
         return try cg.lowerConstant(root_val);
     }
 
@@ -6218,13 +6346,17 @@ fn extractComptimeLeafWValue(
                 }
                 return null;
             },
-            .array => {
+            .array, .vector => |tag| {
                 const elem_ty = root_ty.childType(zcu);
                 const elem_size: u32 = @intCast(elem_ty.abiSize(zcu));
                 if (elem_size == 0) return null;
                 const elem_idx = target_byte_offset / elem_size;
                 const rem_off = target_byte_offset % elem_size;
-                const total_len = root_ty.arrayLenIncludingSentinel(zcu);
+                const total_len = switch (tag) {
+                    .array => root_ty.arrayLenIncludingSentinel(zcu),
+                    .vector => root_ty.vectorLen(zcu),
+                    else => unreachable,
+                };
                 if (elem_idx >= total_len) return null;
                 const elem_val = try root_val.elemValue(pt, elem_idx);
                 return cg.extractComptimeLeafWValue(elem_val, rem_off, leaf_ty);
@@ -6575,9 +6707,142 @@ fn floatCmp(cg: *CodeGen, ty: FloatType, op: std.math.CompareOperator, lhs: WVal
     }
 }
 
+fn simdCmpOpcode(
+    elem_ty: Type,
+    op: std.math.CompareOperator,
+    zcu: *const Zcu,
+    target: *const std.Target,
+) ?std.wasm.SimdOpcode {
+    if (elem_ty.zigTypeTag(zcu) == .float) {
+        return switch (elem_ty.floatBits(target)) {
+            32 => switch (op) {
+                .eq => .f32x4_eq,
+                .neq => .f32x4_ne,
+                .lt => .f32x4_lt,
+                .gt => .f32x4_gt,
+                .lte => .f32x4_le,
+                .gte => .f32x4_ge,
+            },
+            64 => switch (op) {
+                .eq => .f64x2_eq,
+                .neq => .f64x2_ne,
+                .lt => .f64x2_lt,
+                .gt => .f64x2_gt,
+                .lte => .f64x2_le,
+                .gte => .f64x2_ge,
+            },
+            else => null,
+        };
+    }
+    if (elem_ty.isAbiInt(zcu)) {
+        const int_info = elem_ty.intInfo(zcu);
+        const is_signed = int_info.signedness == .signed;
+        return switch (int_info.bits) {
+            8 => switch (op) {
+                .eq => .i8x16_eq,
+                .neq => .i8x16_ne,
+                .lt => if (is_signed) .i8x16_lt_s else .i8x16_lt_u,
+                .gt => if (is_signed) .i8x16_gt_s else .i8x16_gt_u,
+                .lte => if (is_signed) .i8x16_le_s else .i8x16_le_u,
+                .gte => if (is_signed) .i8x16_ge_s else .i8x16_ge_u,
+            },
+            16 => switch (op) {
+                .eq => .i16x8_eq,
+                .neq => .i16x8_ne,
+                .lt => if (is_signed) .i16x8_lt_s else .i16x8_lt_u,
+                .gt => if (is_signed) .i16x8_gt_s else .i16x8_gt_u,
+                .lte => if (is_signed) .i16x8_le_s else .i16x8_le_u,
+                .gte => if (is_signed) .i16x8_ge_s else .i16x8_ge_u,
+            },
+            32 => switch (op) {
+                .eq => .i32x4_eq,
+                .neq => .i32x4_ne,
+                .lt => if (is_signed) .i32x4_lt_s else .i32x4_lt_u,
+                .gt => if (is_signed) .i32x4_gt_s else .i32x4_gt_u,
+                .lte => if (is_signed) .i32x4_le_s else .i32x4_le_u,
+                .gte => if (is_signed) .i32x4_ge_s else .i32x4_ge_u,
+            },
+            64 => switch (op) {
+                .eq => .i64x2_eq,
+                .neq => .i64x2_ne,
+                .lt => if (is_signed) .i64x2_lt_s else null,
+                .gt => if (is_signed) .i64x2_gt_s else null,
+                .lte => if (is_signed) .i64x2_le_s else null,
+                .gte => if (is_signed) .i64x2_ge_s else null,
+            },
+            else => null,
+        };
+    }
+    return null;
+}
+
 fn airCmpVector(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
-    _ = inst;
-    return cg.fail("TODO implement airCmpVector for wasm", .{});
+    const zcu = cg.pt.zcu;
+    const ty_pl = cg.air.instructions.items(.data)[@backingInt(inst)].ty_pl;
+    const payload = cg.air.extraData(Air.VectorCmp, ty_pl.payload).data;
+    const lhs = try cg.resolveInst(payload.lhs);
+    const rhs = try cg.resolveInst(payload.rhs);
+    const op = payload.compareOperator();
+    const operand_ty = cg.typeOf(payload.lhs);
+    const elem_ty = operand_ty.childType(zcu);
+    const res_ty = cg.typeOfIndex(inst);
+    if (!res_ty.hasRuntimeBits(zcu)) return cg.finishAir(inst, .none, &.{ payload.lhs, payload.rhs });
+
+    const vec_len: usize = @intCast(res_ty.vectorLen(zcu));
+    const res_alloc = try cg.allocStack(res_ty);
+
+    if (determineSimdStoreStrategy(operand_ty, zcu, cg.target) == .direct) {
+        if (simdCmpOpcode(elem_ty, op, zcu, cg.target)) |cmp_opcode| {
+            const mask = try cg.emitBinSimd(operand_ty, lhs, rhs, cmp_opcode);
+            if (vec_len == 16 and res_alloc != .promoted) {
+                const ones = try cg.storeSimdImmd(@splat(1));
+                try cg.emitWValue(ones);
+                try cg.addSimd(.v128_and);
+                var bool_vec = try (WValue{ .stack = {} }).toLocal(cg, operand_ty);
+                defer bool_vec.free(cg);
+                try cg.store(res_alloc, bool_vec, operand_ty, .{ .alignment = .@"1" });
+            } else {
+                var mask_loc = try mask.toLocal(cg, operand_ty);
+                defer mask_loc.free(cg);
+                const stride = 16 / vec_len;
+                for (0..vec_len) |lane| {
+                    try cg.emitWValue(mask_loc);
+                    try cg.addSimdLane(.i8x16_extract_lane_u, @intCast(lane * stride));
+                    try cg.addImm32(1);
+                    try cg.addTag(.i32_and);
+                    var cmp_val = try (WValue{ .stack = {} }).toLocal(cg, .bool);
+                    defer cmp_val.free(cg);
+                    try cg.store(res_alloc, cmp_val, .bool, .{ .offset = lane });
+                }
+            }
+            return cg.finishAir(inst, res_alloc, &.{ payload.lhs, payload.rhs });
+        }
+    }
+
+    var rhs_val = if (rhs == .stack) try rhs.toLocal(cg, operand_ty) else rhs;
+    defer if (rhs == .stack) rhs_val.free(cg);
+    var lhs_val = if (lhs == .stack) try lhs.toLocal(cg, operand_ty) else lhs;
+    defer if (lhs == .stack) lhs_val.free(cg);
+
+    for (0..vec_len) |lane| {
+        const lhs_elem = try cg.loadVecElem(lhs_val, operand_ty, lane);
+        var lhs_elem_val = if (lhs_elem == .stack) try lhs_elem.toLocal(cg, elem_ty) else lhs_elem;
+        defer if (lhs_elem == .stack) lhs_elem_val.free(cg);
+
+        const rhs_elem = try cg.loadVecElem(rhs_val, operand_ty, lane);
+        var rhs_elem_val = if (rhs_elem == .stack) try rhs_elem.toLocal(cg, elem_ty) else rhs_elem;
+        defer if (rhs_elem == .stack) rhs_elem_val.free(cg);
+
+        const cmp_res = if (elem_ty.zigTypeTag(zcu) == .float)
+            try cg.floatCmp(.fromType(cg, elem_ty), op, lhs_elem_val, rhs_elem_val)
+        else
+            try cg.intCmp(.fromType(cg, elem_ty), op, lhs_elem_val, rhs_elem_val);
+
+        var cmp_val = if (cmp_res == .stack) try cmp_res.toLocal(cg, .bool) else cmp_res;
+        defer if (cmp_res == .stack) cmp_val.free(cg);
+        try cg.store(res_alloc, cmp_val, .bool, .{ .offset = lane });
+    }
+    return cg.finishAir(inst, res_alloc, &.{ payload.lhs, payload.rhs });
 }
 
 fn airCmpLteErrorsLen(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -6776,8 +7041,7 @@ fn bitcast(cg: *CodeGen, dest_ty: Type, src_ty: Type, operand: WValue) InnerErro
             },
             .f80, .f128 => unreachable,
         },
-        .int => {},
-        .aggregate => unreachable,
+        .int, .aggregate => {},
     }
 
     switch (dest_class) {
@@ -6795,8 +7059,7 @@ fn bitcast(cg: *CodeGen, dest_ty: Type, src_ty: Type, operand: WValue) InnerErro
             },
             .f80, .f128 => unreachable,
         },
-        .int => {},
-        .aggregate => unreachable,
+        .int, .aggregate => {},
     }
 
     if (needs_wrapping) {
@@ -7830,8 +8093,8 @@ fn airArrayElemVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 const opcode: std.wasm.SimdOpcode = switch (elem_ty.bitSize(zcu)) {
                     8 => if (elem_ty.isSignedInt(zcu)) .i8x16_extract_lane_s else .i8x16_extract_lane_u,
                     16 => if (elem_ty.isSignedInt(zcu)) .i16x8_extract_lane_s else .i16x8_extract_lane_u,
-                    32 => if (elem_ty.isInt(zcu)) .i32x4_extract_lane else .f32x4_extract_lane,
-                    64 => if (elem_ty.isInt(zcu)) .i64x2_extract_lane else .f64x2_extract_lane,
+                    32 => if (elem_ty.isAnyFloat()) .f32x4_extract_lane else .i32x4_extract_lane,
+                    64 => if (elem_ty.isAnyFloat()) .f64x2_extract_lane else .i64x2_extract_lane,
                     else => unreachable,
                 };
 
@@ -7846,8 +8109,10 @@ fn airArrayElemVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 return cg.finishAir(inst, .stack, &.{ bin_op.lhs, bin_op.rhs });
             },
             else => {
+                var array_val = if (array == .stack) try array.toLocal(cg, array_ty) else array;
+                defer if (array == .stack) array_val.free(cg);
                 const stack_vec = try cg.allocStack(array_ty);
-                try cg.store(stack_vec, array, array_ty, .{});
+                try cg.store(stack_vec, array_val, array_ty, .{});
 
                 // Is a non-unrolled vector (v128)
                 try cg.emitWValue(stack_vec);
@@ -7863,6 +8128,554 @@ fn airArrayElemVal(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     return cg.finishAir(inst, result, &.{ bin_op.lhs, bin_op.rhs });
 }
 
+fn extractSimdLane(cg: *CodeGen, vec: WValue, vec_ty: Type, lane: u8) InnerError!WValue {
+    const zcu = cg.pt.zcu;
+    const elem_ty = vec_ty.childType(zcu);
+    const opcode: std.wasm.SimdOpcode = switch (elem_ty.bitSize(zcu)) {
+        8 => if (elem_ty.isSignedInt(zcu)) .i8x16_extract_lane_s else .i8x16_extract_lane_u,
+        16 => if (elem_ty.isSignedInt(zcu)) .i16x8_extract_lane_s else .i16x8_extract_lane_u,
+        32 => if (elem_ty.isAnyFloat()) .f32x4_extract_lane else .i32x4_extract_lane,
+        64 => if (elem_ty.isAnyFloat()) .f64x2_extract_lane else .i64x2_extract_lane,
+        else => unreachable,
+    };
+    try cg.emitWValue(vec);
+    try cg.addSimdLane(opcode, lane);
+    return .stack;
+}
+
+fn replaceSimdLane(cg: *CodeGen, vec: WValue, elem: WValue, vec_ty: Type, lane: u8) InnerError!WValue {
+    const zcu = cg.pt.zcu;
+    const elem_ty = vec_ty.childType(zcu);
+    const opcode: std.wasm.SimdOpcode = switch (elem_ty.bitSize(zcu)) {
+        8 => .i8x16_replace_lane,
+        16 => .i16x8_replace_lane,
+        32 => if (elem_ty.isAnyFloat()) .f32x4_replace_lane else .i32x4_replace_lane,
+        64 => if (elem_ty.isAnyFloat()) .f64x2_replace_lane else .i64x2_replace_lane,
+        else => unreachable,
+    };
+    var elem_val = if (vec != .stack and elem == .stack) try elem.toLocal(cg, elem_ty) else elem;
+    defer if (vec != .stack and elem == .stack) elem_val.free(cg);
+    try cg.emitWValue(vec);
+    try cg.emitWValue(elem_val);
+    try cg.addSimdLane(opcode, lane);
+    return .stack;
+}
+
+fn loadVecElem(cg: *CodeGen, vec: WValue, vec_ty: Type, lane: usize) InnerError!WValue {
+    const zcu = cg.pt.zcu;
+    const elem_ty = vec_ty.childType(zcu);
+    if (determineSimdStoreStrategy(vec_ty, zcu, cg.target) == .direct) {
+        return cg.extractSimdLane(vec, vec_ty, @intCast(lane));
+    }
+    const off = lane * @as(usize, @intCast(elem_ty.abiSize(zcu)));
+    if (isByRef(elem_ty, zcu, cg.target)) {
+        return cg.offsetPointer(vec, off);
+    }
+    return cg.load(vec, elem_ty, .{ .offset = off });
+}
+
+fn emitBinSimd(cg: *CodeGen, ty: Type, lhs: WValue, rhs: WValue, opcode: std.wasm.SimdOpcode) InnerError!WValue {
+    var rhs_val = if (lhs != .stack and rhs == .stack) try rhs.toLocal(cg, ty) else rhs;
+    defer if (lhs != .stack and rhs == .stack) rhs_val.free(cg);
+    try cg.emitWValue(lhs);
+    try cg.emitWValue(rhs_val);
+    try cg.addSimd(opcode);
+    return .stack;
+}
+
+fn emitUnSimd(cg: *CodeGen, operand: WValue, opcode: std.wasm.SimdOpcode) InnerError!WValue {
+    try cg.emitWValue(operand);
+    try cg.addSimd(opcode);
+    return .stack;
+}
+
+fn emitFloatMinMaxSimd(
+    cg: *CodeGen,
+    ty: Type,
+    lhs: WValue,
+    rhs: WValue,
+    cmp_op: std.wasm.SimdOpcode,
+    ne_op: std.wasm.SimdOpcode,
+) InnerError!WValue {
+    var rhs_val = if (rhs == .stack) try rhs.toLocal(cg, ty) else rhs;
+    defer if (rhs == .stack) rhs_val.free(cg);
+    var lhs_val = if (lhs == .stack) try lhs.toLocal(cg, ty) else lhs;
+    defer if (lhs == .stack) lhs_val.free(cg);
+
+    try cg.emitWValue(lhs_val);
+    try cg.emitWValue(rhs_val);
+    try cg.emitWValue(lhs_val);
+    try cg.emitWValue(rhs_val);
+    try cg.addSimd(cmp_op);
+    try cg.emitWValue(rhs_val);
+    try cg.emitWValue(rhs_val);
+    try cg.addSimd(ne_op);
+    try cg.addSimd(.v128_or);
+    try cg.addSimd(.v128_bitselect);
+    return .stack;
+}
+
+fn tryEmitVecShiftSimd(
+    cg: *CodeGen,
+    tag: Air.Inst.Tag,
+    ty: Type,
+    rhs_ref: Air.Inst.Ref,
+    lhs: WValue,
+    rhs: WValue,
+) InnerError!?WValue {
+    const pt = cg.pt;
+    const zcu = pt.zcu;
+    const elem_ty = ty.childType(zcu);
+    const int_info = elem_ty.intInfo(zcu);
+    const vec_len: usize = @intCast(ty.vectorLen(zcu));
+    const rhs_ty = cg.typeOf(rhs_ref);
+
+    var const_shift_amt: ?u32 = null;
+    if (rhs_ref.toInterned()) |rhs_ip| {
+        const rhs_val: Value = .fromInterned(rhs_ip);
+        if (rhs_val.isUndef(zcu)) return null;
+        const elem0 = try rhs_val.elemValue(pt, 0);
+        if (elem0.isUndef(zcu)) return null;
+        const amt0 = elem0.toUnsignedInt(zcu);
+        for (1..vec_len) |lane| {
+            const elem_i = try rhs_val.elemValue(pt, lane);
+            if (elem_i.isUndef(zcu) or elem_i.toUnsignedInt(zcu) != amt0) return null;
+        }
+        const_shift_amt = @intCast(amt0);
+    } else if (rhs_ref.toIndex()) |rhs_inst| {
+        if (cg.air.instructions.items(.tag)[@backingInt(rhs_inst)] != .splat) return null;
+    } else {
+        return null;
+    }
+
+    const opcode: std.wasm.SimdOpcode = switch (tag) {
+        .shl, .shl_exact => switch (int_info.bits) {
+            8 => .i8x16_shl,
+            16 => .i16x8_shl,
+            32 => .i32x4_shl,
+            64 => .i64x2_shl,
+            else => unreachable,
+        },
+        .shr, .shr_exact => switch (int_info.bits) {
+            8 => if (int_info.signedness == .signed) .i8x16_shr_s else .i8x16_shr_u,
+            16 => if (int_info.signedness == .signed) .i16x8_shr_s else .i16x8_shr_u,
+            32 => if (int_info.signedness == .signed) .i32x4_shr_s else .i32x4_shr_u,
+            64 => if (int_info.signedness == .signed) .i64x2_shr_s else .i64x2_shr_u,
+            else => unreachable,
+        },
+        else => unreachable,
+    };
+
+    var rhs_val = if (rhs == .stack) try rhs.toLocal(cg, rhs_ty) else rhs;
+    defer if (rhs == .stack) rhs_val.free(cg);
+    try cg.emitWValue(lhs);
+    if (const_shift_amt) |amt| {
+        try cg.addImm32(@bitCast(amt));
+    } else {
+        const shift_amt = try cg.loadVecElem(rhs_val, rhs_ty, 0);
+        try cg.emitWValue(shift_amt);
+    }
+    try cg.addSimd(opcode);
+    return .stack;
+}
+
+fn vecBinOp(
+    cg: *CodeGen,
+    tag: Air.Inst.Tag,
+    ty: Type,
+    lhs_ref: Air.Inst.Ref,
+    rhs_ref: Air.Inst.Ref,
+    lhs: WValue,
+    rhs: WValue,
+) InnerError!WValue {
+    const zcu = cg.pt.zcu;
+    if (!ty.hasRuntimeBits(zcu)) return .none;
+    const elem_ty = ty.childType(zcu);
+
+    if (determineSimdStoreStrategy(ty, zcu, cg.target) == .direct) {
+        if (elem_ty.zigTypeTag(zcu) == .float) {
+            switch (elem_ty.floatBits(cg.target)) {
+                32 => switch (tag) {
+                    .add => return cg.emitBinSimd(ty, lhs, rhs, .f32x4_add),
+                    .sub => return cg.emitBinSimd(ty, lhs, rhs, .f32x4_sub),
+                    .mul => return cg.emitBinSimd(ty, lhs, rhs, .f32x4_mul),
+                    .div_float, .div_exact => return cg.emitBinSimd(ty, lhs, rhs, .f32x4_div),
+                    .min => return cg.emitFloatMinMaxSimd(ty, lhs, rhs, .f32x4_lt, .f32x4_ne),
+                    .max => return cg.emitFloatMinMaxSimd(ty, lhs, rhs, .f32x4_gt, .f32x4_ne),
+                    else => {},
+                },
+                64 => switch (tag) {
+                    .add => return cg.emitBinSimd(ty, lhs, rhs, .f64x2_add),
+                    .sub => return cg.emitBinSimd(ty, lhs, rhs, .f64x2_sub),
+                    .mul => return cg.emitBinSimd(ty, lhs, rhs, .f64x2_mul),
+                    .div_float, .div_exact => return cg.emitBinSimd(ty, lhs, rhs, .f64x2_div),
+                    .min => return cg.emitFloatMinMaxSimd(ty, lhs, rhs, .f64x2_lt, .f64x2_ne),
+                    .max => return cg.emitFloatMinMaxSimd(ty, lhs, rhs, .f64x2_gt, .f64x2_ne),
+                    else => {},
+                },
+                else => {},
+            }
+        } else if (elem_ty.isAbiInt(zcu)) {
+            const int_info = elem_ty.intInfo(zcu);
+            const is_signed = int_info.signedness == .signed;
+            switch (tag) {
+                .add, .add_wrap => return cg.emitBinSimd(ty, lhs, rhs, switch (int_info.bits) {
+                    8 => .i8x16_add,
+                    16 => .i16x8_add,
+                    32 => .i32x4_add,
+                    64 => .i64x2_add,
+                    else => unreachable,
+                }),
+                .sub, .sub_wrap => return cg.emitBinSimd(ty, lhs, rhs, switch (int_info.bits) {
+                    8 => .i8x16_sub,
+                    16 => .i16x8_sub,
+                    32 => .i32x4_sub,
+                    64 => .i64x2_sub,
+                    else => unreachable,
+                }),
+                .mul, .mul_wrap => switch (int_info.bits) {
+                    8 => {
+                        var rhs_val = if (rhs == .stack) try rhs.toLocal(cg, ty) else rhs;
+                        defer if (rhs == .stack) rhs_val.free(cg);
+                        var lhs_val = if (lhs == .stack) try lhs.toLocal(cg, ty) else lhs;
+                        defer if (lhs == .stack) lhs_val.free(cg);
+                        try cg.emitWValue(lhs_val);
+                        try cg.emitWValue(rhs_val);
+                        try cg.addSimd(.i16x8_extmul_low_i8x16_u);
+                        try cg.emitWValue(lhs_val);
+                        try cg.emitWValue(rhs_val);
+                        try cg.addSimd(.i16x8_extmul_high_i8x16_u);
+                        try cg.addSimdShuffle(.{ 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30 });
+                        return .stack;
+                    },
+                    16 => return cg.emitBinSimd(ty, lhs, rhs, .i16x8_mul),
+                    32 => return cg.emitBinSimd(ty, lhs, rhs, .i32x4_mul),
+                    64 => return cg.emitBinSimd(ty, lhs, rhs, .i64x2_mul),
+                    else => unreachable,
+                },
+                .add_sat => switch (int_info.bits) {
+                    8 => return cg.emitBinSimd(ty, lhs, rhs, if (is_signed) .i8x16_add_sat_s else .i8x16_add_sat_u),
+                    16 => return cg.emitBinSimd(ty, lhs, rhs, if (is_signed) .i16x8_add_sat_s else .i16x8_add_sat_u),
+                    else => {},
+                },
+                .sub_sat => switch (int_info.bits) {
+                    8 => return cg.emitBinSimd(ty, lhs, rhs, if (is_signed) .i8x16_sub_sat_s else .i8x16_sub_sat_u),
+                    16 => return cg.emitBinSimd(ty, lhs, rhs, if (is_signed) .i16x8_sub_sat_s else .i16x8_sub_sat_u),
+                    else => {},
+                },
+                .min => switch (int_info.bits) {
+                    8 => return cg.emitBinSimd(ty, lhs, rhs, if (is_signed) .i8x16_min_s else .i8x16_min_u),
+                    16 => return cg.emitBinSimd(ty, lhs, rhs, if (is_signed) .i16x8_min_s else .i16x8_min_u),
+                    32 => return cg.emitBinSimd(ty, lhs, rhs, if (is_signed) .i32x4_min_s else .i32x4_min_u),
+                    64 => if (is_signed) {
+                        var rhs_val = if (rhs == .stack) try rhs.toLocal(cg, ty) else rhs;
+                        defer if (rhs == .stack) rhs_val.free(cg);
+                        var lhs_val = if (lhs == .stack) try lhs.toLocal(cg, ty) else lhs;
+                        defer if (lhs == .stack) lhs_val.free(cg);
+                        try cg.emitWValue(lhs_val);
+                        try cg.emitWValue(rhs_val);
+                        try cg.emitWValue(lhs_val);
+                        try cg.emitWValue(rhs_val);
+                        try cg.addSimd(.i64x2_lt_s);
+                        try cg.addSimd(.v128_bitselect);
+                        return .stack;
+                    },
+                    else => unreachable,
+                },
+                .max => switch (int_info.bits) {
+                    8 => return cg.emitBinSimd(ty, lhs, rhs, if (is_signed) .i8x16_max_s else .i8x16_max_u),
+                    16 => return cg.emitBinSimd(ty, lhs, rhs, if (is_signed) .i16x8_max_s else .i16x8_max_u),
+                    32 => return cg.emitBinSimd(ty, lhs, rhs, if (is_signed) .i32x4_max_s else .i32x4_max_u),
+                    64 => if (is_signed) {
+                        var rhs_val = if (rhs == .stack) try rhs.toLocal(cg, ty) else rhs;
+                        defer if (rhs == .stack) rhs_val.free(cg);
+                        var lhs_val = if (lhs == .stack) try lhs.toLocal(cg, ty) else lhs;
+                        defer if (lhs == .stack) lhs_val.free(cg);
+                        try cg.emitWValue(lhs_val);
+                        try cg.emitWValue(rhs_val);
+                        try cg.emitWValue(lhs_val);
+                        try cg.emitWValue(rhs_val);
+                        try cg.addSimd(.i64x2_gt_s);
+                        try cg.addSimd(.v128_bitselect);
+                        return .stack;
+                    },
+                    else => unreachable,
+                },
+                .bit_and => return cg.emitBinSimd(ty, lhs, rhs, .v128_and),
+                .bit_or => return cg.emitBinSimd(ty, lhs, rhs, .v128_or),
+                .xor => return cg.emitBinSimd(ty, lhs, rhs, .v128_xor),
+                .shl, .shl_exact, .shr, .shr_exact => {
+                    if (try cg.tryEmitVecShiftSimd(tag, ty, rhs_ref, lhs, rhs)) |res| return res;
+                },
+                else => {},
+            }
+        }
+    }
+
+    return cg.scalarizeVecBinOp(tag, ty, lhs_ref, rhs_ref, lhs, rhs);
+}
+
+fn scalarizeVecBinOp(
+    cg: *CodeGen,
+    tag: Air.Inst.Tag,
+    ty: Type,
+    lhs_ref: Air.Inst.Ref,
+    rhs_ref: Air.Inst.Ref,
+    lhs: WValue,
+    rhs: WValue,
+) InnerError!WValue {
+    const zcu = cg.pt.zcu;
+    const lhs_ty = cg.typeOf(lhs_ref);
+    const rhs_ty = cg.typeOf(rhs_ref);
+    const elem_ty = ty.childType(zcu);
+    const lhs_elem_ty = lhs_ty.childType(zcu);
+    const rhs_elem_ty = rhs_ty.childType(zcu);
+    const vec_len: usize = @intCast(ty.vectorLen(zcu));
+
+    var rhs_val = if (rhs == .stack) try rhs.toLocal(cg, rhs_ty) else rhs;
+    defer if (rhs == .stack) rhs_val.free(cg);
+    var lhs_val = if (lhs == .stack) try lhs.toLocal(cg, lhs_ty) else lhs;
+    defer if (lhs == .stack) lhs_val.free(cg);
+
+    const is_direct = determineSimdStoreStrategy(ty, zcu, cg.target) == .direct;
+    var vec_local: WValue = if (is_direct) try cg.allocLocal(ty) else .none;
+    defer if (is_direct) vec_local.free(cg);
+    const res_alloc: WValue = if (!is_direct) try cg.allocStack(ty) else .none;
+    const elem_size: usize = @intCast(elem_ty.abiSize(zcu));
+
+    for (0..vec_len) |lane| {
+        const lhs_elem = try cg.loadVecElem(lhs_val, lhs_ty, lane);
+        var lhs_elem_val = if (lhs_elem == .stack) try lhs_elem.toLocal(cg, lhs_elem_ty) else lhs_elem;
+        defer if (lhs_elem == .stack) lhs_elem_val.free(cg);
+
+        const rhs_elem = try cg.loadVecElem(rhs_val, rhs_ty, lane);
+        var rhs_elem_val = if (rhs_elem == .stack) try rhs_elem.toLocal(cg, rhs_elem_ty) else rhs_elem;
+        defer if (rhs_elem == .stack) rhs_elem_val.free(cg);
+
+        const res_elem: WValue = if (elem_ty.zigTypeTag(zcu) == .float) blk: {
+            const float_ty: FloatType = .fromType(cg, elem_ty);
+            break :blk switch (tag) {
+                .add => try cg.floatAdd(float_ty, lhs_elem_val, rhs_elem_val),
+                .sub => try cg.floatSub(float_ty, lhs_elem_val, rhs_elem_val),
+                .mul => try cg.floatMul(float_ty, lhs_elem_val, rhs_elem_val),
+                .div_float, .div_exact => try cg.floatDiv(float_ty, lhs_elem_val, rhs_elem_val),
+                .div_trunc => try cg.floatDivTrunc(float_ty, lhs_elem_val, rhs_elem_val),
+                .div_floor => try cg.floatDivFloor(float_ty, lhs_elem_val, rhs_elem_val),
+                .div_ceil => try cg.floatDivCeil(float_ty, lhs_elem_val, rhs_elem_val),
+                .rem => try cg.floatRem(float_ty, lhs_elem_val, rhs_elem_val),
+                .mod => try cg.floatMod(float_ty, lhs_elem_val, rhs_elem_val),
+                .max => try cg.floatMax(float_ty, lhs_elem_val, rhs_elem_val),
+                .min => try cg.floatMin(float_ty, lhs_elem_val, rhs_elem_val),
+                else => unreachable,
+            };
+        } else blk: {
+            const int_ty: IntType = .fromType(cg, elem_ty);
+            break :blk switch (tag) {
+                .add => try cg.intAdd(int_ty, lhs_elem_val, rhs_elem_val),
+                .sub => try cg.intSub(int_ty, lhs_elem_val, rhs_elem_val),
+                .mul => if (int_ty.bits >= 65 and int_ty.bits <= 128)
+                    try cg.intMul128(lhs_elem_val, rhs_elem_val, false, false)
+                else
+                    try cg.intMul(int_ty, lhs_elem_val, rhs_elem_val),
+                .add_wrap => try cg.intWrap(int_ty, try cg.intAdd(int_ty, lhs_elem_val, rhs_elem_val)),
+                .sub_wrap => try cg.intWrap(int_ty, try cg.intSub(int_ty, lhs_elem_val, rhs_elem_val)),
+                .mul_wrap => try cg.intWrap(int_ty, if (int_ty.bits >= 65 and int_ty.bits <= 128)
+                    try cg.intMul128(lhs_elem_val, rhs_elem_val, false, false)
+                else
+                    try cg.intMul(int_ty, lhs_elem_val, rhs_elem_val)),
+                .add_sat => try cg.intAddSat(int_ty, lhs_elem_val, rhs_elem_val),
+                .sub_sat => try cg.intSubSat(int_ty, lhs_elem_val, rhs_elem_val),
+                .mul_sat => try cg.intMulSat(int_ty, lhs_elem_val, rhs_elem_val),
+                .shl_sat => try cg.intShlSat(int_ty, lhs_elem_val, rhs_elem_val),
+                .div_exact, .div_trunc => try cg.intDiv(int_ty, lhs_elem_val, rhs_elem_val),
+                .div_floor => try cg.intDivFloor(int_ty, lhs_elem_val, rhs_elem_val),
+                .div_ceil => try cg.intDivCeil(int_ty, lhs_elem_val, rhs_elem_val),
+                .rem => try cg.intRem(int_ty, lhs_elem_val, rhs_elem_val),
+                .mod => try cg.intMod(int_ty, lhs_elem_val, rhs_elem_val),
+                .max => try cg.intMax(int_ty, lhs_elem_val, rhs_elem_val),
+                .min => try cg.intMin(int_ty, lhs_elem_val, rhs_elem_val),
+                .shl => try cg.intWrap(int_ty, try cg.intShl(int_ty, lhs_elem_val, rhs_elem_val)),
+                .shl_exact => try cg.intShl(int_ty, lhs_elem_val, rhs_elem_val),
+                .shr, .shr_exact => try cg.intShr(int_ty, lhs_elem_val, rhs_elem_val),
+                .bit_and => try cg.intAnd(int_ty, lhs_elem_val, rhs_elem_val),
+                .bit_or => try cg.intOr(int_ty, lhs_elem_val, rhs_elem_val),
+                .xor => try cg.intXor(int_ty, lhs_elem_val, rhs_elem_val),
+                else => unreachable,
+            };
+        };
+
+        if (is_direct) {
+            if (lane == 0) {
+                const splat_op: std.wasm.SimdOpcode = switch (elem_ty.bitSize(zcu)) {
+                    8 => .i8x16_splat,
+                    16 => .i16x8_splat,
+                    32 => if (elem_ty.isAnyFloat()) .f32x4_splat else .i32x4_splat,
+                    64 => if (elem_ty.isAnyFloat()) .f64x2_splat else .i64x2_splat,
+                    else => unreachable,
+                };
+                try cg.emitWValue(res_elem);
+                try cg.addSimd(splat_op);
+            } else {
+                const updated = try cg.replaceSimdLane(vec_local, res_elem, ty, @intCast(lane));
+                try cg.emitWValue(updated);
+            }
+            try cg.addLocal(.local_set, vec_local.local);
+        } else {
+            var res_elem_val = if (res_elem == .stack) try res_elem.toLocal(cg, elem_ty) else res_elem;
+            defer if (res_elem == .stack) res_elem_val.free(cg);
+            try cg.store(res_alloc, res_elem_val, elem_ty, .{ .offset = lane * elem_size });
+        }
+    }
+
+    if (is_direct) {
+        try cg.emitWValue(vec_local);
+        return .stack;
+    }
+    return res_alloc;
+}
+
+fn vecUnOp(cg: *CodeGen, tag: Air.Inst.Tag, ty: Type, operand: WValue) InnerError!WValue {
+    const zcu = cg.pt.zcu;
+    if (!ty.hasRuntimeBits(zcu)) return .none;
+    const elem_ty = ty.childType(zcu);
+
+    if (determineSimdStoreStrategy(ty, zcu, cg.target) == .direct) {
+        if (tag == .not) {
+            return cg.emitUnSimd(operand, .v128_not);
+        }
+        if (elem_ty.zigTypeTag(zcu) == .float) {
+            switch (elem_ty.floatBits(cg.target)) {
+                32 => switch (tag) {
+                    .abs => return cg.emitUnSimd(operand, .f32x4_abs),
+                    .neg => return cg.emitUnSimd(operand, .f32x4_neg),
+                    .sqrt => return cg.emitUnSimd(operand, .f32x4_sqrt),
+                    .floor => return cg.emitUnSimd(operand, .f32x4_floor),
+                    .ceil => return cg.emitUnSimd(operand, .f32x4_ceil),
+                    .trunc_float => return cg.emitUnSimd(operand, .f32x4_trunc),
+                    else => {},
+                },
+                64 => switch (tag) {
+                    .abs => return cg.emitUnSimd(operand, .f64x2_abs),
+                    .neg => return cg.emitUnSimd(operand, .f64x2_neg),
+                    .sqrt => return cg.emitUnSimd(operand, .f64x2_sqrt),
+                    .floor => return cg.emitUnSimd(operand, .f64x2_floor),
+                    .ceil => return cg.emitUnSimd(operand, .f64x2_ceil),
+                    .trunc_float => return cg.emitUnSimd(operand, .f64x2_trunc),
+                    else => {},
+                },
+                else => {},
+            }
+        } else if (elem_ty.isAbiInt(zcu)) {
+            const int_info = elem_ty.intInfo(zcu);
+            switch (tag) {
+                .abs => {
+                    if (int_info.signedness == .unsigned) return operand;
+                    return cg.emitUnSimd(operand, switch (int_info.bits) {
+                        8 => .i8x16_abs,
+                        16 => .i16x8_abs,
+                        32 => .i32x4_abs,
+                        64 => .i64x2_abs,
+                        else => unreachable,
+                    });
+                },
+                .neg => return cg.emitUnSimd(operand, switch (int_info.bits) {
+                    8 => .i8x16_neg,
+                    16 => .i16x8_neg,
+                    32 => .i32x4_neg,
+                    64 => .i64x2_neg,
+                    else => unreachable,
+                }),
+                else => {},
+            }
+        }
+    }
+
+    return cg.scalarizeVecUnOp(tag, ty, operand);
+}
+
+fn scalarizeVecUnOp(cg: *CodeGen, tag: Air.Inst.Tag, ty: Type, operand: WValue) InnerError!WValue {
+    const zcu = cg.pt.zcu;
+    const elem_ty = ty.childType(zcu);
+    const vec_len: usize = @intCast(ty.vectorLen(zcu));
+
+    var op_val = if (operand == .stack) try operand.toLocal(cg, ty) else operand;
+    defer if (operand == .stack) op_val.free(cg);
+
+    const is_direct = determineSimdStoreStrategy(ty, zcu, cg.target) == .direct;
+    var vec_local: WValue = if (is_direct) try cg.allocLocal(ty) else .none;
+    defer if (is_direct) vec_local.free(cg);
+    const res_alloc: WValue = if (!is_direct) try cg.allocStack(ty) else .none;
+    const elem_size: usize = @intCast(elem_ty.abiSize(zcu));
+
+    for (0..vec_len) |lane| {
+        const elem = try cg.loadVecElem(op_val, ty, lane);
+        var elem_val = if (elem == .stack) try elem.toLocal(cg, elem_ty) else elem;
+        defer if (elem == .stack) elem_val.free(cg);
+
+        const res_elem: WValue = if (elem_ty.zigTypeTag(zcu) == .float) blk: {
+            const float_ty: FloatType = .fromType(cg, elem_ty);
+            break :blk switch (tag) {
+                .abs => try cg.floatAbs(float_ty, elem_val),
+                .sqrt => try cg.floatSqrt(float_ty, elem_val),
+                .sin => try cg.floatSin(float_ty, elem_val),
+                .cos => try cg.floatCos(float_ty, elem_val),
+                .tan => try cg.floatTan(float_ty, elem_val),
+                .exp => try cg.floatExp(float_ty, elem_val),
+                .exp2 => try cg.floatExp2(float_ty, elem_val),
+                .log => try cg.floatLog(float_ty, elem_val),
+                .log2 => try cg.floatLog2(float_ty, elem_val),
+                .log10 => try cg.floatLog10(float_ty, elem_val),
+                .floor => try cg.floatFloor(float_ty, elem_val),
+                .ceil => try cg.floatCeil(float_ty, elem_val),
+                .round => try cg.floatRound(float_ty, elem_val),
+                .trunc_float => try cg.floatTrunc(float_ty, elem_val),
+                .neg => try cg.floatNeg(float_ty, elem_val),
+                else => unreachable,
+            };
+        } else blk: {
+            const int_ty: IntType = .fromType(cg, elem_ty);
+            break :blk switch (tag) {
+                .abs => try cg.intAbs(int_ty, elem_val),
+                .not => try cg.intNot(int_ty, elem_val),
+                .clz => try cg.intClz(int_ty, elem_val),
+                .ctz => try cg.intCtz(int_ty, elem_val),
+                .popcount => try cg.intPopCount(int_ty, elem_val),
+                .byte_swap => try cg.intByteSwap(int_ty, elem_val),
+                .bit_reverse => try cg.intBitReverse(int_ty, elem_val),
+                else => unreachable,
+            };
+        };
+
+        if (is_direct) {
+            if (lane == 0) {
+                const splat_op: std.wasm.SimdOpcode = switch (elem_ty.bitSize(zcu)) {
+                    8 => .i8x16_splat,
+                    16 => .i16x8_splat,
+                    32 => if (elem_ty.isAnyFloat()) .f32x4_splat else .i32x4_splat,
+                    64 => if (elem_ty.isAnyFloat()) .f64x2_splat else .i64x2_splat,
+                    else => unreachable,
+                };
+                try cg.emitWValue(res_elem);
+                try cg.addSimd(splat_op);
+            } else {
+                const updated = try cg.replaceSimdLane(vec_local, res_elem, ty, @intCast(lane));
+                try cg.emitWValue(updated);
+            }
+            try cg.addLocal(.local_set, vec_local.local);
+        } else {
+            var res_elem_val = if (res_elem == .stack) try res_elem.toLocal(cg, elem_ty) else res_elem;
+            defer if (res_elem == .stack) res_elem_val.free(cg);
+            try cg.store(res_alloc, res_elem_val, elem_ty, .{ .offset = lane * elem_size });
+        }
+    }
+
+    if (is_direct) {
+        try cg.emitWValue(vec_local);
+        return .stack;
+    }
+    return res_alloc;
+}
+
 fn airSplat(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const zcu = cg.pt.zcu;
     const ty_op = cg.air.instructions.items(.data)[@backingInt(inst)].ty_op;
@@ -7870,48 +8683,21 @@ fn airSplat(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const ty = cg.typeOfIndex(inst);
     const elem_ty = ty.childType(zcu);
 
-    if (determineSimdStoreStrategy(ty, zcu, cg.target) == .direct) blk: {
-        switch (operand) {
-            // when the operand lives in the linear memory section, we can directly
-            // load and splat the value at once. Meaning we do not first have to load
-            // the scalar value onto the stack.
-            .stack_offset, .nav_ref, .uav_ref => {
-                const opcode = switch (elem_ty.bitSize(zcu)) {
-                    8 => @backingInt(std.wasm.SimdOpcode.v128_load8_splat),
-                    16 => @backingInt(std.wasm.SimdOpcode.v128_load16_splat),
-                    32 => @backingInt(std.wasm.SimdOpcode.v128_load32_splat),
-                    64 => @backingInt(std.wasm.SimdOpcode.v128_load64_splat),
-                    else => break :blk, // Cannot make use of simd-instructions
-                };
-                try cg.emitMemBase(operand);
-                const extra_index: u32 = @intCast(cg.mir_extra.items.len);
-                // stores as := opcode, offset, alignment (opcode::memarg)
-                try cg.mir_extra.ensureUnusedCapacity(cg.gpa, 4);
-                cg.mir_extra.appendAssumeCapacity(opcode);
-                _ = try cg.addExtraAssumeCapacity(Mir.MemArg{
-                    .offset = operand.memOffset(),
-                    .alignment = elem_ty.abiAlignment(zcu),
-                });
-                try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
-                return cg.finishAir(inst, .stack, &.{ty_op.operand});
-            },
-            .local => {
-                const opcode = switch (elem_ty.bitSize(zcu)) {
-                    8 => @backingInt(std.wasm.SimdOpcode.i8x16_splat),
-                    16 => @backingInt(std.wasm.SimdOpcode.i16x8_splat),
-                    32 => if (elem_ty.isInt(zcu)) @backingInt(std.wasm.SimdOpcode.i32x4_splat) else @backingInt(std.wasm.SimdOpcode.f32x4_splat),
-                    64 => if (elem_ty.isInt(zcu)) @backingInt(std.wasm.SimdOpcode.i64x2_splat) else @backingInt(std.wasm.SimdOpcode.f64x2_splat),
-                    else => break :blk, // Cannot make use of simd-instructions
-                };
-                try cg.emitWValue(operand);
-                const extra_index: u32 = @intCast(cg.mir_extra.items.len);
-                try cg.mir_extra.append(cg.gpa, opcode);
-                try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
-                return cg.finishAir(inst, .stack, &.{ty_op.operand});
-            },
+    if (determineSimdStoreStrategy(ty, zcu, cg.target) == .direct) {
+        const opcode: std.wasm.SimdOpcode = switch (elem_ty.bitSize(zcu)) {
+            8 => .i8x16_splat,
+            16 => .i16x8_splat,
+            32 => if (elem_ty.isAnyFloat()) .f32x4_splat else .i32x4_splat,
+            64 => if (elem_ty.isAnyFloat()) .f64x2_splat else .i64x2_splat,
             else => unreachable,
-        }
+        };
+        try cg.emitWValue(operand);
+        try cg.addSimd(opcode);
+        return cg.finishAir(inst, .stack, &.{ty_op.operand});
     }
+
+    var operand_val = if (operand == .stack) try operand.toLocal(cg, elem_ty) else operand;
+    defer if (operand == .stack) operand_val.free(cg);
 
     const vector_len = @as(usize, @intCast(ty.vectorLen(zcu)));
     const result = try cg.allocStack(ty);
@@ -7919,7 +8705,7 @@ fn airSplat(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     var index: usize = 0;
     var offset: u32 = 0;
     while (index < vector_len) : (index += 1) {
-        try cg.store(result, operand, elem_ty, .{ .offset = offset });
+        try cg.store(result, operand_val, elem_ty, .{ .offset = offset });
         offset += elem_byte_size;
     }
 
@@ -7927,11 +8713,102 @@ fn airSplat(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 }
 
 fn airSelect(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
+    const zcu = cg.pt.zcu;
     const pl_op = cg.air.instructions.items(.data)[@backingInt(inst)].pl_op;
-    const operand = try cg.resolveInst(pl_op.operand);
+    const extra = cg.air.extraData(Air.Bin, pl_op.payload).data;
+    const pred = try cg.resolveInst(pl_op.operand);
+    const lhs = try cg.resolveInst(extra.lhs);
+    const rhs = try cg.resolveInst(extra.rhs);
+    const pred_ty = cg.typeOf(pl_op.operand);
+    const res_ty = cg.typeOfIndex(inst);
+    if (!res_ty.hasRuntimeBits(zcu)) return cg.finishAir(inst, .none, &.{ pl_op.operand, extra.lhs, extra.rhs });
 
-    _ = operand;
-    return cg.fail("TODO: Implement wasm airSelect", .{});
+    const elem_ty = res_ty.childType(zcu);
+    const vec_len: usize = @intCast(res_ty.vectorLen(zcu));
+
+    var pred_val = if (pred == .stack) try pred.toLocal(cg, pred_ty) else pred;
+    defer if (pred == .stack) pred_val.free(cg);
+    var rhs_val = if (rhs == .stack) try rhs.toLocal(cg, res_ty) else rhs;
+    defer if (rhs == .stack) rhs_val.free(cg);
+    var lhs_val = if (lhs == .stack) try lhs.toLocal(cg, res_ty) else lhs;
+    defer if (lhs == .stack) lhs_val.free(cg);
+
+    if (determineSimdStoreStrategy(res_ty, zcu, cg.target) == .direct) {
+        try cg.emitWValue(lhs_val);
+        try cg.emitWValue(rhs_val);
+        const elem_bits = elem_ty.bitSize(zcu);
+        if (elem_bits == 8 and pred_val != .promoted) {
+            const base_offset = pred_val.memOffset();
+            try cg.emitMemBase(pred_val);
+            const extra_index: u32 = @intCast(cg.mir_extra.items.len);
+            try cg.mir_extra.ensureUnusedCapacity(cg.gpa, 4);
+            cg.mir_extra.appendAssumeCapacity(@backingInt(std.wasm.SimdOpcode.v128_load));
+            _ = try cg.addExtraAssumeCapacity(Mir.MemArg{
+                .offset = base_offset,
+                .alignment = .@"1",
+            });
+            try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
+            try cg.addSimd(.i8x16_neg);
+        } else {
+            const splat_op: std.wasm.SimdOpcode = switch (elem_bits) {
+                8 => .i8x16_splat,
+                16 => .i16x8_splat,
+                32 => .i32x4_splat,
+                64 => .i64x2_splat,
+                else => unreachable,
+            };
+            const replace_op: std.wasm.SimdOpcode = switch (elem_bits) {
+                8 => .i8x16_replace_lane,
+                16 => .i16x8_replace_lane,
+                32 => .i32x4_replace_lane,
+                64 => .i64x2_replace_lane,
+                else => unreachable,
+            };
+            const neg_op: std.wasm.SimdOpcode = switch (elem_bits) {
+                8 => .i8x16_neg,
+                16 => .i16x8_neg,
+                32 => .i32x4_neg,
+                64 => .i64x2_neg,
+                else => unreachable,
+            };
+            const b0 = try cg.loadVecElem(pred_val, pred_ty, 0);
+            try cg.emitWValue(b0);
+            if (elem_bits == 64) try cg.addTag(.i64_extend_i32_u);
+            try cg.addSimd(splat_op);
+            for (1..vec_len) |lane| {
+                const bi = try cg.loadVecElem(pred_val, pred_ty, lane);
+                try cg.emitWValue(bi);
+                if (elem_bits == 64) try cg.addTag(.i64_extend_i32_u);
+                try cg.addSimdLane(replace_op, @intCast(lane));
+            }
+            try cg.addSimd(neg_op);
+        }
+        try cg.addSimd(.v128_bitselect);
+        return cg.finishAir(inst, .stack, &.{ pl_op.operand, extra.lhs, extra.rhs });
+    }
+
+    const res_alloc = try cg.allocStack(res_ty);
+    const elem_size: usize = @intCast(elem_ty.abiSize(zcu));
+    for (0..vec_len) |lane| {
+        const lhs_elem = try cg.loadVecElem(lhs_val, res_ty, lane);
+        var lhs_elem_val = if (lhs_elem == .stack) try lhs_elem.toLocal(cg, elem_ty) else lhs_elem;
+        defer if (lhs_elem == .stack) lhs_elem_val.free(cg);
+
+        const rhs_elem = try cg.loadVecElem(rhs_val, res_ty, lane);
+        var rhs_elem_val = if (rhs_elem == .stack) try rhs_elem.toLocal(cg, elem_ty) else rhs_elem;
+        defer if (rhs_elem == .stack) rhs_elem_val.free(cg);
+
+        try cg.emitWValue(lhs_elem_val);
+        try cg.emitWValue(rhs_elem_val);
+        const pred_elem = try cg.loadVecElem(pred_val, pred_ty, lane);
+        try cg.emitWValue(pred_elem);
+        try cg.addTag(.select);
+
+        var sel_val = try (WValue{ .stack = {} }).toLocal(cg, elem_ty);
+        defer sel_val.free(cg);
+        try cg.store(res_alloc, sel_val, elem_ty, .{ .offset = lane * elem_size });
+    }
+    return cg.finishAir(inst, res_alloc, &.{ pl_op.operand, extra.lhs, extra.rhs });
 }
 
 fn airShuffleOne(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -7942,28 +8819,86 @@ fn airShuffleOne(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const result_ty = unwrapped.result_ty;
     const mask = unwrapped.mask;
     const operand = try cg.resolveInst(unwrapped.operand);
+    const operand_ty = cg.typeOf(unwrapped.operand);
 
     const elem_ty = result_ty.childType(zcu);
     const elem_size = elem_ty.abiSize(zcu);
 
-    // TODO: this function could have an `i8x16_shuffle` fast path like `airShuffleTwo` if we were
-    // to lower the comptime-known operands to a non-by-ref vector value.
+    if (!isByRef(operand_ty, zcu, cg.target) and
+        !isByRef(result_ty, zcu, cg.target) and
+        elem_ty.bitSize(zcu) % 8 == 0)
+    blk: {
+        var lane_map: [16]u8 align(4) = undefined;
+        var const_buf: [16]u8 = @splat(0);
+        var has_const_val = false;
+        const lanes_per_elem: usize = @intCast(elem_ty.bitSize(zcu) / 8);
+        for (mask, 0..) |mask_elem, out_idx| {
+            const out_first_lane = out_idx * lanes_per_elem;
+            const in_first_lane: usize = switch (mask_elem.unwrap()) {
+                .elem => |i| i * lanes_per_elem,
+                .value => |val_ip| val_blk: {
+                    const val: Value = .fromInterned(val_ip);
+                    if (val.isUndef(zcu)) break :val_blk 0;
+                    val.writeToMemory(zcu, const_buf[out_first_lane..][0..lanes_per_elem]) catch |err| switch (err) {
+                        error.ReinterpretDeclRef => break :blk,
+                        error.OutOfMemory => return error.OutOfMemory,
+                        error.IllDefinedMemoryLayout => unreachable,
+                    };
+                    has_const_val = true;
+                    break :val_blk out_first_lane + 16;
+                },
+            };
+            for (lane_map[out_first_lane..][0..lanes_per_elem], in_first_lane..) |*out, in| {
+                out.* = @intCast(in);
+            }
+        }
+        try cg.emitWValue(operand);
+        if (has_const_val) {
+            const const_vec = try cg.storeSimdImmd(const_buf);
+            try cg.emitWValue(const_vec);
+        } else {
+            try cg.emitWValue(operand);
+        }
+        const extra_index: u32 = @intCast(cg.mir_extra.items.len);
+        try cg.mir_extra.appendSlice(cg.gpa, &.{
+            @backingInt(std.wasm.SimdOpcode.i8x16_shuffle),
+            @bitCast(lane_map[0..4].*),
+            @bitCast(lane_map[4..8].*),
+            @bitCast(lane_map[8..12].*),
+            @bitCast(lane_map[12..].*),
+        });
+        try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
+        return cg.finishAir(inst, .stack, &.{unwrapped.operand});
+    }
 
-    // TODO: this is incorrect if either operand or the result is *not* by-ref, which is possible.
-    // I tried to fix it, but I couldn't make much sense of how this backend handles memory.
-    if (!isByRef(result_ty, zcu, cg.target) or
-        !isByRef(cg.typeOf(unwrapped.operand), zcu, cg.target)) return cg.fail("TODO: handle mixed by-ref shuffle", .{});
+    const operand_mem = if (isByRef(operand_ty, zcu, cg.target)) operand else blk: {
+        const alloc = try cg.allocStack(operand_ty);
+        try cg.store(alloc, operand, operand_ty, .{});
+        break :blk alloc;
+    };
 
     const dest_alloc = try cg.allocStack(result_ty);
     for (mask, 0..) |mask_elem, out_idx| {
-        try cg.emitMemBase(dest_alloc);
-        const elem_val = switch (mask_elem.unwrap()) {
-            .elem => |idx| try cg.load(operand, elem_ty, .{ .offset = elem_size * idx }),
-            .value => |val| try cg.lowerConstant(.fromInterned(val)),
-        };
-        try cg.store(.stack, elem_val, elem_ty, .{ .offset = dest_alloc.memOffset() + elem_size * out_idx });
+        if (isByRef(elem_ty, zcu, cg.target)) {
+            const elem_val = switch (mask_elem.unwrap()) {
+                .elem => |idx| try cg.offsetPointer(operand_mem, elem_size * idx),
+                .value => |val| try cg.resolveValue(.fromInterned(val)),
+            };
+            try cg.store(dest_alloc, elem_val, elem_ty, .{ .offset = elem_size * out_idx });
+        } else {
+            try cg.emitMemBase(dest_alloc);
+            const elem_val = switch (mask_elem.unwrap()) {
+                .elem => |idx| try cg.load(operand_mem, elem_ty, .{ .offset = elem_size * idx }),
+                .value => |val| try cg.lowerConstant(.fromInterned(val)),
+            };
+            try cg.store(.stack, elem_val, elem_ty, .{ .offset = dest_alloc.memOffset() + elem_size * out_idx });
+        }
     }
-    return cg.finishAir(inst, dest_alloc, &.{unwrapped.operand});
+    const result = if (isByRef(result_ty, zcu, cg.target))
+        dest_alloc
+    else
+        try cg.load(dest_alloc, result_ty, .{});
+    return cg.finishAir(inst, result, &.{unwrapped.operand});
 }
 
 fn airShuffleTwo(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -8016,31 +8951,133 @@ fn airShuffleTwo(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         return cg.finishAir(inst, .stack, &.{ unwrapped.operand_a, unwrapped.operand_b });
     }
 
-    // TODO: this is incorrect if either operand or the result is *not* by-ref, which is possible.
-    // I tried to fix it, but I couldn't make much sense of how this backend handles memory.
-    if (!isByRef(result_ty, zcu, cg.target) or
-        !isByRef(a_ty, zcu, cg.target) or
-        !isByRef(b_ty, zcu, cg.target)) return cg.fail("TODO: handle mixed by-ref shuffle", .{});
+    const a_mem = if (isByRef(a_ty, zcu, cg.target)) operand_a else blk: {
+        const alloc = try cg.allocStack(a_ty);
+        try cg.store(alloc, operand_a, a_ty, .{});
+        break :blk alloc;
+    };
+    const b_mem = if (isByRef(b_ty, zcu, cg.target)) operand_b else blk: {
+        const alloc = try cg.allocStack(b_ty);
+        try cg.store(alloc, operand_b, b_ty, .{});
+        break :blk alloc;
+    };
 
     const dest_alloc = try cg.allocStack(result_ty);
     for (mask, 0..) |mask_elem, out_idx| {
-        try cg.emitMemBase(dest_alloc);
-        const elem_val = switch (mask_elem.unwrap()) {
-            .a_elem => |idx| try cg.load(operand_a, elem_ty, .{ .offset = elem_size * idx }),
-            .b_elem => |idx| try cg.load(operand_b, elem_ty, .{ .offset = elem_size * idx }),
-            .undef => try cg.emitUndefined(elem_ty),
-        };
-        try cg.store(.stack, elem_val, elem_ty, .{ .offset = dest_alloc.memOffset() + elem_size * out_idx });
+        if (isByRef(elem_ty, zcu, cg.target)) {
+            const elem_val = switch (mask_elem.unwrap()) {
+                .a_elem => |idx| try cg.offsetPointer(a_mem, elem_size * idx),
+                .b_elem => |idx| try cg.offsetPointer(b_mem, elem_size * idx),
+                .undef => try cg.resolveValue(.fromInterned(try pt.intern(.{ .undef = elem_ty.toIntern() }))),
+            };
+            try cg.store(dest_alloc, elem_val, elem_ty, .{ .offset = elem_size * out_idx });
+        } else {
+            try cg.emitMemBase(dest_alloc);
+            const elem_val = switch (mask_elem.unwrap()) {
+                .a_elem => |idx| try cg.load(a_mem, elem_ty, .{ .offset = elem_size * idx }),
+                .b_elem => |idx| try cg.load(b_mem, elem_ty, .{ .offset = elem_size * idx }),
+                .undef => try cg.emitUndefined(elem_ty),
+            };
+            try cg.store(.stack, elem_val, elem_ty, .{ .offset = dest_alloc.memOffset() + elem_size * out_idx });
+        }
     }
-    return cg.finishAir(inst, dest_alloc, &.{ unwrapped.operand_a, unwrapped.operand_b });
+    const result = if (isByRef(result_ty, zcu, cg.target))
+        dest_alloc
+    else
+        try cg.load(dest_alloc, result_ty, .{});
+    return cg.finishAir(inst, result, &.{ unwrapped.operand_a, unwrapped.operand_b });
+}
+
+fn reduceScalarOp(
+    cg: *CodeGen,
+    op: std.builtin.ReduceOp,
+    ty: Type,
+    lhs: WValue,
+    rhs: WValue,
+) InnerError!WValue {
+    const zcu = cg.pt.zcu;
+    if (ty.zigTypeTag(zcu) == .float) {
+        const float_ty: FloatType = .fromType(cg, ty);
+        return switch (op) {
+            .Add => cg.floatAdd(float_ty, lhs, rhs),
+            .Mul => cg.floatMul(float_ty, lhs, rhs),
+            .Min => cg.floatMin(float_ty, lhs, rhs),
+            .Max => cg.floatMax(float_ty, lhs, rhs),
+            .And, .Or, .Xor => unreachable,
+        };
+    }
+    const int_ty: IntType = .fromType(cg, ty);
+    return switch (op) {
+        .Add => cg.intWrap(int_ty, try cg.intAdd(int_ty, lhs, rhs)),
+        .Mul => cg.intWrap(int_ty, if (int_ty.bits >= 65 and int_ty.bits <= 128)
+            try cg.intMul128(lhs, rhs, false, false)
+        else
+            try cg.intMul(int_ty, lhs, rhs)),
+        .And => cg.intAnd(int_ty, lhs, rhs),
+        .Or => cg.intOr(int_ty, lhs, rhs),
+        .Xor => cg.intXor(int_ty, lhs, rhs),
+        .Min => cg.intMin(int_ty, lhs, rhs),
+        .Max => cg.intMax(int_ty, lhs, rhs),
+    };
 }
 
 fn airReduce(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
+    const zcu = cg.pt.zcu;
     const reduce = cg.air.instructions.items(.data)[@backingInt(inst)].reduce;
     const operand = try cg.resolveInst(reduce.operand);
+    const operand_ty = cg.typeOf(reduce.operand);
+    const res_ty = cg.typeOfIndex(inst);
+    if (!operand_ty.hasRuntimeBits(zcu)) {
+        const zero: WValue = if (res_ty.isInt(zcu)) .{ .imm32 = 0 } else .none;
+        return cg.finishAir(inst, zero, &.{reduce.operand});
+    }
 
-    _ = operand;
-    return cg.fail("TODO: Implement wasm airReduce", .{});
+    const vec_len: usize = @intCast(operand_ty.vectorLen(zcu));
+    const op: std.builtin.ReduceOp = reduce.operation;
+
+    var op_val = if (operand == .stack) try operand.toLocal(cg, operand_ty) else operand;
+    defer if (operand == .stack) op_val.free(cg);
+
+    const elem0 = try cg.loadVecElem(op_val, operand_ty, 0);
+    if (isByRef(res_ty, zcu, cg.target)) {
+        const acc_alloc = try cg.allocStack(res_ty);
+        {
+            var elem0_val = if (elem0 == .stack) try elem0.toLocal(cg, res_ty) else elem0;
+            defer if (elem0 == .stack) elem0_val.free(cg);
+            try cg.store(acc_alloc, elem0_val, res_ty, .{});
+        }
+        for (1..vec_len) |lane| {
+            const elem = try cg.loadVecElem(op_val, operand_ty, lane);
+            var elem_val = if (elem == .stack) try elem.toLocal(cg, res_ty) else elem;
+            defer if (elem == .stack) elem_val.free(cg);
+            const next_acc = try cg.reduceScalarOp(op, res_ty, acc_alloc, elem_val);
+            var next_val = if (next_acc == .stack) try next_acc.toLocal(cg, res_ty) else next_acc;
+            defer if (next_acc == .stack) next_val.free(cg);
+            try cg.store(acc_alloc, next_val, res_ty, .{});
+        }
+        return cg.finishAir(inst, acc_alloc, &.{reduce.operand});
+    }
+
+    if (vec_len == 1) {
+        return cg.finishAir(inst, elem0, &.{reduce.operand});
+    }
+
+    var acc = try cg.allocLocal(res_ty);
+    defer acc.free(cg);
+    try cg.emitWValue(elem0);
+    try cg.addLocal(.local_set, acc.local);
+
+    for (1..vec_len) |lane| {
+        const elem = try cg.loadVecElem(op_val, operand_ty, lane);
+        var elem_val = if (elem == .stack) try elem.toLocal(cg, res_ty) else elem;
+        defer if (elem == .stack) elem_val.free(cg);
+        const next_acc = try cg.reduceScalarOp(op, res_ty, acc, elem_val);
+        try cg.emitWValue(next_acc);
+        try cg.addLocal(.local_set, acc.local);
+    }
+
+    try cg.emitWValue(acc);
+    return cg.finishAir(inst, .stack, &.{reduce.operand});
 }
 
 fn airAggregateInit(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -8054,8 +9091,42 @@ fn airAggregateInit(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const result: WValue = result_value: {
         switch (result_ty.zigTypeTag(zcu)) {
             .array, .vector => {
-                const result = try cg.allocStack(result_ty);
                 const elem_ty = result_ty.childType(zcu);
+                if (result_ty.zigTypeTag(zcu) == .vector and determineSimdStoreStrategy(result_ty, zcu, cg.target) == .direct) {
+                    const elem_bits = elem_ty.bitSize(zcu);
+                    const splat_opcode: std.wasm.SimdOpcode = switch (elem_bits) {
+                        8 => .i8x16_splat,
+                        16 => .i16x8_splat,
+                        32 => if (elem_ty.isAnyFloat()) .f32x4_splat else .i32x4_splat,
+                        64 => if (elem_ty.isAnyFloat()) .f64x2_splat else .i64x2_splat,
+                        else => unreachable,
+                    };
+                    const replace_opcode: std.wasm.SimdOpcode = switch (elem_bits) {
+                        8 => .i8x16_replace_lane,
+                        16 => .i16x8_replace_lane,
+                        32 => if (elem_ty.isAnyFloat()) .f32x4_replace_lane else .i32x4_replace_lane,
+                        64 => if (elem_ty.isAnyFloat()) .f64x2_replace_lane else .i64x2_replace_lane,
+                        else => unreachable,
+                    };
+                    const elem0 = try cg.resolveInst(elements[0]);
+                    try cg.emitWValue(elem0);
+                    {
+                        const extra_index: u32 = @intCast(cg.mir_extra.items.len);
+                        try cg.mir_extra.append(cg.gpa, @backingInt(splat_opcode));
+                        try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
+                    }
+                    for (elements[1..], 1..) |elem, lane| {
+                        if (elem == elements[0]) continue;
+                        const elem_val = try cg.resolveInst(elem);
+                        try cg.emitWValue(elem_val);
+                        const extra_index: u32 = @intCast(cg.mir_extra.items.len);
+                        try cg.mir_extra.appendSlice(cg.gpa, &.{ @backingInt(replace_opcode), @intCast(lane) });
+                        try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
+                    }
+                    break :result_value .stack;
+                }
+
+                const result = try cg.allocStack(result_ty);
                 const elem_size = elem_ty.abiSize(zcu);
                 const sentinel = result_ty.sentinel(zcu);
 
