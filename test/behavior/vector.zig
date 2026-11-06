@@ -1877,3 +1877,65 @@ test "pass 8-byte, 16-byte, and 32-byte vectors by value as function parameters"
     try S.doTheTest();
     try comptime S.doTheTest();
 }
+
+test "128-bit and non-128-bit vector constants, arithmetic, comparisons, select, and reduce" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+
+    const S = struct {
+        noinline fn f32x4Ops(a: @Vector(4, f32), b: @Vector(4, f32), s: f32) @Vector(4, f32) {
+            const c: @Vector(4, f32) = .{ 1.0, 2.0, 3.0, 4.0 };
+            const vs: @Vector(4, f32) = @splat(s);
+            const sum = (a + b) * vs - c;
+            const mask = a < b;
+            return @select(f32, mask, sum, @abs(a - b));
+        }
+
+        noinline fn i32x4Ops(a: @Vector(4, i32), b: @Vector(4, i32), sh: u5) i32 {
+            const c: @Vector(4, i32) = .{ 10, 20, 30, 40 };
+            const vsh: @Vector(4, u5) = @splat(sh);
+            const diff = (a -% c) +% (b << vsh);
+            const prod = diff *% @Vector(4, i32){ 2, 3, 4, 5 };
+            return @reduce(.Add, prod);
+        }
+
+        noinline fn nonSimdWidthOps(v4u8: @Vector(4, u8), v3f32: @Vector(3, f32), v8f32: @Vector(8, f32)) !void {
+            const c4u8: @Vector(4, u8) = .{ 1, 2, 3, 4 };
+            try expectEqual(@Vector(4, u8){ 11, 22, 33, 44 }, v4u8 + c4u8);
+
+            const c3f32: @Vector(3, f32) = .{ 0.5, 1.5, 2.5 };
+            const sum3 = v3f32 + c3f32;
+            try expectEqual(@Vector(3, f32){ 1.5, 3.5, 5.5 }, sum3);
+            const mask3 = v3f32 < @Vector(3, f32){ 1.5, 1.5, 1.5 };
+            try expectEqual(@Vector(3, f32){ 0.5, 3.5, 5.5 }, @select(f32, mask3, c3f32, sum3));
+
+            const c8f32: @Vector(8, f32) = @splat(2.0);
+            try expectEqual(@as(f32, 52.0), @reduce(.Add, v8f32 + c8f32));
+        }
+
+        fn doTheTest() !void {
+            var a_f32: @Vector(4, f32) = .{ 1.0, 5.0, 3.0, 8.0 };
+            var b_f32: @Vector(4, f32) = .{ 2.0, 2.0, 4.0, 1.0 };
+            _ = .{ &a_f32, &b_f32 };
+            const res_f32 = f32x4Ops(a_f32, b_f32, 2.0);
+            try expectEqual(@Vector(4, f32){ 5.0, 3.0, 11.0, 7.0 }, res_f32);
+            try expectEqual(@as(f32, 26.0), @reduce(.Add, res_f32));
+
+            var a_i32: @Vector(4, i32) = .{ 15, 25, 35, 45 };
+            var b_i32: @Vector(4, i32) = .{ 1, 2, 3, 4 };
+            _ = .{ &a_i32, &b_i32 };
+            try expectEqual(@as(i32, 150), i32x4Ops(a_i32, b_i32, 1));
+
+            var v4u8: @Vector(4, u8) = .{ 10, 20, 30, 40 };
+            var v3f32: @Vector(3, f32) = .{ 1.0, 2.0, 3.0 };
+            var v8f32: @Vector(8, f32) = .{ 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0 };
+            _ = .{ &v4u8, &v3f32, &v8f32 };
+            try nonSimdWidthOps(v4u8, v3f32, v8f32);
+        }
+    };
+
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}
