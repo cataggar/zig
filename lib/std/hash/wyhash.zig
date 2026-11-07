@@ -43,6 +43,10 @@ pub const Wyhash = struct {
             return;
         }
 
+        self.updateCold(input);
+    }
+
+    noinline fn updateCold(self: *Wyhash, input: []const u8) void {
         var i: usize = 0;
 
         if (self.buf_len > 0) {
