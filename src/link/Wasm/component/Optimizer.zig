@@ -791,10 +791,12 @@ fn optimizeFuncBody(
         var changed = false;
         if (eliminateLeafStackCopy(&root_list)) changed = true;
         if (try forwardDeadStackCopyLoads(arena, &root_list)) changed = true;
+        if (try forwardAndEliminateMemoryOps(arena, &root_list)) changed = true;
         if (try simplifyLocals(arena, &root_list, optimize_mode)) changed = true;
-        if (foldConstants(&root_list)) changed = true;
+        if (try foldConstants(arena, &root_list, optimize_mode)) changed = true;
         if (try foldDerivedPtrOffsets(arena, module, func, &root_list, is_post_inline, &had_offset_fold)) changed = true;
         if (try scalarizeShadowStackSlots(arena, module, func, &root_list, is_post_inline, had_offset_fold)) changed = true;
+        if (try hoistLoopInvariantCode(arena, module, func, &root_list, optimize_mode)) changed = true;
         if (try simplifyControlFlow(arena, &root_list)) changed = true;
         if (eliminateDeadCode(&root_list)) changed = true;
         if (!changed) break;
@@ -1131,6 +1133,55 @@ fn matchStackFrameCopyAt(slice: []const Instr, idx: usize, fp: u32) ?StackCopyCa
         .src_local = src_local,
         .src_offset = src_offset,
         .copy_len = copy_len,
+    };
+}
+
+fn matchFpSrcCopyAt(slice: []const Instr, idx: usize, fp: u32) ?struct { end_idx: usize, src_offset: u64, copy_len: u64 } {
+    var pos = idx;
+    if (pos >= slice.len or slice[pos] != .local_get or slice[pos].local_get != fp) return null;
+    pos += 1;
+    var src_offset: u64 = 0;
+    if (pos + 1 < slice.len and
+        slice[pos] == .i32_const and slice[pos].i32_const >= 0 and
+        slice[pos + 1] == .numeric_op and slice[pos + 1].numeric_op == 0x6a)
+    {
+        src_offset = @intCast(slice[pos].i32_const);
+        pos += 2;
+    }
+    if (pos + 1 >= slice.len) return null;
+    if (slice[pos] != .i32_const or slice[pos].i32_const <= 0) return null;
+    const copy_len: u64 = @intCast(slice[pos].i32_const);
+    if (slice[pos + 1] != .raw or !std.mem.eql(u8, slice[pos + 1].raw, &.{ 0xfc, 0x0a, 0x00, 0x00 })) return null;
+    return .{
+        .end_idx = pos + 2,
+        .src_offset = src_offset,
+        .copy_len = copy_len,
+    };
+}
+
+fn matchFpFillAt(slice: []const Instr, idx: usize, fp: u32) ?struct { end_idx: usize, dst_offset: u64, fill_len: u64 } {
+    var pos = idx;
+    if (pos >= slice.len or slice[pos] != .local_get or slice[pos].local_get != fp) return null;
+    pos += 1;
+    var dst_offset: u64 = 0;
+    if (pos + 1 < slice.len and
+        slice[pos] == .i32_const and slice[pos].i32_const >= 0 and
+        slice[pos + 1] == .numeric_op and slice[pos + 1].numeric_op == 0x6a)
+    {
+        dst_offset = @intCast(slice[pos].i32_const);
+        pos += 2;
+    }
+    if (pos >= slice.len or !isPureZeroPopInstr(slice[pos])) return null;
+    if (slice[pos] == .local_get and slice[pos].local_get == fp) return null;
+    pos += 1;
+    if (pos + 1 >= slice.len) return null;
+    if (slice[pos] != .i32_const or slice[pos].i32_const <= 0) return null;
+    const fill_len: u64 = @intCast(slice[pos].i32_const);
+    if (slice[pos + 1] != .raw or !std.mem.eql(u8, slice[pos + 1].raw, &.{ 0xfc, 0x0b, 0x00 })) return null;
+    return .{
+        .end_idx = pos + 2,
+        .dst_offset = dst_offset,
+        .fill_len = fill_len,
     };
 }
 
@@ -2199,6 +2250,48 @@ fn analyzeFpUsesInSlice(
                         i = copy_cand.end_idx;
                         continue;
                     }
+                    // `memory.copy` where `src` is `fp` or `fp + src_off`:
+                    if (matchFpSrcCopyAt(slice, i, fp)) |src_copy| {
+                        if (src_copy.src_offset + src_copy.copy_len > frame_size) return false;
+                        if (src_copy.copy_len > std.math.maxInt(u32)) return false;
+                        try recordShadowSlotAccess(arena, slots, src_copy.src_offset, @intCast(src_copy.copy_len), null, false, in_loop);
+                        i = src_copy.end_idx;
+                        continue;
+                    }
+                    // `memory.fill` where `dst` is `fp` or `fp + dst_off`:
+                    if (matchFpFillAt(slice, i, fp)) |fill_cand| {
+                        if (fill_cand.dst_offset + fill_cand.fill_len > frame_size) return false;
+                        if (fill_cand.fill_len > std.math.maxInt(u32)) return false;
+                        try recordShadowSlotAccess(arena, slots, fill_cand.dst_offset, @intCast(fill_cand.fill_len), null, true, in_loop);
+                        i = fill_cand.end_idx;
+                        continue;
+                    }
+                    // In-function non-escaping address `local.get fp; i32.const c; i32.add` (`c >= 0`)
+                    // consumed directly by a load or store (never passed to a call or stored as a pointer,
+                    // preserving `@fieldParentPtr` safety):
+                    if (i + 3 < slice.len and
+                        slice[i + 1] == .i32_const and slice[i + 1].i32_const >= 0 and
+                        slice[i + 2] == .numeric_op and slice[i + 2].numeric_op == 0x6a)
+                    {
+                        const add_off: u64 = @intCast(slice[i + 1].i32_const);
+                        if (decodeLoadAccess(slice[i + 3])) |access| {
+                            if (access.mem_idx != 0 or (access.opcode == 0xfd and access.simd_sub > 0x0a)) return false;
+                            if (add_off + access.offset + access.size > frame_size) return false;
+                            try recordShadowSlotAccess(arena, slots, add_off + access.offset, access.size, null, false, in_loop);
+                            i += 4;
+                            continue;
+                        }
+                        if (findSingleValueStoreIdx(slice, i + 3, fp)) |store_idx| {
+                            const access = decodeStoreAccess(slice[store_idx]).?;
+                            if (access.mem_idx != 0 or add_off + access.offset + access.size > frame_size) return false;
+                            if (!(try analyzeFpUsesInSlice(arena, slice[i + 3 .. store_idx], fp, sp_save, frame_size, in_loop, slots))) {
+                                return false;
+                            }
+                            try recordShadowSlotAccess(arena, slots, add_off + access.offset, access.size, null, true, in_loop);
+                            i = store_idx + 1;
+                            continue;
+                        }
+                    }
                     return false;
                 }
             },
@@ -2393,6 +2486,1317 @@ fn scalarizeShadowStackSlots(
         root_list.* = new_root;
     }
     return true;
+}
+
+const TrackedMemEntry = struct {
+    base_local: u32,
+    offset: u64,
+    size: u32,
+    opcode: u8,
+    simd_sub: u32 = 0,
+    val_instr: Instr,
+    is_from_store: bool,
+};
+
+const PendingDeadStore = struct {
+    base_local: u32,
+    offset: u64,
+    size: u32,
+    out_idx: usize,
+    active: bool = true,
+};
+
+fn memRangesOverlap(off_a: u64, size_a: u32, off_b: u64, size_b: u32) bool {
+    return off_a < off_b + size_b and off_b < off_a + size_a;
+}
+
+fn isForwardableMemVal(inst: Instr, base_local: u32) bool {
+    return switch (inst) {
+        .i32_const, .i64_const => true,
+        .local_get => |l| l != base_local,
+        .raw => |r| r.len > 0 and switch (r[0]) {
+            0x43, 0x44 => true,
+            0xfd => blk: {
+                var p: usize = 1;
+                const sub = readU32(r, &p) catch break :blk false;
+                break :blk sub == 0x0c; // v128.const
+            },
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn checkFpNeverEscapesToCallOrMem(slice: []const Instr, fp: u32, sp_updated_in_prologue: bool) bool {
+    var i: usize = 0;
+    while (i < slice.len) : (i += 1) {
+        switch (slice[i]) {
+            .local_set => |l| if (l == fp) return false,
+            .local_tee => |l| if (l == fp) return false,
+            .call, .return_call, .return_call_indirect => if (!sp_updated_in_prologue) return false,
+            .raw => |r| if (!sp_updated_in_prologue and r.len > 0) switch (r[0]) {
+                0x10, 0x11, 0x12, 0x13, 0x14, 0x15 => return false,
+                else => {},
+            },
+            .local_get => |l| if (l == fp) {
+                if (i + 1 < slice.len) {
+                    if (decodeLoadAccess(slice[i + 1]) != null) {
+                        i += 1;
+                        continue;
+                    }
+                    if (i + 2 < slice.len and isPureZeroPopInstr(slice[i + 1]) and decodeStoreAccess(slice[i + 2]) != null) {
+                        if (slice[i + 1] == .local_get and slice[i + 1].local_get == fp) return false;
+                        i += 2;
+                        continue;
+                    }
+                    if (findSingleValueStoreIdx(slice, i + 1, fp)) |store_idx| {
+                        if (!checkFpNeverEscapesToCallOrMem(slice[i + 1 .. store_idx], fp, sp_updated_in_prologue)) return false;
+                        i = store_idx;
+                        continue;
+                    }
+                }
+                return false;
+            },
+            .block => |b| if (!checkFpNeverEscapesToCallOrMem(b.body.items, fp, sp_updated_in_prologue)) return false,
+            .loop => |lp| if (!checkFpNeverEscapesToCallOrMem(lp.body.items, fp, sp_updated_in_prologue)) return false,
+            .if_ => |if_inst| {
+                if (!checkFpNeverEscapesToCallOrMem(if_inst.then_body.items, fp, sp_updated_in_prologue)) return false;
+                if (if_inst.has_else and !checkFpNeverEscapesToCallOrMem(if_inst.else_body.items, fp, sp_updated_in_prologue)) return false;
+            },
+            else => {},
+        }
+    }
+    return true;
+}
+
+fn invalidateMemEntriesForLocal(active: *std.ArrayListUnmanaged(TrackedMemEntry), local_idx: u32) void {
+    var i: usize = 0;
+    while (i < active.items.len) {
+        const e = active.items[i];
+        if (e.base_local == local_idx or (e.val_instr == .local_get and e.val_instr.local_get == local_idx)) {
+            _ = active.swapRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn invalidateMemEntriesForStore(
+    active: *std.ArrayListUnmanaged(TrackedMemEntry),
+    store_base: ?u32,
+    offset: u64,
+    size: u32,
+    non_escaping_fp: ?u32,
+) void {
+    var i: usize = 0;
+    while (i < active.items.len) {
+        const e = active.items[i];
+        const remove = if (store_base) |sb| blk: {
+            if (e.base_local == sb) {
+                break :blk memRangesOverlap(e.offset, e.size, offset, size);
+            }
+            if (non_escaping_fp != null and (e.base_local == non_escaping_fp.? or sb == non_escaping_fp.?)) {
+                break :blk false;
+            }
+            break :blk true;
+        } else blk: {
+            if (non_escaping_fp != null and e.base_local == non_escaping_fp.?) {
+                break :blk false;
+            }
+            break :blk true;
+        };
+        if (remove) {
+            _ = active.swapRemove(i);
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn invalidateMemEntriesForCall(active: *std.ArrayListUnmanaged(TrackedMemEntry), non_escaping_fp: ?u32) void {
+    var i: usize = 0;
+    while (i < active.items.len) {
+        if (non_escaping_fp != null and active.items[i].base_local == non_escaping_fp.?) {
+            i += 1;
+        } else {
+            _ = active.swapRemove(i);
+        }
+    }
+}
+
+fn invalidateClobberedMemEntries(
+    list: *const InstrList,
+    arena: std.mem.Allocator,
+    active: *std.ArrayListUnmanaged(TrackedMemEntry),
+    non_escaping_fp: ?u32,
+) Error!void {
+    if (active.items.len == 0) return;
+    var mod_locals: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    try collectModifiedLocals(list, arena, &mod_locals);
+    var it = mod_locals.keyIterator();
+    while (it.next()) |k| {
+        invalidateMemEntriesForLocal(active, k.*);
+    }
+    invalidateClobberedMemEntriesInSlice(list.items, active, &mod_locals, non_escaping_fp);
+}
+
+fn invalidateClobberedMemEntriesInSlice(
+    slice: []const Instr,
+    active: *std.ArrayListUnmanaged(TrackedMemEntry),
+    mod_locals: *const std.AutoHashMapUnmanaged(u32, void),
+    non_escaping_fp: ?u32,
+) void {
+    for (slice, 0..) |inst, idx| {
+        if (active.items.len == 0) return;
+        if (decodeStoreAccess(inst)) |store_acc| {
+            if (store_acc.mem_idx != 0) {
+                active.clearRetainingCapacity();
+                return;
+            }
+            var known_base: ?u32 = null;
+            if (findPrevSingleValueExprStart(slice, idx)) |val_start| {
+                if (val_start >= 1 and slice[val_start - 1] == .local_get) {
+                    const b = slice[val_start - 1].local_get;
+                    if (!mod_locals.contains(b)) known_base = b;
+                }
+            }
+            invalidateMemEntriesForStore(active, known_base, store_acc.offset, store_acc.size, non_escaping_fp);
+            continue;
+        }
+        switch (inst) {
+            .call, .return_call, .return_call_indirect => invalidateMemEntriesForCall(active, non_escaping_fp),
+            .block => |b| invalidateClobberedMemEntriesInSlice(b.body.items, active, mod_locals, non_escaping_fp),
+            .loop => |lp| invalidateClobberedMemEntriesInSlice(lp.body.items, active, mod_locals, non_escaping_fp),
+            .if_ => |if_inst| {
+                invalidateClobberedMemEntriesInSlice(if_inst.then_body.items, active, mod_locals, non_escaping_fp);
+                if (if_inst.has_else) invalidateClobberedMemEntriesInSlice(if_inst.else_body.items, active, mod_locals, non_escaping_fp);
+            },
+            .raw => |r| if (r.len > 0) switch (r[0]) {
+                0x10, 0x11, 0x12, 0x13, 0x14, 0x15 => invalidateMemEntriesForCall(active, non_escaping_fp),
+                0x40, 0xfb, 0xfe => active.clearRetainingCapacity(),
+                0xfc => {
+                    var p: usize = 1;
+                    const sub = readU32(r, &p) catch {
+                        active.clearRetainingCapacity();
+                        return;
+                    };
+                    if (sub >= 0x08 and sub <= 0x0b) {
+                        active.clearRetainingCapacity();
+                        return;
+                    }
+                },
+                0xfd => {
+                    var p: usize = 1;
+                    const sub = readU32(r, &p) catch {
+                        active.clearRetainingCapacity();
+                        return;
+                    };
+                    if (sub >= 0x58 and sub <= 0x5b) {
+                        active.clearRetainingCapacity();
+                        return;
+                    }
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
+}
+
+fn emitForwardedLoadValue(
+    arena: std.mem.Allocator,
+    out: *InstrList,
+    entry: TrackedMemEntry,
+    load_acc: MemAccessInfo,
+) Error!bool {
+    if (load_acc.offset < entry.offset or load_acc.offset + load_acc.size > entry.offset + entry.size) return false;
+
+    if (load_acc.offset == entry.offset and load_acc.size == entry.size) {
+        if (!entry.is_from_store and load_acc.opcode == entry.opcode and load_acc.simd_sub == entry.simd_sub) {
+            out.items[out.items.len - 1] = entry.val_instr;
+            return true;
+        }
+        switch (load_acc.opcode) {
+            0x28 => if (entry.opcode == 0x36 or entry.opcode == 0x28) {
+                out.items[out.items.len - 1] = entry.val_instr;
+                return true;
+            },
+            0x29 => if (entry.opcode == 0x37 or entry.opcode == 0x29) {
+                out.items[out.items.len - 1] = entry.val_instr;
+                return true;
+            },
+            0x2a => if (entry.opcode == 0x38 or entry.opcode == 0x2a) {
+                out.items[out.items.len - 1] = entry.val_instr;
+                return true;
+            },
+            0x2b => if (entry.opcode == 0x39 or entry.opcode == 0x2b) {
+                out.items[out.items.len - 1] = entry.val_instr;
+                return true;
+            },
+            0xfd => if (load_acc.simd_sub == 0x00 and entry.opcode == 0xfd and (entry.simd_sub == 0x0b or entry.simd_sub == 0x00)) {
+                out.items[out.items.len - 1] = entry.val_instr;
+                return true;
+            },
+            0x2d => if (entry.opcode == 0x3a) {
+                if (entry.val_instr == .i32_const) {
+                    out.items[out.items.len - 1] = .{ .i32_const = entry.val_instr.i32_const & 0xff };
+                } else {
+                    out.items[out.items.len - 1] = entry.val_instr;
+                    out.append(arena, .{ .i32_const = 0xff }) catch return error.OutOfMemory;
+                    out.append(arena, .{ .numeric_op = 0x71 }) catch return error.OutOfMemory;
+                }
+                return true;
+            },
+            0x2c => if (entry.opcode == 0x3a) {
+                if (entry.val_instr == .i32_const) {
+                    out.items[out.items.len - 1] = .{ .i32_const = @as(i32, @as(i8, @truncate(entry.val_instr.i32_const))) };
+                } else {
+                    out.items[out.items.len - 1] = entry.val_instr;
+                    out.append(arena, .{ .numeric_op = 0xc0 }) catch return error.OutOfMemory;
+                }
+                return true;
+            },
+            0x2f => if (entry.opcode == 0x3b) {
+                if (entry.val_instr == .i32_const) {
+                    out.items[out.items.len - 1] = .{ .i32_const = entry.val_instr.i32_const & 0xffff };
+                } else {
+                    out.items[out.items.len - 1] = entry.val_instr;
+                    out.append(arena, .{ .i32_const = 0xffff }) catch return error.OutOfMemory;
+                    out.append(arena, .{ .numeric_op = 0x71 }) catch return error.OutOfMemory;
+                }
+                return true;
+            },
+            0x2e => if (entry.opcode == 0x3b) {
+                if (entry.val_instr == .i32_const) {
+                    out.items[out.items.len - 1] = .{ .i32_const = @as(i32, @as(i16, @truncate(entry.val_instr.i32_const))) };
+                } else {
+                    out.items[out.items.len - 1] = entry.val_instr;
+                    out.append(arena, .{ .numeric_op = 0xc1 }) catch return error.OutOfMemory;
+                }
+                return true;
+            },
+            0x31 => if (entry.opcode == 0x3c) {
+                if (entry.val_instr == .i64_const) {
+                    out.items[out.items.len - 1] = .{ .i64_const = entry.val_instr.i64_const & 0xff };
+                } else {
+                    out.items[out.items.len - 1] = entry.val_instr;
+                    out.append(arena, .{ .i64_const = 0xff }) catch return error.OutOfMemory;
+                    out.append(arena, .{ .numeric_op = 0x83 }) catch return error.OutOfMemory;
+                }
+                return true;
+            },
+            0x30 => if (entry.opcode == 0x3c) {
+                if (entry.val_instr == .i64_const) {
+                    out.items[out.items.len - 1] = .{ .i64_const = @as(i64, @as(i8, @truncate(entry.val_instr.i64_const))) };
+                } else {
+                    out.items[out.items.len - 1] = entry.val_instr;
+                    out.append(arena, .{ .numeric_op = 0xc2 }) catch return error.OutOfMemory;
+                }
+                return true;
+            },
+            0x33 => if (entry.opcode == 0x3d) {
+                if (entry.val_instr == .i64_const) {
+                    out.items[out.items.len - 1] = .{ .i64_const = entry.val_instr.i64_const & 0xffff };
+                } else {
+                    out.items[out.items.len - 1] = entry.val_instr;
+                    out.append(arena, .{ .i64_const = 0xffff }) catch return error.OutOfMemory;
+                    out.append(arena, .{ .numeric_op = 0x83 }) catch return error.OutOfMemory;
+                }
+                return true;
+            },
+            0x32 => if (entry.opcode == 0x3d) {
+                if (entry.val_instr == .i64_const) {
+                    out.items[out.items.len - 1] = .{ .i64_const = @as(i64, @as(i16, @truncate(entry.val_instr.i64_const))) };
+                } else {
+                    out.items[out.items.len - 1] = entry.val_instr;
+                    out.append(arena, .{ .numeric_op = 0xc3 }) catch return error.OutOfMemory;
+                }
+                return true;
+            },
+            0x35 => if (entry.opcode == 0x3e) {
+                if (entry.val_instr == .i64_const) {
+                    out.items[out.items.len - 1] = .{ .i64_const = entry.val_instr.i64_const & 0xffff_ffff };
+                } else {
+                    out.items[out.items.len - 1] = entry.val_instr;
+                    out.append(arena, .{ .i64_const = 0xffff_ffff }) catch return error.OutOfMemory;
+                    out.append(arena, .{ .numeric_op = 0x83 }) catch return error.OutOfMemory;
+                }
+                return true;
+            },
+            0x34 => if (entry.opcode == 0x3e) {
+                if (entry.val_instr == .i64_const) {
+                    out.items[out.items.len - 1] = .{ .i64_const = @as(i64, @as(i32, @truncate(entry.val_instr.i64_const))) };
+                } else {
+                    out.items[out.items.len - 1] = entry.val_instr;
+                    out.append(arena, .{ .numeric_op = 0xc4 }) catch return error.OutOfMemory;
+                }
+                return true;
+            },
+            else => return false,
+        }
+        return false;
+    }
+
+    // Narrow load bit-slice extraction (`load_acc.size < entry.size`)
+    if (load_acc.size < entry.size) {
+        const bit_shift: u32 = @intCast((load_acc.offset - entry.offset) * 8);
+        if (entry.size == 4 and (entry.opcode == 0x36 or entry.opcode == 0x28)) {
+            if (entry.val_instr == .i32_const) {
+                const shifted: u32 = @as(u32, @bitCast(entry.val_instr.i32_const)) >> @as(u5, @intCast(bit_shift));
+                const folded: i32 = switch (load_acc.opcode) {
+                    0x2d => @intCast(shifted & 0xff),
+                    0x2c => @as(i32, @as(i8, @bitCast(@as(u8, @truncate(shifted))))),
+                    0x2f => @intCast(shifted & 0xffff),
+                    0x2e => @as(i32, @as(i16, @bitCast(@as(u16, @truncate(shifted))))),
+                    else => return false,
+                };
+                out.items[out.items.len - 1] = .{ .i32_const = folded };
+                return true;
+            }
+            switch (load_acc.opcode) {
+                0x2d, 0x2c, 0x2f, 0x2e => {
+                    out.items[out.items.len - 1] = entry.val_instr;
+                    if (bit_shift > 0) {
+                        out.append(arena, .{ .i32_const = @intCast(bit_shift) }) catch return error.OutOfMemory;
+                        out.append(arena, .{ .numeric_op = 0x76 }) catch return error.OutOfMemory; // i32.shr_u
+                    }
+                    switch (load_acc.opcode) {
+                        0x2d => if (bit_shift < 24) {
+                            out.append(arena, .{ .i32_const = 0xff }) catch return error.OutOfMemory;
+                            out.append(arena, .{ .numeric_op = 0x71 }) catch return error.OutOfMemory;
+                        },
+                        0x2c => out.append(arena, .{ .numeric_op = 0xc0 }) catch return error.OutOfMemory,
+                        0x2f => if (bit_shift < 16) {
+                            out.append(arena, .{ .i32_const = 0xffff }) catch return error.OutOfMemory;
+                            out.append(arena, .{ .numeric_op = 0x71 }) catch return error.OutOfMemory;
+                        },
+                        0x2e => out.append(arena, .{ .numeric_op = 0xc1 }) catch return error.OutOfMemory,
+                        else => unreachable,
+                    }
+                    return true;
+                },
+                else => return false,
+            }
+        } else if (entry.size == 8 and (entry.opcode == 0x37 or entry.opcode == 0x29)) {
+            if (entry.val_instr == .i64_const) {
+                const shifted: u64 = @as(u64, @bitCast(entry.val_instr.i64_const)) >> @as(u6, @intCast(bit_shift));
+                switch (load_acc.opcode) {
+                    0x28 => out.items[out.items.len - 1] = .{ .i32_const = @bitCast(@as(u32, @truncate(shifted))) },
+                    0x2d => out.items[out.items.len - 1] = .{ .i32_const = @intCast(shifted & 0xff) },
+                    0x2c => out.items[out.items.len - 1] = .{ .i32_const = @as(i32, @as(i8, @bitCast(@as(u8, @truncate(shifted))))) },
+                    0x2f => out.items[out.items.len - 1] = .{ .i32_const = @intCast(shifted & 0xffff) },
+                    0x2e => out.items[out.items.len - 1] = .{ .i32_const = @as(i32, @as(i16, @bitCast(@as(u16, @truncate(shifted))))) },
+                    0x31 => out.items[out.items.len - 1] = .{ .i64_const = @intCast(shifted & 0xff) },
+                    0x30 => out.items[out.items.len - 1] = .{ .i64_const = @as(i64, @as(i8, @bitCast(@as(u8, @truncate(shifted))))) },
+                    0x33 => out.items[out.items.len - 1] = .{ .i64_const = @intCast(shifted & 0xffff) },
+                    0x32 => out.items[out.items.len - 1] = .{ .i64_const = @as(i64, @as(i16, @bitCast(@as(u16, @truncate(shifted))))) },
+                    0x35 => out.items[out.items.len - 1] = .{ .i64_const = @intCast(shifted & 0xffff_ffff) },
+                    0x34 => out.items[out.items.len - 1] = .{ .i64_const = @as(i64, @as(i32, @bitCast(@as(u32, @truncate(shifted))))) },
+                    else => return false,
+                }
+                return true;
+            }
+            switch (load_acc.opcode) {
+                0x28, 0x2d, 0x2c, 0x2f, 0x2e => {
+                    out.items[out.items.len - 1] = entry.val_instr;
+                    if (bit_shift > 0) {
+                        out.append(arena, .{ .i64_const = @intCast(bit_shift) }) catch return error.OutOfMemory;
+                        out.append(arena, .{ .numeric_op = 0x88 }) catch return error.OutOfMemory; // i64.shr_u
+                    }
+                    out.append(arena, .{ .numeric_op = 0xa7 }) catch return error.OutOfMemory; // i32.wrap_i64
+                    switch (load_acc.opcode) {
+                        0x28 => {},
+                        0x2d => {
+                            out.append(arena, .{ .i32_const = 0xff }) catch return error.OutOfMemory;
+                            out.append(arena, .{ .numeric_op = 0x71 }) catch return error.OutOfMemory;
+                        },
+                        0x2c => out.append(arena, .{ .numeric_op = 0xc0 }) catch return error.OutOfMemory,
+                        0x2f => {
+                            out.append(arena, .{ .i32_const = 0xffff }) catch return error.OutOfMemory;
+                            out.append(arena, .{ .numeric_op = 0x71 }) catch return error.OutOfMemory;
+                        },
+                        0x2e => out.append(arena, .{ .numeric_op = 0xc1 }) catch return error.OutOfMemory,
+                        else => unreachable,
+                    }
+                    return true;
+                },
+                0x31, 0x30, 0x33, 0x32, 0x35, 0x34 => {
+                    out.items[out.items.len - 1] = entry.val_instr;
+                    if (bit_shift > 0) {
+                        out.append(arena, .{ .i64_const = @intCast(bit_shift) }) catch return error.OutOfMemory;
+                        out.append(arena, .{ .numeric_op = 0x88 }) catch return error.OutOfMemory; // i64.shr_u
+                    }
+                    switch (load_acc.opcode) {
+                        0x31 => if (bit_shift < 56) {
+                            out.append(arena, .{ .i64_const = 0xff }) catch return error.OutOfMemory;
+                            out.append(arena, .{ .numeric_op = 0x83 }) catch return error.OutOfMemory;
+                        },
+                        0x30 => out.append(arena, .{ .numeric_op = 0xc2 }) catch return error.OutOfMemory,
+                        0x33 => if (bit_shift < 48) {
+                            out.append(arena, .{ .i64_const = 0xffff }) catch return error.OutOfMemory;
+                            out.append(arena, .{ .numeric_op = 0x83 }) catch return error.OutOfMemory;
+                        },
+                        0x32 => out.append(arena, .{ .numeric_op = 0xc3 }) catch return error.OutOfMemory,
+                        0x35 => if (bit_shift < 32) {
+                            out.append(arena, .{ .i64_const = 0xffff_ffff }) catch return error.OutOfMemory;
+                            out.append(arena, .{ .numeric_op = 0x83 }) catch return error.OutOfMemory;
+                        },
+                        0x34 => out.append(arena, .{ .numeric_op = 0xc4 }) catch return error.OutOfMemory,
+                        else => unreachable,
+                    }
+                    return true;
+                },
+                else => return false,
+            }
+        }
+    }
+
+    return false;
+}
+
+fn forwardAndEliminateMemBlock(
+    arena: std.mem.Allocator,
+    list: *InstrList,
+    active: *std.ArrayListUnmanaged(TrackedMemEntry),
+    non_escaping_fp: ?u32,
+    skip_exact_fp_store_forward: bool,
+    is_epilogue_block: bool,
+) Error!bool {
+    var changed = false;
+    var out: InstrList = .empty;
+    out.ensureTotalCapacity(arena, list.items.len + 8) catch return error.OutOfMemory;
+
+    var pending_stores: std.ArrayListUnmanaged(PendingDeadStore) = .empty;
+    var any_nop_store = false;
+    var just_loaded: ?struct { base_local: u32, access: MemAccessInfo } = null;
+
+    var i: usize = 0;
+    while (i < list.items.len) : (i += 1) {
+        const prev_loaded = just_loaded;
+        just_loaded = null;
+
+        const inst = list.items[i];
+
+        if (out.items.len >= 1 and out.items[out.items.len - 1] == .local_get) {
+            if (decodeLoadAccess(inst)) |load_acc| {
+                const base_local = out.items[out.items.len - 1].local_get;
+                if (load_acc.mem_idx == 0) {
+                    // Mark any potentially aliasing pending store as read (not dead)
+                    for (pending_stores.items) |*ps| {
+                        if (!ps.active) continue;
+                        if (ps.base_local == base_local) {
+                            if (memRangesOverlap(ps.offset, ps.size, load_acc.offset, load_acc.size)) {
+                                ps.active = false;
+                            }
+                        } else if (!(non_escaping_fp != null and (ps.base_local == non_escaping_fp.? or base_local == non_escaping_fp.?))) {
+                            ps.active = false;
+                        }
+                    }
+
+                    // Search `active` for an entry covering `[load_acc.offset, load_acc.offset + load_acc.size)`
+                    var forwarded = false;
+                    var j = active.items.len;
+                    while (j > 0) {
+                        j -= 1;
+                        const e = active.items[j];
+                        if (e.base_local == base_local and
+                            load_acc.offset >= e.offset and
+                            load_acc.offset + load_acc.size <= e.offset + e.size)
+                        {
+                            if (skip_exact_fp_store_forward and non_escaping_fp != null and base_local == non_escaping_fp.? and
+                                e.is_from_store and load_acc.size == e.size and e.size >= 4)
+                            {
+                                break;
+                            }
+                            if (try emitForwardedLoadValue(arena, &out, e, load_acc)) {
+                                forwarded = true;
+                                changed = true;
+                            }
+                            break;
+                        }
+                    }
+                    if (forwarded) continue;
+
+                    out.append(arena, inst) catch return error.OutOfMemory;
+                    just_loaded = .{ .base_local = base_local, .access = load_acc };
+                    continue;
+                }
+            }
+        }
+
+        if (decodeStoreAccess(inst)) |store_acc| {
+            if (store_acc.mem_idx == 0 and out.items.len >= 2 and
+                out.items[out.items.len - 2] == .local_get and
+                isForwardableMemVal(out.items[out.items.len - 1], out.items[out.items.len - 2].local_get))
+            {
+                const base_local = out.items[out.items.len - 2].local_get;
+                const val_instr = out.items[out.items.len - 1];
+
+                // Overwrite DSE: check if an active pending store on `base_local` is completely covered
+                for (pending_stores.items) |*ps| {
+                    if (!ps.active) continue;
+                    if (ps.base_local == base_local) {
+                        if (store_acc.offset <= ps.offset and store_acc.offset + store_acc.size >= ps.offset + ps.size) {
+                            ps.active = false;
+                            out.items[ps.out_idx] = .nop;
+                            out.items[ps.out_idx + 1] = .nop;
+                            out.items[ps.out_idx + 2] = .nop;
+                            any_nop_store = true;
+                            changed = true;
+                        } else if (memRangesOverlap(ps.offset, ps.size, store_acc.offset, store_acc.size)) {
+                            ps.active = false;
+                        }
+                    } else if (!(non_escaping_fp != null and (ps.base_local == non_escaping_fp.? or base_local == non_escaping_fp.?))) {
+                        ps.active = false;
+                    }
+                }
+
+                invalidateMemEntriesForStore(active, base_local, store_acc.offset, store_acc.size, non_escaping_fp);
+                active.append(arena, .{
+                    .base_local = base_local,
+                    .offset = store_acc.offset,
+                    .size = store_acc.size,
+                    .opcode = store_acc.opcode,
+                    .simd_sub = store_acc.simd_sub,
+                    .val_instr = val_instr,
+                    .is_from_store = true,
+                }) catch return error.OutOfMemory;
+                pending_stores.append(arena, .{
+                    .base_local = base_local,
+                    .offset = store_acc.offset,
+                    .size = store_acc.size,
+                    .out_idx = out.items.len - 2,
+                    .active = true,
+                }) catch return error.OutOfMemory;
+                out.append(arena, inst) catch return error.OutOfMemory;
+                continue;
+            } else {
+                var known_base: ?u32 = null;
+                if (store_acc.mem_idx == 0) {
+                    if (findPrevSingleValueExprStart(out.items, out.items.len)) |val_start| {
+                        if (val_start >= 1 and out.items[val_start - 1] == .local_get) {
+                            known_base = out.items[val_start - 1].local_get;
+                        }
+                    }
+                }
+                for (pending_stores.items) |*ps| {
+                    if (!ps.active) continue;
+                    if (known_base) |kb| {
+                        if (ps.base_local == kb) {
+                            if (memRangesOverlap(ps.offset, ps.size, store_acc.offset, store_acc.size)) ps.active = false;
+                        } else if (!(non_escaping_fp != null and (ps.base_local == non_escaping_fp.? or kb == non_escaping_fp.?))) {
+                            ps.active = false;
+                        }
+                    } else if (!(non_escaping_fp != null and ps.base_local == non_escaping_fp.?)) {
+                        ps.active = false;
+                    }
+                }
+                invalidateMemEntriesForStore(active, known_base, store_acc.offset, store_acc.size, non_escaping_fp);
+                if (known_base) |kb| {
+                    if (out.items.len >= 1 and out.items[out.items.len - 1] == .local_tee) {
+                        const tee_local = out.items[out.items.len - 1].local_tee;
+                        if (tee_local != kb) {
+                            active.append(arena, .{
+                                .base_local = kb,
+                                .offset = store_acc.offset,
+                                .size = store_acc.size,
+                                .opcode = store_acc.opcode,
+                                .simd_sub = store_acc.simd_sub,
+                                .val_instr = .{ .local_get = tee_local },
+                                .is_from_store = true,
+                            }) catch return error.OutOfMemory;
+                        }
+                    }
+                }
+                out.append(arena, inst) catch return error.OutOfMemory;
+                continue;
+            }
+        }
+
+        if (decodeLoadAccess(inst)) |load_acc| {
+            // Non-`local.get` base load: mark potentially aliasing pending stores as read
+            for (pending_stores.items) |*ps| {
+                if (!ps.active) continue;
+                if (!(non_escaping_fp != null and ps.base_local == non_escaping_fp.?)) {
+                    ps.active = false;
+                }
+            }
+            _ = load_acc;
+        }
+
+        switch (inst) {
+            .local_set => |x| {
+                invalidateMemEntriesForLocal(active, x);
+                for (pending_stores.items) |*ps| {
+                    if (ps.base_local == x) ps.active = false;
+                }
+                if (prev_loaded) |jl| {
+                    if (x != jl.base_local) {
+                        invalidateMemEntriesForStore(active, jl.base_local, jl.access.offset, jl.access.size, non_escaping_fp);
+                        active.append(arena, .{
+                            .base_local = jl.base_local,
+                            .offset = jl.access.offset,
+                            .size = jl.access.size,
+                            .opcode = jl.access.opcode,
+                            .simd_sub = jl.access.simd_sub,
+                            .val_instr = .{ .local_get = x },
+                            .is_from_store = false,
+                        }) catch return error.OutOfMemory;
+                    }
+                }
+                out.append(arena, inst) catch return error.OutOfMemory;
+            },
+            .local_tee => |x| {
+                invalidateMemEntriesForLocal(active, x);
+                for (pending_stores.items) |*ps| {
+                    if (ps.base_local == x) ps.active = false;
+                }
+                if (prev_loaded) |jl| {
+                    if (x != jl.base_local) {
+                        invalidateMemEntriesForStore(active, jl.base_local, jl.access.offset, jl.access.size, non_escaping_fp);
+                        active.append(arena, .{
+                            .base_local = jl.base_local,
+                            .offset = jl.access.offset,
+                            .size = jl.access.size,
+                            .opcode = jl.access.opcode,
+                            .simd_sub = jl.access.simd_sub,
+                            .val_instr = .{ .local_get = x },
+                            .is_from_store = false,
+                        }) catch return error.OutOfMemory;
+                    }
+                }
+                out.append(arena, inst) catch return error.OutOfMemory;
+            },
+            .block => |b_in| {
+                for (pending_stores.items) |*ps| ps.active = false;
+                var b = b_in;
+                var blk_active = active.clone(arena) catch return error.OutOfMemory;
+                if (try forwardAndEliminateMemBlock(arena, &b.body, &blk_active, non_escaping_fp, skip_exact_fp_store_forward, false)) {
+                    changed = true;
+                }
+                try invalidateClobberedMemEntries(&b.body, arena, active, non_escaping_fp);
+                out.append(arena, .{ .block = b }) catch return error.OutOfMemory;
+            },
+            .if_ => |if_in| {
+                for (pending_stores.items) |*ps| ps.active = false;
+                var if_inst = if_in;
+                var then_active = active.clone(arena) catch return error.OutOfMemory;
+                if (try forwardAndEliminateMemBlock(arena, &if_inst.then_body, &then_active, non_escaping_fp, skip_exact_fp_store_forward, false)) {
+                    changed = true;
+                }
+                if (if_inst.has_else) {
+                    var else_active = active.clone(arena) catch return error.OutOfMemory;
+                    if (try forwardAndEliminateMemBlock(arena, &if_inst.else_body, &else_active, non_escaping_fp, skip_exact_fp_store_forward, false)) {
+                        changed = true;
+                    }
+                }
+                try invalidateClobberedMemEntries(&if_inst.then_body, arena, active, non_escaping_fp);
+                if (if_inst.has_else) {
+                    try invalidateClobberedMemEntries(&if_inst.else_body, arena, active, non_escaping_fp);
+                }
+                out.append(arena, .{ .if_ = if_inst }) catch return error.OutOfMemory;
+            },
+            .loop => |lp_in| {
+                for (pending_stores.items) |*ps| ps.active = false;
+                var lp = lp_in;
+                try invalidateClobberedMemEntries(&lp.body, arena, active, non_escaping_fp);
+                var lp_active = active.clone(arena) catch return error.OutOfMemory;
+                if (try forwardAndEliminateMemBlock(arena, &lp.body, &lp_active, non_escaping_fp, skip_exact_fp_store_forward, false)) {
+                    changed = true;
+                }
+                out.append(arena, .{ .loop = lp }) catch return error.OutOfMemory;
+            },
+            .br, .br_if, .br_table, .return_, .unreachable_ => {
+                for (pending_stores.items) |*ps| ps.active = false;
+                out.append(arena, inst) catch return error.OutOfMemory;
+            },
+            .call, .return_call, .return_call_indirect => {
+                for (pending_stores.items) |*ps| {
+                    if (!(non_escaping_fp != null and ps.base_local == non_escaping_fp.?)) {
+                        ps.active = false;
+                    }
+                }
+                invalidateMemEntriesForCall(active, non_escaping_fp);
+                out.append(arena, inst) catch return error.OutOfMemory;
+            },
+            .raw => |r| {
+                if (r.len > 0) switch (r[0]) {
+                    0x10, 0x11, 0x12, 0x13, 0x14, 0x15 => {
+                        for (pending_stores.items) |*ps| {
+                            if (!(non_escaping_fp != null and ps.base_local == non_escaping_fp.?)) {
+                                ps.active = false;
+                            }
+                        }
+                        invalidateMemEntriesForCall(active, non_escaping_fp);
+                    },
+                    0x40, 0xfb, 0xfe => {
+                        for (pending_stores.items) |*ps| ps.active = false;
+                        active.clearRetainingCapacity();
+                    },
+                    0xfc => {
+                        var p: usize = 1;
+                        const sub = readU32(r, &p) catch 0xff;
+                        if (sub >= 0x08 and sub <= 0x0b) {
+                            for (pending_stores.items) |*ps| ps.active = false;
+                            active.clearRetainingCapacity();
+                        }
+                    },
+                    0xfd => {
+                        var p: usize = 1;
+                        const sub = readU32(r, &p) catch 0xffff;
+                        if (sub >= 0x54 and sub <= 0x5b) {
+                            for (pending_stores.items) |*ps| ps.active = false;
+                            if (sub >= 0x58) active.clearRetainingCapacity();
+                        }
+                    },
+                    else => {},
+                };
+                out.append(arena, inst) catch return error.OutOfMemory;
+            },
+            else => {
+                out.append(arena, inst) catch return error.OutOfMemory;
+            },
+        }
+    }
+
+    // Dead Frame Epilogue DSE: any pending store on `non_escaping_fp` reaching the end of the function body
+    // without being read is dead because the stack frame is popped immediately after `body_end`.
+    if (is_epilogue_block) {
+        if (non_escaping_fp) |fp| {
+            for (pending_stores.items) |*ps| {
+                if (ps.active and ps.base_local == fp) {
+                    ps.active = false;
+                    out.items[ps.out_idx] = .nop;
+                    out.items[ps.out_idx + 1] = .nop;
+                    out.items[ps.out_idx + 2] = .nop;
+                    any_nop_store = true;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    if (any_nop_store) {
+        var write_idx: usize = 0;
+        for (out.items) |item| {
+            if (item != .nop) {
+                out.items[write_idx] = item;
+                write_idx += 1;
+            }
+        }
+        out.items.len = write_idx;
+    }
+
+    list.* = out;
+    return changed;
+}
+
+fn forwardAndEliminateMemoryOps(arena: std.mem.Allocator, root_list: *InstrList) Error!bool {
+    var active: std.ArrayListUnmanaged(TrackedMemEntry) = .empty;
+    if (detectShadowStackFrame(root_list.items)) |frame| {
+        const body_slice = root_list.items[frame.body_start..frame.body_end];
+        const fp_never_escapes = checkFpNeverEscapesToCallOrMem(body_slice, frame.fp, frame.has_epilogue);
+        const non_escaping_fp: ?u32 = if (fp_never_escapes) frame.fp else null;
+
+        // If `scalarizeShadowStackSlots` intentionally preserved a single-store + single-load full-width slot
+        // on `fp` (as in `disjointFrame`), do not forward that exact full-width `fp` store to its load.
+        var fp_stores: usize = 0;
+        var fp_loads: usize = 0;
+        if (fp_never_escapes) {
+            for (body_slice, 0..) |inst, idx| {
+                if (idx >= 1 and body_slice[idx - 1] == .local_get and body_slice[idx - 1].local_get == frame.fp) {
+                    if (decodeLoadAccess(inst) != null) fp_loads += 1;
+                }
+                if (idx >= 2 and body_slice[idx - 2] == .local_get and body_slice[idx - 2].local_get == frame.fp) {
+                    if (decodeStoreAccess(inst) != null) fp_stores += 1;
+                }
+            }
+        }
+        const skip_exact_fp_store_forward = fp_never_escapes and fp_stores == 1 and fp_loads == 1;
+
+        var body_list: InstrList = .empty;
+        body_list.appendSlice(arena, body_slice) catch return error.OutOfMemory;
+        const changed = try forwardAndEliminateMemBlock(
+            arena,
+            &body_list,
+            &active,
+            non_escaping_fp,
+            skip_exact_fp_store_forward,
+            true,
+        );
+        if (!changed) return false;
+
+        if (!sliceUsesLocalOrEarlyExit(body_list.items, frame.fp, frame.sp_save, frame.has_epilogue) and
+            (!frame.has_epilogue or !hasBranchToDepth(body_list.items, 0)))
+        {
+            if (frame.has_trailing_return) {
+                body_list.append(arena, .return_) catch return error.OutOfMemory;
+            }
+            root_list.* = body_list;
+        } else {
+            var new_root: InstrList = .empty;
+            const cap = frame.body_start + body_list.items.len + (root_list.items.len - frame.body_end);
+            new_root.ensureTotalCapacity(arena, cap) catch return error.OutOfMemory;
+            new_root.appendSliceAssumeCapacity(root_list.items[0..frame.body_start]);
+            new_root.appendSliceAssumeCapacity(body_list.items);
+            new_root.appendSliceAssumeCapacity(root_list.items[frame.body_end..]);
+            root_list.* = new_root;
+        }
+        return true;
+    }
+
+    return forwardAndEliminateMemBlock(arena, root_list, &active, null, false, false);
+}
+
+const LoopStoreInfo = struct {
+    base_local: u32,
+    offset: u64,
+    size: u32,
+};
+
+const LoopSideEffects = struct {
+    modified_locals: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    local_write_counts: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+    modified_globals: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    stores: std.ArrayListUnmanaged(LoopStoreInfo) = .empty,
+    has_call_or_barrier: bool = false,
+    has_unknown_store: bool = false,
+};
+
+fn collectLoopLocalAndGlobalWrites(
+    slice: []const Instr,
+    arena: std.mem.Allocator,
+    effects: *LoopSideEffects,
+) Error!void {
+    for (slice) |inst| {
+        switch (inst) {
+            .local_set, .local_tee => |x| {
+                effects.modified_locals.put(arena, x, {}) catch return error.OutOfMemory;
+                const gop = effects.local_write_counts.getOrPut(arena, x) catch return error.OutOfMemory;
+                if (!gop.found_existing) gop.value_ptr.* = 0;
+                gop.value_ptr.* += 1;
+            },
+            .raw => |r| if (r.len > 0 and r[0] == 0x24) {
+                var p: usize = 1;
+                if (readU32(r, &p)) |g| {
+                    effects.modified_globals.put(arena, g, {}) catch return error.OutOfMemory;
+                } else |_| {
+                    effects.has_call_or_barrier = true;
+                }
+            },
+            .block => |b| try collectLoopLocalAndGlobalWrites(b.body.items, arena, effects),
+            .loop => |lp| try collectLoopLocalAndGlobalWrites(lp.body.items, arena, effects),
+            .if_ => |if_inst| {
+                try collectLoopLocalAndGlobalWrites(if_inst.then_body.items, arena, effects);
+                if (if_inst.has_else) try collectLoopLocalAndGlobalWrites(if_inst.else_body.items, arena, effects);
+            },
+            else => {},
+        }
+    }
+}
+
+fn collectLoopMemoryEffects(
+    slice: []const Instr,
+    arena: std.mem.Allocator,
+    effects: *LoopSideEffects,
+) Error!void {
+    for (slice, 0..) |inst, idx| {
+        if (decodeStoreAccess(inst)) |store_acc| {
+            if (store_acc.mem_idx != 0) {
+                effects.has_unknown_store = true;
+                continue;
+            }
+            if (findPrevSingleValueExprStart(slice, idx)) |val_start| {
+                if (val_start >= 1 and slice[val_start - 1] == .local_get) {
+                    const b = slice[val_start - 1].local_get;
+                    if (!effects.modified_locals.contains(b)) {
+                        effects.stores.append(arena, .{
+                            .base_local = b,
+                            .offset = store_acc.offset,
+                            .size = store_acc.size,
+                        }) catch return error.OutOfMemory;
+                        continue;
+                    }
+                } else if (val_start >= 3 and
+                    slice[val_start - 3] == .local_get and
+                    slice[val_start - 2] == .i32_const and
+                    slice[val_start - 2].i32_const >= 0 and
+                    slice[val_start - 1] == .numeric_op and
+                    slice[val_start - 1].numeric_op == 0x6a)
+                {
+                    const b = slice[val_start - 3].local_get;
+                    if (!effects.modified_locals.contains(b)) {
+                        effects.stores.append(arena, .{
+                            .base_local = b,
+                            .offset = store_acc.offset + @as(u64, @intCast(slice[val_start - 2].i32_const)),
+                            .size = store_acc.size,
+                        }) catch return error.OutOfMemory;
+                        continue;
+                    }
+                }
+            }
+            effects.has_unknown_store = true;
+            continue;
+        }
+        switch (inst) {
+            .call, .return_call, .return_call_indirect => effects.has_call_or_barrier = true,
+            .block => |b| try collectLoopMemoryEffects(b.body.items, arena, effects),
+            .loop => |lp| try collectLoopMemoryEffects(lp.body.items, arena, effects),
+            .if_ => |if_inst| {
+                try collectLoopMemoryEffects(if_inst.then_body.items, arena, effects);
+                if (if_inst.has_else) try collectLoopMemoryEffects(if_inst.else_body.items, arena, effects);
+            },
+            .raw => |r| if (r.len > 0) switch (r[0]) {
+                0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x40, 0xfb, 0xfe => effects.has_call_or_barrier = true,
+                0xfc => {
+                    var p: usize = 1;
+                    const sub = readU32(r, &p) catch {
+                        effects.has_call_or_barrier = true;
+                        continue;
+                    };
+                    if (sub >= 0x08 and sub <= 0x0b) effects.has_call_or_barrier = true;
+                },
+                else => {},
+            },
+            else => {},
+        }
+    }
+}
+
+fn getLocalValType(module: *const Mod.Module, func: *const Mod.Func, local_idx: u32) ?types.ValType {
+    if (func.decl.type_var.index >= module.module_types.items.len) return null;
+    const params = module.module_types.items[func.decl.type_var.index].func_type.params;
+    if (local_idx < params.len) return params[local_idx];
+    const rel = local_idx - @as(u32, @intCast(params.len));
+    if (rel < func.local_types.items.len) return func.local_types.items[rel];
+    return null;
+}
+
+fn inferExprValType(cand: []const Instr, module: *const Mod.Module, func: *const Mod.Func) ?types.ValType {
+    var end = cand.len;
+    while (end > 0 and cand[end - 1] == .nop) end -= 1;
+    if (end == 0) return null;
+    return switch (cand[end - 1]) {
+        .i32_const => .i32,
+        .i64_const => .i64,
+        .local_get => |l| getLocalValType(module, func, l),
+        .numeric_op => |op| switch (op) {
+            0x45...0x78, 0xa7...0xab, 0xbc, 0xc0, 0xc1 => .i32,
+            0x79...0x8a, 0xac...0xb1, 0xbd, 0xc2...0xc4 => .i64,
+            0x8b...0x98, 0xb2...0xb6, 0xbe => .f32,
+            0x99...0xa6, 0xb7...0xbb, 0xbf => .f64,
+            else => null,
+        },
+        .raw => |r| if (r.len > 0) switch (r[0]) {
+            0x43 => .f32,
+            0x44 => .f64,
+            0x28, 0x2c...0x2f => .i32,
+            0x29, 0x30...0x35 => .i64,
+            0x2a => .f32,
+            0x2b => .f64,
+            0x23 => blk: {
+                var p: usize = 1;
+                const g = readU32(r, &p) catch break :blk null;
+                if (g < module.globals.items.len) break :blk module.globals.items[g].type.val_type;
+                break :blk null;
+            },
+            0x1b => blk: {
+                const c = findPrevSingleValueExprStart(cand, end - 1) orelse break :blk null;
+                const v2 = findPrevSingleValueExprStart(cand, c) orelse break :blk null;
+                break :blk inferExprValType(cand[0..v2], module, func) orelse inferExprValType(cand[0..c], module, func);
+            },
+            0xfc => blk: {
+                var p: usize = 1;
+                const sub = readU32(r, &p) catch break :blk null;
+                break :blk switch (sub) {
+                    0x00...0x03 => .i32,
+                    0x04...0x07 => .i64,
+                    else => null,
+                };
+            },
+            0xfd => blk: {
+                var p: usize = 1;
+                const sub = readU32(r, &p) catch break :blk null;
+                break :blk switch (sub) {
+                    0x15, 0x16, 0x18, 0x19, 0x1b, 0x53, 0x63, 0x64, 0x83, 0x84, 0xa3, 0xa4, 0xc3, 0xc4 => .i32,
+                    0x1d => .i64,
+                    0x1f => .f32,
+                    0x21 => .f64,
+                    else => .v128,
+                };
+            },
+            else => null,
+        } else null,
+        else => null,
+    };
+}
+
+fn isLoopInvariantExpr(
+    cand: []const Instr,
+    effects: *const LoopSideEffects,
+    allow_loads_and_globals: bool,
+    non_escaping_fp: ?u32,
+) bool {
+    for (cand, 0..) |inst, idx| {
+        if (decodeLoadAccess(inst)) |load_acc| {
+            if (!allow_loads_and_globals) return false;
+            if (effects.has_call_or_barrier or effects.has_unknown_store) return false;
+            if (load_acc.mem_idx != 0) return false;
+
+            var base_local: ?u32 = null;
+            var eff_offset: u64 = load_acc.offset;
+            if (idx >= 1 and cand[idx - 1] == .local_get) {
+                base_local = cand[idx - 1].local_get;
+            } else if (idx >= 3 and
+                cand[idx - 3] == .local_get and
+                cand[idx - 2] == .i32_const and
+                cand[idx - 2].i32_const >= 0 and
+                cand[idx - 1] == .numeric_op and
+                cand[idx - 1].numeric_op == 0x6a)
+            {
+                base_local = cand[idx - 3].local_get;
+                eff_offset += @as(u64, @intCast(cand[idx - 2].i32_const));
+            }
+            const b = base_local orelse return false;
+            if (effects.modified_locals.contains(b)) return false;
+
+            for (effects.stores.items) |s| {
+                if (s.base_local == b) {
+                    if (memRangesOverlap(eff_offset, load_acc.size, s.offset, s.size)) return false;
+                } else if (!(non_escaping_fp != null and (b == non_escaping_fp.? or s.base_local == non_escaping_fp.?))) {
+                    return false;
+                }
+            }
+            continue;
+        }
+
+        switch (inst) {
+            .nop, .i32_const, .i64_const => {},
+            .local_get => |l| if (effects.modified_locals.contains(l)) return false,
+            .local_set, .local_tee => return false,
+            .numeric_op => |op| switch (op) {
+                // Trapping integer div/rem and float-to-int truncations cannot be hoisted speculatively
+                0x6d...0x70, 0x7f...0x82, 0xa8...0xab, 0xae...0xb1 => return false,
+                0x45...0x6c, 0x71...0x7e, 0x83...0xa7, 0xac, 0xad, 0xb2...0xc4 => {},
+                else => return false,
+            },
+            .raw => |r| {
+                if (r.len == 0) return false;
+                switch (r[0]) {
+                    0x1b, 0x43, 0x44 => {},
+                    0x23 => {
+                        if (!allow_loads_and_globals or effects.has_call_or_barrier) return false;
+                        var p: usize = 1;
+                        const g = readU32(r, &p) catch return false;
+                        if (effects.modified_globals.contains(g)) return false;
+                    },
+                    0xfc => {
+                        var p: usize = 1;
+                        const sub = readU32(r, &p) catch return false;
+                        if (sub > 0x07) return false;
+                    },
+                    0xfd => {
+                        var p: usize = 1;
+                        const sub = readU32(r, &p) catch return false;
+                        if (sub < 0x0c or (sub >= 0x54 and sub <= 0x5b)) return false;
+                    },
+                    else => return false,
+                }
+            },
+            else => return false,
+        }
+    }
+    return true;
+}
+
+fn isLoopPrefixTerminator(inst: Instr) bool {
+    if (decodeStoreAccess(inst) != null) return true;
+    return switch (inst) {
+        .block, .loop, .if_, .br, .br_if, .br_table, .return_, .unreachable_, .call, .return_call, .return_call_indirect => true,
+        .raw => |r| r.len > 0 and switch (r[0]) {
+            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x24, 0x40, 0xfb, 0xfc, 0xfe => true,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn allocateScratchLocal(module: *const Mod.Module, func: *Mod.Func, val_type: types.ValType) Error!u32 {
+    const param_count: u32 = if (func.decl.type_var.index < module.module_types.items.len)
+        @intCast(module.module_types.items[func.decl.type_var.index].func_type.params.len)
+    else
+        0;
+    const new_idx: u32 = param_count + @as(u32, @intCast(func.local_types.items.len));
+    if (func.local_type_idxs.items.len == func.local_types.items.len and func.local_type_idxs.items.len > 0) {
+        func.local_type_idxs.append(module.allocator, types.invalid_index) catch return error.OutOfMemory;
+    } else {
+        func.local_type_idxs.clearRetainingCapacity();
+    }
+    func.local_types.append(module.allocator, val_type) catch return error.OutOfMemory;
+    return new_idx;
+}
+
+fn hoistLoopInvariantInBlock(
+    arena: std.mem.Allocator,
+    module: *const Mod.Module,
+    func: *Mod.Func,
+    list: *InstrList,
+    non_escaping_fp: ?u32,
+) Error!bool {
+    var changed = false;
+    var out: InstrList = .empty;
+    out.ensureTotalCapacity(arena, list.items.len + 8) catch return error.OutOfMemory;
+
+    for (list.items) |inst| {
+        switch (inst) {
+            .block => |b_in| {
+                var b = b_in;
+                if (try hoistLoopInvariantInBlock(arena, module, func, &b.body, non_escaping_fp)) changed = true;
+                out.append(arena, .{ .block = b }) catch return error.OutOfMemory;
+            },
+            .if_ => |if_in| {
+                var if_inst = if_in;
+                if (try hoistLoopInvariantInBlock(arena, module, func, &if_inst.then_body, non_escaping_fp)) changed = true;
+                if (if_inst.has_else) {
+                    if (try hoistLoopInvariantInBlock(arena, module, func, &if_inst.else_body, non_escaping_fp)) changed = true;
+                }
+                out.append(arena, .{ .if_ = if_inst }) catch return error.OutOfMemory;
+            },
+            .loop => |lp_in| {
+                var lp = lp_in;
+                if (try hoistLoopInvariantInBlock(arena, module, func, &lp.body, non_escaping_fp)) changed = true;
+
+                var effects: LoopSideEffects = .{};
+                try collectLoopLocalAndGlobalWrites(lp.body.items, arena, &effects);
+                try collectLoopMemoryEffects(lp.body.items, arena, &effects);
+
+                // First: hoist top-level `<invariant_expr>; local.set X` in the unconditional loop entry prefix
+                // when `X` is assigned only once in the loop and not read earlier in the prefix.
+                var scan_idx: usize = 0;
+                while (scan_idx < lp.body.items.len) {
+                    const item = lp.body.items[scan_idx];
+                    if (isLoopPrefixTerminator(item)) break;
+                    if (item == .local_set) {
+                        const target_local = item.local_set;
+                        if ((effects.local_write_counts.get(target_local) orelse 0) == 1) {
+                            if (findPrevSingleValueExprStart(lp.body.items, scan_idx)) |expr_start| {
+                                const expr_slice = lp.body.items[expr_start..scan_idx];
+                                if (expr_slice.len >= 1 and
+                                    !sliceReferencesLocal(lp.body.items[0..expr_start], target_local) and
+                                    isLoopInvariantExpr(expr_slice, &effects, true, non_escaping_fp))
+                                {
+                                    out.appendSlice(arena, expr_slice) catch return error.OutOfMemory;
+                                    out.append(arena, .{ .local_set = target_local }) catch return error.OutOfMemory;
+
+                                    const remove_count = (scan_idx + 1) - expr_start;
+                                    std.mem.copyForwards(
+                                        Instr,
+                                        lp.body.items[expr_start .. lp.body.items.len - remove_count],
+                                        lp.body.items[scan_idx + 1 ..],
+                                    );
+                                    lp.body.items.len -= remove_count;
+                                    _ = effects.modified_locals.remove(target_local);
+                                    changed = true;
+                                    scan_idx = expr_start;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    scan_idx += 1;
+                }
+
+                // Compute `prefix_end` (before first branch, conditional, call, or store)
+                var prefix_end: usize = 0;
+                while (prefix_end < lp.body.items.len and !isLoopPrefixTerminator(lp.body.items[prefix_end])) {
+                    prefix_end += 1;
+                }
+
+                // Second: scan maximal single-value expressions in `lp.body.items` (in the unconditional prefix,
+                // both pure expressions and proven-safe invariant loads are eligible; after `prefix_end`,
+                // multi-op pure arithmetic expressions `>= 2` ops with no loads/globals are also eligible).
+                const HoistedChunk = struct {
+                    start: usize,
+                    end: usize,
+                    scratch_local: u32,
+                };
+                var chunks: std.ArrayListUnmanaged(HoistedChunk) = .empty;
+                var end_idx: usize = lp.body.items.len;
+                while (end_idx >= 2) {
+                    const allow_loads = end_idx <= prefix_end;
+                    if (findPrevSingleValueExprStart(lp.body.items, end_idx)) |start_idx| {
+                        const cand = lp.body.items[start_idx..end_idx];
+                        if (cand.len >= 2 and isLoopInvariantExpr(cand, &effects, allow_loads, non_escaping_fp)) {
+                            if (inferExprValType(cand, module, func)) |val_type| {
+                                const scratch_local = try allocateScratchLocal(module, func, val_type);
+                                chunks.append(arena, .{
+                                    .start = start_idx,
+                                    .end = end_idx,
+                                    .scratch_local = scratch_local,
+                                }) catch return error.OutOfMemory;
+                                end_idx = start_idx;
+                                continue;
+                            }
+                        }
+                    }
+                    end_idx -= 1;
+                }
+
+                if (chunks.items.len > 0) {
+                    // Emit preheader computations in forward order (`chunks` was collected from high `end_idx` to low)
+                    var ci = chunks.items.len;
+                    while (ci > 0) {
+                        ci -= 1;
+                        const ch = chunks.items[ci];
+                        out.appendSlice(arena, lp.body.items[ch.start..ch.end]) catch return error.OutOfMemory;
+                        out.append(arena, .{ .local_set = ch.scratch_local }) catch return error.OutOfMemory;
+                    }
+
+                    // Rewrite `lp.body` replacing each `[ch.start..ch.end)` with `.local_get = ch.scratch_local`
+                    var new_lp_body: InstrList = .empty;
+                    new_lp_body.ensureTotalCapacity(arena, lp.body.items.len) catch return error.OutOfMemory;
+                    var cursor: usize = 0;
+                    var ri = chunks.items.len;
+                    while (ri > 0) {
+                        ri -= 1;
+                        const ch = chunks.items[ri];
+                        new_lp_body.appendSliceAssumeCapacity(lp.body.items[cursor..ch.start]);
+                        new_lp_body.appendAssumeCapacity(.{ .local_get = ch.scratch_local });
+                        cursor = ch.end;
+                    }
+                    new_lp_body.appendSliceAssumeCapacity(lp.body.items[cursor..]);
+                    lp.body = new_lp_body;
+                    changed = true;
+                }
+
+                out.append(arena, .{ .loop = lp }) catch return error.OutOfMemory;
+            },
+            else => {
+                out.append(arena, inst) catch return error.OutOfMemory;
+            },
+        }
+    }
+
+    list.* = out;
+    return changed;
+}
+
+fn hoistLoopInvariantCode(
+    arena: std.mem.Allocator,
+    module: *const Mod.Module,
+    func: *Mod.Func,
+    root_list: *InstrList,
+    optimize_mode: OptimizeMode,
+) Error!bool {
+    _ = optimize_mode;
+    var non_escaping_fp: ?u32 = null;
+    if (detectShadowStackFrame(root_list.items)) |frame| {
+        const body_slice = root_list.items[frame.body_start..frame.body_end];
+        if (checkFpNeverEscapesToCallOrMem(body_slice, frame.fp, frame.has_epilogue)) {
+            non_escaping_fp = frame.fp;
+        }
+    }
+    return hoistLoopInvariantInBlock(arena, module, func, root_list, non_escaping_fp);
 }
 
 fn isPropagatableInstr(inst: Instr) bool {
@@ -2735,6 +4139,7 @@ fn findPrevSingleValueExprStart(slice: []const Instr, end_pos: usize) ?usize {
     var pos: usize = end_pos;
     while (pos > 0) {
         pos -= 1;
+        if (pos < end_pos - 1 and slice[pos] == .nop) continue;
         const eff = valExprStackEffect(slice[pos], null) orelse return null;
         if (eff.pushes == 0) return null;
         needed = needed - eff.pushes + eff.pops;
@@ -3119,6 +4524,7 @@ fn invertComparisonOp(op: u8) ?u8 {
         0x5c => 0x5b, // f32.ne -> f32.eq
         0x61 => 0x62, // f64.eq -> f64.ne
         0x62 => 0x61, // f64.ne -> f64.eq
+        0x73 => 0x46, // i32.eqz(i32.xor(a, b)) -> i32.eq(a, b)
         else => null,
     };
 }
@@ -3134,140 +4540,562 @@ fn isPureZeroPopInstr(inst: Instr) bool {
     };
 }
 
-fn emitOrFoldI32Eqz(items: []Instr, out_len: *usize) bool {
-    if (out_len.* >= 1) {
-        switch (items[out_len.* - 1]) {
+fn instrEql(a: Instr, b: Instr) bool {
+    return switch (a) {
+        .nop => b == .nop,
+        .i32_const => |v| b == .i32_const and b.i32_const == v,
+        .i64_const => |v| b == .i64_const and b.i64_const == v,
+        .local_get => |v| b == .local_get and b.local_get == v,
+        .local_set => |v| b == .local_set and b.local_set == v,
+        .local_tee => |v| b == .local_tee and b.local_tee == v,
+        .ref_func => |v| b == .ref_func and b.ref_func == v,
+        .numeric_op => |v| b == .numeric_op and b.numeric_op == v,
+        .raw => |r| b == .raw and std.mem.eql(u8, r, b.raw),
+        else => false,
+    };
+}
+
+const MagicU32 = struct {
+    mul: u64,
+    shift: u6,
+    add: bool,
+};
+
+fn magicU32(d: u32) MagicU32 {
+    const ad: u64 = d;
+    const nc: u64 = @as(u64, 0xffff_ffff) - (@as(u64, 0 -% d) % ad);
+    var p: u32 = 31;
+    var q1: u64 = 0x8000_0000 / nc;
+    var r1: u64 = 0x8000_0000 - q1 * nc;
+    var q2: u64 = 0x7fff_ffff / ad;
+    var r2: u64 = 0x7fff_ffff - q2 * ad;
+    var add = false;
+    while (true) {
+        p += 1;
+        if (r1 >= nc - r1) {
+            q1 = q1 * 2 + 1;
+            r1 = r1 * 2 - nc;
+        } else {
+            q1 = q1 * 2;
+            r1 = r1 * 2;
+        }
+        if (r2 + 1 >= ad - r2) {
+            if (q2 >= 0x7fff_ffff) add = true;
+            q2 = q2 * 2 + 1;
+            r2 = r2 * 2 + 1 - ad;
+        } else {
+            if (q2 >= 0x8000_0000) add = true;
+            q2 = q2 * 2;
+            r2 = r2 * 2 + 1;
+        }
+        const delta = ad - 1 - r2;
+        if (p >= 64 or !(q1 < delta or (q1 == delta and r1 == 0))) break;
+    }
+    return .{
+        .mul = (q2 + 1) & 0xffff_ffff,
+        .shift = @intCast(p - 32),
+        .add = add,
+    };
+}
+
+const MagicS32 = struct {
+    mul: i64,
+    shift: u6,
+};
+
+fn magicS32(d: u32) MagicS32 {
+    const ad: u64 = d;
+    const t: u64 = 0x8000_0000;
+    const anc: u64 = t - 1 - (t % ad);
+    var p: u32 = 31;
+    var q1: u64 = 0x8000_0000 / anc;
+    var r1: u64 = 0x8000_0000 - q1 * anc;
+    var q2: u64 = 0x8000_0000 / ad;
+    var r2: u64 = 0x8000_0000 - q2 * ad;
+    while (true) {
+        p += 1;
+        q1 *= 2;
+        r1 *= 2;
+        if (r1 >= anc) {
+            q1 += 1;
+            r1 -= anc;
+        }
+        q2 *= 2;
+        r2 *= 2;
+        if (r2 >= ad) {
+            q2 += 1;
+            r2 -= ad;
+        }
+        const delta = ad - r2;
+        if (p >= 64 or !(q1 < delta or (q1 == delta and r1 == 0))) break;
+    }
+    return .{
+        .mul = @intCast(q2 + 1),
+        .shift = @intCast(p),
+    };
+}
+
+fn emitMagicDivU32(arena: std.mem.Allocator, out: *InstrList, d: u32, lhs_local: ?u32) Error!bool {
+    const mag = magicU32(d);
+    if (!mag.add) {
+        try out.appendSlice(arena, &.{
+            .{ .numeric_op = 0xad }, // i64.extend_i32_u
+            .{ .i64_const = @intCast(mag.mul) },
+            .{ .numeric_op = 0x7e }, // i64.mul
+            .{ .i64_const = 32 + @as(i64, mag.shift) },
+            .{ .numeric_op = 0x88 }, // i64.shr_u
+            .{ .numeric_op = 0xa7 }, // i32.wrap_i64
+        });
+        return true;
+    }
+    const l = lhs_local orelse return false;
+    try out.appendSlice(arena, &.{
+        .{ .numeric_op = 0xad }, // i64.extend_i32_u
+        .{ .i64_const = @intCast(mag.mul) },
+        .{ .numeric_op = 0x7e }, // i64.mul
+        .{ .i64_const = 32 },
+        .{ .numeric_op = 0x88 }, // i64.shr_u
+        .{ .local_get = l },
+        .{ .numeric_op = 0xad }, // i64.extend_i32_u
+        .{ .numeric_op = 0x7c }, // i64.add
+    });
+    if (mag.shift > 0) {
+        try out.appendSlice(arena, &.{
+            .{ .i64_const = @as(i64, mag.shift) },
+            .{ .numeric_op = 0x88 }, // i64.shr_u
+        });
+    }
+    try out.append(arena, .{ .numeric_op = 0xa7 }); // i32.wrap_i64
+    return true;
+}
+
+fn emitStrengthReducedDivS32(arena: std.mem.Allocator, out: *InstrList, d: u32, l: u32) Error!void {
+    if (std.math.isPowerOfTwo(d)) {
+        const k: i32 = @intCast(@ctz(d));
+        if (k == 1) {
+            try out.appendSlice(arena, &.{
+                .{ .i32_const = 31 },
+                .{ .numeric_op = 0x76 }, // i32.shr_u
+                .{ .local_get = l },
+                .{ .numeric_op = 0x6a }, // i32.add
+                .{ .i32_const = 1 },
+                .{ .numeric_op = 0x75 }, // i32.shr_s
+            });
+        } else {
+            try out.appendSlice(arena, &.{
+                .{ .i32_const = 31 },
+                .{ .numeric_op = 0x75 }, // i32.shr_s
+                .{ .i32_const = 32 - k },
+                .{ .numeric_op = 0x76 }, // i32.shr_u
+                .{ .local_get = l },
+                .{ .numeric_op = 0x6a }, // i32.add
+                .{ .i32_const = k },
+                .{ .numeric_op = 0x75 }, // i32.shr_s
+            });
+        }
+        return;
+    }
+    const mag = magicS32(d);
+    try out.appendSlice(arena, &.{
+        .{ .numeric_op = 0xac }, // i64.extend_i32_s
+        .{ .i64_const = mag.mul },
+        .{ .numeric_op = 0x7e }, // i64.mul
+        .{ .i64_const = @as(i64, mag.shift) },
+        .{ .numeric_op = 0x87 }, // i64.shr_s
+        .{ .numeric_op = 0xa7 }, // i32.wrap_i64
+        .{ .local_get = l },
+        .{ .i32_const = 31 },
+        .{ .numeric_op = 0x76 }, // i32.shr_u
+        .{ .numeric_op = 0x6a }, // i32.add
+    });
+}
+
+fn possibleOnesI32(slice: []const Instr) u32 {
+    if (slice.len == 0) return 0xffff_ffff;
+    const last = slice[slice.len - 1];
+    switch (last) {
+        .i32_const => |c| return @bitCast(c),
+        .numeric_op => |op| switch (op) {
+            0x45...0x66 => return 1,
+            0x67, 0x68, 0x69 => return 0x3f, // clz, ctz, popcnt in 0..32
+            0x71 => { // i32.and
+                const r_start = findPrevSingleValueExprStart(slice, slice.len - 1) orelse return 0xffff_ffff;
+                const l_start = findPrevSingleValueExprStart(slice, r_start) orelse return possibleOnesI32(slice[r_start .. slice.len - 1]);
+                return possibleOnesI32(slice[l_start..r_start]) & possibleOnesI32(slice[r_start .. slice.len - 1]);
+            },
+            0x72, 0x73 => { // i32.or, i32.xor
+                const r_start = findPrevSingleValueExprStart(slice, slice.len - 1) orelse return 0xffff_ffff;
+                const l_start = findPrevSingleValueExprStart(slice, r_start) orelse return 0xffff_ffff;
+                return possibleOnesI32(slice[l_start..r_start]) | possibleOnesI32(slice[r_start .. slice.len - 1]);
+            },
+            0x74 => { // i32.shl
+                if (slice.len >= 2 and slice[slice.len - 2] == .i32_const) {
+                    const sh: u5 = @truncate(@as(u32, @bitCast(slice[slice.len - 2].i32_const)));
+                    const l_start = findPrevSingleValueExprStart(slice, slice.len - 2) orelse return (@as(u32, 0xffff_ffff) << sh);
+                    return possibleOnesI32(slice[l_start .. slice.len - 2]) << sh;
+                }
+                return 0xffff_ffff;
+            },
+            0x76 => { // i32.shr_u
+                if (slice.len >= 2 and slice[slice.len - 2] == .i32_const) {
+                    const sh: u5 = @truncate(@as(u32, @bitCast(slice[slice.len - 2].i32_const)));
+                    const l_start = findPrevSingleValueExprStart(slice, slice.len - 2) orelse return (@as(u32, 0xffff_ffff) >> sh);
+                    return possibleOnesI32(slice[l_start .. slice.len - 2]) >> sh;
+                }
+                return 0xffff_ffff;
+            },
+            0x70 => { // i32.rem_u
+                if (slice.len >= 2 and slice[slice.len - 2] == .i32_const) {
+                    const d: u32 = @bitCast(slice[slice.len - 2].i32_const);
+                    if (d == 1) return 0;
+                    if (d > 1) {
+                        const rem_mask: u32 = @as(u32, 0xffff_ffff) >> @intCast(@clz(d - 1));
+                        const l_start = findPrevSingleValueExprStart(slice, slice.len - 2) orelse return rem_mask;
+                        return possibleOnesI32(slice[l_start .. slice.len - 2]) & rem_mask;
+                    }
+                }
+                return 0xffff_ffff;
+            },
+            0xa7 => { // i32.wrap_i64
+                return @truncate(possibleOnesI64(slice[0 .. slice.len - 1]));
+            },
+            else => return 0xffff_ffff,
+        },
+        .raw => |r| {
+            if (r.len == 0) return 0xffff_ffff;
+            return switch (r[0]) {
+                0x2d => 0xff, // i32.load8_u
+                0x2f => 0xffff, // i32.load16_u
+                0x1b, 0x1c => blk: { // select
+                    const c_start = findPrevSingleValueExprStart(slice, slice.len - 1) orelse break :blk 0xffff_ffff;
+                    const f_start = findPrevSingleValueExprStart(slice, c_start) orelse break :blk 0xffff_ffff;
+                    const t_start = findPrevSingleValueExprStart(slice, f_start) orelse break :blk 0xffff_ffff;
+                    break :blk possibleOnesI32(slice[t_start..f_start]) | possibleOnesI32(slice[f_start..c_start]);
+                },
+                else => 0xffff_ffff,
+            };
+        },
+        .if_ => |if_inst| {
+            if (if_inst.has_else and if_inst.then_body.items.len > 0 and if_inst.else_body.items.len > 0) {
+                return possibleOnesI32(if_inst.then_body.items) | possibleOnesI32(if_inst.else_body.items);
+            }
+            return 0xffff_ffff;
+        },
+        else => return 0xffff_ffff,
+    }
+}
+
+fn possibleOnesI64(slice: []const Instr) u64 {
+    if (slice.len == 0) return 0xffff_ffff_ffff_ffff;
+    const last = slice[slice.len - 1];
+    switch (last) {
+        .i64_const => |c| return @bitCast(c),
+        .numeric_op => |op| switch (op) {
+            0x79, 0x7a, 0x7b => return 0x7f, // i64 clz, ctz, popcnt in 0..64
+            0x83 => { // i64.and
+                const r_start = findPrevSingleValueExprStart(slice, slice.len - 1) orelse return 0xffff_ffff_ffff_ffff;
+                const l_start = findPrevSingleValueExprStart(slice, r_start) orelse return possibleOnesI64(slice[r_start .. slice.len - 1]);
+                return possibleOnesI64(slice[l_start..r_start]) & possibleOnesI64(slice[r_start .. slice.len - 1]);
+            },
+            0x84, 0x85 => { // i64.or, i64.xor
+                const r_start = findPrevSingleValueExprStart(slice, slice.len - 1) orelse return 0xffff_ffff_ffff_ffff;
+                const l_start = findPrevSingleValueExprStart(slice, r_start) orelse return 0xffff_ffff_ffff_ffff;
+                return possibleOnesI64(slice[l_start..r_start]) | possibleOnesI64(slice[r_start .. slice.len - 1]);
+            },
+            0x86 => { // i64.shl
+                if (slice.len >= 2 and slice[slice.len - 2] == .i64_const) {
+                    const sh: u6 = @truncate(@as(u64, @bitCast(slice[slice.len - 2].i64_const)));
+                    const l_start = findPrevSingleValueExprStart(slice, slice.len - 2) orelse return (@as(u64, 0xffff_ffff_ffff_ffff) << sh);
+                    return possibleOnesI64(slice[l_start .. slice.len - 2]) << sh;
+                }
+                return 0xffff_ffff_ffff_ffff;
+            },
+            0x88 => { // i64.shr_u
+                if (slice.len >= 2 and slice[slice.len - 2] == .i64_const) {
+                    const sh: u6 = @truncate(@as(u64, @bitCast(slice[slice.len - 2].i64_const)));
+                    const l_start = findPrevSingleValueExprStart(slice, slice.len - 2) orelse return (@as(u64, 0xffff_ffff_ffff_ffff) >> sh);
+                    return possibleOnesI64(slice[l_start .. slice.len - 2]) >> sh;
+                }
+                return 0xffff_ffff_ffff_ffff;
+            },
+            0x82 => { // i64.rem_u
+                if (slice.len >= 2 and slice[slice.len - 2] == .i64_const) {
+                    const d: u64 = @bitCast(slice[slice.len - 2].i64_const);
+                    if (d == 1) return 0;
+                    if (d > 1) {
+                        const rem_mask: u64 = @as(u64, 0xffff_ffff_ffff_ffff) >> @intCast(@clz(d - 1));
+                        const l_start = findPrevSingleValueExprStart(slice, slice.len - 2) orelse return rem_mask;
+                        return possibleOnesI64(slice[l_start .. slice.len - 2]) & rem_mask;
+                    }
+                }
+                return 0xffff_ffff_ffff_ffff;
+            },
+            0xad => { // i64.extend_i32_u
+                return @as(u64, possibleOnesI32(slice[0 .. slice.len - 1]));
+            },
+            else => return 0xffff_ffff_ffff_ffff,
+        },
+        .raw => |r| {
+            if (r.len == 0) return 0xffff_ffff_ffff_ffff;
+            return switch (r[0]) {
+                0x31 => 0xff, // i64.load8_u
+                0x33 => 0xffff, // i64.load16_u
+                0x35 => 0xffff_ffff, // i64.load32_u
+                0x1b, 0x1c => blk: {
+                    const c_start = findPrevSingleValueExprStart(slice, slice.len - 1) orelse break :blk 0xffff_ffff_ffff_ffff;
+                    const f_start = findPrevSingleValueExprStart(slice, c_start) orelse break :blk 0xffff_ffff_ffff_ffff;
+                    const t_start = findPrevSingleValueExprStart(slice, f_start) orelse break :blk 0xffff_ffff_ffff_ffff;
+                    break :blk possibleOnesI64(slice[t_start..f_start]) | possibleOnesI64(slice[f_start..c_start]);
+                },
+                else => 0xffff_ffff_ffff_ffff,
+            };
+        },
+        .if_ => |if_inst| {
+            if (if_inst.has_else and if_inst.then_body.items.len > 0 and if_inst.else_body.items.len > 0) {
+                return possibleOnesI64(if_inst.then_body.items) | possibleOnesI64(if_inst.else_body.items);
+            }
+            return 0xffff_ffff_ffff_ffff;
+        },
+        else => return 0xffff_ffff_ffff_ffff,
+    }
+}
+
+fn extractLocalGetOrTee(inst: Instr) ?u32 {
+    return switch (inst) {
+        .local_get => |l| l,
+        .local_tee => |l| l,
+        else => null,
+    };
+}
+
+fn emitOrFoldI32Eqz(arena: std.mem.Allocator, out: *InstrList) Error!bool {
+    if (out.items.len >= 1) {
+        switch (out.items[out.items.len - 1]) {
             .i32_const => |c| {
-                items[out_len.* - 1] = .{ .i32_const = if (c == 0) 1 else 0 };
+                out.items[out.items.len - 1] = .{ .i32_const = if (c == 0) 1 else 0 };
                 return true;
             },
             .numeric_op => |prev_op| {
                 if (invertComparisonOp(prev_op)) |inv| {
-                    items[out_len.* - 1] = .{ .numeric_op = inv };
-                    if (inv == 0x46 and out_len.* >= 2 and items[out_len.* - 2] == .i32_const and items[out_len.* - 2].i32_const == 0) {
-                        out_len.* -= 2;
-                        _ = emitOrFoldI32Eqz(items, out_len);
-                    } else if (inv == 0x51 and out_len.* >= 2 and items[out_len.* - 2] == .i64_const and items[out_len.* - 2].i64_const == 0) {
-                        items[out_len.* - 2] = .{ .numeric_op = 0x50 };
-                        out_len.* -= 1;
+                    out.items[out.items.len - 1] = .{ .numeric_op = inv };
+                    if (inv == 0x46 and out.items.len >= 2 and out.items[out.items.len - 2] == .i32_const and out.items[out.items.len - 2].i32_const == 0) {
+                        out.items.len -= 2;
+                        _ = try emitOrFoldI32Eqz(arena, out);
+                    } else if (inv == 0x51 and out.items.len >= 2 and out.items[out.items.len - 2] == .i64_const and out.items[out.items.len - 2].i64_const == 0) {
+                        out.items[out.items.len - 2] = .{ .numeric_op = 0x50 };
+                        out.items.len -= 1;
                     }
                     return true;
                 }
-                if (prev_op == 0x45 and out_len.* >= 2 and isBoolProducer(items[out_len.* - 2])) {
-                    out_len.* -= 1;
-                    return true;
+                if (prev_op == 0x45 and out.items.len >= 2) {
+                    const before_eqz = out.items[0 .. out.items.len - 1];
+                    if (isBoolProducer(before_eqz[before_eqz.len - 1]) or possibleOnesI32(before_eqz) <= 1) {
+                        out.items.len -= 1;
+                        return true;
+                    }
                 }
             },
             else => {},
         }
     }
-    items[out_len.*] = .{ .numeric_op = 0x45 };
-    out_len.* += 1;
+    out.append(arena, .{ .numeric_op = 0x45 }) catch return error.OutOfMemory;
     return false;
 }
 
-fn foldConstants(list: *InstrList) bool {
+fn foldConstants(arena: std.mem.Allocator, list: *InstrList, optimize_mode: OptimizeMode) Error!bool {
     var changed = false;
 
     for (list.items) |*inst| {
         switch (inst.*) {
             .block => |*b| {
-                if (foldConstants(&b.body)) changed = true;
+                if (try foldConstants(arena, &b.body, optimize_mode)) changed = true;
             },
             .loop => |*l| {
-                if (foldConstants(&l.body)) changed = true;
+                if (try foldConstants(arena, &l.body, optimize_mode)) changed = true;
             },
             .if_ => |*i| {
-                if (foldConstants(&i.then_body)) changed = true;
-                if (i.has_else and foldConstants(&i.else_body)) changed = true;
+                if (try foldConstants(arena, &i.then_body, optimize_mode)) changed = true;
+                if (i.has_else and try foldConstants(arena, &i.else_body, optimize_mode)) changed = true;
             },
             else => {},
         }
     }
 
-    var out_len: usize = 0;
+    var out: InstrList = .empty;
+    out.ensureTotalCapacity(arena, list.items.len) catch return error.OutOfMemory;
+
     for (list.items) |inst| {
         switch (inst) {
             .numeric_op => |op| {
                 if (op == 0x45) {
-                    if (emitOrFoldI32Eqz(list.items, &out_len)) {
+                    if (try emitOrFoldI32Eqz(arena, &out)) {
                         changed = true;
                     }
                     continue;
                 }
-                if (out_len >= 1) {
-                    switch (list.items[out_len - 1]) {
+                if (op == 0x50 and out.items.len >= 1 and out.items[out.items.len - 1] == .numeric_op and out.items[out.items.len - 1].numeric_op == 0x85) {
+                    out.items[out.items.len - 1] = .{ .numeric_op = 0x51 };
+                    if (out.items.len >= 2 and out.items[out.items.len - 2] == .i64_const and out.items[out.items.len - 2].i64_const == 0) {
+                        out.items[out.items.len - 2] = .{ .numeric_op = 0x50 };
+                        out.items.len -= 1;
+                    }
+                    changed = true;
+                    continue;
+                }
+                if (out.items.len >= 1) {
+                    switch (out.items[out.items.len - 1]) {
                         .i32_const => |a| {
                             if (foldI32Unary(a, op)) |folded| {
-                                list.items[out_len - 1] = folded;
+                                out.items[out.items.len - 1] = folded;
                                 changed = true;
                                 continue;
                             }
                         },
                         .i64_const => |a| {
                             if (foldI64Unary(a, op)) |folded| {
-                                list.items[out_len - 1] = folded;
+                                out.items[out.items.len - 1] = folded;
                                 changed = true;
                                 continue;
+                            }
+                        },
+                        .numeric_op => |prev_op| {
+                            // `i32.wrap_i64` of `i64.extend_i32_s` or `i64.extend_i32_u` -> elide both
+                            if (op == 0xa7 and (prev_op == 0xac or prev_op == 0xad)) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                            // Float unary idempotents: abs(abs(x)) -> abs(x), abs(neg(x)) -> abs(x), neg(neg(x)) -> x
+                            if (op == 0x8b and (prev_op == 0x8b or prev_op == 0x8c)) {
+                                out.items[out.items.len - 1] = .{ .numeric_op = 0x8b };
+                                changed = true;
+                                continue;
+                            }
+                            if (op == 0x8c and prev_op == 0x8c) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                            if (op == 0x99 and (prev_op == 0x99 or prev_op == 0x9a)) {
+                                out.items[out.items.len - 1] = .{ .numeric_op = 0x99 };
+                                changed = true;
+                                continue;
+                            }
+                            if (op == 0x9a and prev_op == 0x9a) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .raw => {
+                            // Fuse `extend*_s` of `load*_u` into `load*_s`
+                            if (op >= 0xc0 and op <= 0xc4) {
+                                if (decodeLoadAccess(out.items[out.items.len - 1])) |load_acc| {
+                                    const fused_opc: ?u8 = switch (op) {
+                                        0xc0 => if (load_acc.opcode == 0x2d) @as(u8, 0x2c) else null,
+                                        0xc1 => if (load_acc.opcode == 0x2f) @as(u8, 0x2e) else null,
+                                        0xc2 => if (load_acc.opcode == 0x31) @as(u8, 0x30) else null,
+                                        0xc3 => if (load_acc.opcode == 0x33) @as(u8, 0x32) else null,
+                                        0xc4 => if (load_acc.opcode == 0x35) @as(u8, 0x34) else null,
+                                        else => null,
+                                    };
+                                    if (fused_opc) |new_opc| {
+                                        const new_raw = arena.dupe(u8, out.items[out.items.len - 1].raw) catch return error.OutOfMemory;
+                                        new_raw[0] = new_opc;
+                                        out.items[out.items.len - 1] = .{ .raw = new_raw };
+                                        changed = true;
+                                        continue;
+                                    }
+                                }
                             }
                         },
                         else => {},
                     }
                 }
-                if (out_len >= 2) {
-                    if (list.items[out_len - 2] == .i32_const and list.items[out_len - 1] == .i32_const) {
-                        const a = list.items[out_len - 2].i32_const;
-                        const b = list.items[out_len - 1].i32_const;
+                if (out.items.len >= 2) {
+                    if (out.items[out.items.len - 2] == .i32_const and out.items[out.items.len - 1] == .i32_const) {
+                        const a = out.items[out.items.len - 2].i32_const;
+                        const b = out.items[out.items.len - 1].i32_const;
                         if (foldI32Binary(a, b, op)) |folded| {
-                            list.items[out_len - 2] = folded;
-                            out_len -= 1;
+                            out.items[out.items.len - 2] = folded;
+                            out.items.len -= 1;
                             changed = true;
                             continue;
                         }
-                    } else if (list.items[out_len - 2] == .i64_const and list.items[out_len - 1] == .i64_const) {
-                        const a = list.items[out_len - 2].i64_const;
-                        const b = list.items[out_len - 1].i64_const;
+                    } else if (out.items[out.items.len - 2] == .i64_const and out.items[out.items.len - 1] == .i64_const) {
+                        const a = out.items[out.items.len - 2].i64_const;
+                        const b = out.items[out.items.len - 1].i64_const;
                         if (foldI64Binary(a, b, op)) |folded| {
-                            list.items[out_len - 2] = folded;
-                            out_len -= 1;
+                            out.items[out.items.len - 2] = folded;
+                            out.items.len -= 1;
                             changed = true;
                             continue;
+                        }
+                    } else if (out.items[out.items.len - 2] == .local_get and out.items[out.items.len - 1] == .local_get and
+                        out.items[out.items.len - 2].local_get == out.items[out.items.len - 1].local_get)
+                    {
+                        // Same-local integer binary/comparison folds
+                        switch (op) {
+                            0x6b, 0x73, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x52, 0x53, 0x54, 0x55, 0x56 => {
+                                out.items[out.items.len - 2] = .{ .i32_const = 0 };
+                                out.items.len -= 1;
+                                changed = true;
+                                continue;
+                            },
+                            0x7d, 0x85 => {
+                                out.items[out.items.len - 2] = .{ .i64_const = 0 };
+                                out.items.len -= 1;
+                                changed = true;
+                                continue;
+                            },
+                            0x71, 0x72, 0x83, 0x84 => {
+                                out.items.len -= 1;
+                                changed = true;
+                                continue;
+                            },
+                            0x46, 0x4c, 0x4d, 0x4e, 0x4f, 0x51, 0x57, 0x58, 0x59, 0x5a => {
+                                out.items[out.items.len - 2] = .{ .i32_const = 1 };
+                                out.items.len -= 1;
+                                changed = true;
+                                continue;
+                            },
+                            else => {},
                         }
                     }
                 }
 
                 // Constant reassociation: (x +- c1) +- c2 and associative bitwise
-                if (out_len >= 3) {
+                if (out.items.len >= 3) {
                     if ((op == 0x6a or op == 0x6b) and
-                        list.items[out_len - 1] == .i32_const and
-                        list.items[out_len - 2] == .numeric_op and
-                        (list.items[out_len - 2].numeric_op == 0x6a or list.items[out_len - 2].numeric_op == 0x6b) and
-                        list.items[out_len - 3] == .i32_const)
+                        out.items[out.items.len - 1] == .i32_const and
+                        out.items[out.items.len - 2] == .numeric_op and
+                        (out.items[out.items.len - 2].numeric_op == 0x6a or out.items[out.items.len - 2].numeric_op == 0x6b) and
+                        out.items[out.items.len - 3] == .i32_const)
                     {
-                        const c1 = list.items[out_len - 3].i32_const;
-                        const op1 = list.items[out_len - 2].numeric_op;
-                        const c2 = list.items[out_len - 1].i32_const;
+                        const c1 = out.items[out.items.len - 3].i32_const;
+                        const op1 = out.items[out.items.len - 2].numeric_op;
+                        const c2 = out.items[out.items.len - 1].i32_const;
                         const d1: i32 = if (op1 == 0x6a) c1 else 0 -% c1;
                         const d2: i32 = if (op == 0x6a) c2 else 0 -% c2;
                         const total: i32 = d1 +% d2;
                         if (total == 0) {
-                            out_len -= 3;
+                            out.items.len -= 3;
                         } else {
-                            list.items[out_len - 3] = .{ .i32_const = total };
-                            list.items[out_len - 2] = .{ .numeric_op = 0x6a };
-                            out_len -= 1;
+                            out.items[out.items.len - 3] = .{ .i32_const = total };
+                            out.items[out.items.len - 2] = .{ .numeric_op = 0x6a };
+                            out.items.len -= 1;
                         }
                         changed = true;
                         continue;
                     }
                     if ((op == 0x71 or op == 0x72 or op == 0x73) and
-                        list.items[out_len - 1] == .i32_const and
-                        list.items[out_len - 2] == .numeric_op and
-                        list.items[out_len - 2].numeric_op == op and
-                        list.items[out_len - 3] == .i32_const)
+                        out.items[out.items.len - 1] == .i32_const and
+                        out.items[out.items.len - 2] == .numeric_op and
+                        out.items[out.items.len - 2].numeric_op == op and
+                        out.items[out.items.len - 3] == .i32_const)
                     {
-                        const c1 = list.items[out_len - 3].i32_const;
-                        const c2 = list.items[out_len - 1].i32_const;
+                        const c1 = out.items[out.items.len - 3].i32_const;
+                        const c2 = out.items[out.items.len - 1].i32_const;
                         const combined: i32 = switch (op) {
                             0x71 => c1 & c2,
                             0x72 => c1 | c2,
@@ -3280,44 +5108,44 @@ fn foldConstants(list: *InstrList) bool {
                             else => unreachable,
                         };
                         if (is_identity) {
-                            out_len -= 3;
+                            out.items.len -= 3;
                         } else {
-                            list.items[out_len - 3] = .{ .i32_const = combined };
-                            out_len -= 1;
+                            out.items[out.items.len - 3] = .{ .i32_const = combined };
+                            out.items.len -= 1;
                         }
                         changed = true;
                         continue;
                     }
                     if ((op == 0x7c or op == 0x7d) and
-                        list.items[out_len - 1] == .i64_const and
-                        list.items[out_len - 2] == .numeric_op and
-                        (list.items[out_len - 2].numeric_op == 0x7c or list.items[out_len - 2].numeric_op == 0x7d) and
-                        list.items[out_len - 3] == .i64_const)
+                        out.items[out.items.len - 1] == .i64_const and
+                        out.items[out.items.len - 2] == .numeric_op and
+                        (out.items[out.items.len - 2].numeric_op == 0x7c or out.items[out.items.len - 2].numeric_op == 0x7d) and
+                        out.items[out.items.len - 3] == .i64_const)
                     {
-                        const c1 = list.items[out_len - 3].i64_const;
-                        const op1 = list.items[out_len - 2].numeric_op;
-                        const c2 = list.items[out_len - 1].i64_const;
+                        const c1 = out.items[out.items.len - 3].i64_const;
+                        const op1 = out.items[out.items.len - 2].numeric_op;
+                        const c2 = out.items[out.items.len - 1].i64_const;
                         const d1: i64 = if (op1 == 0x7c) c1 else 0 -% c1;
                         const d2: i64 = if (op == 0x7c) c2 else 0 -% c2;
                         const total: i64 = d1 +% d2;
                         if (total == 0) {
-                            out_len -= 3;
+                            out.items.len -= 3;
                         } else {
-                            list.items[out_len - 3] = .{ .i64_const = total };
-                            list.items[out_len - 2] = .{ .numeric_op = 0x7c };
-                            out_len -= 1;
+                            out.items[out.items.len - 3] = .{ .i64_const = total };
+                            out.items[out.items.len - 2] = .{ .numeric_op = 0x7c };
+                            out.items.len -= 1;
                         }
                         changed = true;
                         continue;
                     }
                     if ((op == 0x83 or op == 0x84 or op == 0x85) and
-                        list.items[out_len - 1] == .i64_const and
-                        list.items[out_len - 2] == .numeric_op and
-                        list.items[out_len - 2].numeric_op == op and
-                        list.items[out_len - 3] == .i64_const)
+                        out.items[out.items.len - 1] == .i64_const and
+                        out.items[out.items.len - 2] == .numeric_op and
+                        out.items[out.items.len - 2].numeric_op == op and
+                        out.items[out.items.len - 3] == .i64_const)
                     {
-                        const c1 = list.items[out_len - 3].i64_const;
-                        const c2 = list.items[out_len - 1].i64_const;
+                        const c1 = out.items[out.items.len - 3].i64_const;
+                        const c2 = out.items[out.items.len - 1].i64_const;
                         const combined: i64 = switch (op) {
                             0x83 => c1 & c2,
                             0x84 => c1 | c2,
@@ -3330,10 +5158,10 @@ fn foldConstants(list: *InstrList) bool {
                             else => unreachable,
                         };
                         if (is_identity) {
-                            out_len -= 3;
+                            out.items.len -= 3;
                         } else {
-                            list.items[out_len - 3] = .{ .i64_const = combined };
-                            out_len -= 1;
+                            out.items[out.items.len - 3] = .{ .i64_const = combined };
+                            out.items.len -= 1;
                         }
                         changed = true;
                         continue;
@@ -3341,105 +5169,208 @@ fn foldConstants(list: *InstrList) bool {
                 }
 
                 // Single-constant right-operand peepholes
-                if (out_len >= 1) {
-                    switch (list.items[out_len - 1]) {
+                if (out.items.len >= 1) {
+                    switch (out.items[out.items.len - 1]) {
                         .i32_const => |rhs| {
                             const rhs_u: u32 = @bitCast(rhs);
                             const shift_amt: u5 = @truncate(rhs_u);
                             switch (op) {
                                 0x6a, 0x6b, 0x72 => if (rhs == 0) {
-                                    out_len -= 1;
+                                    out.items.len -= 1;
                                     changed = true;
                                     continue;
                                 },
                                 0x73 => {
                                     if (rhs == 0) {
-                                        out_len -= 1;
+                                        out.items.len -= 1;
                                         changed = true;
                                         continue;
                                     }
-                                    if (rhs == 1 and out_len >= 2 and isBoolProducer(list.items[out_len - 2])) {
-                                        out_len -= 1;
-                                        _ = emitOrFoldI32Eqz(list.items, &out_len);
-                                        changed = true;
-                                        continue;
+                                    if (rhs == 1 and out.items.len >= 2) {
+                                        const lhs_slice = out.items[0 .. out.items.len - 1];
+                                        if (isBoolProducer(lhs_slice[lhs_slice.len - 1]) or possibleOnesI32(lhs_slice) <= 1) {
+                                            out.items.len -= 1;
+                                            _ = try emitOrFoldI32Eqz(arena, &out);
+                                            changed = true;
+                                            continue;
+                                        }
                                     }
                                 },
-                                0x71 => if (rhs == -1 or (out_len >= 2 and isBoolProducer(list.items[out_len - 2]) and (rhs & 1) == 1)) {
-                                    out_len -= 1;
-                                    changed = true;
-                                    continue;
+                                0x71 => {
+                                    if (rhs == -1 or (out.items.len >= 2 and isBoolProducer(out.items[out.items.len - 2]) and (rhs & 1) == 1)) {
+                                        out.items.len -= 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if (out.items.len >= 2) {
+                                        if (findPrevSingleValueExprStart(out.items, out.items.len - 1)) |lhs_start| {
+                                            const lhs_slice = out.items[lhs_start .. out.items.len - 1];
+                                            if ((possibleOnesI32(lhs_slice) & ~rhs_u) == 0) {
+                                                out.items.len -= 1;
+                                                changed = true;
+                                                continue;
+                                            }
+                                        }
+                                    }
                                 },
                                 0x74, 0x75, 0x76, 0x77, 0x78 => if (shift_amt == 0) {
-                                    out_len -= 1;
+                                    out.items.len -= 1;
                                     changed = true;
                                     continue;
                                 },
                                 0x46 => {
                                     if (rhs == 0) {
-                                        out_len -= 1;
-                                        _ = emitOrFoldI32Eqz(list.items, &out_len);
+                                        out.items.len -= 1;
+                                        _ = try emitOrFoldI32Eqz(arena, &out);
                                         changed = true;
                                         continue;
                                     }
-                                    if (rhs == 1 and out_len >= 2 and isBoolProducer(list.items[out_len - 2])) {
-                                        out_len -= 1;
-                                        changed = true;
-                                        continue;
+                                    if (rhs == 1 and out.items.len >= 2) {
+                                        const lhs_slice = out.items[0 .. out.items.len - 1];
+                                        if (isBoolProducer(lhs_slice[lhs_slice.len - 1]) or possibleOnesI32(lhs_slice) <= 1) {
+                                            out.items.len -= 1;
+                                            changed = true;
+                                            continue;
+                                        }
                                     }
                                 },
                                 0x47 => {
-                                    if (rhs == 0 and out_len >= 2 and isBoolProducer(list.items[out_len - 2])) {
-                                        out_len -= 1;
-                                        changed = true;
-                                        continue;
+                                    if (rhs == 0 and out.items.len >= 2) {
+                                        const lhs_slice = out.items[0 .. out.items.len - 1];
+                                        if (lhs_slice[lhs_slice.len - 1] == .numeric_op and lhs_slice[lhs_slice.len - 1].numeric_op == 0x73) {
+                                            out.items[out.items.len - 2] = .{ .numeric_op = 0x47 };
+                                            out.items.len -= 1;
+                                            changed = true;
+                                            continue;
+                                        }
+                                        if (isBoolProducer(lhs_slice[lhs_slice.len - 1]) or possibleOnesI32(lhs_slice) <= 1) {
+                                            out.items.len -= 1;
+                                            changed = true;
+                                            continue;
+                                        }
                                     }
-                                    if (rhs == 1 and out_len >= 2 and isBoolProducer(list.items[out_len - 2])) {
-                                        out_len -= 1;
-                                        _ = emitOrFoldI32Eqz(list.items, &out_len);
-                                        changed = true;
-                                        continue;
+                                    if (rhs == 1 and out.items.len >= 2) {
+                                        const lhs_slice = out.items[0 .. out.items.len - 1];
+                                        if (isBoolProducer(lhs_slice[lhs_slice.len - 1]) or possibleOnesI32(lhs_slice) <= 1) {
+                                            out.items.len -= 1;
+                                            _ = try emitOrFoldI32Eqz(arena, &out);
+                                            changed = true;
+                                            continue;
+                                        }
                                     }
                                 },
                                 0x6c => {
                                     if (rhs == 1) {
-                                        out_len -= 1;
+                                        out.items.len -= 1;
                                         changed = true;
                                         continue;
                                     }
                                     if (rhs_u > 1 and std.math.isPowerOfTwo(rhs_u)) {
-                                        list.items[out_len - 1] = .{ .i32_const = @intCast(@ctz(rhs_u)) };
-                                        list.items[out_len] = .{ .numeric_op = 0x74 };
-                                        out_len += 1;
+                                        out.items[out.items.len - 1] = .{ .i32_const = @intCast(@ctz(rhs_u)) };
+                                        out.append(arena, .{ .numeric_op = 0x74 }) catch return error.OutOfMemory;
                                         changed = true;
                                         continue;
                                     }
+                                    if (optimize_mode == .fast and out.items.len >= 2) {
+                                        if (extractLocalGetOrTee(out.items[out.items.len - 2])) |l| {
+                                            if (rhs_u > 2 and std.math.isPowerOfTwo(rhs_u - 1)) {
+                                                const k: i32 = @intCast(@ctz(rhs_u - 1));
+                                                out.items[out.items.len - 1] = .{ .i32_const = k };
+                                                try out.appendSlice(arena, &.{
+                                                    .{ .numeric_op = 0x74 }, // i32.shl
+                                                    .{ .local_get = l },
+                                                    .{ .numeric_op = 0x6a }, // i32.add
+                                                });
+                                                changed = true;
+                                                continue;
+                                            }
+                                            if (rhs_u > 2 and rhs_u < 0x8000_0000 and std.math.isPowerOfTwo(rhs_u + 1)) {
+                                                const k: i32 = @intCast(@ctz(rhs_u + 1));
+                                                out.items[out.items.len - 1] = .{ .i32_const = k };
+                                                try out.appendSlice(arena, &.{
+                                                    .{ .numeric_op = 0x74 }, // i32.shl
+                                                    .{ .local_get = l },
+                                                    .{ .numeric_op = 0x6b }, // i32.sub
+                                                });
+                                                changed = true;
+                                                continue;
+                                            }
+                                        }
+                                    }
                                 },
-                                0x6d => if (rhs == 1) {
-                                    out_len -= 1;
-                                    changed = true;
-                                    continue;
+                                0x6d => {
+                                    if (rhs == 1) {
+                                        out.items.len -= 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if (optimize_mode == .fast and rhs > 1 and out.items.len >= 2) {
+                                        if (extractLocalGetOrTee(out.items[out.items.len - 2])) |l| {
+                                            out.items.len -= 1;
+                                            try emitStrengthReducedDivS32(arena, &out, rhs_u, l);
+                                            changed = true;
+                                            continue;
+                                        }
+                                    }
                                 },
                                 0x6e => {
                                     if (rhs_u == 1) {
-                                        out_len -= 1;
+                                        out.items.len -= 1;
                                         changed = true;
                                         continue;
                                     }
                                     if (rhs_u > 1 and std.math.isPowerOfTwo(rhs_u)) {
-                                        list.items[out_len - 1] = .{ .i32_const = @intCast(@ctz(rhs_u)) };
-                                        list.items[out_len] = .{ .numeric_op = 0x76 };
-                                        out_len += 1;
+                                        out.items[out.items.len - 1] = .{ .i32_const = @intCast(@ctz(rhs_u)) };
+                                        out.append(arena, .{ .numeric_op = 0x76 }) catch return error.OutOfMemory;
                                         changed = true;
                                         continue;
                                     }
+                                    if (optimize_mode == .fast and rhs_u > 1 and out.items.len >= 2) {
+                                        const lhs_local = extractLocalGetOrTee(out.items[out.items.len - 2]);
+                                        const saved_len = out.items.len - 1;
+                                        out.items.len = saved_len;
+                                        if (try emitMagicDivU32(arena, &out, rhs_u, lhs_local)) {
+                                            changed = true;
+                                            continue;
+                                        }
+                                        out.append(arena, .{ .i32_const = rhs }) catch return error.OutOfMemory;
+                                    }
                                 },
-                                0x70 => if (rhs_u >= 1 and std.math.isPowerOfTwo(rhs_u)) {
-                                    list.items[out_len - 1] = .{ .i32_const = @bitCast(rhs_u - 1) };
-                                    list.items[out_len] = .{ .numeric_op = 0x71 };
-                                    out_len += 1;
-                                    changed = true;
-                                    continue;
+                                0x6f => {
+                                    if (optimize_mode == .fast and rhs > 1 and out.items.len >= 2) {
+                                        if (extractLocalGetOrTee(out.items[out.items.len - 2])) |l| {
+                                            out.items[out.items.len - 1] = .{ .local_get = l };
+                                            try emitStrengthReducedDivS32(arena, &out, rhs_u, l);
+                                            try out.appendSlice(arena, &.{
+                                                .{ .i32_const = rhs },
+                                                .{ .numeric_op = 0x6c }, // i32.mul
+                                                .{ .numeric_op = 0x6b }, // i32.sub
+                                            });
+                                            changed = true;
+                                            continue;
+                                        }
+                                    }
+                                },
+                                0x70 => {
+                                    if (rhs_u >= 1 and std.math.isPowerOfTwo(rhs_u)) {
+                                        out.items[out.items.len - 1] = .{ .i32_const = @bitCast(rhs_u - 1) };
+                                        out.append(arena, .{ .numeric_op = 0x71 }) catch return error.OutOfMemory;
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if (optimize_mode == .fast and rhs_u > 1 and out.items.len >= 2) {
+                                        if (extractLocalGetOrTee(out.items[out.items.len - 2])) |l| {
+                                            out.items[out.items.len - 1] = .{ .local_get = l };
+                                            _ = try emitMagicDivU32(arena, &out, rhs_u, l);
+                                            try out.appendSlice(arena, &.{
+                                                .{ .i32_const = rhs },
+                                                .{ .numeric_op = 0x6c }, // i32.mul
+                                                .{ .numeric_op = 0x6b }, // i32.sub
+                                            });
+                                            changed = true;
+                                            continue;
+                                        }
+                                    }
                                 },
                                 else => {},
                             }
@@ -3449,62 +5380,97 @@ fn foldConstants(list: *InstrList) bool {
                             const shift_amt: u6 = @truncate(rhs_u);
                             switch (op) {
                                 0x7c, 0x7d, 0x84, 0x85 => if (rhs == 0) {
-                                    out_len -= 1;
+                                    out.items.len -= 1;
                                     changed = true;
                                     continue;
                                 },
-                                0x83 => if (rhs == -1) {
-                                    out_len -= 1;
-                                    changed = true;
-                                    continue;
+                                0x83 => {
+                                    if (rhs == -1) {
+                                        out.items.len -= 1;
+                                        changed = true;
+                                        continue;
+                                    }
+                                    if (out.items.len >= 2) {
+                                        if (findPrevSingleValueExprStart(out.items, out.items.len - 1)) |lhs_start| {
+                                            const lhs_slice = out.items[lhs_start .. out.items.len - 1];
+                                            if ((possibleOnesI64(lhs_slice) & ~rhs_u) == 0) {
+                                                out.items.len -= 1;
+                                                changed = true;
+                                                continue;
+                                            }
+                                        }
+                                    }
                                 },
                                 0x86, 0x87, 0x88, 0x89, 0x8a => if (shift_amt == 0) {
-                                    out_len -= 1;
+                                    out.items.len -= 1;
                                     changed = true;
                                     continue;
                                 },
                                 0x51 => if (rhs == 0) {
-                                    list.items[out_len - 1] = .{ .numeric_op = 0x50 };
+                                    out.items[out.items.len - 1] = .{ .numeric_op = 0x50 };
                                     changed = true;
                                     continue;
                                 },
                                 0x7e => {
                                     if (rhs == 1) {
-                                        out_len -= 1;
+                                        out.items.len -= 1;
                                         changed = true;
                                         continue;
                                     }
                                     if (rhs_u > 1 and std.math.isPowerOfTwo(rhs_u)) {
-                                        list.items[out_len - 1] = .{ .i64_const = @intCast(@ctz(rhs_u)) };
-                                        list.items[out_len] = .{ .numeric_op = 0x86 };
-                                        out_len += 1;
+                                        out.items[out.items.len - 1] = .{ .i64_const = @intCast(@ctz(rhs_u)) };
+                                        out.append(arena, .{ .numeric_op = 0x86 }) catch return error.OutOfMemory;
                                         changed = true;
                                         continue;
                                     }
+                                    if (optimize_mode == .fast and out.items.len >= 2) {
+                                        if (extractLocalGetOrTee(out.items[out.items.len - 2])) |l| {
+                                            if (rhs_u > 2 and std.math.isPowerOfTwo(rhs_u - 1)) {
+                                                const k: i64 = @intCast(@ctz(rhs_u - 1));
+                                                out.items[out.items.len - 1] = .{ .i64_const = k };
+                                                try out.appendSlice(arena, &.{
+                                                    .{ .numeric_op = 0x86 }, // i64.shl
+                                                    .{ .local_get = l },
+                                                    .{ .numeric_op = 0x7c }, // i64.add
+                                                });
+                                                changed = true;
+                                                continue;
+                                            }
+                                            if (rhs_u > 2 and rhs_u < 0x8000_0000_0000_0000 and std.math.isPowerOfTwo(rhs_u + 1)) {
+                                                const k: i64 = @intCast(@ctz(rhs_u + 1));
+                                                out.items[out.items.len - 1] = .{ .i64_const = k };
+                                                try out.appendSlice(arena, &.{
+                                                    .{ .numeric_op = 0x86 }, // i64.shl
+                                                    .{ .local_get = l },
+                                                    .{ .numeric_op = 0x7d }, // i64.sub
+                                                });
+                                                changed = true;
+                                                continue;
+                                            }
+                                        }
+                                    }
                                 },
                                 0x7f => if (rhs == 1) {
-                                    out_len -= 1;
+                                    out.items.len -= 1;
                                     changed = true;
                                     continue;
                                 },
                                 0x80 => {
                                     if (rhs_u == 1) {
-                                        out_len -= 1;
+                                        out.items.len -= 1;
                                         changed = true;
                                         continue;
                                     }
                                     if (rhs_u > 1 and std.math.isPowerOfTwo(rhs_u)) {
-                                        list.items[out_len - 1] = .{ .i64_const = @intCast(@ctz(rhs_u)) };
-                                        list.items[out_len] = .{ .numeric_op = 0x88 };
-                                        out_len += 1;
+                                        out.items[out.items.len - 1] = .{ .i64_const = @intCast(@ctz(rhs_u)) };
+                                        out.append(arena, .{ .numeric_op = 0x88 }) catch return error.OutOfMemory;
                                         changed = true;
                                         continue;
                                     }
                                 },
                                 0x82 => if (rhs_u >= 1 and std.math.isPowerOfTwo(rhs_u)) {
-                                    list.items[out_len - 1] = .{ .i64_const = @bitCast(rhs_u - 1) };
-                                    list.items[out_len] = .{ .numeric_op = 0x83 };
-                                    out_len += 1;
+                                    out.items[out.items.len - 1] = .{ .i64_const = @bitCast(rhs_u - 1) };
+                                    out.append(arena, .{ .numeric_op = 0x83 }) catch return error.OutOfMemory;
                                     changed = true;
                                     continue;
                                 },
@@ -3516,42 +5482,41 @@ fn foldConstants(list: *InstrList) bool {
                 }
 
                 // Commutative left-constant peepholes when RHS is a pure zero-pop instruction
-                if (out_len >= 2 and isPureZeroPopInstr(list.items[out_len - 1])) {
-                    const rhs_inst = list.items[out_len - 1];
-                    switch (list.items[out_len - 2]) {
+                if (out.items.len >= 2 and isPureZeroPopInstr(out.items[out.items.len - 1])) {
+                    const rhs_inst = out.items[out.items.len - 1];
+                    switch (out.items[out.items.len - 2]) {
                         .i32_const => |lhs| {
                             const lhs_u: u32 = @bitCast(lhs);
                             switch (op) {
                                 0x6a, 0x72, 0x73 => if (lhs == 0) {
-                                    list.items[out_len - 2] = rhs_inst;
-                                    out_len -= 1;
+                                    out.items[out.items.len - 2] = rhs_inst;
+                                    out.items.len -= 1;
                                     changed = true;
                                     continue;
                                 },
                                 0x71 => if (lhs == -1) {
-                                    list.items[out_len - 2] = rhs_inst;
-                                    out_len -= 1;
+                                    out.items[out.items.len - 2] = rhs_inst;
+                                    out.items.len -= 1;
                                     changed = true;
                                     continue;
                                 },
                                 0x46 => if (lhs == 0) {
-                                    list.items[out_len - 2] = rhs_inst;
-                                    list.items[out_len - 1] = .{ .numeric_op = 0x45 };
+                                    out.items[out.items.len - 2] = rhs_inst;
+                                    out.items[out.items.len - 1] = .{ .numeric_op = 0x45 };
                                     changed = true;
                                     continue;
                                 },
                                 0x6c => {
                                     if (lhs == 1) {
-                                        list.items[out_len - 2] = rhs_inst;
-                                        out_len -= 1;
+                                        out.items[out.items.len - 2] = rhs_inst;
+                                        out.items.len -= 1;
                                         changed = true;
                                         continue;
                                     }
                                     if (lhs_u > 1 and std.math.isPowerOfTwo(lhs_u)) {
-                                        list.items[out_len - 2] = rhs_inst;
-                                        list.items[out_len - 1] = .{ .i32_const = @intCast(@ctz(lhs_u)) };
-                                        list.items[out_len] = .{ .numeric_op = 0x74 };
-                                        out_len += 1;
+                                        out.items[out.items.len - 2] = rhs_inst;
+                                        out.items[out.items.len - 1] = .{ .i32_const = @intCast(@ctz(lhs_u)) };
+                                        out.append(arena, .{ .numeric_op = 0x74 }) catch return error.OutOfMemory;
                                         changed = true;
                                         continue;
                                     }
@@ -3563,35 +5528,34 @@ fn foldConstants(list: *InstrList) bool {
                             const lhs_u: u64 = @bitCast(lhs);
                             switch (op) {
                                 0x7c, 0x84, 0x85 => if (lhs == 0) {
-                                    list.items[out_len - 2] = rhs_inst;
-                                    out_len -= 1;
+                                    out.items[out.items.len - 2] = rhs_inst;
+                                    out.items.len -= 1;
                                     changed = true;
                                     continue;
                                 },
                                 0x83 => if (lhs == -1) {
-                                    list.items[out_len - 2] = rhs_inst;
-                                    out_len -= 1;
+                                    out.items[out.items.len - 2] = rhs_inst;
+                                    out.items.len -= 1;
                                     changed = true;
                                     continue;
                                 },
                                 0x51 => if (lhs == 0) {
-                                    list.items[out_len - 2] = rhs_inst;
-                                    list.items[out_len - 1] = .{ .numeric_op = 0x50 };
+                                    out.items[out.items.len - 2] = rhs_inst;
+                                    out.items[out.items.len - 1] = .{ .numeric_op = 0x50 };
                                     changed = true;
                                     continue;
                                 },
                                 0x7e => {
                                     if (lhs == 1) {
-                                        list.items[out_len - 2] = rhs_inst;
-                                        out_len -= 1;
+                                        out.items[out.items.len - 2] = rhs_inst;
+                                        out.items.len -= 1;
                                         changed = true;
                                         continue;
                                     }
                                     if (lhs_u > 1 and std.math.isPowerOfTwo(lhs_u)) {
-                                        list.items[out_len - 2] = rhs_inst;
-                                        list.items[out_len - 1] = .{ .i64_const = @intCast(@ctz(lhs_u)) };
-                                        list.items[out_len] = .{ .numeric_op = 0x86 };
-                                        out_len += 1;
+                                        out.items[out.items.len - 2] = rhs_inst;
+                                        out.items[out.items.len - 1] = .{ .i64_const = @intCast(@ctz(lhs_u)) };
+                                        out.append(arena, .{ .numeric_op = 0x86 }) catch return error.OutOfMemory;
                                         changed = true;
                                         continue;
                                     }
@@ -3603,12 +5567,48 @@ fn foldConstants(list: *InstrList) bool {
                     }
                 }
             },
+            .raw => |r| {
+                if (r.len > 0 and (r[0] == 0x1b or r[0] == 0x1c)) {
+                    // `select` on `i32.eqz`: swap pure zero-pop arms and pop `i32.eqz`
+                    if (out.items.len >= 1 and out.items[out.items.len - 1] == .numeric_op and out.items[out.items.len - 1].numeric_op == 0x45) {
+                        if (findPrevSingleValueExprStart(out.items, out.items.len - 1)) |cond_start| {
+                            if (cond_start >= 2 and isPureZeroPopInstr(out.items[cond_start - 2]) and isPureZeroPopInstr(out.items[cond_start - 1])) {
+                                const tmp = out.items[cond_start - 2];
+                                out.items[cond_start - 2] = out.items[cond_start - 1];
+                                out.items[cond_start - 1] = tmp;
+                                _ = out.pop();
+                                changed = true;
+                            }
+                        }
+                    }
+                    // `select(a, a, cond) -> a` and constant-cond `select` when arms/cond are pure zero-pop
+                    if (out.items.len >= 3 and
+                        isPureZeroPopInstr(out.items[out.items.len - 3]) and
+                        isPureZeroPopInstr(out.items[out.items.len - 2]) and
+                        isPureZeroPopInstr(out.items[out.items.len - 1]))
+                    {
+                        const val1 = out.items[out.items.len - 3];
+                        const val2 = out.items[out.items.len - 2];
+                        const cond = out.items[out.items.len - 1];
+                        if (instrEql(val1, val2)) {
+                            out.items.len -= 2;
+                            changed = true;
+                            continue;
+                        }
+                        if (cond == .i32_const) {
+                            out.items[out.items.len - 3] = if (cond.i32_const != 0) val1 else val2;
+                            out.items.len -= 2;
+                            changed = true;
+                            continue;
+                        }
+                    }
+                }
+            },
             else => {},
         }
-        list.items[out_len] = inst;
-        out_len += 1;
+        out.append(arena, inst) catch return error.OutOfMemory;
     }
-    list.shrinkRetainingCapacity(out_len);
+    list.* = out;
     return changed;
 }
 
@@ -3724,6 +5724,10 @@ fn stripRedundantCondTests(out: *InstrList) bool {
         } else {
             break;
         }
+    }
+    if (out.items.len >= 1 and out.items[out.items.len - 1] == .numeric_op and out.items[out.items.len - 1].numeric_op == 0x73) {
+        out.items[out.items.len - 1] = .{ .numeric_op = 0x47 };
+        stripped = true;
     }
     return stripped;
 }
@@ -4263,13 +6267,13 @@ fn classifyTrivialFunc(
                 0x10 => {
                     leading_still_matching = false;
                     const callee = readU32(bytes, &pos) catch return .none;
+                    const is_cond_call = (depth > 0 or has_early_return) and seen_cond_branch;
                     if (optimize_mode != .fast or
-                        (depth == 0 and !has_early_return) or
-                        !seen_cond_branch or
                         has_loop or
                         inner_callee != null or
                         callee >= module.funcs.items.len or
-                        callee == fidx)
+                        callee == fidx or
+                        (!is_cond_call and module.funcs.items[callee].is_import))
                     {
                         return .none;
                     }
@@ -4465,10 +6469,11 @@ fn classifyTrivialFunc(
         },
         .fast => {
             if (inner_callee != null) {
+                const max_ops: u32 = if (seen_cond_branch) 28 else 24;
                 if (uses_global_op or
                     has_loop or
-                    !seen_cond_branch or
-                    op_count > 28 or
+                    (!seen_cond_branch and module.funcs.items[inner_callee.?].is_import) or
+                    op_count > max_ops or
                     bytes.len > 80 or
                     func.local_types.items.len > 4 or
                     sig.params.len > 4)
@@ -4693,6 +6698,7 @@ fn inlineTrivialFunctions(
                     }
                     func.code_bytes = new_bytes;
                     func.owns_code_bytes = true;
+                    modified_funcs[i] = true;
                     any_inlined = true;
                 },
                 .forward => |fwd| {
@@ -8480,5 +10486,796 @@ test "Optimizer: post-inlining shadow-stack slot scalarization (SROA) and derive
         defer opt_mod.deinit();
 
         try testing.expectEqualSlices(u8, &raw_store_code, opt_mod.funcs.items[0].code_bytes);
+    }
+}
+
+test "Optimizer: structured Wasm LICM (hoistLoopInvariantCode)" {
+    const allocator = testing.allocator;
+
+    // 1. Hoists multi-instruction pure expression (`(a << 4) + b`), proven-safe non-aliasing load (`*ptr`),
+    //    and single-assignment `local.set` out of `.loop`:
+    var mod = Mod.Module.init(allocator);
+    defer mod.deinit();
+
+    try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+    // Type 0: (param i32 ptr, i32 a, i32 b, i32 n) -> (result i32)
+    try mod.module_types.append(allocator, .{ .func_type = .{
+        .params = try allocator.dupe(types.ValType, &.{ .i32, .i32, .i32, .i32 }),
+        .results = try allocator.dupe(types.ValType, &.{.i32}),
+    } });
+    try mod.type_meta.append(allocator, .{});
+
+    // locals: 4 = i (loop counter), 5 = acc, 6 = inv_single_set
+    const loop_code = [_]u8{
+        0x02, 0x40, // block
+        0x03, 0x40, // loop
+        // Single-assignment local.set 6 = a ^ b in loop entry prefix:
+        0x20, 0x01, // local.get 1 (a)
+        0x20, 0x02, // local.get 2 (b)
+        0x73, // i32.xor
+        0x21, 0x06, // local.set 6
+        // Proven-safe invariant load from ptr offset=0 (loop only stores to ptr offset=8) + ((a << 4) + b):
+        0x20, 0x05, // local.get 5 (acc)
+        0x20, 0x00, // local.get 0 (ptr)
+        0x28, 0x02, 0x00, // i32.load align=2 offset=0 (disjoint from store at offset=8)
+        0x20, 0x01, // local.get 1 (a)
+        0x41, 0x04, // i32.const 4
+        0x74, // i32.shl
+        0x20, 0x02, // local.get 2 (b)
+        0x6a, // i32.add
+        0x6a, // i32.add
+        0x20, 0x06, // local.get 6
+        0x6a, // i32.add
+        0x21, 0x05, // local.set 5 (acc)
+        // Store to ptr offset=8 (disjoint from [0..4)):
+        0x20, 0x00, // local.get 0 (ptr)
+        0x20, 0x05, // local.get 5 (acc)
+        0x36, 0x02, 0x08, // i32.store align=2 offset=8
+        // i += 1; br_if 0 (i < n)
+        0x20, 0x04, // local.get 4 (i)
+        0x41, 0x01, // i32.const 1
+        0x6a, // i32.add
+        0x22, 0x04, // local.tee 4
+        0x20, 0x03, // local.get 3 (n)
+        0x49, // i32.lt_u
+        0x0d, 0x00, // br_if 0 (continue loop)
+        0x0b, // end loop
+        0x0b, // end block
+        0x20, 0x05, // local.get 5 (acc)
+        0x0b, // end
+    };
+
+    var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &loop_code };
+    try f0.local_types.appendSlice(allocator, &.{ .i32, .i32, .i32 });
+    try mod.funcs.append(allocator, f0);
+    try mod.exports.append(allocator, .{ .name = "licm_loop", .kind = .func, .var_ = .{ .index = 0 } });
+
+    const wasm = try writer.writeModule(allocator, &mod);
+    defer allocator.free(wasm);
+    const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+    defer allocator.free(opt);
+    var opt_mod = try reader.readModule(allocator, opt);
+    defer opt_mod.deinit();
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    var parse_pos: usize = 0;
+    var parsed: InstrList = .empty;
+    _ = try parseInstrBlock(arena_state.allocator(), opt_mod.funcs.items[0].code_bytes, &parse_pos, false, &parsed);
+
+    // Find the `.loop` (either top-level after unused `.block` unwrapping or inside `.block`)
+    // and verify `i32.load`, `i32.shl`, and `i32.xor` were hoisted out of `.loop`:
+    var found_loop = false;
+    for (parsed.items) |inst| {
+        const maybe_lp_items: ?[]const Instr = switch (inst) {
+            .loop => |lp| lp.body.items,
+            .block => |b| blk: {
+                for (b.body.items) |b_inst| {
+                    if (b_inst == .loop) break :blk b_inst.loop.body.items;
+                }
+                break :blk null;
+            },
+            else => null,
+        };
+        if (maybe_lp_items) |lp_items| {
+            found_loop = true;
+            for (lp_items) |lp_inst| {
+                if (lp_inst == .numeric_op) {
+                    try testing.expect(lp_inst.numeric_op != 0x73); // i32.xor hoisted
+                    try testing.expect(lp_inst.numeric_op != 0x74); // i32.shl hoisted
+                }
+                if (lp_inst == .raw and lp_inst.raw.len > 0) {
+                    try testing.expect(lp_inst.raw[0] != 0x28); // i32.load hoisted
+                }
+            }
+        }
+    }
+    try testing.expect(found_loop);
+
+    // 2. Hoist loop-invariant `i64` `select` expression and verify scratch local has type `.i64`:
+    {
+        var mod2 = Mod.Module.init(allocator);
+        defer mod2.deinit();
+
+        // Type 0: (param i64 a, i64 b, i32 cond, i32 n) -> (result i64)
+        try mod2.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i64, .i64, .i32, .i32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i64}),
+        } });
+        try mod2.type_meta.append(allocator, .{});
+
+        // local 4 = i (i32), local 5 = acc (i64)
+        const select_loop_code = [_]u8{
+            0x03, 0x40, // loop (empty)
+            0x20, 0x05, // local.get 5 (acc)
+            // Loop-invariant i64 select: `select(a, b, cond)`
+            0x20, 0x00, // local.get 0 (a: i64)
+            0x20, 0x01, // local.get 1 (b: i64)
+            0x20, 0x02, // local.get 2 (cond: i32)
+            0x1b, // select (result is i64!)
+            0x7c, // i64.add
+            0x21, 0x05, // local.set 5 (acc)
+            0x20, 0x04, // local.get 4 (i)
+            0x41, 0x01, // i32.const 1
+            0x6a, // i32.add
+            0x22, 0x04, // local.tee 4 (i)
+            0x20, 0x03, // local.get 3 (n)
+            0x49, // i32.lt_u
+            0x0d, 0x00, // br_if 0
+            0x0b, // end loop
+            0x20, 0x05, // local.get 5 (acc)
+            0x0b, // end
+        };
+
+        var f_sel = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &select_loop_code };
+        try f_sel.local_types.appendSlice(allocator, &.{ .i32, .i64 });
+        try mod2.funcs.append(allocator, f_sel);
+        try mod2.exports.append(allocator, .{ .name = "licm_i64_select", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm2 = try writer.writeModule(allocator, &mod2);
+        defer allocator.free(wasm2);
+        const opt2 = try optimize(allocator, wasm2, .{ .optimize_mode = .fast });
+        defer allocator.free(opt2);
+        var opt_mod2 = try reader.readModule(allocator, opt2);
+        defer opt_mod2.deinit();
+
+        var arena2 = std.heap.ArenaAllocator.init(allocator);
+        defer arena2.deinit();
+        var pos2: usize = 0;
+        var parsed2: InstrList = .empty;
+        _ = try parseInstrBlock(arena2.allocator(), opt_mod2.funcs.items[0].code_bytes, &pos2, false, &parsed2);
+
+        // Verify `select` (`0x1b`) was hoisted out of `.loop` and the new scratch local is `.i64`:
+        var i64_locals: usize = 0;
+        for (opt_mod2.funcs.items[0].local_types.items) |lt| {
+            if (lt == .i64) i64_locals += 1;
+        }
+        try testing.expectEqual(@as(usize, 2), i64_locals); // `acc` + hoisted `select` scratch local
+        for (parsed2.items) |inst| {
+            if (inst == .loop) {
+                for (inst.loop.body.items) |lp_inst| {
+                    if (lp_inst == .raw and lp_inst.raw.len > 0) {
+                        try testing.expect(lp_inst.raw[0] != 0x1b);
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "Optimizer: store-to-load forwarding, redundant-load elimination, narrow bit-slice extraction, and DSE" {
+    const allocator = testing.allocator;
+
+    // 1. Overwrite DSE, exact store-to-load forwarding, narrow load8_u bit-slice extraction,
+    //    and cross-block load-to-load forwarding across a non-aliasing store:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        // Type 0: (param i32 ptr, i32 val, i32 cond) -> (result i32)
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32, .i32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        // local 3 = loaded_v
+        const mem_code = [_]u8{
+            // Dead overwritten store at offset=0:
+            0x20, 0x00, // local.get 0 (ptr)
+            0x41, 0x01, // i32.const 1
+            0x36, 0x02, 0x00, // i32.store offset=0 (DEAD: overwritten below!)
+            // Live store at offset=0:
+            0x20, 0x00, // local.get 0 (ptr)
+            0x20, 0x01, // local.get 1 (val)
+            0x36, 0x02, 0x00, // i32.store offset=0
+            // Load from offset=4 and tee into local 3:
+            0x20, 0x00, // local.get 0 (ptr)
+            0x28, 0x02, 0x04, // i32.load offset=4
+            0x22, 0x03, // local.tee 3
+            // Non-overlapping store at offset=8 inside `if`:
+            0x20, 0x02, // local.get 2 (cond)
+            0x04, 0x40, // if (empty)
+            0x20, 0x00, // local.get 0 (ptr)
+            0x41, 0x2a, // i32.const 42
+            0x36, 0x02, 0x08, // i32.store offset=8 (disjoint from offset=0 and offset=4!)
+            0x0b, // end if
+            // Redundant load from offset=4 (forwarded from local 3!)
+            0x20, 0x00, // local.get 0 (ptr)
+            0x28, 0x02, 0x04, // i32.load offset=4 -> local.get 3
+            0x6a, // i32.add
+            // Exact load from offset=0 (forwarded from local 1!)
+            0x20, 0x00, // local.get 0 (ptr)
+            0x28, 0x02, 0x00, // i32.load offset=0 -> local.get 1
+            0x6a, // i32.add
+            // Narrow load8_u at offset=2 within stored [0..4) (extracted via `(val >> 16) & 0xff`!)
+            0x20, 0x00, // local.get 0 (ptr)
+            0x2d, 0x00, 0x02, // i32.load8_u offset=2 -> (local.get 1 >> 16) & 255
+            0x6a, // i32.add
+            0x0b, // end
+        };
+
+        var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &mem_code };
+        try f0.local_types.append(allocator, .i32); // local 3
+        try mod.funcs.append(allocator, f0);
+        try mod.exports.append(allocator, .{ .name = "mem_forward", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        var parse_pos: usize = 0;
+        var parsed: InstrList = .empty;
+        _ = try parseInstrBlock(arena_state.allocator(), opt_mod.funcs.items[0].code_bytes, &parse_pos, false, &parsed);
+
+        var top_stores: usize = 0;
+        var top_i32_loads: usize = 0;
+        var top_i32_load8_u: usize = 0;
+        for (parsed.items) |inst| {
+            if (inst == .raw and inst.raw.len > 0) {
+                switch (inst.raw[0]) {
+                    0x36 => top_stores += 1,
+                    0x28 => top_i32_loads += 1,
+                    0x2d => top_i32_load8_u += 1,
+                    else => {},
+                }
+            }
+        }
+        // Only 1 top-level store remains (the overwritten store at offset=0 was eliminated by DSE),
+        // only 1 `i32.load` remains (the initial load at offset=4; the second offset=4 load and offset=0 load were forwarded),
+        // and 0 `i32.load8_u` remain (extracted via bit shift + mask)!
+        try testing.expectEqual(@as(usize, 1), top_stores);
+        try testing.expectEqual(@as(usize, 1), top_i32_loads);
+        try testing.expectEqual(@as(usize, 0), top_i32_load8_u);
+    }
+
+    // 2. Dead Frame Epilogue DSE eliminates unread stores to `fp` and strips the dead shadow-stack frame:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.globals.append(allocator, .{
+            .type = .{ .val_type = .i32, .mutability = .mutable },
+            .init_expr_bytes = &[_]u8{ 0x41, 0x80, 0x80, 0x04 },
+        });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{.i32}),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const dead_frame_code = [_]u8{
+            0x23, 0x00, // global.get 0
+            0x41, 16, // i32.const 16
+            0x6b, // i32.sub
+            0x22, 0x01, // local.tee 1 (fp)
+            0x24, 0x00, // global.set 0
+            0x20, 0x01, // local.get 1 (fp)
+            0x20, 0x00, // local.get 0 (x)
+            0x36, 0x02, 0x00, // i32.store offset=0 (never read before epilogue!)
+            0x20, 0x00, // local.get 0 (x)
+            0x20, 0x01, // local.get 1 (fp)
+            0x41, 16, // i32.const 16
+            0x6a, // i32.add
+            0x24, 0x00, // global.set 0
+            0x0b, // end
+        };
+
+        var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &dead_frame_code };
+        try f0.local_types.append(allocator, .i32); // local 1 (fp)
+        try mod.funcs.append(allocator, f0);
+        try mod.exports.append(allocator, .{ .name = "dead_epilogue_dse", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        const expected = [_]u8{
+            0x20, 0x00, // local.get 0
+            0x0b, // end
+        };
+        try testing.expectEqualSlices(u8, &expected, opt_mod.funcs.items[0].code_bytes);
+    }
+
+    // 3. Storing `fp + 16` into `[fp + 0]` escapes `fp` into memory; store to `[fp + 16]` must NOT be eliminated:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.globals.append(allocator, .{
+            .type = .{ .val_type = .i32, .mutability = .mutable },
+            .init_expr_bytes = &[_]u8{ 0x41, 0x80, 0x80, 0x04 },
+        });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{.i32}),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const escaped_fp_store_code = [_]u8{
+            0x23, 0x00, // global.get 0
+            0x41, 32, // i32.const 32
+            0x6b, // i32.sub
+            0x22, 0x01, // local.tee 1 (fp)
+            0x24, 0x00, // global.set 0
+            // Store `fp + 16` as a pointer value into `[fp + 0]`:
+            0x20, 0x01, // local.get 1 (fp)
+            0x20, 0x01, // local.get 1 (fp)
+            0x41, 16, // i32.const 16
+            0x6a, // i32.add
+            0x36, 0x02, 0x00, // i32.store offset=0
+            // Store `x` into `[fp + 16]`:
+            0x20, 0x01, // local.get 1 (fp)
+            0x20, 0x00, // local.get 0 (x)
+            0x36, 0x02, 16, // i32.store offset=16 (LIVE: read indirectly via `[fp + 0]` below!)
+            // Load pointer `p = [fp + 0]` and dereference `[p + 0]`:
+            0x20, 0x01, // local.get 1 (fp)
+            0x28, 0x02, 0x00, // i32.load offset=0
+            0x28, 0x02, 0x00, // i32.load offset=0
+            // Epilogue:
+            0x20, 0x01, // local.get 1 (fp)
+            0x41, 32, // i32.const 32
+            0x6a, // i32.add
+            0x24, 0x00, // global.set 0
+            0x0b, // end
+        };
+
+        var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &escaped_fp_store_code };
+        try f0.local_types.append(allocator, .i32); // local 1 (fp)
+        try mod.funcs.append(allocator, f0);
+        try mod.exports.append(allocator, .{ .name = "escaped_fp_val", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        var parse_pos: usize = 0;
+        var parsed: InstrList = .empty;
+        _ = try parseInstrBlock(arena_state.allocator(), opt_mod.funcs.items[0].code_bytes, &parse_pos, false, &parsed);
+
+        var stores_to_16: usize = 0;
+        for (parsed.items) |inst| {
+            if (decodeStoreAccess(inst)) |acc| {
+                if (acc.offset == 16) stores_to_16 += 1;
+            }
+        }
+        try testing.expectEqual(@as(usize, 1), stores_to_16);
+    }
+}
+
+test "Optimizer: post-link arithmetic strength reduction, possibleOnes mask stripping, and peepholes" {
+    const allocator = testing.allocator;
+
+    // 1. Verify `magicU32` and `magicS32` exactness across divisors and sample dividends:
+    {
+        const divisors = [_]u32{ 3, 5, 6, 7, 9, 10, 11, 12, 13, 25, 100, 1000 };
+        const u_samples = [_]u32{ 0, 1, 2, 3, 7, 9, 10, 11, 99, 100, 101, 12345678, 0x7fff_ffff, 0x8000_0000, 0xffff_fffe, 0xffff_ffff };
+        for (divisors) |d| {
+            const mu = magicU32(d);
+            for (u_samples) |n| {
+                const q: u32 = if (!mu.add)
+                    @truncate((@as(u64, n) * mu.mul) >> @intCast(32 + @as(u32, mu.shift)))
+                else
+                    @truncate((((@as(u64, n) * mu.mul) >> 32) + @as(u64, n)) >> @intCast(mu.shift));
+                try testing.expectEqual(n / d, q);
+            }
+
+            const sd: i32 = @intCast(d);
+            const ms = magicS32(d);
+            const s_samples = [_]i32{ -2147483648, -2147483647, -12345678, -101, -100, -99, -11, -10, -9, -1, 0, 1, 9, 10, 11, 99, 100, 101, 12345678, 2147483647 };
+            for (s_samples) |sn| {
+                const prod: i64 = @as(i64, sn) * ms.mul;
+                const sq: i32 = @as(i32, @truncate(prod >> ms.shift)) +% @as(i32, @intCast(@as(u32, @bitCast(sn)) >> 31));
+                try testing.expectEqual(@divTrunc(sn, sd), sq);
+            }
+        }
+    }
+
+    // 2. `.fast` mode `mul` by 2^k +- 1 and `div_u`/`rem_u`/`div_s`/`rem_s` by constant:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const fast_arith_code = [_]u8{
+            // (p0 * 9) + (p0 /u 10) + (p1 %s 10)
+            0x20, 0x00, // local.get 0
+            0x41, 0x09, // i32.const 9 (2^3 + 1)
+            0x6c, // i32.mul -> (p0 << 3) + p0
+            0x20, 0x00, // local.get 0
+            0x41, 0x0a, // i32.const 10
+            0x6e, // i32.div_u -> 64-bit magic mul
+            0x6a, // i32.add
+            0x20, 0x01, // local.get 1
+            0x41, 0x0a, // i32.const 10
+            0x6f, // i32.rem_s -> 64-bit magic mul + sub
+            0x6a, // i32.add
+            0x0b, // end
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &fast_arith_code });
+        try mod.exports.append(allocator, .{ .name = "fast_arith", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        var parse_pos: usize = 0;
+        var parsed: InstrList = .empty;
+        _ = try parseInstrBlock(arena_state.allocator(), opt_mod.funcs.items[0].code_bytes, &parse_pos, false, &parsed);
+
+        for (parsed.items) |inst| {
+            if (inst == .numeric_op) {
+                try testing.expect(inst.numeric_op != 0x6e); // i32.div_u eliminated
+                try testing.expect(inst.numeric_op != 0x6f); // i32.rem_s eliminated
+            }
+        }
+    }
+
+    // 3. `possibleOnes` mask stripping, `wrap(extend)`, `extend8_s(load8_u)`, `eqz(xor)`, `select(..., eqz)`,
+    //    float `abs`/`neg` idempotents, and same-local identities:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32, .f32 }),
+            .results = try allocator.dupe(types.ValType, &.{ .i32, .f32 }),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const peephole_code = [_]u8{
+            // 1) `i32.extend8_s(i32.load8_u)` -> `i32.load8_s`
+            0x20, 0x00, // local.get 0
+            0x2d, 0x00, 0x00, // i32.load8_u offset=0
+            0xc0, // i32.extend8_s -> fused into 0x2c i32.load8_s!
+            // 2) `((p1 >>u 24) & 0xff)` -> redundant mask stripped!
+            0x20, 0x01, // local.get 1
+            0x41, 24, // i32.const 24
+            0x76, // i32.shr_u (possibleOnes = 0xff)
+            0x41, 0xff, 0x01, // i32.const 255
+            0x71, // i32.and (stripped!)
+            0x6a, // i32.add
+            // 3) `i32.wrap_i64(i64.extend_i32_u(p0))` -> `p0`
+            0x20, 0x00, // local.get 0
+            0xad, // i64.extend_i32_u
+            0xa7, // i32.wrap_i64
+            0x6a, // i32.add
+            // 4) `select(p0, p1, i32.eqz(i32.xor(p0, p1)))` -> `select(p1, p0, i32.eq(p0, p1))`
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x73, // i32.xor
+            0x45, // i32.eqz -> folded with xor to i32.eq!
+            0x1b, // select
+            0x6a, // i32.add
+            // 5) `f32.abs(f32.neg(f32.neg(f2)))` -> `f32.abs(f2)`
+            0x20, 0x02, // local.get 2 (f32)
+            0x8c, // f32.neg
+            0x8c, // f32.neg (elided!)
+            0x8b, // f32.abs
+            0x0b, // end
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &peephole_code });
+        try mod.exports.append(allocator, .{ .name = "peepholes", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        const expected = [_]u8{
+            0x20, 0x00, // local.get 0
+            0x2c, 0x00, 0x00, // i32.load8_s offset=0
+            0x20, 0x01, // local.get 1
+            0x41, 24, // i32.const 24
+            0x76, // i32.shr_u
+            0x6a, // i32.add
+            0x20, 0x00, // local.get 0
+            0x6a, // i32.add
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x46, // i32.eq
+            0x1b, // select
+            0x6a, // i32.add
+            0x20, 0x02, // local.get 2
+            0x8b, // f32.abs
+            0x0b, // end
+        };
+        try testing.expectEqualSlices(u8, &expected, opt_mod.funcs.items[0].code_bytes);
+    }
+}
+
+test "Optimizer: 2-pass bottom-up inlining, unconditional 1-call wrapper inlining, and partial-frame SROA" {
+    const allocator = testing.allocator;
+
+    // 1. 2-pass bottom-up inlining of unconditional 1-call wrapper chain (`caller -> scissorEql -> rectEql`):
+    //    `scissorEql` compares `(a ^ b)` and then unconditionally calls `rectEql(a, b)` and combines with `i32.or`.
+    //    Pass 1 inlines leaf `rectEql` into `scissorEql`, turning `scissorEql` into a leaf, and Pass 2 inlines
+    //    `scissorEql` into `caller`, pruning both helpers!
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        // func 0 (`rectEql`): leaf comparing `[a + 0] == [b + 0]`
+        const rect_eql = [_]u8{
+            0x20, 0x00, // local.get 0 (a)
+            0x28, 0x02, 0x00, // i32.load offset=0
+            0x20, 0x01, // local.get 1 (b)
+            0x28, 0x02, 0x00, // i32.load offset=0
+            0x46, // i32.eq
+            0x0b, // end
+        };
+
+        // func 1 (`scissorEql`): unconditional 1-call wrapper calling `rectEql`
+        const scissor_eql = [_]u8{
+            0x20, 0x00, // local.get 0 (a)
+            0x28, 0x02, 0x04, // i32.load offset=4
+            0x20, 0x01, // local.get 1 (b)
+            0x28, 0x02, 0x04, // i32.load offset=4
+            0x46, // i32.eq
+            0x20, 0x00, // local.get 0 (a)
+            0x20, 0x01, // local.get 1 (b)
+            0x10, 0x00, // call $rectEql (unconditional depth-0 call!)
+            0x71, // i32.and
+            0x0b, // end
+        };
+
+        // func 2 (`caller`): calls `scissorEql` twice
+        const caller = [_]u8{
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x01, // call $scissorEql
+            0x20, 0x01,
+            0x20, 0x00,
+            0x10, 0x01, // call $scissorEql
+            0x72, // i32.or
+            0x0b,
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &rect_eql });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &scissor_eql });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &caller });
+        try mod.exports.append(allocator, .{ .name = "caller", .kind = .func, .var_ = .{ .index = 2 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        // Both `rectEql` and `scissorEql` were inlined across the 2 passes and pruned!
+        try testing.expectEqual(@as(usize, 1), opt_mod.funcs.items.len);
+    }
+
+    // 2. Partial-frame per-slot shadow-stack scalarization when `[fp + 16]` has overlapping mixed-type
+    //    accesses (`i64.store` + `i32.load`) while `[fp + 0]` is a clean scalar `i32` slot:
+    //    Slot `[fp + 0]` is promoted to a local while keeping the stack frame for `[fp + 16]`.
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.globals.append(allocator, .{
+            .type = .{ .val_type = .i32, .mutability = .mutable },
+            .init_expr_bytes = &[_]u8{ 0x41, 0x80, 0x80, 0x04 },
+        });
+        // Type 0: (param i32, i64) -> (result i32)
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i64 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const partial_frame_code = [_]u8{
+            0x23, 0x00, // global.get 0
+            0x41, 32, // i32.const 32
+            0x6b, // i32.sub
+            0x22, 0x02, // local.tee 2 (fp)
+            0x24, 0x00, // global.set 0
+            // Clean scalar slot at `fp + 0`:
+            0x20, 0x02, // local.get 2 (fp)
+            0x20, 0x00, // local.get 0 (p0: i32)
+            0x41, 0x07, // i32.const 7
+            0x6a, // i32.add
+            0x36, 0x02, 0x00, // i32.store offset=0
+            // Non-promotable overlapping mixed-type slot at `fp + 16` (`i64.store` + `i32.load` at offset=20):
+            0x20, 0x02, // local.get 2 (fp)
+            0x20, 0x01, // local.get 1 (p1: i64)
+            0x37, 0x03, 16, // i64.store offset=16
+            0x20, 0x02, // local.get 2 (fp)
+            0x28, 0x02, 20, // i32.load offset=20 (overlaps [16..24))
+            // Read clean scalar slot `fp + 0` twice:
+            0x20, 0x02, // local.get 2 (fp)
+            0x28, 0x02, 0x00, // i32.load offset=0
+            0x6a, // i32.add
+            0x20, 0x02, // local.get 2 (fp)
+            0x28, 0x02, 0x00, // i32.load offset=0
+            0x6a, // i32.add
+            // Epilogue:
+            0x20, 0x02, // local.get 2 (fp)
+            0x41, 32, // i32.const 32
+            0x6a, // i32.add
+            0x24, 0x00, // global.set 0
+            0x0b, // end
+        };
+
+        var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &partial_frame_code };
+        try f0.local_types.append(allocator, .i32); // local 2 (fp)
+        try mod.funcs.append(allocator, f0);
+        try mod.exports.append(allocator, .{ .name = "partial_sroa", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        var parse_pos: usize = 0;
+        var parsed: InstrList = .empty;
+        _ = try parseInstrBlock(arena_state.allocator(), opt_mod.funcs.items[0].code_bytes, &parse_pos, false, &parsed);
+
+        var stores_at_0: usize = 0;
+        var loads_at_0: usize = 0;
+        for (parsed.items) |inst| {
+            if (decodeStoreAccess(inst)) |acc| {
+                if (acc.offset == 0) stores_at_0 += 1;
+            }
+            if (decodeLoadAccess(inst)) |acc| {
+                if (acc.offset == 0) loads_at_0 += 1;
+            }
+        }
+        // Clean scalar slot `fp + 0` was promoted to a local (0 stores/loads at offset 0)!
+        try testing.expectEqual(@as(usize, 0), stores_at_0);
+        try testing.expectEqual(@as(usize, 0), loads_at_0);
+    }
+
+    // 3. `@fieldParentPtr` safety: when `fp + 16` escapes to an opaque `call`, `[fp + 0]` is NOT promoted
+    //    because the callee could compute `@fieldParentPtr` (`(fp + 16) - 16`) to access `[fp + 0]`:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.globals.append(allocator, .{
+            .type = .{ .val_type = .i32, .mutability = .mutable },
+            .init_expr_bytes = &[_]u8{ 0x41, 0x80, 0x80, 0x04 },
+        });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{.i32}),
+            .results = &.{},
+        } });
+        try mod.type_meta.append(allocator, .{});
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{.i32}),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        try mod.imports.append(allocator, .{
+            .module_name = "env",
+            .field_name = "use_field_ptr",
+            .kind = .func,
+            .func = .{ .type_var = .{ .index = 0 } },
+        });
+        try mod.funcs.append(allocator, .{
+            .is_import = true,
+            .decl = .{ .type_var = .{ .index = 0 } },
+        });
+        mod.num_func_imports = 1;
+
+        const escaped_call_code = [_]u8{
+            0x23, 0x00, // global.get 0
+            0x41, 32, // i32.const 32
+            0x6b, // i32.sub
+            0x22, 0x01, // local.tee 1 (fp)
+            0x24, 0x00, // global.set 0
+            0x20, 0x01, // local.get 1 (fp)
+            0x20, 0x00, // local.get 0 (param)
+            0x36, 0x02, 0x00, // i32.store offset=0
+            0x20, 0x01, // local.get 1 (fp)
+            0x41, 16, // i32.const 16
+            0x6a, // i32.add
+            0x10, 0x00, // call $use_field_ptr (could subtract 16 via @fieldParentPtr!)
+            0x20, 0x01, // local.get 1 (fp)
+            0x28, 0x02, 0x00, // i32.load offset=0
+            0x20, 0x01, // local.get 1 (fp)
+            0x41, 32, // i32.const 32
+            0x6a, // i32.add
+            0x24, 0x00, // global.set 0
+            0x0b, // end
+        };
+
+        var f1 = Mod.Func{ .decl = .{ .type_var = .{ .index = 1 } }, .code_bytes = &escaped_call_code };
+        try f1.local_types.append(allocator, .i32); // local 1 (fp)
+        try mod.funcs.append(allocator, f1);
+        try mod.exports.append(allocator, .{ .name = "field_parent_ptr_safe", .kind = .func, .var_ = .{ .index = 1 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        var parse_pos: usize = 0;
+        var parsed: InstrList = .empty;
+        _ = try parseInstrBlock(arena_state.allocator(), opt_mod.funcs.items[1].code_bytes, &parse_pos, false, &parsed);
+
+        var i32_stores: usize = 0;
+        var i32_loads: usize = 0;
+        for (parsed.items) |inst| {
+            if (inst == .raw and inst.raw.len > 0) {
+                if (inst.raw[0] == 0x36) i32_stores += 1;
+                if (inst.raw[0] == 0x28) i32_loads += 1;
+            }
+        }
+        // Both store and load at `[fp + 0]` remain in memory because `fp + 16` escaped to `use_field_ptr`!
+        try testing.expectEqual(@as(usize, 1), i32_stores);
+        try testing.expectEqual(@as(usize, 1), i32_loads);
     }
 }
