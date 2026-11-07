@@ -1513,3 +1513,137 @@ test "auto calling convention small aggregate parameters by value" {
     const sp_after = S.readSp();
     try expect(sp_before == sp_after);
 }
+
+test "vector_index lane accesses in SROA and readonly alloc alias" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.cpu.arch != .wasm32) return error.SkipZigTest;
+
+    const S = struct {
+        const Rect = struct {
+            v: @Vector(4, f32),
+
+            noinline fn x(self: Rect) f32 {
+                return self.v[0];
+            }
+
+            noinline fn y(self: Rect) f32 {
+                return self.v[1];
+            }
+
+            noinline fn w(self: Rect) f32 {
+                return self.v[2];
+            }
+
+            noinline fn h(self: Rect) f32 {
+                return self.v[3];
+            }
+
+            noinline fn withUpdatedW(self: Rect, new_w: f32) f32 {
+                var copy = self;
+                copy.v[2] = new_w;
+                return copy.v[0] + copy.v[1] + copy.v[2] + copy.v[3];
+            }
+        };
+
+        noinline fn readLaneFromPtr(ptr: *const Rect) f32 {
+            const r = ptr.*;
+            return r.v[2];
+        }
+
+        noinline fn mutateLaneFromPtr(ptr: *const Rect, delta: f32) f32 {
+            var r = ptr.*;
+            r.v[2] += delta;
+            return r.v[0] + r.v[2];
+        }
+
+        noinline fn exerciseVectorLanes(seed: i32) !void {
+            var vf32: @Vector(4, f32) = .{ 1.0, 2.0, 3.0, 4.0 };
+            vf32[2] = vf32[0] + 10.5;
+            try expect(vf32[0] == 1.0);
+            try expect(vf32[1] == 2.0);
+            try expect(vf32[2] == 11.5);
+            try expect(vf32[3] == 4.0);
+
+            var vi32: @Vector(4, i32) = .{ seed, seed + 1, seed + 2, seed + 3 };
+            vi32[1] = vi32[3] * 2;
+            vi32[3] = -42;
+            try expect(vi32[0] == seed);
+            try expect(vi32[1] == (seed + 3) * 2);
+            try expect(vi32[2] == seed + 2);
+            try expect(vi32[3] == -42);
+
+            var vf64: @Vector(2, f64) = .{ 1.25, -3.5 };
+            vf64[0] = vf64[1] * 2.0;
+            vf64[1] = 8.75;
+            try expect(vf64[0] == -7.0);
+            try expect(vf64[1] == 8.75);
+
+            var vu16: @Vector(8, u16) = .{ 10, 20, 30, 40, 50, 60, 70, 80 };
+            vu16[5] = vu16[2] + 500;
+            try expect(vu16[0] == 10);
+            try expect(vu16[5] == 530);
+            try expect(vu16[7] == 80);
+
+            var vi8: @Vector(16, i8) = .{ -1, -2, -3, -4, 5, 6, 7, 8, -9, -10, 11, 12, -13, 14, -15, 16 };
+            vi8[9] = vi8[1] - 20;
+            try expect(vi8[0] == -1);
+            try expect(vi8[9] == -22);
+            try expect(vi8[15] == 16);
+        }
+
+        fn readSp() u32 {
+            return asm (
+                \\ .globaltype __stack_pointer, i32
+                \\ global.get __stack_pointer
+                \\ local.set %[ret]
+                : [ret] "=r" (-> u32),
+            );
+        }
+
+        inline fn fillRedZone(sp: u32) void {
+            const rz: [*]volatile u8 = @ptrFromInt(sp - 64);
+            for (0..64) |i| rz[i] = 0xA5;
+        }
+
+        inline fn checkRedZone(sp: u32) bool {
+            const rz: [*]volatile u8 = @ptrFromInt(sp - 64);
+            for (0..64) |i| {
+                if (rz[i] != 0xA5) return false;
+            }
+            return true;
+        }
+    };
+
+    const rect: S.Rect = .{ .v = .{ 1.5, 2.5, 3.5, 4.5 } };
+    const sp_before = S.readSp();
+    S.fillRedZone(sp_before);
+
+    const rx = rect.x();
+    const ry = rect.y();
+    const rw = rect.w();
+    const rh = rect.h();
+    const updated_sum = rect.withUpdatedW(10.0);
+    try S.exerciseVectorLanes(7);
+    const rz_lanes = S.checkRedZone(sp_before);
+
+    try expect(rx == 1.5);
+    try expect(ry == 2.5);
+    try expect(rw == 3.5);
+    try expect(rh == 4.5);
+    try expect(updated_sum == 1.5 + 2.5 + 10.0 + 4.5);
+    if (!rz_lanes) return error.VectorLaneAccessTouchedRedZone;
+
+    var mem_rect: S.Rect = .{ .v = .{ 5.0, 6.0, 7.25, 8.0 } };
+    _ = &mem_rect;
+    S.fillRedZone(sp_before);
+    const ptr_w = S.readLaneFromPtr(&mem_rect);
+    const ptr_mut = S.mutateLaneFromPtr(&mem_rect, 2.75);
+    const rz_ptr = S.checkRedZone(sp_before);
+
+    try expect(ptr_w == 7.25);
+    try expect(ptr_mut == 5.0 + 10.0);
+    if (!rz_ptr) return error.VectorPtrLaneLoadTouchedRedZone;
+
+    const sp_after = S.readSp();
+    try expect(sp_before == sp_after);
+}
