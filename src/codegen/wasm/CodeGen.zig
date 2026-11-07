@@ -762,6 +762,15 @@ pub fn addMemArg(cg: *CodeGen, tag: Mir.Inst.Tag, mem_arg: Mir.MemArg) error{Out
     try cg.addInst(.{ .tag = tag, .data = .{ .payload = extra_index } });
 }
 
+/// Inserts a SIMD instruction (`0xfd` prefix) that accesses wasm's linear memory with a `MemArg`.
+pub fn addSimdMemArg(cg: *CodeGen, opcode: std.wasm.SimdOpcode, mem_arg: Mir.MemArg) error{OutOfMemory}!void {
+    const extra_index: u32 = @intCast(cg.mir_extra.items.len);
+    try cg.mir_extra.ensureUnusedCapacity(cg.gpa, 4);
+    cg.mir_extra.appendAssumeCapacity(@backingInt(opcode));
+    _ = try cg.addExtraAssumeCapacity(mem_arg);
+    try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
+}
+
 /// Inserts an instruction from the 'atomics' feature which accesses wasm's linear memory dependent on the
 /// given `tag`.
 pub fn addAtomicMemArg(cg: *CodeGen, tag: std.wasm.AtomicsOpcode, mem_arg: Mir.MemArg) error{OutOfMemory}!void {
@@ -1007,8 +1016,21 @@ fn emitWValue(cg: *CodeGen, value: WValue) InnerError!void {
 fn emitMemBase(cg: *CodeGen, ptr: WValue) InnerError!void {
     switch (ptr) {
         .stack_offset => try cg.addLocal(.local_get, cg.bottom_stack_value.local),
+        .promoted => {},
         else => try cg.emitWValue(ptr),
     }
+}
+
+fn storeAfterMemBase(cg: *CodeGen, dst: WValue, rhs: WValue, ty: Type, offset: u64) InnerError!void {
+    if (dst == .promoted) {
+        return cg.store(dst, rhs, ty, .{ .offset = offset });
+    }
+    return cg.store(.stack, rhs, ty, .{ .offset = dst.memOffset() + offset });
+}
+
+fn optimizeMode(cg: *const CodeGen) std.builtin.OptimizeMode {
+    const zcu = cg.pt.zcu;
+    return zcu.navFileScope(cg.owner_nav).mod.?.optimize_mode;
 }
 
 fn appendFreeLocal(cg: *CodeGen, index: u32) void {
@@ -1469,6 +1491,20 @@ fn collectAutoScalarFields(
         return true;
     }
     switch (ty.zigTypeTag(zcu)) {
+        .int, .@"enum" => {
+            if (ty.abiSize(zcu) != 16 or ty.intInfo(zcu).bits != 128) return false;
+            if (count.* + 2 > max_fields) return false;
+            fields[count.*] = .{
+                .offset = base_offset,
+                .ty = .u64,
+            };
+            fields[count.* + 1] = .{
+                .offset = base_offset + 8,
+                .ty = .u64,
+            };
+            count.* += 2;
+            return true;
+        },
         .@"struct" => {
             const layout = ty.containerLayout(zcu);
             if (layout != .auto and layout != .@"extern") return false;
@@ -1730,11 +1766,14 @@ fn restoreStackPointer(cg: *CodeGen) !void {
 /// moveStack unless a local was already created to store the pointer.
 ///
 fn claimPromotedSlot(cg: *CodeGen, inst: Air.Inst.Index, ty: Type) ?WValue {
+    const zcu = cg.pt.zcu;
     const slot_idx = cg.promoted_insts.get(inst) orelse return null;
     const slot = &cg.promoted_slots.items[slot_idx];
     if (slot.claimed) return null;
-    if (slot.ty.toIntern() != ty.toIntern()) return null;
-    if (slot.size != @as(u32, @intCast(ty.abiSize(cg.pt.zcu)))) return null;
+    const type_ok = slot.ty.toIntern() == ty.toIntern() or
+        (slot.ty.isAbiInt(zcu) and ty.isAbiInt(zcu) and slot.ty.abiSize(zcu) == ty.abiSize(zcu));
+    if (!type_ok) return null;
+    if (slot.size != @as(u32, @intCast(ty.abiSize(zcu)))) return null;
     slot.claimed = true;
     return .{ .promoted = .{ .slot = slot_idx, .offset = 0 } };
 }
@@ -1802,6 +1841,11 @@ fn allocStack(cg: *CodeGen, ty: Type) !WValue {
 }
 
 fn allocInt(cg: *CodeGen, int_ty: IntType) !WValue {
+    if (int_ty.bits == 128) {
+        if (cg.current_air_inst) |inst| {
+            if (cg.claimPromotedSlot(inst, .u128)) |promoted| return promoted;
+        }
+    }
     const abi_size = std.math.cast(u32, std.zig.target.intByteSize(cg.target, int_ty.bits)) orelse {
         return cg.fail("Integer ABI size exceeds max stack size", .{});
     };
@@ -1977,6 +2021,66 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!vo
                 assert(src_f.is_read);
                 const rel_off = src_f.offset - src.promoted.offset;
                 try cg.store(dst_base, .{ .local = src_f.local }, src_f.ty, .{ .offset = rel_off, .alignment = .@"1" });
+            }
+            return;
+        }
+    }
+
+    const const_len_opt: ?u64 = switch (raw_len) {
+        .imm32 => |v| v,
+        .imm64 => |v| v,
+        else => null,
+    };
+    if (const_len_opt) |const_len| {
+        if (const_len == 0) {
+            if (src == .stack) try cg.addTag(.drop);
+            if (dst == .stack) try cg.addTag(.drop);
+            return;
+        }
+        const max_inline_len: u64 = if (cg.hasSimd()) 128 else 32;
+        if (cg.optimizeMode() != .ReleaseSmall and const_len <= max_inline_len) {
+            const owns_src = src == .stack;
+            var src_base = if (owns_src) try src.toLocal(cg, .usize) else src;
+            defer if (owns_src) src_base.free(cg);
+            const owns_dst = dst == .stack;
+            var dst_base = if (owns_dst) try dst.toLocal(cg, .usize) else dst;
+            defer if (owns_dst) dst_base.free(cg);
+
+            const dst_offset = dst_base.memOffset();
+            const src_offset = src_base.memOffset();
+            var off: u64 = 0;
+            while (cg.hasSimd() and const_len - off >= 16) : (off += 16) {
+                try cg.emitMemBase(dst_base);
+                try cg.emitMemBase(src_base);
+                try cg.addSimdMemArg(.v128_load, .{ .offset = src_offset + off, .alignment = .@"1" });
+                try cg.addSimdMemArg(.v128_store, .{ .offset = dst_offset + off, .alignment = .@"1" });
+            }
+            while (const_len - off >= 8) : (off += 8) {
+                try cg.emitMemBase(dst_base);
+                try cg.emitMemBase(src_base);
+                try cg.addMemArg(.i64_load, .{ .offset = src_offset + off, .alignment = .@"1" });
+                try cg.addMemArg(.i64_store, .{ .offset = dst_offset + off, .alignment = .@"1" });
+            }
+            if (const_len - off >= 4) {
+                try cg.emitMemBase(dst_base);
+                try cg.emitMemBase(src_base);
+                try cg.addMemArg(.i32_load, .{ .offset = src_offset + off, .alignment = .@"1" });
+                try cg.addMemArg(.i32_store, .{ .offset = dst_offset + off, .alignment = .@"1" });
+                off += 4;
+            }
+            if (const_len - off >= 2) {
+                try cg.emitMemBase(dst_base);
+                try cg.emitMemBase(src_base);
+                try cg.addMemArg(.i32_load16_u, .{ .offset = src_offset + off, .alignment = .@"1" });
+                try cg.addMemArg(.i32_store16, .{ .offset = dst_offset + off, .alignment = .@"1" });
+                off += 2;
+            }
+            if (const_len - off >= 1) {
+                try cg.emitMemBase(dst_base);
+                try cg.emitMemBase(src_base);
+                try cg.addMemArg(.i32_load8_u, .{ .offset = src_offset + off, .alignment = .@"1" });
+                try cg.addMemArg(.i32_store8, .{ .offset = dst_offset + off, .alignment = .@"1" });
+                off += 1;
             }
             return;
         }
@@ -2163,8 +2267,8 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                     .mul => try cg.floatMul(float_ty, lhs, rhs),
                     .rem => try cg.floatRem(float_ty, lhs, rhs),
                     .mod => try cg.floatMod(float_ty, lhs, rhs),
-                    .max => try cg.floatMax(float_ty, lhs, rhs),
-                    .min => try cg.floatMin(float_ty, lhs, rhs),
+                    .max => try cg.floatMax(float_ty, lhs, rhs, cg.isKnownNonNanFloat(bin_op.lhs), cg.isKnownNonNanFloat(bin_op.rhs)),
+                    .min => try cg.floatMin(float_ty, lhs, rhs, cg.isKnownNonNanFloat(bin_op.lhs), cg.isKnownNonNanFloat(bin_op.rhs)),
                     .div_exact => try cg.floatDiv(float_ty, lhs, rhs),
                     .div_trunc => try cg.floatDivTrunc(float_ty, lhs, rhs),
                     .div_floor => try cg.floatDivFloor(float_ty, lhs, rhs),
@@ -3230,7 +3334,6 @@ const MemArg = struct {
 };
 
 fn store(cg: *CodeGen, lhs: WValue, rhs: WValue, ty: Type, memarg: MemArg) InnerError!void {
-    assert(!(lhs != .stack and rhs == .stack));
     const pt = cg.pt;
     const zcu = pt.zcu;
     const abi_size = ty.abiSize(zcu);
@@ -3245,6 +3348,7 @@ fn store(cg: *CodeGen, lhs: WValue, rhs: WValue, ty: Type, memarg: MemArg) Inner
         natural_alignment.minStrict(memarg.alignment);
 
     if (isByRef(ty, zcu, cg.target)) {
+        assert(!(lhs != .stack and rhs == .stack));
         const offset_ptr = try cg.offsetPointer(lhs, memarg.offset);
         return cg.memcpy(offset_ptr, rhs, cg.usizeImm(abi_size));
     }
@@ -3269,6 +3373,8 @@ fn store(cg: *CodeGen, lhs: WValue, rhs: WValue, ty: Type, memarg: MemArg) Inner
         try cg.addLocal(.local_set, f.local);
         return;
     }
+
+    assert(!(lhs != .stack and rhs == .stack));
 
     const base_offset = lhs.memOffset();
     try cg.emitMemBase(lhs);
@@ -3727,7 +3833,6 @@ fn isInt128HighZeroDepth(cg: *CodeGen, ref: Air.Inst.Ref, depth: u8) bool {
 
 fn intMul128(cg: *CodeGen, lhs: WValue, rhs: WValue, lhs_hi_zero: bool, rhs_hi_zero: bool) InnerError!WValue {
     const result = try cg.allocStack(Type.u128);
-    const result_offset = result.memOffset();
 
     var lhs_lo = try (try cg.load(lhs, .u64, .{})).toLocal(cg, Type.u64);
     defer lhs_lo.free(cg);
@@ -3738,7 +3843,7 @@ fn intMul128(cg: *CodeGen, lhs: WValue, rhs: WValue, lhs_hi_zero: bool, rhs_hi_z
     try cg.emitWValue(lhs_lo);
     try cg.emitWValue(rhs_lo);
     try cg.addTag(.i64_mul);
-    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+    try cg.storeAfterMemBase(result, .stack, .u64, 0);
 
     var u_lo = try cg.allocLocal(Type.u64);
     defer u_lo.free(cg);
@@ -3823,7 +3928,7 @@ fn intMul128(cg: *CodeGen, lhs: WValue, rhs: WValue, lhs_hi_zero: bool, rhs_hi_z
         try cg.addTag(.i64_add);
     }
 
-    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+    try cg.storeAfterMemBase(result, .stack, .u64, 8);
     return result;
 }
 
@@ -4296,12 +4401,11 @@ fn intNot(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
         65...128 => {
             const result = try cg.allocStack(Type.u128);
 
-            const result_offset = result.memOffset();
             try cg.emitMemBase(result);
             _ = try cg.load(operand, .u64, .{});
             try cg.addImm64(~@as(u64, 0));
             try cg.addTag(.i64_xor);
-            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+            try cg.storeAfterMemBase(result, .stack, .u64, 0);
 
             try cg.emitMemBase(result);
             _ = try cg.load(operand, .u64, .{ .offset = 8 });
@@ -4311,7 +4415,7 @@ fn intNot(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                 ~@as(u64, 0) >> @intCast(128 - ty.bits);
             try cg.addImm64(high_mask);
             try cg.addTag(.i64_xor);
-            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+            try cg.storeAfterMemBase(result, .stack, .u64, 8);
 
             return result;
         },
@@ -4351,14 +4455,13 @@ fn intShl(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
             if (rhs == .imm32) {
                 const shift_amt: u32 = rhs.imm32;
                 const result = try cg.allocStack(Type.u128);
-                const result_offset = result.memOffset();
                 if (shift_amt == 0) {
                     try cg.emitMemBase(result);
                     _ = try cg.load(lhs, .u64, .{});
-                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+                    try cg.storeAfterMemBase(result, .stack, .u64, 0);
                     try cg.emitMemBase(result);
                     _ = try cg.load(lhs, .u64, .{ .offset = 8 });
-                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                    try cg.storeAfterMemBase(result, .stack, .u64, 8);
                 } else if (shift_amt < 64) {
                     var lhs_lo = try (try cg.load(lhs, .u64, .{})).toLocal(cg, Type.u64);
                     defer lhs_lo.free(cg);
@@ -4367,7 +4470,7 @@ fn intShl(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
                     try cg.emitWValue(lhs_lo);
                     try cg.addImm64(shift_amt);
                     try cg.addTag(.i64_shl);
-                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+                    try cg.storeAfterMemBase(result, .stack, .u64, 0);
 
                     try cg.emitMemBase(result);
                     _ = try cg.load(lhs, .u64, .{ .offset = 8 });
@@ -4377,19 +4480,19 @@ fn intShl(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
                     try cg.addImm64(64 - shift_amt);
                     try cg.addTag(.i64_shr_u);
                     try cg.addTag(.i64_or);
-                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                    try cg.storeAfterMemBase(result, .stack, .u64, 8);
                 } else if (shift_amt == 64) {
                     try cg.store(result, .{ .imm64 = 0 }, .u64, .{});
                     try cg.emitMemBase(result);
                     _ = try cg.load(lhs, .u64, .{});
-                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                    try cg.storeAfterMemBase(result, .stack, .u64, 8);
                 } else if (shift_amt < 128) {
                     try cg.store(result, .{ .imm64 = 0 }, .u64, .{});
                     try cg.emitMemBase(result);
                     _ = try cg.load(lhs, .u64, .{});
                     try cg.addImm64(shift_amt - 64);
                     try cg.addTag(.i64_shl);
-                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                    try cg.storeAfterMemBase(result, .stack, .u64, 8);
                 } else {
                     try cg.store(result, .{ .imm64 = 0 }, .u64, .{});
                     try cg.store(result, .{ .imm64 = 0 }, .u64, .{ .offset = 8 });
@@ -4398,7 +4501,6 @@ fn intShl(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
             }
 
             const result = try cg.allocStack(Type.u128);
-            const result_offset = result.memOffset();
 
             const owns_s_i32 = rhs == .stack;
             var s_i32 = try rhs.toLocal(cg, Type.u32);
@@ -4429,7 +4531,7 @@ fn intShl(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
             try cg.emitWValue(shl_lo);
             try cg.emitWValue(ge_64);
             try cg.addTag(.select);
-            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+            try cg.storeAfterMemBase(result, .stack, .u64, 0);
 
             try cg.emitMemBase(result);
             try cg.emitWValue(shl_lo);
@@ -4446,7 +4548,7 @@ fn intShl(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
             try cg.addTag(.i64_or);
             try cg.emitWValue(ge_64);
             try cg.addTag(.select);
-            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+            try cg.storeAfterMemBase(result, .stack, .u64, 8);
 
             return result;
         },
@@ -4488,14 +4590,13 @@ fn intShr(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
             if (rhs == .imm32) {
                 const shift_amt: u32 = rhs.imm32;
                 const result = try cg.allocStack(Type.u128);
-                const result_offset = result.memOffset();
                 if (shift_amt == 0) {
                     try cg.emitMemBase(result);
                     _ = try cg.load(lhs, .u64, .{});
-                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+                    try cg.storeAfterMemBase(result, .stack, .u64, 0);
                     try cg.emitMemBase(result);
                     _ = try cg.load(lhs, .u64, .{ .offset = 8 });
-                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                    try cg.storeAfterMemBase(result, .stack, .u64, 8);
                 } else if (shift_amt < 64) {
                     var lhs_hi = try (try cg.load(lhs, .u64, .{ .offset = 8 })).toLocal(cg, Type.u64);
                     defer lhs_hi.free(cg);
@@ -4508,13 +4609,13 @@ fn intShr(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
                     try cg.addImm64(64 - shift_amt);
                     try cg.addTag(.i64_shl);
                     try cg.addTag(.i64_or);
-                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+                    try cg.storeAfterMemBase(result, .stack, .u64, 0);
 
                     try cg.emitMemBase(result);
                     try cg.emitWValue(lhs_hi);
                     try cg.addImm64(shift_amt);
                     try cg.addTag(hi_shr_tag);
-                    try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                    try cg.storeAfterMemBase(result, .stack, .u64, 8);
                 } else if (shift_amt == 64) {
                     if (ty.is_signed) {
                         var lhs_hi = try (try cg.load(lhs, .u64, .{ .offset = 8 })).toLocal(cg, Type.u64);
@@ -4526,11 +4627,11 @@ fn intShr(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
                         try cg.emitWValue(lhs_hi);
                         try cg.addImm64(63);
                         try cg.addTag(.i64_shr_s);
-                        try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                        try cg.storeAfterMemBase(result, .stack, .u64, 8);
                     } else {
                         try cg.emitMemBase(result);
                         _ = try cg.load(lhs, .u64, .{ .offset = 8 });
-                        try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+                        try cg.storeAfterMemBase(result, .stack, .u64, 0);
                         try cg.store(result, .{ .imm64 = 0 }, .u64, .{ .offset = 8 });
                     }
                 } else if (shift_amt < 128) {
@@ -4542,19 +4643,19 @@ fn intShr(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
                         try cg.emitWValue(lhs_hi);
                         try cg.addImm64(shift_amt - 64);
                         try cg.addTag(.i64_shr_s);
-                        try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+                        try cg.storeAfterMemBase(result, .stack, .u64, 0);
 
                         try cg.emitMemBase(result);
                         try cg.emitWValue(lhs_hi);
                         try cg.addImm64(63);
                         try cg.addTag(.i64_shr_s);
-                        try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+                        try cg.storeAfterMemBase(result, .stack, .u64, 8);
                     } else {
                         try cg.emitMemBase(result);
                         _ = try cg.load(lhs, .u64, .{ .offset = 8 });
                         try cg.addImm64(shift_amt - 64);
                         try cg.addTag(.i64_shr_u);
-                        try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+                        try cg.storeAfterMemBase(result, .stack, .u64, 0);
                         try cg.store(result, .{ .imm64 = 0 }, .u64, .{ .offset = 8 });
                     }
                 } else {
@@ -4576,7 +4677,6 @@ fn intShr(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
             }
 
             const result = try cg.allocStack(Type.u128);
-            const result_offset = result.memOffset();
 
             const owns_s_i32 = rhs == .stack;
             var s_i32 = try rhs.toLocal(cg, Type.u32);
@@ -4617,7 +4717,7 @@ fn intShr(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
             try cg.addTag(.i64_or);
             try cg.emitWValue(ge_64);
             try cg.addTag(.select);
-            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+            try cg.storeAfterMemBase(result, .stack, .u64, 0);
 
             try cg.emitMemBase(result);
             if (ty.is_signed) {
@@ -4630,7 +4730,7 @@ fn intShr(cg: *CodeGen, ty: IntType, lhs: WValue, rhs: WValue) InnerError!WValue
             try cg.emitWValue(shr_hi);
             try cg.emitWValue(ge_64);
             try cg.addTag(.select);
-            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+            try cg.storeAfterMemBase(result, .stack, .u64, 8);
 
             return result;
         },
@@ -5076,10 +5176,9 @@ fn intWrap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
         65...127 => {
             const result = try cg.allocStack(Type.u128);
 
-            const result_offset = result.memOffset();
             try cg.emitMemBase(result);
             _ = try cg.load(operand, .u64, .{});
-            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset });
+            try cg.storeAfterMemBase(result, .stack, .u64, 0);
 
             try cg.emitMemBase(result);
             _ = try cg.load(operand, .u64, .{ .offset = 8 });
@@ -5092,7 +5191,7 @@ fn intWrap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
                 try cg.addImm64(~@as(u64, 0) >> @intCast(128 - ty.bits));
                 try cg.addTag(.i64_and);
             }
-            try cg.store(.stack, .stack, .u64, .{ .offset = result_offset + 8 });
+            try cg.storeAfterMemBase(result, .stack, .u64, 8);
 
             return result;
         },
@@ -5592,12 +5691,12 @@ fn intCast(cg: *CodeGen, dest_ty: IntType, src_ty: IntType, operand: WValue) Inn
                 try cg.emitMemBase(result);
                 try cg.emitWValue(operand);
                 try cg.addTag(if (src_ty.is_signed) .i64_extend_i32_s else .i64_extend_i32_u);
-                try cg.store(.stack, .stack, .u64, .{ .offset = result.memOffset() });
+                try cg.storeAfterMemBase(result, .stack, .u64, 0);
                 src_len = 8;
             } else if (src_bits == 64) {
                 try cg.emitMemBase(result);
                 try cg.emitWValue(operand);
-                try cg.store(.stack, .stack, .u64, .{ .offset = result.memOffset() });
+                try cg.storeAfterMemBase(result, .stack, .u64, 0);
                 src_len = 8;
             } else {
                 src_len = src_bits / 8;
@@ -5614,7 +5713,7 @@ fn intCast(cg: *CodeGen, dest_ty: IntType, src_ty: IntType, operand: WValue) Inn
                         try cg.emitWValue(operand);
                     } else unreachable;
                     const shr = try cg.intShr(IntType.i64, .stack, .{ .imm32 = 63 });
-                    try cg.store(.stack, shr, .u64, .{ .offset = result.memOffset() + 8 });
+                    try cg.storeAfterMemBase(result, shr, .u64, 8);
                 } else {
                     try cg.store(result, .{ .imm64 = 0 }, .u64, .{ .offset = 8 });
                 }
@@ -5648,6 +5747,12 @@ fn intCast(cg: *CodeGen, dest_ty: IntType, src_ty: IntType, operand: WValue) Inn
     } else {
         assert(dest_bits <= 64);
         assert(src_bits >= 128);
+        if (operand == .promoted and dest_bits == 32) {
+            const lo = try cg.load(operand, .u64, .{});
+            try cg.emitWValue(lo);
+            try cg.addTag(.i32_wrap_i64);
+            return .stack;
+        }
         const load_ty = if (dest_bits == 32) Type.u32 else Type.u64;
         return cg.load(operand, load_ty, .{});
     }
@@ -5806,8 +5911,69 @@ fn floatMod(cg: *CodeGen, ty: FloatType, lhs: WValue, rhs: WValue) InnerError!WV
     return cg.floatRem(ty, s, rhs);
 }
 
+fn isKnownNonNanFloat(cg: *const CodeGen, ref: Air.Inst.Ref) bool {
+    return cg.isKnownNonNanFloatDepth(ref, 4);
+}
+
+fn isKnownNonNanFloatDepth(cg: *const CodeGen, ref: Air.Inst.Ref, depth: u8) bool {
+    const pt = cg.pt;
+    const zcu = pt.zcu;
+    if (ref.toInterned()) |ip_idx| {
+        const val: Value = .fromInterned(ip_idx);
+        if (val.isUndef(zcu)) return false;
+        const ty = val.typeOf(zcu);
+        if (ty.zigTypeTag(zcu) == .vector) {
+            const len: usize = @intCast(ty.vectorLen(zcu));
+            for (0..len) |i| {
+                const elem = val.elemValue(pt, i) catch return false;
+                if (elem.isUndef(zcu) or elem.isNan(zcu)) return false;
+            }
+            return true;
+        }
+        return !val.isNan(zcu);
+    }
+    if (depth == 0) return false;
+    const inst_idx = ref.toIndex() orelse return false;
+    const tag = cg.air.instructions.items(.tag)[@backingInt(inst_idx)];
+    const data = cg.air.instructions.items(.data)[@backingInt(inst_idx)];
+    return switch (tag) {
+        .min, .max => cg.isKnownNonNanFloatDepth(data.bin_op.lhs, depth - 1) or
+            cg.isKnownNonNanFloatDepth(data.bin_op.rhs, depth - 1),
+        .splat,
+        .float_from_int,
+        .abs,
+        .fpext,
+        .fptrunc,
+        => cg.isKnownNonNanFloatDepth(data.ty_op.operand, depth - 1),
+        .neg,
+        .neg_optimized,
+        .floor,
+        .ceil,
+        .round,
+        .trunc_float,
+        => cg.isKnownNonNanFloatDepth(data.un_op, depth - 1),
+        .add_optimized,
+        .sub_optimized,
+        .mul_optimized,
+        .div_float_optimized,
+        .rem_optimized,
+        => true,
+        .aggregate_init => {
+            const res_ty = cg.typeOfIndex(inst_idx);
+            if (res_ty.zigTypeTag(zcu) != .vector) return false;
+            const len: usize = @intCast(res_ty.vectorLen(zcu));
+            const elements: []const Air.Inst.Ref = @ptrCast(cg.air.extra.items[data.ty_pl.payload..][0..len]);
+            for (elements) |elem| {
+                if (!cg.isKnownNonNanFloatDepth(elem, depth - 1)) return false;
+            }
+            return true;
+        },
+        else => false,
+    };
+}
+
 // wasm fN_max NaN semantics differ with Zig
-fn floatMax(cg: *CodeGen, ty: FloatType, lhs: WValue, rhs: WValue) InnerError!WValue {
+fn floatMax(cg: *CodeGen, ty: FloatType, lhs: WValue, rhs: WValue, lhs_known_non_nan: bool, rhs_known_non_nan: bool) InnerError!WValue {
     switch (ty) {
         .f16 => return cg.callIntrinsic(.__fmaxh, &.{ .f16_type, .f16_type }, Type.f16, &.{ lhs, rhs }),
         .f32, .f64 => {
@@ -5821,12 +5987,12 @@ fn floatMax(cg: *CodeGen, ty: FloatType, lhs: WValue, rhs: WValue) InnerError!WV
             var rhs_val = try rhs.toLocal(cg, elem_ty);
             defer if (rhs == .stack) rhs_val.free(cg);
 
-            const lhs_non_nan = switch (lhs_val) {
+            const lhs_non_nan = lhs_known_non_nan or switch (lhs_val) {
                 .float32 => |v| !std.math.isNan(v),
                 .float64 => |v| !std.math.isNan(v),
                 else => false,
             };
-            const rhs_non_nan = switch (rhs_val) {
+            const rhs_non_nan = rhs_known_non_nan or switch (rhs_val) {
                 .float32 => |v| !std.math.isNan(v),
                 .float64 => |v| !std.math.isNan(v),
                 else => false,
@@ -5866,7 +6032,7 @@ fn floatMax(cg: *CodeGen, ty: FloatType, lhs: WValue, rhs: WValue) InnerError!WV
 }
 
 // wasm fN_min NaN semantics differ with Zig
-fn floatMin(cg: *CodeGen, ty: FloatType, lhs: WValue, rhs: WValue) InnerError!WValue {
+fn floatMin(cg: *CodeGen, ty: FloatType, lhs: WValue, rhs: WValue, lhs_known_non_nan: bool, rhs_known_non_nan: bool) InnerError!WValue {
     switch (ty) {
         .f16 => return cg.callIntrinsic(.__fminh, &.{ .f16_type, .f16_type }, Type.f16, &.{ lhs, rhs }),
         .f32, .f64 => {
@@ -5880,12 +6046,12 @@ fn floatMin(cg: *CodeGen, ty: FloatType, lhs: WValue, rhs: WValue) InnerError!WV
             var rhs_val = try rhs.toLocal(cg, elem_ty);
             defer if (rhs == .stack) rhs_val.free(cg);
 
-            const lhs_non_nan = switch (lhs_val) {
+            const lhs_non_nan = lhs_known_non_nan or switch (lhs_val) {
                 .float32 => |v| !std.math.isNan(v),
                 .float64 => |v| !std.math.isNan(v),
                 else => false,
             };
-            const rhs_non_nan = switch (rhs_val) {
+            const rhs_non_nan = rhs_known_non_nan or switch (rhs_val) {
                 .float32 => |v| !std.math.isNan(v),
                 .float64 => |v| !std.math.isNan(v),
                 else => false,
@@ -8735,7 +8901,19 @@ fn emitFloatMinMaxSimd(
     rhs: WValue,
     cmp_op: std.wasm.SimdOpcode,
     ne_op: std.wasm.SimdOpcode,
+    pminmax_op: std.wasm.SimdOpcode,
+    lhs_non_nan: bool,
+    rhs_non_nan: bool,
 ) InnerError!WValue {
+    if (lhs_non_nan) {
+        return cg.emitBinSimd(ty, lhs, rhs, pminmax_op);
+    }
+    if (rhs_non_nan) {
+        var lhs_val = if (lhs == .stack) try lhs.toLocal(cg, ty) else lhs;
+        defer if (lhs == .stack) lhs_val.free(cg);
+        return cg.emitBinSimd(ty, rhs, lhs_val, pminmax_op);
+    }
+
     var rhs_val = if (rhs == .stack) try rhs.toLocal(cg, ty) else rhs;
     defer if (rhs == .stack) rhs_val.free(cg);
     var lhs_val = if (lhs == .stack) try lhs.toLocal(cg, ty) else lhs;
@@ -8839,8 +9017,8 @@ fn vecBinOp(
                     .sub => return cg.emitBinSimd(ty, lhs, rhs, .f32x4_sub),
                     .mul => return cg.emitBinSimd(ty, lhs, rhs, .f32x4_mul),
                     .div_float, .div_exact => return cg.emitBinSimd(ty, lhs, rhs, .f32x4_div),
-                    .min => return cg.emitFloatMinMaxSimd(ty, lhs, rhs, .f32x4_lt, .f32x4_ne),
-                    .max => return cg.emitFloatMinMaxSimd(ty, lhs, rhs, .f32x4_gt, .f32x4_ne),
+                    .min => return cg.emitFloatMinMaxSimd(ty, lhs, rhs, .f32x4_lt, .f32x4_ne, .f32x4_pmin, cg.isKnownNonNanFloat(lhs_ref), cg.isKnownNonNanFloat(rhs_ref)),
+                    .max => return cg.emitFloatMinMaxSimd(ty, lhs, rhs, .f32x4_gt, .f32x4_ne, .f32x4_pmax, cg.isKnownNonNanFloat(lhs_ref), cg.isKnownNonNanFloat(rhs_ref)),
                     else => {},
                 },
                 64 => switch (tag) {
@@ -8848,8 +9026,8 @@ fn vecBinOp(
                     .sub => return cg.emitBinSimd(ty, lhs, rhs, .f64x2_sub),
                     .mul => return cg.emitBinSimd(ty, lhs, rhs, .f64x2_mul),
                     .div_float, .div_exact => return cg.emitBinSimd(ty, lhs, rhs, .f64x2_div),
-                    .min => return cg.emitFloatMinMaxSimd(ty, lhs, rhs, .f64x2_lt, .f64x2_ne),
-                    .max => return cg.emitFloatMinMaxSimd(ty, lhs, rhs, .f64x2_gt, .f64x2_ne),
+                    .min => return cg.emitFloatMinMaxSimd(ty, lhs, rhs, .f64x2_lt, .f64x2_ne, .f64x2_pmin, cg.isKnownNonNanFloat(lhs_ref), cg.isKnownNonNanFloat(rhs_ref)),
+                    .max => return cg.emitFloatMinMaxSimd(ty, lhs, rhs, .f64x2_gt, .f64x2_ne, .f64x2_pmax, cg.isKnownNonNanFloat(lhs_ref), cg.isKnownNonNanFloat(rhs_ref)),
                     else => {},
                 },
                 else => {},
@@ -9540,8 +9718,8 @@ fn reduceScalarOp(
         return switch (op) {
             .Add => cg.floatAdd(float_ty, lhs, rhs),
             .Mul => cg.floatMul(float_ty, lhs, rhs),
-            .Min => cg.floatMin(float_ty, lhs, rhs),
-            .Max => cg.floatMax(float_ty, lhs, rhs),
+            .Min => cg.floatMin(float_ty, lhs, rhs, false, false),
+            .Max => cg.floatMax(float_ty, lhs, rhs, false, false),
             .And, .Or, .Xor => unreachable,
         };
     }
@@ -9680,17 +9858,19 @@ fn airReduce(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                         },
                         .Min, .Max => {
                             const cmp_op: std.wasm.SimdOpcode = if (op == .Min) .f32x4_lt else .f32x4_gt;
+                            const pminmax_op: std.wasm.SimdOpcode = if (op == .Min) .f32x4_pmin else .f32x4_pmax;
+                            const op_non_nan = cg.isKnownNonNanFloat(reduce.operand);
                             try cg.emitWValue(op_val);
                             try cg.emitWValue(op_val);
                             try cg.addSimdShuffle(.{ 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7 });
-                            _ = try cg.emitFloatMinMaxSimd(operand_ty, op_val, .stack, cmp_op, .f32x4_ne);
+                            _ = try cg.emitFloatMinMaxSimd(operand_ty, op_val, .stack, cmp_op, .f32x4_ne, pminmax_op, op_non_nan, op_non_nan);
                             var step1 = try (WValue{ .stack = {} }).toLocal(cg, operand_ty);
                             defer step1.free(cg);
 
                             try cg.emitWValue(step1);
                             try cg.emitWValue(step1);
                             try cg.addSimdShuffle(.{ 4, 5, 6, 7, 0, 1, 2, 3, 12, 13, 14, 15, 8, 9, 10, 11 });
-                            _ = try cg.emitFloatMinMaxSimd(operand_ty, step1, .stack, cmp_op, .f32x4_ne);
+                            _ = try cg.emitFloatMinMaxSimd(operand_ty, step1, .stack, cmp_op, .f32x4_ne, pminmax_op, op_non_nan, op_non_nan);
                         },
                         .And, .Or, .Xor => unreachable,
                     }
@@ -9709,10 +9889,12 @@ fn airReduce(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                         },
                         .Min, .Max => {
                             const cmp_op: std.wasm.SimdOpcode = if (op == .Min) .f64x2_lt else .f64x2_gt;
+                            const pminmax_op: std.wasm.SimdOpcode = if (op == .Min) .f64x2_pmin else .f64x2_pmax;
+                            const op_non_nan = cg.isKnownNonNanFloat(reduce.operand);
                             try cg.emitWValue(op_val);
                             try cg.emitWValue(op_val);
                             try cg.addSimdShuffle(.{ 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7 });
-                            _ = try cg.emitFloatMinMaxSimd(operand_ty, op_val, .stack, cmp_op, .f64x2_ne);
+                            _ = try cg.emitFloatMinMaxSimd(operand_ty, op_val, .stack, cmp_op, .f64x2_ne, pminmax_op, op_non_nan, op_non_nan);
                         },
                         .And, .Or, .Xor => unreachable,
                     }
@@ -11142,6 +11324,23 @@ fn flattenScalarizableTypeInner(
     }
 
     switch (ty.zigTypeTag(zcu)) {
+        .int, .@"enum" => {
+            if (ty.abiSize(zcu) != 16 or ty.intInfo(zcu).bits != 128) return false;
+            if (out_fields.items.len + 2 > max_sroa_leaves) return false;
+            try out_fields.append(cg.gpa, .{
+                .offset = base_offset,
+                .size = 8,
+                .ty = .u64,
+                .local = 0,
+            });
+            try out_fields.append(cg.gpa, .{
+                .offset = base_offset + 8,
+                .size = 8,
+                .ty = .u64,
+                .local = 0,
+            });
+            return true;
+        },
         .@"struct" => {
             const layout = ty.containerLayout(zcu);
             if (layout != .auto and layout != .@"extern") return false;
@@ -12973,6 +13172,122 @@ const SroaAnalysis = struct {
                 }
             },
 
+            .int_cast => {
+                const op = data.ty_op.operand;
+                const src_ty = self.cg.typeOf(op);
+                const dst_ty = data.ty_op.ty;
+                if (dst_ty.isAbiInt(zcu) and !dst_ty.isVector(zcu)) {
+                    const dst_info = dst_ty.intInfo(zcu);
+                    if (dst_info.bits == 128 and src_ty.isAbiInt(zcu) and !src_ty.isVector(zcu) and
+                        src_ty.intInfo(zcu).bits <= 64)
+                    {
+                        self.markEscaped(op);
+                        _ = try self.tryAddCandidateRoot(inst, .u128, .byref_val);
+                        return;
+                    }
+                    if (dst_info.bits <= 64 and src_ty.isAbiInt(zcu) and !src_ty.isVector(zcu) and
+                        src_ty.intInfo(zcu).bits == 128)
+                    {
+                        if (self.getRef(op)) |ref| {
+                            if (ref.kind == .byref_val and self.checkScalarAccess(ref.root_id, ref.offset, .u64)) {
+                                self.roots.items[ref.root_id].scalar_access_count += 1;
+                                _ = self.markRangeRead(ref.root_id, ref.offset, 8);
+                                return;
+                            }
+                        }
+                    }
+                }
+                self.markEscaped(op);
+            },
+
+            .trunc => {
+                const op = data.ty_op.operand;
+                const src_ty = self.cg.typeOf(op);
+                const dst_ty = data.ty_op.ty;
+                if (dst_ty.isAbiInt(zcu) and !dst_ty.isVector(zcu) and
+                    src_ty.isAbiInt(zcu) and !src_ty.isVector(zcu) and
+                    dst_ty.intInfo(zcu).bits <= 64 and src_ty.intInfo(zcu).bits == 128)
+                {
+                    if (self.getRef(op)) |ref| {
+                        if (ref.kind == .byref_val and self.checkScalarAccess(ref.root_id, ref.offset, .u64)) {
+                            self.roots.items[ref.root_id].scalar_access_count += 1;
+                            _ = self.markRangeRead(ref.root_id, ref.offset, 8);
+                            return;
+                        }
+                    }
+                }
+                self.markEscaped(op);
+            },
+
+            .mul, .mul_wrap, .add, .add_wrap, .sub, .sub_wrap, .bit_and, .bit_or, .xor => {
+                const bin_op = data.bin_op;
+                const res_ty = self.cg.typeOfIndex(inst);
+                if (res_ty.isAbiInt(zcu) and !res_ty.isVector(zcu) and res_ty.intInfo(zcu).bits == 128) {
+                    const is_mul = tag == .mul or tag == .mul_wrap;
+                    for ([_]Air.Inst.Ref{ bin_op.lhs, bin_op.rhs }, [_]bool{
+                        is_mul and self.cg.isInt128HighZero(bin_op.lhs),
+                        is_mul and self.cg.isInt128HighZero(bin_op.rhs),
+                    }) |op, hi_zero| {
+                        if (self.getRef(op)) |ref| {
+                            if (ref.kind == .byref_val and
+                                self.checkScalarAccess(ref.root_id, ref.offset, .u64) and
+                                (hi_zero or self.checkScalarAccess(ref.root_id, ref.offset + 8, .u64)))
+                            {
+                                self.roots.items[ref.root_id].scalar_access_count += 1;
+                                _ = self.markRangeRead(ref.root_id, ref.offset, if (hi_zero) 8 else 16);
+                            } else {
+                                self.markEscaped(op);
+                            }
+                        }
+                    }
+                    _ = try self.tryAddCandidateRoot(inst, .u128, .byref_val);
+                    return;
+                }
+                self.markEscaped(bin_op.lhs);
+                self.markEscaped(bin_op.rhs);
+            },
+
+            .shl, .shl_exact, .shr, .shr_exact => {
+                const bin_op = data.bin_op;
+                const res_ty = self.cg.typeOfIndex(inst);
+                if (res_ty.isAbiInt(zcu) and !res_ty.isVector(zcu) and res_ty.intInfo(zcu).bits == 128) {
+                    self.markEscaped(bin_op.rhs);
+                    if (self.getRef(bin_op.lhs)) |ref| {
+                        if (ref.kind == .byref_val and
+                            self.checkScalarAccess(ref.root_id, ref.offset, .u64) and
+                            self.checkScalarAccess(ref.root_id, ref.offset + 8, .u64))
+                        {
+                            self.roots.items[ref.root_id].scalar_access_count += 1;
+                            var const_shift: ?u64 = null;
+                            if (bin_op.rhs.toInterned()) |rhs_ip| {
+                                const rhs_val: Value = .fromInterned(rhs_ip);
+                                if (!rhs_val.isUndef(zcu)) {
+                                    const_shift = rhs_val.getUnsignedInt(zcu);
+                                }
+                            }
+                            const is_shr = tag == .shr or tag == .shr_exact;
+                            if (const_shift) |shift_amt| {
+                                if (is_shr and shift_amt >= 64) {
+                                    _ = self.markRangeRead(ref.root_id, ref.offset + 8, 8);
+                                } else if (!is_shr and shift_amt >= 64) {
+                                    _ = self.markRangeRead(ref.root_id, ref.offset, 8);
+                                } else {
+                                    _ = self.markRangeRead(ref.root_id, ref.offset, 16);
+                                }
+                            } else {
+                                _ = self.markRangeRead(ref.root_id, ref.offset, 16);
+                            }
+                        } else {
+                            self.markEscaped(bin_op.lhs);
+                        }
+                    }
+                    _ = try self.tryAddCandidateRoot(inst, .u128, .byref_val);
+                    return;
+                }
+                self.markEscaped(bin_op.lhs);
+                self.markEscaped(bin_op.rhs);
+            },
+
             else => self.escapeAllOperands(inst),
         }
     }
@@ -13401,20 +13716,21 @@ fn bodyIsPureAbort(cg: *const CodeGen, body: []const Air.Inst.Index) bool {
     return true;
 }
 
-fn instMayWriteOrCall(cg: *const CodeGen, inst: Air.Inst.Index) bool {
+fn instMayWriteOrCall(cg: *const CodeGen, inst: Air.Inst.Index, sroa: ?*const SroaAnalysis) bool {
     const tags = cg.air.instructions.items(.tag);
+    const datas = cg.air.instructions.items(.data);
     return switch (tags[@backingInt(inst)]) {
         .block => {
             const block = cg.air.unwrapBlock(inst);
             for (block.body) |sub_inst| {
-                if (instMayWriteOrCall(cg, sub_inst)) return true;
+                if (instMayWriteOrCall(cg, sub_inst, sroa)) return true;
             }
             return false;
         },
         .dbg_inline_block => {
             const block = cg.air.unwrapDbgBlock(inst);
             for (block.body) |sub_inst| {
-                if (instMayWriteOrCall(cg, sub_inst)) return true;
+                if (instMayWriteOrCall(cg, sub_inst, sroa)) return true;
             }
             return false;
         },
@@ -13422,21 +13738,78 @@ fn instMayWriteOrCall(cg: *const CodeGen, inst: Air.Inst.Index) bool {
             const branch = cg.air.unwrapCondBr(inst);
             if (!bodyIsPureAbort(cg, branch.then_body)) {
                 for (branch.then_body) |sub_inst| {
-                    if (instMayWriteOrCall(cg, sub_inst)) return true;
+                    if (instMayWriteOrCall(cg, sub_inst, sroa)) return true;
                 }
             }
             if (!bodyIsPureAbort(cg, branch.else_body)) {
                 for (branch.else_body) |sub_inst| {
-                    if (instMayWriteOrCall(cg, sub_inst)) return true;
+                    if (instMayWriteOrCall(cg, sub_inst, sroa)) return true;
+                }
+            }
+            return false;
+        },
+        .switch_br => {
+            const switch_br = cg.air.unwrapSwitch(inst);
+            var it = switch_br.iterateCases();
+            while (it.next()) |case| {
+                if (!bodyIsPureAbort(cg, case.body)) {
+                    for (case.body) |sub_inst| {
+                        if (instMayWriteOrCall(cg, sub_inst, sroa)) return true;
+                    }
+                }
+            }
+            const else_body = it.elseBody();
+            if (!bodyIsPureAbort(cg, else_body)) {
+                for (else_body) |sub_inst| {
+                    if (instMayWriteOrCall(cg, sub_inst, sroa)) return true;
                 }
             }
             return false;
         },
         .store,
         .store_safe,
-        => !cg.elided_init_stores.contains(inst),
+        => {
+            if (cg.elided_init_stores.contains(inst)) return false;
+            if (sroa) |s| {
+                if (s.getRef(datas[@backingInt(inst)].bin_op.lhs)) |ref| {
+                    if (ref.kind == .ptr and !s.roots.items[ref.root_id].escaped and
+                        !s.hasSublaneOnlyVectorRead(ref.root_id))
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        },
+        .optional_payload_ptr_set,
+        .errunion_payload_ptr_set,
+        => {
+            if (sroa) |s| {
+                if (s.getRef(datas[@backingInt(inst)].ty_op.operand)) |ref| {
+                    if (ref.kind == .ptr and !s.roots.items[ref.root_id].escaped and
+                        !s.hasSublaneOnlyVectorRead(ref.root_id))
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        },
+        .set_union_tag,
         .memset,
         .memset_safe,
+        => {
+            if (sroa) |s| {
+                if (s.getRef(datas[@backingInt(inst)].bin_op.lhs)) |ref| {
+                    if (ref.kind == .ptr and !s.roots.items[ref.root_id].escaped and
+                        !s.hasSublaneOnlyVectorRead(ref.root_id))
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        },
         .memcpy,
         .memmove,
         .atomic_store_unordered,
@@ -13446,9 +13819,6 @@ fn instMayWriteOrCall(cg: *const CodeGen, inst: Air.Inst.Index) bool {
         .atomic_rmw,
         .cmpxchg_weak,
         .cmpxchg_strong,
-        .optional_payload_ptr_set,
-        .errunion_payload_ptr_set,
-        .set_union_tag,
         .legalize_vec_store_elem,
         .c_va_start,
         .c_va_copy,
@@ -13954,7 +14324,7 @@ fn scanBlockForLoadElisions(
                             bitcast_seen += 1;
                             if (bitcast_seen == total_uses) break;
                         }
-                        if (instMayWriteOrCall(cg, later)) {
+                        if (instMayWriteOrCall(cg, later, analysis)) {
                             bitcast_ok = false;
                             break;
                         }
@@ -13973,109 +14343,204 @@ fn scanBlockForLoadElisions(
                 var seen_uses: u32 = 0;
                 var readonly_ok = true;
 
-                for (body[i + 1 ..]) |later| {
-                    const SetCtx = struct {
-                        set: *const std.AutoHashMapUnmanaged(Air.Inst.Index, void),
-                        count: u32 = 0,
-                        matched_op: Air.Inst.Ref = .none,
-                        fn cb(self: *@This(), op: Air.Inst.Ref) void {
-                            if (op.toIndex()) |idx| {
-                                if (self.set.contains(idx)) {
-                                    self.count += 1;
-                                    self.matched_op = op;
+                const ExtractChecker = struct {
+                    cg: *CodeGen,
+                    analysis: *const SroaAnalysis,
+                    use_counts: []const u32,
+                    derived_byref: *std.AutoHashMapUnmanaged(Air.Inst.Index, void),
+                    needed_uses: *u32,
+                    seen_uses: *u32,
+                    readonly_ok: *bool,
+                    tag: Air.Inst.Tag,
+                    inst: Air.Inst.Index,
+                    ptr_op: Air.Inst.Ref,
+                    elem_ty: Type,
+                    total_uses: u32,
+
+                    fn checkInst(self: *@This(), later: Air.Inst.Index, in_subblock: bool) InnerError!void {
+                        if (!self.readonly_ok.* or self.seen_uses.* == self.needed_uses.*) return;
+                        const zcu_inner = self.cg.pt.zcu;
+                        const tags_inner = self.cg.air.instructions.items(.tag);
+                        const datas_inner = self.cg.air.instructions.items(.data);
+
+                        const SetCtx = struct {
+                            set: *const std.AutoHashMapUnmanaged(Air.Inst.Index, void),
+                            count: u32 = 0,
+                            matched_op: Air.Inst.Ref = .none,
+                            fn cb(ctx: *@This(), op: Air.Inst.Ref) void {
+                                if (op.toIndex()) |idx| {
+                                    if (ctx.set.contains(idx)) {
+                                        ctx.count += 1;
+                                        ctx.matched_op = op;
+                                    }
                                 }
                             }
-                        }
-                    };
-                    var sctx: SetCtx = .{ .set = &derived_byref };
-                    forEachRuntimeOperand(cg, later, &sctx, SetCtx.cb);
-                    if (sctx.count > 0) {
-                        if (sctx.count != 1) {
-                            readonly_ok = false;
-                            break;
-                        }
-                        const later_tag = tags[@backingInt(later)];
-                        const later_data = datas[@backingInt(later)];
-                        const op = sctx.matched_op;
-                        const valid_extract = switch (later_tag) {
-                            .agg_field_val => blk: {
-                                const extra = cg.air.extraData(Air.StructField, later_data.ty_pl.payload).data;
-                                const st_ty = cg.typeOf(op);
-                                const layout = st_ty.containerLayout(zcu);
-                                break :blk extra.struct_operand == op and st_ty.zigTypeTag(zcu) == .@"struct" and
-                                    (layout == .auto or layout == .@"extern");
-                            },
-                            .array_elem_val => later_data.bin_op.lhs == op and isByRef(cg.typeOf(op), zcu, cg.target),
-                            .slice_ptr, .slice_len, .optional_payload, .unwrap_errunion_err, .unwrap_errunion_payload => later_data.ty_op.operand == op,
-                            .slice_elem_val => later_data.bin_op.lhs == op,
-                            .is_null, .is_non_null, .is_err, .is_non_err => later_data.un_op == op,
-                            .store, .store_safe => blk: {
-                                if (total_uses != 1 or op != inst.toRef()) break :blk false;
-                                if (cg.elided_init_stores.contains(later)) break :blk false;
-                                if (later_data.bin_op.rhs != op or later_data.bin_op.lhs == op) break :blk false;
-                                const lhs_ptr_info = cg.typeOf(later_data.bin_op.lhs).ptrInfo(zcu);
-                                if (lhs_ptr_info.flags.is_volatile or lhs_ptr_info.flags.vector_index != .none or lhs_ptr_info.packed_offset.host_size != 0) break :blk false;
-                                const lhs_alloc = baseAllocInst(cg, later_data.bin_op.lhs);
-                                const src_alloc = if (tag == .load) baseAllocInst(cg, ptr_op) else null;
-                                break :blk (lhs_alloc != null or src_alloc != null) and
-                                    (lhs_alloc == null or src_alloc == null or lhs_alloc.? != src_alloc.?);
-                            },
-                            .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
-                                if (total_uses != 1 or op != inst.toRef() or tag != .load) break :blk false;
-                                const src_idx = ptr_op.toIndex() orelse break :blk false;
-                                if (tags[@backingInt(src_idx)] != .alloc) break :blk false;
-                                const src_ref = analysis.getRef(ptr_op) orelse break :blk false;
-                                if (src_ref.kind != .ptr or src_ref.offset != 0 or !analysis.roots.items[src_ref.root_id].demoted) break :blk false;
-                                const call = cg.air.unwrapCall(later);
-                                if (call.callee == op) break :blk false;
-                                if (baseAllocInst(cg, call.callee) == src_idx) break :blk false;
-                                const callee_ty = cg.typeOf(call.callee);
-                                const fn_ty = switch (callee_ty.zigTypeTag(zcu)) {
-                                    .@"fn" => callee_ty,
-                                    .pointer => callee_ty.childType(zcu),
-                                    else => break :blk false,
-                                };
-                                const fn_info = zcu.typeToFunc(fn_ty) orelse break :blk false;
-                                if (fn_info.cc != .auto) break :blk false;
-                                if (classifyAutoParam(elem_ty, zcu, cg.target) != .by_ref) break :blk false;
-                                var match_count: u32 = 0;
-                                for (call.args, 0..) |arg, arg_i| {
-                                    if (arg == op) {
-                                        if (fn_info.is_var_args and arg_i >= fn_info.param_types.len) {
+                        };
+                        var sctx: SetCtx = .{ .set = self.derived_byref };
+                        forEachRuntimeOperand(self.cg, later, &sctx, SetCtx.cb);
+                        if (sctx.count > 0) {
+                            if (sctx.count != 1) {
+                                self.readonly_ok.* = false;
+                                return;
+                            }
+                            const later_tag = tags_inner[@backingInt(later)];
+                            const later_data = datas_inner[@backingInt(later)];
+                            const op = sctx.matched_op;
+                            const valid_extract = switch (later_tag) {
+                                .agg_field_val => blk: {
+                                    const extra = self.cg.air.extraData(Air.StructField, later_data.ty_pl.payload).data;
+                                    const st_ty = self.cg.typeOf(op);
+                                    const layout = st_ty.containerLayout(zcu_inner);
+                                    const type_tag = st_ty.zigTypeTag(zcu_inner);
+                                    break :blk extra.struct_operand == op and
+                                        (type_tag == .@"struct" or type_tag == .@"union") and
+                                        (layout == .auto or layout == .@"extern");
+                                },
+                                .get_union_tag => later_data.ty_op.operand == op,
+                                .array_elem_val => later_data.bin_op.lhs == op and isByRef(self.cg.typeOf(op), zcu_inner, self.cg.target),
+                                .slice_ptr, .slice_len, .optional_payload, .unwrap_errunion_err, .unwrap_errunion_payload => later_data.ty_op.operand == op,
+                                .slice_elem_val => later_data.bin_op.lhs == op,
+                                .is_null, .is_non_null, .is_err, .is_non_err => later_data.un_op == op,
+                                .store, .store_safe => blk: {
+                                    if (in_subblock or self.total_uses != 1 or op != self.inst.toRef()) break :blk false;
+                                    if (self.cg.elided_init_stores.contains(later)) break :blk false;
+                                    if (later_data.bin_op.rhs != op or later_data.bin_op.lhs == op) break :blk false;
+                                    const lhs_ptr_info = self.cg.typeOf(later_data.bin_op.lhs).ptrInfo(zcu_inner);
+                                    if (lhs_ptr_info.flags.is_volatile or lhs_ptr_info.flags.vector_index != .none or lhs_ptr_info.packed_offset.host_size != 0) break :blk false;
+                                    const lhs_alloc = baseAllocInst(self.cg, later_data.bin_op.lhs);
+                                    const src_alloc = if (self.tag == .load) baseAllocInst(self.cg, self.ptr_op) else null;
+                                    break :blk (lhs_alloc != null or src_alloc != null) and
+                                        (lhs_alloc == null or src_alloc == null or lhs_alloc.? != src_alloc.?);
+                                },
+                                .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
+                                    if (in_subblock or self.total_uses != 1 or op != self.inst.toRef() or self.tag != .load) break :blk false;
+                                    const src_idx = self.ptr_op.toIndex() orelse break :blk false;
+                                    if (tags_inner[@backingInt(src_idx)] != .alloc) break :blk false;
+                                    const src_ref = self.analysis.getRef(self.ptr_op) orelse break :blk false;
+                                    if (src_ref.kind != .ptr or src_ref.offset != 0 or !self.analysis.roots.items[src_ref.root_id].demoted) break :blk false;
+                                    const call = self.cg.air.unwrapCall(later);
+                                    if (call.callee == op) break :blk false;
+                                    if (baseAllocInst(self.cg, call.callee) == src_idx) break :blk false;
+                                    const callee_ty = self.cg.typeOf(call.callee);
+                                    const fn_ty = switch (callee_ty.zigTypeTag(zcu_inner)) {
+                                        .@"fn" => callee_ty,
+                                        .pointer => callee_ty.childType(zcu_inner),
+                                        else => break :blk false,
+                                    };
+                                    const fn_info = zcu_inner.typeToFunc(fn_ty) orelse break :blk false;
+                                    if (fn_info.cc != .auto) break :blk false;
+                                    if (classifyAutoParam(self.elem_ty, zcu_inner, self.cg.target) != .by_ref) break :blk false;
+                                    var match_count: u32 = 0;
+                                    for (call.args, 0..) |arg, arg_i| {
+                                        if (arg == op) {
+                                            if (fn_info.is_var_args and arg_i >= fn_info.param_types.len) {
+                                                match_count = 0;
+                                                break;
+                                            }
+                                            match_count += 1;
+                                        } else if (baseAllocInst(self.cg, arg) == src_idx) {
                                             match_count = 0;
                                             break;
                                         }
-                                        match_count += 1;
-                                    } else if (baseAllocInst(cg, arg) == src_idx) {
-                                        match_count = 0;
-                                        break;
+                                    }
+                                    break :blk match_count == 1;
+                                },
+                                else => false,
+                            };
+                            if (!valid_extract) {
+                                self.readonly_ok.* = false;
+                                return;
+                            }
+                            self.seen_uses.* += 1;
+                            const later_ty = self.cg.typeOfIndex(later);
+                            if (later_ty.hasRuntimeBits(zcu_inner) and isByRef(later_ty, zcu_inner, self.cg.target) and
+                                switch (later_tag) {
+                                    .agg_field_val, .array_elem_val, .optional_payload, .unwrap_errunion_payload => true,
+                                    else => false,
+                                })
+                            {
+                                try self.derived_byref.put(self.cg.gpa, later, {});
+                                self.needed_uses.* += self.use_counts[@backingInt(later)];
+                            }
+                            if (self.seen_uses.* == self.needed_uses.*) return;
+                        }
+
+                        switch (tags_inner[@backingInt(later)]) {
+                            .block => {
+                                const block = self.cg.air.unwrapBlock(later);
+                                for (block.body) |sub_inst| {
+                                    try self.checkInst(sub_inst, true);
+                                    if (!self.readonly_ok.* or self.seen_uses.* == self.needed_uses.*) return;
+                                }
+                                return;
+                            },
+                            .dbg_inline_block => {
+                                const block = self.cg.air.unwrapDbgBlock(later);
+                                for (block.body) |sub_inst| {
+                                    try self.checkInst(sub_inst, true);
+                                    if (!self.readonly_ok.* or self.seen_uses.* == self.needed_uses.*) return;
+                                }
+                                return;
+                            },
+                            .cond_br => {
+                                const branch = self.cg.air.unwrapCondBr(later);
+                                for (branch.then_body) |sub_inst| {
+                                    try self.checkInst(sub_inst, true);
+                                    if (!self.readonly_ok.*) return;
+                                }
+                                for (branch.else_body) |sub_inst| {
+                                    try self.checkInst(sub_inst, true);
+                                    if (!self.readonly_ok.*) return;
+                                }
+                                if (instMayWriteOrCall(self.cg, later, self.analysis)) {
+                                    self.readonly_ok.* = false;
+                                }
+                                return;
+                            },
+                            .switch_br => {
+                                const switch_br = self.cg.air.unwrapSwitch(later);
+                                var it = switch_br.iterateCases();
+                                while (it.next()) |case| {
+                                    for (case.body) |sub_inst| {
+                                        try self.checkInst(sub_inst, true);
+                                        if (!self.readonly_ok.*) return;
                                     }
                                 }
-                                break :blk match_count == 1;
+                                for (it.elseBody()) |sub_inst| {
+                                    try self.checkInst(sub_inst, true);
+                                    if (!self.readonly_ok.*) return;
+                                }
+                                if (instMayWriteOrCall(self.cg, later, self.analysis)) {
+                                    self.readonly_ok.* = false;
+                                }
+                                return;
                             },
-                            else => false,
-                        };
-                        if (!valid_extract) {
-                            readonly_ok = false;
-                            break;
+                            else => {},
                         }
-                        seen_uses += 1;
-                        const later_ty = cg.typeOfIndex(later);
-                        if (later_ty.hasRuntimeBits(zcu) and isByRef(later_ty, zcu, cg.target) and
-                            switch (later_tag) {
-                                .agg_field_val, .array_elem_val, .optional_payload, .unwrap_errunion_payload => true,
-                                else => false,
-                            })
-                        {
-                            try derived_byref.put(cg.gpa, later, {});
-                            needed_uses += use_counts[@backingInt(later)];
+
+                        if (instMayWriteOrCall(self.cg, later, self.analysis)) {
+                            self.readonly_ok.* = false;
                         }
-                        if (seen_uses == needed_uses) break;
                     }
-                    if (instMayWriteOrCall(cg, later)) {
-                        readonly_ok = false;
-                        break;
-                    }
+                };
+
+                var checker: ExtractChecker = .{
+                    .cg = cg,
+                    .analysis = analysis,
+                    .use_counts = use_counts,
+                    .derived_byref = &derived_byref,
+                    .needed_uses = &needed_uses,
+                    .seen_uses = &seen_uses,
+                    .readonly_ok = &readonly_ok,
+                    .tag = tag,
+                    .inst = inst,
+                    .ptr_op = ptr_op,
+                    .elem_ty = elem_ty,
+                    .total_uses = total_uses,
+                };
+                for (body[i + 1 ..]) |later| {
+                    try checker.checkInst(later, false);
+                    if (!readonly_ok or seen_uses == needed_uses) break;
                 }
                 if (readonly_ok and seen_uses == needed_uses) {
                     try cg.elided_readonly_loads.put(cg.gpa, inst, {});
@@ -14090,13 +14555,19 @@ const ReadOnlyAllocAliasAnalysis = struct {
     const Candidate = struct {
         alloc_inst: Air.Inst.Index,
         alloc_body_idx: usize,
+        defining_body: []const Air.Inst.Index,
+        active_body_idx: ?usize = null,
         init_store: ?Air.Inst.Index = null,
         src_inst: ?Air.Inst.Index = null,
         src_is_load: bool = false,
         src_load_body_idx: usize = 0,
         last_use_body_idx: usize = 0,
-        used_in_subblock: bool = false,
         invalid: bool = false,
+    };
+
+    const SeenInst = struct {
+        body_ptr: [*]const Air.Inst.Index,
+        body_idx: usize,
     };
 
     cg: *CodeGen,
@@ -14104,13 +14575,13 @@ const ReadOnlyAllocAliasAnalysis = struct {
     use_counts: []const u32,
     candidates: std.AutoArrayHashMapUnmanaged(Air.Inst.Index, Candidate) = .empty,
     derived_to_alloc: std.AutoHashMapUnmanaged(Air.Inst.Index, Air.Inst.Index) = .empty,
-    seen_top_level: std.AutoHashMapUnmanaged(Air.Inst.Index, usize) = .empty,
+    seen_insts: std.AutoHashMapUnmanaged(Air.Inst.Index, SeenInst) = .empty,
 
     fn deinit(self: *ReadOnlyAllocAliasAnalysis) void {
         const gpa = self.cg.gpa;
         self.candidates.deinit(gpa);
         self.derived_to_alloc.deinit(gpa);
-        self.seen_top_level.deinit(gpa);
+        self.seen_insts.deinit(gpa);
     }
 
     fn invalidateOp(self: *ReadOnlyAllocAliasAnalysis, op: Air.Inst.Ref) void {
@@ -14126,17 +14597,35 @@ const ReadOnlyAllocAliasAnalysis = struct {
         const zcu = self.cg.pt.zcu;
         const tags = self.cg.air.instructions.items(.tag);
         const datas = self.cg.air.instructions.items(.data);
-        var top_level_active = in_top_level;
+        var scope_active = true;
+        _ = in_top_level;
+
+        defer {
+            for (self.candidates.values()) |*cand| {
+                if (cand.defining_body.ptr == body.ptr) {
+                    cand.active_body_idx = null;
+                }
+            }
+        }
 
         for (body, 0..) |inst, body_idx| {
+            for (self.candidates.values()) |*cand| {
+                if (cand.defining_body.ptr == body.ptr) {
+                    cand.active_body_idx = body_idx;
+                }
+            }
+
             const tag = tags[@backingInt(inst)];
             const data = datas[@backingInt(inst)];
 
-            if (top_level_active) {
-                try self.seen_top_level.put(self.cg.gpa, inst, body_idx);
+            if (scope_active) {
+                try self.seen_insts.put(self.cg.gpa, inst, .{
+                    .body_ptr = body.ptr,
+                    .body_idx = body_idx,
+                });
             }
 
-            if (top_level_active and tag == .alloc) {
+            if (scope_active and tag == .alloc) {
                 const alloc_promoted = if (self.sroa.getRef(inst.toRef())) |ref|
                     !self.sroa.roots.items[ref.root_id].escaped and
                         !self.sroa.hasSublaneOnlyVectorRead(ref.root_id)
@@ -14149,6 +14638,8 @@ const ReadOnlyAllocAliasAnalysis = struct {
                         try self.candidates.put(self.cg.gpa, inst, .{
                             .alloc_inst = inst,
                             .alloc_body_idx = body_idx,
+                            .defining_body = body,
+                            .active_body_idx = body_idx,
                         });
                         try self.derived_to_alloc.put(self.cg.gpa, inst, inst);
                     }
@@ -14156,11 +14647,11 @@ const ReadOnlyAllocAliasAnalysis = struct {
                 continue;
             }
 
-            if (top_level_active and (tag == .store or tag == .store_safe)) {
+            if (scope_active and (tag == .store or tag == .store_safe)) {
                 const bin_op = data.bin_op;
                 if (bin_op.lhs.toIndex()) |lhs_idx| {
                     if (self.candidates.getPtr(lhs_idx)) |cand| {
-                        if (!cand.invalid and cand.init_store == null) {
+                        if (!cand.invalid and cand.init_store == null and cand.defining_body.ptr == body.ptr) {
                             var ok = false;
                             if (bin_op.rhs.toIndex()) |rhs_idx| {
                                 const rhs_tag = tags[@backingInt(rhs_idx)];
@@ -14182,33 +14673,41 @@ const ReadOnlyAllocAliasAnalysis = struct {
                                     rhs_ty.abiSize(zcu) == elem_ty.abiSize(zcu))
                                 {
                                     if (rhs_tag == .arg and (alloc_escaped or rhs_escaped) and
-                                        self.seen_top_level.contains(rhs_idx) and
+                                        self.seen_insts.contains(rhs_idx) and
                                         alloc_ptr_ty.ptrAlignment(zcu).compare(.lte, rhs_ty.abiAlignment(zcu)))
                                     {
                                         cand.init_store = inst;
                                         cand.src_inst = rhs_idx;
                                         cand.src_is_load = false;
                                         ok = true;
-                                    } else if (rhs_tag == .load) {
-                                        if (self.seen_top_level.get(rhs_idx)) |load_body_idx| {
-                                            const load_ty_op = datas[@backingInt(rhs_idx)].ty_op;
-                                            const load_ptr_ty = self.cg.typeOf(load_ty_op.operand);
-                                            const load_ptr_info = load_ptr_ty.ptrInfo(zcu);
-                                            const src_escaped = if (self.sroa.getRef(load_ty_op.operand)) |ref|
-                                                self.sroa.roots.items[ref.root_id].escaped
-                                            else
-                                                true;
-                                            if (!load_ptr_info.flags.is_volatile and
-                                                isNonBitpackedPtr(load_ptr_info) and
-                                                src_escaped and
-                                                alloc_ptr_ty.ptrAlignment(zcu).compare(.lte, load_ptr_ty.ptrAlignment(zcu)))
-                                            {
-                                                cand.init_store = inst;
-                                                cand.src_inst = rhs_idx;
-                                                cand.src_is_load = true;
-                                                cand.src_load_body_idx = load_body_idx;
-                                                cand.last_use_body_idx = body_idx;
-                                                ok = true;
+                                    } else if (rhs_tag == .load or rhs_tag == .slice_elem_val or rhs_tag == .ptr_elem_val) {
+                                        if (self.seen_insts.get(rhs_idx)) |seen_load| {
+                                            if (seen_load.body_ptr == body.ptr) {
+                                                const load_ptr_op = switch (rhs_tag) {
+                                                    .load => datas[@backingInt(rhs_idx)].ty_op.operand,
+                                                    .slice_elem_val, .ptr_elem_val => datas[@backingInt(rhs_idx)].bin_op.lhs,
+                                                    else => unreachable,
+                                                };
+                                                const load_ptr_ty = self.cg.typeOf(load_ptr_op);
+                                                const load_ptr_info = load_ptr_ty.ptrInfo(zcu);
+                                                const src_escaped = if (rhs_tag == .slice_elem_val or load_ptr_ty.isSlice(zcu))
+                                                    true
+                                                else if (self.sroa.getRef(load_ptr_op)) |ref|
+                                                    self.sroa.roots.items[ref.root_id].escaped
+                                                else
+                                                    true;
+                                                if (!load_ptr_info.flags.is_volatile and
+                                                    isNonBitpackedPtr(load_ptr_info) and
+                                                    src_escaped and
+                                                    alloc_ptr_ty.ptrAlignment(zcu).compare(.lte, load_ptr_ty.ptrAlignment(zcu)))
+                                                {
+                                                    cand.init_store = inst;
+                                                    cand.src_inst = rhs_idx;
+                                                    cand.src_is_load = true;
+                                                    cand.src_load_body_idx = seen_load.body_idx;
+                                                    cand.last_use_body_idx = body_idx;
+                                                    ok = true;
+                                                }
                                             }
                                         }
                                     }
@@ -14248,13 +14747,12 @@ const ReadOnlyAllocAliasAnalysis = struct {
                     const alloc_inst = op_check.matched_alloc.?;
                     const cand = self.candidates.getPtr(alloc_inst).?;
                     const op = op_check.matched_op;
-                    if (cand.invalid or cand.init_store == null) {
+                    if (cand.invalid or cand.init_store == null or cand.active_body_idx == null) {
                         cand.invalid = true;
                     } else {
-                        if (in_top_level) {
-                            if (body_idx > cand.last_use_body_idx) cand.last_use_body_idx = body_idx;
-                        } else {
-                            cand.used_in_subblock = true;
+                        const active_idx = cand.active_body_idx.?;
+                        if (active_idx > cand.last_use_body_idx) {
+                            cand.last_use_body_idx = active_idx;
                         }
                         var derived_ok = false;
                         var read_ok = false;
@@ -14290,14 +14788,48 @@ const ReadOnlyAllocAliasAnalysis = struct {
                             },
                             .load => {
                                 const res_ty = self.cg.typeOfIndex(inst);
-                                read_ok = data.ty_op.operand == op and !self.cg.typeOf(op).isVolatilePtr(zcu) and
-                                    (!cand.src_is_load or !isByRef(res_ty, zcu, self.cg.target));
+                                if (data.ty_op.operand == op and !self.cg.typeOf(op).isVolatilePtr(zcu)) {
+                                    if (!cand.src_is_load or !isByRef(res_ty, zcu, self.cg.target)) {
+                                        read_ok = true;
+                                    } else {
+                                        derived_ok = true;
+                                    }
+                                }
                             },
                             .ptr_elem_val => {
                                 const res_ty = self.cg.typeOfIndex(inst);
-                                read_ok = data.bin_op.lhs == op and !self.cg.typeOf(op).isVolatilePtr(zcu) and
-                                    !self.cg.typeOf(op).isSlice(zcu) and
-                                    (!cand.src_is_load or !isByRef(res_ty, zcu, self.cg.target));
+                                if (data.bin_op.lhs == op and !self.cg.typeOf(op).isVolatilePtr(zcu) and
+                                    !self.cg.typeOf(op).isSlice(zcu))
+                                {
+                                    if (!cand.src_is_load or !isByRef(res_ty, zcu, self.cg.target)) {
+                                        read_ok = true;
+                                    } else {
+                                        derived_ok = true;
+                                    }
+                                }
+                            },
+                            .agg_field_val => {
+                                const extra = self.cg.air.extraData(Air.StructField, data.ty_pl.payload).data;
+                                const st_ty = self.cg.typeOf(op);
+                                const layout = st_ty.containerLayout(zcu);
+                                const type_tag = st_ty.zigTypeTag(zcu);
+                                if (extra.struct_operand == op and
+                                    (type_tag == .@"struct" or type_tag == .@"union") and
+                                    (layout == .auto or layout == .@"extern"))
+                                {
+                                    const res_ty = self.cg.typeOfIndex(inst);
+                                    if (res_ty.hasRuntimeBits(zcu) and isByRef(res_ty, zcu, self.cg.target)) {
+                                        derived_ok = true;
+                                    } else {
+                                        read_ok = true;
+                                    }
+                                }
+                            },
+                            .get_union_tag,
+                            .slice_ptr,
+                            .slice_len,
+                            => {
+                                read_ok = data.ty_op.operand == op;
                             },
                             .is_null_ptr,
                             .is_non_null_ptr,
@@ -14322,7 +14854,7 @@ const ReadOnlyAllocAliasAnalysis = struct {
                 .block => try self.scanBody(self.cg.air.unwrapBlock(inst).body, false),
                 .dbg_inline_block => try self.scanBody(self.cg.air.unwrapDbgBlock(inst).body, false),
                 .loop => {
-                    top_level_active = false;
+                    scope_active = false;
                     try self.scanBody(self.cg.air.unwrapBlock(inst).body, false);
                 },
                 .cond_br => {
@@ -14339,7 +14871,7 @@ const ReadOnlyAllocAliasAnalysis = struct {
                 .@"try", .try_cold => try self.scanBody(self.cg.air.unwrapTry(inst).else_body, false),
                 .try_ptr, .try_ptr_cold => try self.scanBody(self.cg.air.unwrapTryPtr(inst).else_body, false),
                 .ret, .ret_safe, .ret_load, .unreach, .trap, .repeat => {
-                    top_level_active = false;
+                    scope_active = false;
                 },
                 else => {},
             }
@@ -14510,17 +15042,26 @@ fn analyzeSroa(cg: *CodeGen, main_body: []const Air.Inst.Index) InnerError!void 
         const init_store = cand.init_store orelse continue;
         const src_inst = cand.src_inst orelse continue;
         if (cand.src_is_load) {
-            if (cand.used_in_subblock) continue;
             var write_between = false;
-            for (main_body[cand.src_load_body_idx + 1 .. cand.last_use_body_idx + 1]) |between_inst| {
+            for (cand.defining_body[cand.src_load_body_idx + 1 .. cand.last_use_body_idx + 1]) |between_inst| {
                 if (between_inst == init_store) continue;
-                if (instMayWriteOrCall(cg, between_inst)) {
+                if (instMayWriteOrCall(cg, between_inst, &analysis)) {
                     write_between = true;
                     break;
                 }
             }
             if (write_between) continue;
             try cg.elided_readonly_loads.put(cg.gpa, src_inst, {});
+        }
+        var iter = alloc_alias.derived_to_alloc.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.* == cand.alloc_inst) {
+                const derived_inst = entry.key_ptr.*;
+                const derived_tag = cg.air.instructions.items(.tag)[@backingInt(derived_inst)];
+                if (derived_tag == .load or derived_tag == .ptr_elem_val) {
+                    try cg.elided_readonly_loads.put(cg.gpa, derived_inst, {});
+                }
+            }
         }
         if (analysis.getRef(src_inst.toRef())) |ref| {
             analysis.roots.items[ref.root_id].escaped = true;

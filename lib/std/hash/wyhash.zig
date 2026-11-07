@@ -34,7 +34,7 @@ pub const Wyhash = struct {
 
     // This is subtly different from other hash function update calls. Wyhash requires the last
     // full 48-byte block to be run through final1 if is exactly aligned to 48-bytes.
-    pub fn update(self: *Wyhash, input: []const u8) void {
+    pub inline fn update(self: *Wyhash, input: []const u8) void {
         self.total_len += input.len;
 
         if (input.len <= 48 - self.buf_len) {
@@ -43,6 +43,10 @@ pub const Wyhash = struct {
             return;
         }
 
+        self.updateCold(input);
+    }
+
+    noinline fn updateCold(self: *Wyhash, input: []const u8) void {
         var i: usize = 0;
 
         if (self.buf_len > 0) {
