@@ -788,6 +788,7 @@ fn optimizeFuncBody(
     for (0..max_pass_rounds) |_| {
         var changed = false;
         if (eliminateLeafStackCopy(&root_list)) changed = true;
+        if (try forwardDeadStackCopyLoads(arena, &root_list)) changed = true;
         if (try simplifyLocals(arena, &root_list, optimize_mode)) changed = true;
         if (foldConstants(&root_list)) changed = true;
         if (try simplifyControlFlow(arena, &root_list)) changed = true;
@@ -813,56 +814,663 @@ fn optimizeFuncBody(
 
 // ── Pass L: Local Simplification and Compaction ──────────────────────────
 
-fn eliminateLeafStackCopy(root_list: *InstrList) bool {
-    const items = root_list.items;
-    if (items.len < 8) return false;
+const MemAccessInfo = struct {
+    opcode: u8,
+    simd_sub: u32 = 0,
+    align_val: u32,
+    mem_idx: u32,
+    offset: u64,
+    size: u32,
+};
 
-    // Match stage2_wasm leaf by-value aggregate copy prologue:
-    //   0: global.get _       (.raw { 0x23, ... })
-    //   1: i32.const n        (n > 0)
-    //   2: i32.sub            (.numeric_op 0x6b)
-    //   3: local.tee tmp      (.local_tee tmp_local)
-    //   4: local.get src      (.local_get src_param, src_param != tmp_local)
-    //   5: i32.const n2       (n2 == n)
-    //   6: memory.copy 0 0    (.raw { 0xfc, 0x0a, 0x00, 0x00 })
-    if (items[0] != .raw or !std.mem.eql(u8, items[0].raw, &.{ 0x23, 0x00 })) return false;
-    if (items[1] != .i32_const or items[1].i32_const <= 0) return false;
-    const copy_size = items[1].i32_const;
-    if (items[2] != .numeric_op or items[2].numeric_op != 0x6b) return false;
-    if (items[3] != .local_tee) return false;
-    const tmp_local = items[3].local_tee;
-    if (items[4] != .local_get) return false;
-    const src_param = items[4].local_get;
-    if (src_param == tmp_local) return false;
-    if (items[5] != .i32_const or items[5].i32_const != copy_size) return false;
-    if (items[6] != .raw or !std.mem.eql(u8, items[6].raw, &.{ 0xfc, 0x0a, 0x00, 0x00 })) return false;
+fn decodeLoadAccess(inst: Instr) ?MemAccessInfo {
+    if (inst != .raw) return null;
+    const r = inst.raw;
+    if (r.len == 0) return null;
+    var pos: usize = 1;
+    var simd_sub: u32 = 0;
+    const size: u32 = switch (r[0]) {
+        0x28, 0x2a, 0x34, 0x35 => 4,
+        0x29, 0x2b => 8,
+        0x2c, 0x2d, 0x30, 0x31 => 1,
+        0x2e, 0x2f, 0x32, 0x33 => 2,
+        0xfd => blk: {
+            simd_sub = readU32(r, &pos) catch return null;
+            break :blk switch (simd_sub) {
+                0x00 => 16,
+                0x01...0x06, 0x0a, 0x5d => 8,
+                0x07 => 1,
+                0x08 => 2,
+                0x09, 0x5c => 4,
+                else => return null,
+            };
+        },
+        else => return null,
+    };
+    const align_raw = readU32(r, &pos) catch return null;
+    const mem_idx = if ((align_raw & 0x40) != 0) (readU32(r, &pos) catch return null) else 0;
+    const off_r = leb128.readU64Leb128(r[pos..]) catch return null;
+    pos += off_r.bytes_read;
+    if (pos != r.len) return null;
+    return .{
+        .opcode = r[0],
+        .simd_sub = simd_sub,
+        .align_val = align_raw & ~@as(u32, 0x40),
+        .mem_idx = mem_idx,
+        .offset = off_r.value,
+        .size = size,
+    };
+}
 
-    for (items[7..]) |inst| {
+fn decodeStoreAccess(inst: Instr) ?MemAccessInfo {
+    if (inst != .raw) return null;
+    const r = inst.raw;
+    if (r.len == 0) return null;
+    var pos: usize = 1;
+    var simd_sub: u32 = 0;
+    const size: u32 = switch (r[0]) {
+        0x36, 0x38, 0x3e => 4,
+        0x37, 0x39 => 8,
+        0x3a, 0x3c => 1,
+        0x3b, 0x3d => 2,
+        0xfd => blk: {
+            simd_sub = readU32(r, &pos) catch return null;
+            break :blk switch (simd_sub) {
+                0x0b => 16,
+                0x58 => 1,
+                0x59 => 2,
+                0x5a => 4,
+                0x5b => 8,
+                else => return null,
+            };
+        },
+        else => return null,
+    };
+    const align_raw = readU32(r, &pos) catch return null;
+    const mem_idx = if ((align_raw & 0x40) != 0) (readU32(r, &pos) catch return null) else 0;
+    const off_r = leb128.readU64Leb128(r[pos..]) catch return null;
+    pos += off_r.bytes_read;
+    if (r[0] == 0xfd and simd_sub >= 0x58 and simd_sub <= 0x5b) {
+        if (pos >= r.len) return null;
+        pos += 1;
+    }
+    if (pos != r.len) return null;
+    return .{
+        .opcode = r[0],
+        .simd_sub = simd_sub,
+        .align_val = align_raw & ~@as(u32, 0x40),
+        .mem_idx = mem_idx,
+        .offset = off_r.value,
+        .size = size,
+    };
+}
+
+fn encodeLoadInstr(
+    arena: std.mem.Allocator,
+    access: MemAccessInfo,
+    new_align: u32,
+    new_offset: u64,
+) Error!Instr {
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    buf.append(arena, access.opcode) catch return error.OutOfMemory;
+    if (access.opcode == 0xfd) {
+        appendU32Leb(arena, &buf, access.simd_sub) catch return error.OutOfMemory;
+    }
+    appendU32Leb(arena, &buf, new_align) catch return error.OutOfMemory;
+    var off_tmp: [leb128.max_u64_bytes]u8 = undefined;
+    const off_n = leb128.writeU64Leb128(&off_tmp, new_offset);
+    buf.appendSlice(arena, off_tmp[0..off_n]) catch return error.OutOfMemory;
+    return .{ .raw = buf.items };
+}
+
+fn canEliminateLeafStackCopyInSlice(
+    slice: []const Instr,
+    tmp_local: u32,
+    src_param: u32,
+    copy_size: u64,
+    allow_return: bool,
+) bool {
+    for (slice, 0..) |inst, idx| {
         switch (inst) {
-            .block, .loop, .if_, .br, .br_if, .br_table, .unreachable_ => return false,
-            .call, .return_call, .return_call_indirect => return false,
-            .local_set => |idx| if (idx == tmp_local or idx == src_param) return false,
-            .local_tee => |idx| if (idx == tmp_local or idx == src_param) return false,
+            .block => |b| {
+                if (!canEliminateLeafStackCopyInSlice(b.body.items, tmp_local, src_param, copy_size, allow_return)) return false;
+            },
+            .loop => |l| {
+                if (!canEliminateLeafStackCopyInSlice(l.body.items, tmp_local, src_param, copy_size, allow_return)) return false;
+            },
+            .if_ => |i| {
+                if (!canEliminateLeafStackCopyInSlice(i.then_body.items, tmp_local, src_param, copy_size, allow_return)) return false;
+                if (i.has_else and !canEliminateLeafStackCopyInSlice(i.else_body.items, tmp_local, src_param, copy_size, allow_return)) return false;
+            },
+            .return_ => if (!allow_return) return false,
+            .unreachable_, .call, .return_call, .return_call_indirect => return false,
+            .local_set, .local_tee => |lidx| if (lidx == tmp_local or lidx == src_param) return false,
+            .local_get => |lidx| if (lidx == tmp_local) {
+                if (idx + 1 < slice.len) {
+                    if (decodeLoadAccess(slice[idx + 1])) |access| {
+                        if (access.mem_idx == 0 and access.offset + access.size <= copy_size) continue;
+                    }
+                }
+                if (idx + 3 < slice.len and
+                    slice[idx + 1] == .i32_const and slice[idx + 1].i32_const >= 0 and
+                    slice[idx + 2] == .numeric_op and slice[idx + 2].numeric_op == 0x6a)
+                {
+                    if (decodeLoadAccess(slice[idx + 3])) |access| {
+                        const add_off: u64 = @intCast(slice[idx + 1].i32_const);
+                        if (access.mem_idx == 0 and add_off + access.offset + access.size <= copy_size) continue;
+                    }
+                }
+                return false;
+            },
             .raw => |r| {
                 if (r.len == 0) return false;
                 switch (r[0]) {
-                    0x10...0x15, 0x24, 0x36...0x3e, 0x40, 0xfc, 0xfd, 0xfe => return false,
+                    0x10...0x15, 0x24, 0x26, 0x36...0x3e, 0x40, 0xfb, 0xfe => return false,
+                    0xfc => {
+                        var p: usize = 1;
+                        const sub = readU32(r, &p) catch return false;
+                        if (sub > 0x07) return false;
+                    },
+                    0xfd => {
+                        var p: usize = 1;
+                        const sub = readU32(r, &p) catch return false;
+                        if (sub == 0x0b or (sub >= 0x58 and sub <= 0x5b)) return false;
+                    },
                     else => {},
                 }
             },
             else => {},
         }
     }
+    return true;
+}
 
-    for (items[7..]) |*inst| {
-        if (inst.* == .local_get and inst.local_get == tmp_local) {
-            inst.* = .{ .local_get = src_param };
+fn rewriteLocalGetInSlice(slice: []Instr, from_local: u32, to_local: u32) void {
+    for (slice) |*inst| {
+        switch (inst.*) {
+            .local_get => |*idx| if (idx.* == from_local) {
+                idx.* = to_local;
+            },
+            .block => |*b| rewriteLocalGetInSlice(b.body.items, from_local, to_local),
+            .loop => |*l| rewriteLocalGetInSlice(l.body.items, from_local, to_local),
+            .if_ => |*i| {
+                rewriteLocalGetInSlice(i.then_body.items, from_local, to_local);
+                if (i.has_else) rewriteLocalGetInSlice(i.else_body.items, from_local, to_local);
+            },
+            else => {},
+        }
+    }
+}
+
+fn eliminateLeafStackCopy(root_list: *InstrList) bool {
+    const items = root_list.items;
+    if (items.len < 8) return false;
+
+    // Match stage2_wasm leaf by-value aggregate copy prologue:
+    //   0: global.get _       (.raw { 0x23, 0x00 })
+    //   1: i32.const stack_sz (stack_sz > 0)
+    //   2: i32.sub            (.numeric_op 0x6b)
+    //   3: local.tee tmp      (.local_tee tmp_local)
+    //   [optional 4..6: global.set 0; local.get tmp]
+    //   local.get src         (.local_get src_param, src_param != tmp_local)
+    //   i32.const copy_sz     (0 < copy_sz <= stack_sz)
+    //   memory.copy 0 0       (.raw { 0xfc, 0x0a, 0x00, 0x00 })
+    if (items[0] != .raw or !std.mem.eql(u8, items[0].raw, &.{ 0x23, 0x00 })) return false;
+    if (items[1] != .i32_const or items[1].i32_const <= 0) return false;
+    const stack_size = items[1].i32_const;
+    if (items[2] != .numeric_op or items[2].numeric_op != 0x6b) return false;
+    if (items[3] != .local_tee) return false;
+    const tmp_local = items[3].local_tee;
+
+    var prologue_len: usize = 7;
+    var has_global_set_in_prologue = false;
+    if (items.len >= 10 and
+        items[4] == .raw and std.mem.eql(u8, items[4].raw, &.{ 0x24, 0x00 }) and
+        items[5] == .local_get and items[5].local_get == tmp_local)
+    {
+        prologue_len = 9;
+        has_global_set_in_prologue = true;
+    }
+
+    if (items.len <= prologue_len) return false;
+    if (items[prologue_len - 3] != .local_get) return false;
+    const src_param = items[prologue_len - 3].local_get;
+    if (src_param == tmp_local) return false;
+    if (items[prologue_len - 2] != .i32_const) return false;
+    const copy_size = items[prologue_len - 2].i32_const;
+    if (copy_size <= 0 or copy_size > stack_size) return false;
+    if (items[prologue_len - 1] != .raw or !std.mem.eql(u8, items[prologue_len - 1].raw, &.{ 0xfc, 0x0a, 0x00, 0x00 })) return false;
+
+    const has_trailing_return = items[items.len - 1] == .return_;
+    const pre_ret_end = if (has_trailing_return) items.len - 1 else items.len;
+    const has_epilogue = pre_ret_end >= prologue_len + 4 and
+        items[pre_ret_end - 4] == .local_get and items[pre_ret_end - 4].local_get == tmp_local and
+        items[pre_ret_end - 3] == .i32_const and items[pre_ret_end - 3].i32_const == stack_size and
+        items[pre_ret_end - 2] == .numeric_op and items[pre_ret_end - 2].numeric_op == 0x6a and
+        items[pre_ret_end - 1] == .raw and std.mem.eql(u8, items[pre_ret_end - 1].raw, &.{ 0x24, 0x00 });
+
+    if (has_global_set_in_prologue and !has_epilogue) return false;
+
+    const body_end = if (has_epilogue) pre_ret_end - 4 else items.len;
+    if (body_end < prologue_len) return false;
+
+    if (!canEliminateLeafStackCopyInSlice(
+        items[prologue_len..body_end],
+        tmp_local,
+        src_param,
+        @intCast(copy_size),
+        !has_epilogue,
+    )) return false;
+
+    rewriteLocalGetInSlice(root_list.items[prologue_len..body_end], tmp_local, src_param);
+
+    const body_len = body_end - prologue_len;
+    std.mem.copyForwards(Instr, root_list.items[0..body_len], root_list.items[prologue_len..body_end]);
+    var new_len = body_len;
+    if (has_epilogue and has_trailing_return) {
+        root_list.items[new_len] = .return_;
+        new_len += 1;
+    }
+    root_list.shrinkRetainingCapacity(new_len);
+    return true;
+}
+
+const StackCopyCand = struct {
+    start_idx: usize,
+    end_idx: usize,
+    dst_offset: u64,
+    src_local: u32,
+    src_offset: u64,
+    copy_len: u64,
+};
+
+fn matchStackFrameCopyAt(slice: []const Instr, idx: usize, fp: u32) ?StackCopyCand {
+    var pos = idx;
+    if (pos >= slice.len or slice[pos] != .local_get or slice[pos].local_get != fp) return null;
+    pos += 1;
+    var dst_offset: u64 = 0;
+    if (pos + 1 < slice.len and
+        slice[pos] == .i32_const and slice[pos].i32_const >= 0 and
+        slice[pos + 1] == .numeric_op and slice[pos + 1].numeric_op == 0x6a)
+    {
+        dst_offset = @intCast(slice[pos].i32_const);
+        pos += 2;
+    }
+    if (pos >= slice.len or slice[pos] != .local_get) return null;
+    const src_local = slice[pos].local_get;
+    pos += 1;
+    var src_offset: u64 = 0;
+    if (pos + 1 < slice.len and
+        slice[pos] == .i32_const and slice[pos].i32_const >= 0 and
+        slice[pos + 1] == .numeric_op and slice[pos + 1].numeric_op == 0x6a)
+    {
+        src_offset = @intCast(slice[pos].i32_const);
+        pos += 2;
+    }
+    if (pos + 1 >= slice.len) return null;
+    if (slice[pos] != .i32_const or slice[pos].i32_const <= 0) return null;
+    const copy_len: u64 = @intCast(slice[pos].i32_const);
+    if (slice[pos + 1] != .raw or !std.mem.eql(u8, slice[pos + 1].raw, &.{ 0xfc, 0x0a, 0x00, 0x00 })) return null;
+    return .{
+        .start_idx = idx,
+        .end_idx = pos + 2,
+        .dst_offset = dst_offset,
+        .src_local = src_local,
+        .src_offset = src_offset,
+        .copy_len = copy_len,
+    };
+}
+
+fn rangesOverlap(a_start: u64, a_len: u64, b_start: u64, b_len: u64) bool {
+    return a_start < b_start + b_len and b_start < a_start + a_len;
+}
+
+fn verifyDisjointFpUsesInSlice(
+    slice: []const Instr,
+    fp: u32,
+    sp_save: ?u32,
+    slot_start: u64,
+    slot_len: u64,
+    skip_start: ?usize,
+    skip_end: ?usize,
+    window_start: ?usize,
+    window_end: ?usize,
+) bool {
+    var i: usize = 0;
+    while (i < slice.len) {
+        if (skip_start != null and i >= skip_start.? and i < skip_end.?) {
+            i = skip_end.?;
+            continue;
+        }
+        const in_window = window_start != null and i >= window_start.? and i < window_end.?;
+        const inst = slice[i];
+        switch (inst) {
+            .block => |b| {
+                if (!verifyDisjointFpUsesInSlice(b.body.items, fp, sp_save, slot_start, slot_len, null, null, null, null)) return false;
+            },
+            .loop => |l| {
+                if (!verifyDisjointFpUsesInSlice(l.body.items, fp, sp_save, slot_start, slot_len, null, null, null, null)) return false;
+            },
+            .if_ => |if_inst| {
+                if (!verifyDisjointFpUsesInSlice(if_inst.then_body.items, fp, sp_save, slot_start, slot_len, null, null, null, null)) return false;
+                if (if_inst.has_else and !verifyDisjointFpUsesInSlice(if_inst.else_body.items, fp, sp_save, slot_start, slot_len, null, null, null, null)) return false;
+            },
+            .local_set, .local_tee => |lidx| {
+                if (lidx == fp) return false;
+                if (sp_save != null and lidx == sp_save.?) return false;
+            },
+            .local_get => |lidx| {
+                if (sp_save != null and lidx == sp_save.?) return false;
+                if (lidx == fp) {
+                    // 1. Direct load: `local.get fp; <load>`
+                    if (i + 1 < slice.len) {
+                        if (decodeLoadAccess(slice[i + 1])) |access| {
+                            if (access.mem_idx != 0) return false;
+                            if (in_window and access.offset >= slot_start and access.offset + access.size <= slot_start + slot_len) {
+                                i += 2;
+                                continue;
+                            }
+                            if (!rangesOverlap(access.offset, access.size, slot_start, slot_len)) {
+                                i += 2;
+                                continue;
+                            }
+                            return false;
+                        }
+                    }
+                    // 2. Offset load: `local.get fp; i32.const C; i32.add; <load>`
+                    if (i + 3 < slice.len and
+                        slice[i + 1] == .i32_const and slice[i + 1].i32_const >= 0 and
+                        slice[i + 2] == .numeric_op and slice[i + 2].numeric_op == 0x6a)
+                    {
+                        if (decodeLoadAccess(slice[i + 3])) |access| {
+                            if (access.mem_idx != 0) return false;
+                            const total_off = @as(u64, @intCast(slice[i + 1].i32_const)) + access.offset;
+                            if (in_window and total_off >= slot_start and total_off + access.size <= slot_start + slot_len) {
+                                i += 4;
+                                continue;
+                            }
+                            if (!rangesOverlap(total_off, access.size, slot_start, slot_len)) {
+                                i += 4;
+                                continue;
+                            }
+                            return false;
+                        }
+                    }
+                    // 3. Direct store with pure value: `local.get fp; <pure>; <store>`
+                    if (i + 2 < slice.len and isPureZeroPopInstr(slice[i + 1]) and
+                        !(slice[i + 1] == .local_get and (slice[i + 1].local_get == fp or (sp_save != null and slice[i + 1].local_get == sp_save.?))))
+                    {
+                        if (decodeStoreAccess(slice[i + 2])) |access| {
+                            if (access.mem_idx == 0 and !rangesOverlap(access.offset, access.size, slot_start, slot_len)) {
+                                i += 3;
+                                continue;
+                            }
+                        }
+                    }
+                    // 4. Offset store with pure value: `local.get fp; i32.const C; i32.add; <pure>; <store>`
+                    if (i + 4 < slice.len and
+                        slice[i + 1] == .i32_const and slice[i + 1].i32_const >= 0 and
+                        slice[i + 2] == .numeric_op and slice[i + 2].numeric_op == 0x6a and
+                        isPureZeroPopInstr(slice[i + 3]) and
+                        !(slice[i + 3] == .local_get and (slice[i + 3].local_get == fp or (sp_save != null and slice[i + 3].local_get == sp_save.?))))
+                    {
+                        if (decodeStoreAccess(slice[i + 4])) |access| {
+                            const total_off = @as(u64, @intCast(slice[i + 1].i32_const)) + access.offset;
+                            if (access.mem_idx == 0 and !rangesOverlap(total_off, access.size, slot_start, slot_len)) {
+                                i += 5;
+                                continue;
+                            }
+                        }
+                    }
+                    // 5. Disjoint `memory.copy` into `fp + D2`
+                    if (matchStackFrameCopyAt(slice, i, fp)) |other_copy| {
+                        if (!rangesOverlap(other_copy.dst_offset, other_copy.copy_len, slot_start, slot_len) and
+                            (other_copy.src_local != fp or !rangesOverlap(other_copy.src_offset, other_copy.copy_len, slot_start, slot_len)) and
+                            (sp_save == null or other_copy.src_local != sp_save.?))
+                        {
+                            i = other_copy.end_idx;
+                            continue;
+                        }
+                    }
+                    return false;
+                }
+            },
+            else => {},
+        }
+        i += 1;
+    }
+    return true;
+}
+
+fn sliceUsesLocalOrEarlyExit(slice: []const Instr, fp: u32, sp_save: ?u32, forbid_return_or_trap: bool) bool {
+    for (slice) |inst| {
+        switch (inst) {
+            .local_get, .local_set, .local_tee => |lidx| {
+                if (lidx == fp) return true;
+                if (sp_save != null and lidx == sp_save.?) return true;
+            },
+            .return_, .unreachable_ => if (forbid_return_or_trap) return true,
+            .block => |b| if (sliceUsesLocalOrEarlyExit(b.body.items, fp, sp_save, forbid_return_or_trap)) return true,
+            .loop => |l| if (sliceUsesLocalOrEarlyExit(l.body.items, fp, sp_save, forbid_return_or_trap)) return true,
+            .if_ => |if_inst| {
+                if (sliceUsesLocalOrEarlyExit(if_inst.then_body.items, fp, sp_save, forbid_return_or_trap)) return true;
+                if (if_inst.has_else and sliceUsesLocalOrEarlyExit(if_inst.else_body.items, fp, sp_save, forbid_return_or_trap)) return true;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
+fn forwardDeadStackCopyLoads(arena: std.mem.Allocator, root_list: *InstrList) Error!bool {
+    const items = root_list.items;
+    if (items.len < 6) return false;
+
+    const has_trailing_return = items[items.len - 1] == .return_;
+    const pre_ret_end = if (has_trailing_return) items.len - 1 else items.len;
+
+    if (items[0] != .raw or !std.mem.eql(u8, items[0].raw, &.{ 0x23, 0x00 })) return false;
+
+    var fp: u32 = 0;
+    var sp_save: ?u32 = null;
+    var frame_size: u64 = 0;
+    var body_start: usize = 0;
+    var body_end: usize = 0;
+    var has_epilogue = false;
+
+    if (pre_ret_end >= 9 and
+        items[1] == .i32_const and items[1].i32_const > 0 and
+        items[2] == .numeric_op and items[2].numeric_op == 0x6b and
+        (items[3] == .local_tee or items[3] == .local_set) and
+        items[4] == .raw and std.mem.eql(u8, items[4].raw, &.{ 0x24, 0x00 }))
+    {
+        const cand_fp = if (items[3] == .local_tee) items[3].local_tee else items[3].local_set;
+        const cand_sz = items[1].i32_const;
+        if (items[pre_ret_end - 4] == .local_get and items[pre_ret_end - 4].local_get == cand_fp and
+            items[pre_ret_end - 3] == .i32_const and items[pre_ret_end - 3].i32_const == cand_sz and
+            items[pre_ret_end - 2] == .numeric_op and items[pre_ret_end - 2].numeric_op == 0x6a and
+            items[pre_ret_end - 1] == .raw and std.mem.eql(u8, items[pre_ret_end - 1].raw, &.{ 0x24, 0x00 }))
+        {
+            fp = cand_fp;
+            frame_size = @intCast(cand_sz);
+            body_start = 5;
+            body_end = pre_ret_end - 4;
+            has_epilogue = true;
         }
     }
 
-    const tail_len = items.len - 7;
-    std.mem.copyForwards(Instr, root_list.items[0..tail_len], root_list.items[7..]);
-    root_list.shrinkRetainingCapacity(tail_len);
+    if (body_start == 0 and pre_ret_end >= 8 and
+        items[1] == .local_tee and
+        items[2] == .i32_const and items[2].i32_const > 0 and
+        items[3] == .numeric_op and items[3].numeric_op == 0x6b and
+        (items[4] == .local_tee or items[4] == .local_set) and
+        items[5] == .raw and std.mem.eql(u8, items[5].raw, &.{ 0x24, 0x00 }))
+    {
+        const cand_sp = items[1].local_tee;
+        const cand_fp = if (items[4] == .local_tee) items[4].local_tee else items[4].local_set;
+        if (cand_sp != cand_fp and
+            items[pre_ret_end - 2] == .local_get and items[pre_ret_end - 2].local_get == cand_sp and
+            items[pre_ret_end - 1] == .raw and std.mem.eql(u8, items[pre_ret_end - 1].raw, &.{ 0x24, 0x00 }))
+        {
+            fp = cand_fp;
+            sp_save = cand_sp;
+            frame_size = @intCast(items[2].i32_const);
+            body_start = 6;
+            body_end = pre_ret_end - 2;
+            has_epilogue = true;
+        }
+    }
+
+    if (body_start == 0 and pre_ret_end >= 5 and
+        items[1] == .i32_const and items[1].i32_const > 0 and
+        items[2] == .numeric_op and items[2].numeric_op == 0x6b and
+        items[3] == .local_set)
+    {
+        fp = items[3].local_set;
+        frame_size = @intCast(items[1].i32_const);
+        body_start = 4;
+        body_end = pre_ret_end;
+        has_epilogue = false;
+    }
+
+    if (body_start == 0 or body_end < body_start) return false;
+
+    const body_slice = items[body_start..body_end];
+    var matched_cand: ?StackCopyCand = null;
+    var matched_window_end: usize = 0;
+
+    var scan_idx: usize = 0;
+    while (scan_idx < body_slice.len) : (scan_idx += 1) {
+        const cand = matchStackFrameCopyAt(body_slice, scan_idx, fp) orelse continue;
+        if (cand.dst_offset + cand.copy_len > frame_size) continue;
+        if (sp_save != null and cand.src_local == sp_save.?) continue;
+        if (cand.src_local == fp and rangesOverlap(cand.src_offset, cand.copy_len, cand.dst_offset, cand.copy_len)) continue;
+
+        // Find the straight-line window after `cand.end_idx` before any memory write, call, branch, or modification of `src_local`/`fp`.
+        var win_end = cand.end_idx;
+        while (win_end < body_slice.len) {
+            if (matchStackFrameCopyAt(body_slice, win_end, fp)) |other_copy| {
+                if (!rangesOverlap(other_copy.dst_offset, other_copy.copy_len, cand.dst_offset, cand.copy_len) and
+                    (cand.src_local != fp or !rangesOverlap(other_copy.dst_offset, other_copy.copy_len, cand.src_offset, cand.copy_len)) and
+                    other_copy.src_local != cand.src_local)
+                {
+                    win_end = other_copy.end_idx;
+                    continue;
+                }
+                break;
+            }
+            const winst = body_slice[win_end];
+            const stop = switch (winst) {
+                .block, .loop, .if_, .br, .br_if, .br_table, .return_, .unreachable_, .call, .return_call, .return_call_indirect => true,
+                .local_set, .local_tee => |lidx| lidx == cand.src_local or lidx == fp or (sp_save != null and lidx == sp_save.?),
+                .raw => |r| blk: {
+                    if (r.len == 0) break :blk true;
+                    break :blk switch (r[0]) {
+                        0x10...0x15, 0x24, 0x26, 0x36...0x3e, 0x40, 0xfb, 0xfe => true,
+                        0xfc => sub_blk: {
+                            var p: usize = 1;
+                            const sub = readU32(r, &p) catch break :sub_blk true;
+                            break :sub_blk sub > 0x07;
+                        },
+                        0xfd => sub_blk: {
+                            var p: usize = 1;
+                            const sub = readU32(r, &p) catch break :sub_blk true;
+                            break :sub_blk sub == 0x0b or (sub >= 0x58 and sub <= 0x5b);
+                        },
+                        else => false,
+                    };
+                },
+                else => false,
+            };
+            if (stop) break;
+            win_end += 1;
+        }
+
+        if (verifyDisjointFpUsesInSlice(
+            body_slice,
+            fp,
+            sp_save,
+            cand.dst_offset,
+            cand.copy_len,
+            cand.start_idx,
+            cand.end_idx,
+            cand.end_idx,
+            win_end,
+        )) {
+            matched_cand = cand;
+            matched_window_end = win_end;
+            break;
+        }
+    }
+
+    const cand = matched_cand orelse return false;
+
+    var new_list: InstrList = .empty;
+    new_list.ensureTotalCapacity(arena, items.len) catch return error.OutOfMemory;
+    new_list.appendSliceAssumeCapacity(items[0..body_start]);
+
+    var bi: usize = 0;
+    while (bi < body_slice.len) {
+        if (bi == cand.start_idx) {
+            bi = cand.end_idx;
+            continue;
+        }
+        if (bi >= cand.end_idx and bi < matched_window_end and
+            body_slice[bi] == .local_get and body_slice[bi].local_get == fp)
+        {
+            if (bi + 1 < matched_window_end) {
+                if (decodeLoadAccess(body_slice[bi + 1])) |access| {
+                    if (access.mem_idx == 0 and access.offset >= cand.dst_offset and access.offset + access.size <= cand.dst_offset + cand.copy_len) {
+                        const rel_off = access.offset - cand.dst_offset;
+                        const new_off = cand.src_offset + rel_off;
+                        const shift_align: u32 = if (access.align_val == 0) 0 else @min(access.align_val, @ctz(cand.dst_offset | cand.src_offset | (@as(u64, 1) << @intCast(access.align_val))));
+                        const new_load = try encodeLoadInstr(arena, access, shift_align, new_off);
+                        new_list.append(arena, .{ .local_get = cand.src_local }) catch return error.OutOfMemory;
+                        new_list.append(arena, new_load) catch return error.OutOfMemory;
+                        bi += 2;
+                        continue;
+                    }
+                }
+            }
+            if (bi + 3 < matched_window_end and
+                body_slice[bi + 1] == .i32_const and body_slice[bi + 1].i32_const >= 0 and
+                body_slice[bi + 2] == .numeric_op and body_slice[bi + 2].numeric_op == 0x6a)
+            {
+                if (decodeLoadAccess(body_slice[bi + 3])) |access| {
+                    const total_off = @as(u64, @intCast(body_slice[bi + 1].i32_const)) + access.offset;
+                    if (access.mem_idx == 0 and total_off >= cand.dst_offset and total_off + access.size <= cand.dst_offset + cand.copy_len) {
+                        const rel_off = total_off - cand.dst_offset;
+                        const new_off = cand.src_offset + rel_off;
+                        const shift_align: u32 = if (access.align_val == 0) 0 else @min(access.align_val, @ctz(cand.dst_offset | cand.src_offset | (@as(u64, 1) << @intCast(access.align_val))));
+                        const new_load = try encodeLoadInstr(arena, access, shift_align, new_off);
+                        new_list.append(arena, .{ .local_get = cand.src_local }) catch return error.OutOfMemory;
+                        new_list.append(arena, new_load) catch return error.OutOfMemory;
+                        bi += 4;
+                        continue;
+                    }
+                }
+            }
+        }
+        new_list.append(arena, body_slice[bi]) catch return error.OutOfMemory;
+        bi += 1;
+    }
+
+    const new_body_end = new_list.items.len;
+    new_list.appendSlice(arena, items[body_end..]) catch return error.OutOfMemory;
+
+    // Bonus: if `fp` (and `sp_save`) now has no remaining uses in the body and there are no early returns/traps, strip the prologue and epilogue too.
+    if (!sliceUsesLocalOrEarlyExit(new_list.items[body_start..new_body_end], fp, sp_save, has_epilogue)) {
+        const stripped_body_len = new_body_end - body_start;
+        std.mem.copyForwards(Instr, new_list.items[0..stripped_body_len], new_list.items[body_start..new_body_end]);
+        var final_len = stripped_body_len;
+        if (has_trailing_return) {
+            new_list.items[final_len] = .return_;
+            final_len += 1;
+        }
+        new_list.shrinkRetainingCapacity(final_len);
+    }
+
+    root_list.* = new_list;
     return true;
 }
 
@@ -2363,6 +2971,16 @@ fn depth0StackDelta(code: u8) ?i32 {
     };
 }
 
+fn depth0MiscStackDelta(misc_op: u32) ?i32 {
+    return switch (misc_op) {
+        0x00...0x07, 0x09, 0x0d => 0,
+        0x08, 0x0a, 0x0b, 0x0c, 0x0e, 0x11 => -3,
+        0x0f => -1,
+        0x10 => 1,
+        else => null,
+    };
+}
+
 fn classifyTrivialFunc(
     module: *const Mod.Module,
     fidx: u32,
@@ -2431,6 +3049,7 @@ fn classifyTrivialFunc(
 
     var needs_result_block: bool = false;
     var has_early_return: bool = false;
+    var has_branch_to_func_block: bool = false;
     var uses_global_op: bool = false;
     var has_loop: bool = false;
     var seen_cond_branch: bool = false;
@@ -2480,7 +3099,7 @@ fn classifyTrivialFunc(
                     leading_still_matching = false;
                     const callee = readU32(bytes, &pos) catch return .none;
                     if (optimize_mode != .fast or
-                        depth == 0 or
+                        (depth == 0 and !has_early_return) or
                         !seen_cond_branch or
                         has_loop or
                         inner_callee != null or
@@ -2488,6 +3107,11 @@ fn classifyTrivialFunc(
                         callee == fidx)
                     {
                         return .none;
+                    }
+                    const callee_sig = getFuncSignature(module, &module.funcs.items[callee]) orelse return .none;
+                    if (depth == 0) {
+                        depth0_stack = depth0_stack - @as(i32, @intCast(callee_sig.params.len)) + @as(i32, @intCast(callee_sig.results.len));
+                        if (depth0_stack < 0) depth0_stack_exact = false;
                     }
                     inner_callee = callee;
                     continue;
@@ -2531,7 +3155,7 @@ fn classifyTrivialFunc(
                     leading_still_matching = false;
                     if (depth == 0 and pos == body_end) {
                         had_trailing_return = true;
-                        if (!has_early_return and depth0_stack_exact and depth0_stack == @as(i32, @intCast(sig.results.len))) {
+                        if (depth0_stack_exact and depth0_stack == @as(i32, @intCast(sig.results.len))) {
                             effective_end = instr_start;
                             op_count -= 1;
                         } else {
@@ -2539,6 +3163,7 @@ fn classifyTrivialFunc(
                             needs_result_block = true;
                         }
                     } else if (depth > 0 and pos < body_end and (bytes[pos] == 0x0b or bytes[pos] == 0x05)) {
+                        if (sig.results.len == 2 and (!depth0_stack_exact or depth0_stack != 0)) return .none;
                         has_early_return = true;
                         needs_result_block = true;
                     } else {
@@ -2551,7 +3176,10 @@ fn classifyTrivialFunc(
                     if (decoded.code == 0x0d) seen_cond_branch = true;
                     const target = readU32(bytes, &pos) catch return .none;
                     if (target > depth) return .none;
-                    if (target == depth) needs_result_block = true;
+                    if (target == depth) {
+                        needs_result_block = true;
+                        has_branch_to_func_block = true;
+                    }
                     if (depth == 0) {
                         if (decoded.code == 0x0d) {
                             depth0_stack -= 1;
@@ -2568,7 +3196,10 @@ fn classifyTrivialFunc(
                     for (0..@as(usize, count) + 1) |_| {
                         const target = readU32(bytes, &pos) catch return .none;
                         if (target > depth) return .none;
-                        if (target == depth) needs_result_block = true;
+                        if (target == depth) {
+                            needs_result_block = true;
+                            has_branch_to_func_block = true;
+                        }
                     }
                     if (depth == 0) depth0_stack_exact = false;
                     continue;
@@ -2609,6 +3240,7 @@ fn classifyTrivialFunc(
                     if (depth == 0) {
                         if (depth0StackDelta(@intCast(decoded.code))) |delta| {
                             depth0_stack += delta;
+                            if (depth0_stack < 0) depth0_stack_exact = false;
                         } else {
                             depth0_stack_exact = false;
                         }
@@ -2616,7 +3248,16 @@ fn classifyTrivialFunc(
                 },
             }
         } else if (depth == 0) {
-            depth0_stack_exact = false;
+            if (decoded.prefix == 0xfc) {
+                if (depth0MiscStackDelta(decoded.code)) |delta| {
+                    depth0_stack += delta;
+                    if (depth0_stack < 0) depth0_stack_exact = false;
+                } else {
+                    depth0_stack_exact = false;
+                }
+            } else {
+                depth0_stack_exact = false;
+            }
         }
 
         leading_still_matching = false;
@@ -2624,7 +3265,8 @@ fn classifyTrivialFunc(
     }
 
     if (pos != body_end or depth != 0) return .none;
-    if (sig.results.len > 1 and (needs_result_block or has_early_return or !depth0_stack_exact or depth0_stack != @as(i32, @intCast(sig.results.len)))) {
+    if (needs_result_block and !depth0_stack_exact) return .none;
+    if (sig.results.len > 1 and (has_branch_to_func_block or !depth0_stack_exact or depth0_stack != @as(i32, @intCast(sig.results.len)))) {
         return .none;
     }
     if (sig.params.len == 0 and op_count <= 1 and !had_trailing_return and !std.mem.eql(u8, bytes, &.{ 0x01, 0x0b })) {
@@ -2649,9 +3291,9 @@ fn classifyTrivialFunc(
                     op_count <= 7 and
                     sig.params.len <= 2;
                 const allow_one_local = func.local_types.items.len <= 1 and
-                    op_count <= 10 and
-                    sig.params.len <= 3 and
-                    (prefix_params == sig.params.len or (sig.params.len <= 2 and op_count <= 9));
+                    !needs_result_block and
+                    ((op_count <= 10 and sig.params.len <= 3 and (prefix_params == sig.params.len or (sig.params.len <= 2 and op_count <= 9))) or
+                        (sig.params.len >= 1 and sig.params.len <= 2 and op_count <= 12 and bytes.len <= 32));
                 if (!allow_zero_local and !allow_one_local) return .none;
             }
         },
@@ -2661,6 +3303,7 @@ fn classifyTrivialFunc(
                     has_loop or
                     !seen_cond_branch or
                     op_count > 28 or
+                    bytes.len > 80 or
                     func.local_types.items.len > 4 or
                     sig.params.len > 4)
                 {
@@ -2956,7 +3599,8 @@ fn inlineTrivialFunctions(
                 if (callee != i and callee >= module.num_func_imports and callee < num_funcs) {
                     switch (trivials[callee]) {
                         .leaf => |*leaf| {
-                            const needed_locals: usize = (leaf.param_count - leaf.prefix_params) + leaf.local_count;
+                            const extra_result_locals: usize = if (leaf.needs_result_block and leaf.result_count == 2) 2 else 0;
+                            const needed_locals: usize = (leaf.param_count - leaf.prefix_params) + leaf.local_count + extra_result_locals;
                             const can_inline_site = switch (optimize_mode) {
                                 .small => func.local_types.items.len + needed_locals <= 4096,
                                 .fast => out.items.len + (bytes.len - pos) <= 16384 and func.local_types.items.len + needed_locals <= 512,
@@ -2982,6 +3626,25 @@ fn inlineTrivialFunctions(
                                     }
                                     func.local_types.append(module.allocator, leaf.local_types[l]) catch return error.OutOfMemory;
                                     local_map[leaf.param_count + l] = new_idx;
+                                }
+                                var res_local_0: u32 = 0;
+                                var res_local_1: u32 = 0;
+                                if (leaf.needs_result_block and leaf.result_count == 2) {
+                                    res_local_0 = caller_param_count + @as(u32, @intCast(func.local_types.items.len));
+                                    if (func.local_type_idxs.items.len == func.local_types.items.len and func.local_type_idxs.items.len > 0) {
+                                        func.local_type_idxs.append(module.allocator, types.invalid_index) catch return error.OutOfMemory;
+                                    } else {
+                                        func.local_type_idxs.clearRetainingCapacity();
+                                    }
+                                    func.local_types.append(module.allocator, leaf.result_types[0]) catch return error.OutOfMemory;
+
+                                    res_local_1 = caller_param_count + @as(u32, @intCast(func.local_types.items.len));
+                                    if (func.local_type_idxs.items.len == func.local_types.items.len and func.local_type_idxs.items.len > 0) {
+                                        func.local_type_idxs.append(module.allocator, types.invalid_index) catch return error.OutOfMemory;
+                                    } else {
+                                        func.local_type_idxs.clearRetainingCapacity();
+                                    }
+                                    func.local_types.append(module.allocator, leaf.result_types[1]) catch return error.OutOfMemory;
                                 }
 
                                 var p: usize = leaf.param_count;
@@ -3009,7 +3672,7 @@ fn inlineTrivialFunctions(
 
                                 if (leaf.needs_result_block) {
                                     out.append(module.allocator, 0x02) catch return error.OutOfMemory;
-                                    if (leaf.result_count == 0) {
+                                    if (leaf.result_count == 0 or leaf.result_count == 2) {
                                         out.append(module.allocator, 0x40) catch return error.OutOfMemory;
                                     } else {
                                         const vt_byte: u8 = @bitCast(@as(i8, @intCast(@backingInt(leaf.result_types[0]))));
@@ -3046,6 +3709,12 @@ fn inlineTrivialFunctions(
                                                 continue;
                                             },
                                             0x0f => {
+                                                if (leaf.needs_result_block and leaf.result_count == 2) {
+                                                    out.append(module.allocator, 0x21) catch return error.OutOfMemory;
+                                                    try appendU32Leb(module.allocator, &out, res_local_1);
+                                                    out.append(module.allocator, 0x21) catch return error.OutOfMemory;
+                                                    try appendU32Leb(module.allocator, &out, res_local_0);
+                                                }
                                                 out.append(module.allocator, 0x0c) catch return error.OutOfMemory;
                                                 try appendU32Leb(module.allocator, &out, inner_depth);
                                                 continue;
@@ -3058,7 +3727,19 @@ fn inlineTrivialFunctions(
                                 }
 
                                 if (leaf.needs_result_block) {
+                                    if (leaf.result_count == 2) {
+                                        out.append(module.allocator, 0x21) catch return error.OutOfMemory;
+                                        try appendU32Leb(module.allocator, &out, res_local_1);
+                                        out.append(module.allocator, 0x21) catch return error.OutOfMemory;
+                                        try appendU32Leb(module.allocator, &out, res_local_0);
+                                    }
                                     out.append(module.allocator, 0x0b) catch return error.OutOfMemory;
+                                    if (leaf.result_count == 2) {
+                                        out.append(module.allocator, 0x20) catch return error.OutOfMemory;
+                                        try appendU32Leb(module.allocator, &out, res_local_0);
+                                        out.append(module.allocator, 0x20) catch return error.OutOfMemory;
+                                        try appendU32Leb(module.allocator, &out, res_local_1);
+                                    }
                                 }
                                 if (decoded.code == 0x12) {
                                     out.append(module.allocator, 0x0f) catch return error.OutOfMemory;
@@ -5433,4 +6114,569 @@ test "Optimizer: .fast mode 1-cold-call wrapper inlining and trivial inner-calle
         try testing.expectEqualSlices(u8, &[_]u8{ 0x10, 0x00, 0x10, 0x00, 0x6a, 0x0b }, mod_small.funcs.items[1].code_bytes);
     }
 }
+
+test "Optimizer: eliminateLeafStackCopy with padded stack frame (copy_size < stack_size) and read-only control flow" {
+    const allocator = testing.allocator;
+
+    // 1. 24-byte `Curve` copy in 32-byte aligned stack frame with read-only `block`/`if` control flow (`band.curveExtent` pattern):
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.globals.append(allocator, .{
+            .type = .{ .val_type = .i32, .mutability = .mutable },
+            .init_expr_bytes = &[_]u8{ 0x41, 0x80, 0x80, 0x04 },
+        });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{.i32}),
+            .results = try allocator.dupe(types.ValType, &.{ .f32, .f32 }),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const curve_extent_body = [_]u8{
+            0x23, 0x00, // global.get 0
+            0x41, 32, // i32.const 32 (stack_size = 32)
+            0x6b, // i32.sub
+            0x22, 0x01, // local.tee 1 (tmp_local)
+            0x20, 0x00, // local.get 0 (src_param)
+            0x41, 24, // i32.const 24 (copy_size = 24 < 32)
+            0xfc, 0x0a, 0x00, 0x00, // memory.copy 0 0
+            0x02, 0x7d, // block (result f32)
+            0x20, 0x01, // local.get 1
+            0x2a, 0x02, 0x04, // f32.load align=2 offset=4
+            0x20, 0x01, // local.get 1
+            0x2a, 0x02, 0x0c, // f32.load align=2 offset=12
+            0x96, // f32.min
+            0x0b, // end block
+            0x20, 0x01, // local.get 1
+            0x28, 0x02, 0x10, // i32.load align=2 offset=16 (within [0, 24))
+            0x04, 0x7d, // if (result f32)
+            0x20, 0x01, // local.get 1
+            0x2a, 0x02, 0x14, // f32.load align=2 offset=20 (20 + 4 <= 24)
+            0x05, // else
+            0x20, 0x01, // local.get 1
+            0x2a, 0x02, 0x04, // f32.load align=2 offset=4
+            0x0b, // end if
+            0x0f, // return
+            0x0b, // end
+        };
+
+        var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &curve_extent_body };
+        try f0.local_types.append(allocator, .i32); // local 1 (tmp_local)
+        try mod.funcs.append(allocator, f0);
+        try mod.exports.append(allocator, .{ .name = "curveExtent", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        // Scratch local 1 and the 7-op stack copy prologue are completely eliminated!
+        try testing.expectEqual(@as(usize, 0), opt_mod.funcs.items[0].local_types.items.len);
+        const expected = [_]u8{
+            0x20, 0x00, // local.get 0
+            0x2a, 0x02, 0x04, // f32.load align=2 offset=4
+            0x20, 0x00, // local.get 0
+            0x2a, 0x02, 0x0c, // f32.load align=2 offset=12
+            0x96, // f32.min
+            0x20, 0x00, // local.get 0
+            0x28, 0x02, 0x10, // i32.load align=2 offset=16
+            0x04, 0x7d, // if (result f32)
+            0x20, 0x00, // local.get 0
+            0x2a, 0x02, 0x14, // f32.load align=2 offset=20
+            0x05, // else
+            0x20, 0x00, // local.get 0
+            0x2a, 0x02, 0x04, // f32.load align=2 offset=4
+            0x0b, // end if
+            0x0f, // return
+            0x0b, // end
+        };
+        try testing.expectEqualSlices(u8, &expected, opt_mod.funcs.items[0].code_bytes);
+    }
+
+    // 2. Load accessing uncopied padding `[24, 32)` (offset 24 when copy_size == 24) is NOT rewritten:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.globals.append(allocator, .{
+            .type = .{ .val_type = .i32, .mutability = .mutable },
+            .init_expr_bytes = &[_]u8{ 0x41, 0x80, 0x80, 0x04 },
+        });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{.i32}),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const out_of_range_body = [_]u8{
+            0x23, 0x00,
+            0x41, 32,
+            0x6b,
+            0x22, 0x01,
+            0x20, 0x00,
+            0x41, 24,
+            0xfc, 0x0a, 0x00, 0x00,
+            0x20, 0x01,
+            0x28, 0x02, 24, // i32.load offset=24 (24 + 4 > 24 -> out of copied range!)
+            0x0b,
+        };
+        var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &out_of_range_body };
+        try f0.local_types.append(allocator, .i32);
+        try mod.funcs.append(allocator, f0);
+        try mod.exports.append(allocator, .{ .name = "oob", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        try testing.expectEqual(@as(usize, 1), opt_mod.funcs.items[0].local_types.items.len);
+        try testing.expectEqualSlices(u8, &out_of_range_body, opt_mod.funcs.items[0].code_bytes);
+    }
+}
+
+test "Optimizer: caller dead stack-slot memory.copy load forwarding and frame stripping" {
+    const allocator = testing.allocator;
+
+    // 1. Dead stack copy at offset D=16 (`local.get fp; i32.const 16; i32.add; local.get src; i32.const 16; memory.copy`)
+    //    followed by loads from `fp` at offsets 16 and 20: rewrites loads to `src` at offsets 0 and 4,
+    //    deletes the `memory.copy`, and strips the now-unused stack frame prologue & epilogue!
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.globals.append(allocator, .{
+            .type = .{ .val_type = .i32, .mutability = .mutable },
+            .init_expr_bytes = &[_]u8{ 0x41, 0x80, 0x80, 0x04 },
+        });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{.i32}),
+            .results = try allocator.dupe(types.ValType, &.{.f32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        // Caller after inlining `Padding.left` + `Padding.right`:
+        //   global.get 0; i32.const 32; i32.sub; local.tee 1; global.set 0;
+        //   local.get 1; i32.const 16; i32.add; local.get 0; i32.const 16; memory.copy 0 0;
+        //   local.get 1; f32.load align=2 offset=16;
+        //   local.get 1; f32.load align=2 offset=20;
+        //   f32.add;
+        //   local.get 1; i32.const 32; i32.add; global.set 0;
+        //   return; end
+        const caller_body = [_]u8{
+            0x23, 0x00, // global.get 0
+            0x41, 32, // i32.const 32
+            0x6b, // i32.sub
+            0x22, 0x01, // local.tee 1 (fp)
+            0x24, 0x00, // global.set 0
+            0x20, 0x01, // local.get 1 (fp)
+            0x41, 16, // i32.const 16 (D = 16)
+            0x6a, // i32.add
+            0x20, 0x00, // local.get 0 (src)
+            0x41, 16, // i32.const 16 (N = 16)
+            0xfc, 0x0a, 0x00, 0x00, // memory.copy 0 0
+            0x20, 0x01, // local.get 1 (fp)
+            0x2a, 0x02, 16, // f32.load align=2 offset=16
+            0x20, 0x01, // local.get 1 (fp)
+            0x2a, 0x02, 20, // f32.load align=2 offset=20
+            0x92, // f32.add
+            0x20, 0x01, // local.get 1 (fp)
+            0x41, 32, // i32.const 32
+            0x6a, // i32.add
+            0x24, 0x00, // global.set 0
+            0x0f, // return
+            0x0b, // end
+        };
+
+        var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &caller_body };
+        try f0.local_types.append(allocator, .i32); // local 1 (fp)
+        try mod.funcs.append(allocator, f0);
+        try mod.exports.append(allocator, .{ .name = "sumPadding", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        // Both the `memory.copy` AND the stack frame prologue/epilogue + `fp` local are eliminated!
+        try testing.expectEqual(@as(usize, 0), opt_mod.funcs.items[0].local_types.items.len);
+        const expected = [_]u8{
+            0x20, 0x00, // local.get 0
+            0x2a, 0x02, 0x00, // f32.load align=2 offset=0
+            0x20, 0x00, // local.get 0
+            0x2a, 0x02, 0x04, // f32.load align=2 offset=4
+            0x92, // f32.add
+            0x0f, // return
+            0x0b, // end
+        };
+        try testing.expectEqualSlices(u8, &expected, opt_mod.funcs.items[0].code_bytes);
+    }
+
+    // 2. When `fp` still has a disjoint store/load at `[0, 4)`, the dead `memory.copy` at `[16, 32)` is
+    //    eliminated while the prologue/epilogue for `[0, 4)` are preserved:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.globals.append(allocator, .{
+            .type = .{ .val_type = .i32, .mutability = .mutable },
+            .init_expr_bytes = &[_]u8{ 0x41, 0x80, 0x80, 0x04 },
+        });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const caller_disjoint = [_]u8{
+            0x23, 0x00, // global.get 0
+            0x41, 32, // i32.const 32
+            0x6b, // i32.sub
+            0x22, 0x02, // local.tee 2 (fp)
+            0x24, 0x00, // global.set 0
+            0x20, 0x02, // local.get 2 (fp)
+            0x20, 0x01, // local.get 1
+            0x36, 0x02, 0x00, // i32.store align=2 offset=0 (disjoint slot [0, 4))
+            0x20, 0x02, // local.get 2 (fp)
+            0x41, 16, // i32.const 16
+            0x6a, // i32.add
+            0x20, 0x00, // local.get 0 (src)
+            0x41, 16, // i32.const 16
+            0xfc, 0x0a, 0x00, 0x00, // memory.copy 0 0
+            0x20, 0x02, // local.get 2 (fp)
+            0x28, 0x02, 20, // i32.load align=2 offset=20 (inside [16, 32))
+            0x20, 0x02, // local.get 2 (fp)
+            0x28, 0x02, 0x00, // i32.load align=2 offset=0 (disjoint slot [0, 4))
+            0x6a, // i32.add
+            0x20, 0x02, // local.get 2 (fp)
+            0x41, 32, // i32.const 32
+            0x6a, // i32.add
+            0x24, 0x00, // global.set 0
+            0x0f, // return
+            0x0b, // end
+        };
+
+        var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &caller_disjoint };
+        try f0.local_types.append(allocator, .i32);
+        try mod.funcs.append(allocator, f0);
+        try mod.exports.append(allocator, .{ .name = "disjointFrame", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        const expected = [_]u8{
+            0x23, 0x00, // global.get 0
+            0x41, 32, // i32.const 32
+            0x6b, // i32.sub
+            0x22, 0x02, // local.tee 2 (fp)
+            0x24, 0x00, // global.set 0
+            0x20, 0x02, // local.get 2 (fp)
+            0x20, 0x01, // local.get 1
+            0x36, 0x02, 0x00, // i32.store align=2 offset=0
+            0x20, 0x00, // local.get 0 (src — forwarded from fp+20!)
+            0x28, 0x02, 0x04, // i32.load align=2 offset=4
+            0x20, 0x02, // local.get 2 (fp)
+            0x28, 0x02, 0x00, // i32.load align=2 offset=0
+            0x6a, // i32.add
+            0x20, 0x02, // local.get 2 (fp)
+            0x41, 32, // i32.const 32
+            0x6a, // i32.add
+            0x24, 0x00, // global.set 0
+            0x0f, // return
+            0x0b, // end
+        };
+        try testing.expectEqualSlices(u8, &expected, opt_mod.funcs.items[0].code_bytes);
+    }
+}
+
+test "Optimizer: 0xfc stack delta tracking, post-early-return cold calls, 2-result early return, and .small 12-op leaf cap" {
+    const allocator = testing.allocator;
+
+    // 1. `0xfc` stack delta tracking (`memory.copy` and `i32.trunc_sat_f32_s`) at depth 0 preserves
+    //    `depth0_stack_exact` in a function with early return (`needs_result_block`):
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32, .f32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        // Helper with early return AND depth-0 `memory.copy` (`0xfc 0x0a`, delta -3) + `i32.trunc_sat_f32_s` (`0xfc 0x00`, delta 0)
+        const fc_helper = [_]u8{
+            0x02, 0x40, // block (empty)
+            0x20, 0x00, // local.get 0
+            0x0d, 0x00, // br_if 0
+            0x41, 0x00, // i32.const 0
+            0x0f, // return (early return -> needs_result_block = true)
+            0x0b, // end block
+            0x20, 0x00, // local.get 0 (dst)
+            0x20, 0x01, // local.get 1 (src)
+            0x41, 0x08, // i32.const 8 (len)
+            0xfc, 0x0a, 0x00, 0x00, // memory.copy 0 0 (depth 0: pops 3 -> depth0_stack remains 0!)
+            0x20, 0x02, // local.get 2 (f32)
+            0xfc, 0x00, // i32.trunc_sat_f32_s (depth 0: pops 1, pushes 1 -> depth0_stack == 1!)
+            0x0f, // return
+            0x0b, // end
+        };
+        const caller = [_]u8{
+            0x20, 0x00,
+            0x20, 0x01,
+            0x20, 0x02,
+            0x10, 0x00, // call $fc_helper
+            0x0b,
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &fc_helper });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &caller });
+        try mod.exports.append(allocator, .{ .name = "run_fc", .kind = .func, .var_ = .{ .index = 1 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        // `fc_helper` was classified as trivial (depth0_stack_exact preserved) and inlined into `run_fc`!
+        try testing.expectEqual(@as(usize, 1), opt_mod.funcs.items.len);
+    }
+
+    // 2. `.fast` mode inlining of post-early-return depth-0 cold call (`ensureTotalCapacity` pattern)
+    //    AND 2-result early-return cold-call wrapper (`ArrayList.addOne` pattern):
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        // Type 0: (param i32, i32) -> (result i32) (`ensureTotalCapacityPrecise` / `ensureTotalCapacity`)
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+        // Type 1: (param i32) -> (result i32, i32) (`addOne`: returns `(ptr, err)`)
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{.i32}),
+            .results = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        // func 0 (imported `ensureTotalCapacityPrecise`):
+        try mod.imports.append(allocator, .{
+            .module_name = "env",
+            .field_name = "ensureTotalCapacityPrecise",
+            .kind = .func,
+            .func = .{ .type_var = .{ .index = 0 } },
+        });
+        try mod.funcs.append(allocator, .{
+            .is_import = true,
+            .decl = .{ .type_var = .{ .index = 0 } },
+        });
+        mod.num_func_imports = 1;
+
+        // func 1 (`ensureTotalCapacity` with post-early-return cold call at depth 0):
+        //   block (empty) { local.get 0; i32.load offset=8; local.get 1; i32.lt_u; br_if 0; i32.const 0; return; }
+        //   local.get 0; local.get 1; call $ensureTotalCapacityPrecise; return; end
+        const ensure_total_cap = [_]u8{
+            0x02, 0x40, // block (empty)
+            0x20, 0x00, // local.get 0
+            0x28, 0x02, 0x08, // i32.load align=2 offset=8 (cap)
+            0x20, 0x01, // local.get 1 (new_cap)
+            0x49, // i32.lt_u
+            0x0d, 0x00, // br_if 0
+            0x41, 0x00, // i32.const 0 (ok)
+            0x0f, // return (early return at depth 1)
+            0x0b, // end block
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x10, 0x00, // call $ensureTotalCapacityPrecise (at depth 0 after has_early_return!)
+            0x0f, // return
+            0x0b, // end
+        };
+
+        // func 2 (`addOne` returning 2 results `(i32, i32)` with early return + cold call):
+        //   local.get 0; local.get 0; i32.load offset=4; i32.const 1; i32.add; local.tee 1;
+        //   block (empty) {
+        //     local.get 0; i32.load offset=8; local.get 1; i32.ge_u; br_if 0;
+        //     local.get 0; local.get 1; call $ensureTotalCapacityPrecise; local.tee 2;
+        //     if (empty) { i32.const 0; local.get 2; return; }
+        //   }
+        //   local.get 0; local.get 1; i32.store offset=4;
+        //   local.get 0; i32.load offset=0; i32.const 0; return; end
+        const add_one = [_]u8{
+            0x20, 0x00, // local.get 0
+            0x28, 0x02, 0x04, // i32.load offset=4 (len)
+            0x41, 0x01, // i32.const 1
+            0x6a, // i32.add
+            0x21, 0x01, // local.set 1 (new_len)
+            0x02, 0x40, // block (empty)
+            0x20, 0x00, // local.get 0
+            0x28, 0x02, 0x08, // i32.load offset=8 (cap)
+            0x20, 0x01, // local.get 1
+            0x4f, // i32.ge_u
+            0x0d, 0x00, // br_if 0
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x10, 0x00, // call $ensureTotalCapacityPrecise
+            0x22, 0x02, // local.tee 2 (err)
+            0x04, 0x40, // if (empty)
+            0x41, 0x00, // i32.const 0 (undef ptr)
+            0x20, 0x02, // local.get 2 (err)
+            0x0f, // return (2-result early return!)
+            0x0b, // end if
+            0x0b, // end block
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1
+            0x36, 0x02, 0x04, // i32.store offset=4
+            0x20, 0x00, // local.get 0
+            0x28, 0x02, 0x00, // i32.load offset=0 (ptr)
+            0x41, 0x00, // i32.const 0 (ok err)
+            0x0f, // return
+            0x0b, // end
+        };
+
+        // func 3 (exported caller): calls both `ensureTotalCapacity` (func 1) and `addOne` (func 2)
+        const caller = [_]u8{
+            0x20, 0x00,
+            0x41, 16,
+            0x10, 0x01, // call $ensureTotalCapacity
+            0x1a, // drop
+            0x20, 0x00,
+            0x10, 0x02, // call $addOne
+            0x0b,
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &ensure_total_cap });
+        var f_add_one = Mod.Func{ .decl = .{ .type_var = .{ .index = 1 } }, .code_bytes = &add_one };
+        try f_add_one.local_types.appendSlice(allocator, &.{ .i32, .i32 }); // locals 1, 2
+        try mod.funcs.append(allocator, f_add_one);
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 1 } }, .code_bytes = &caller });
+        try mod.exports.append(allocator, .{ .name = "caller", .kind = .func, .var_ = .{ .index = 3 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        // Both `ensureTotalCapacity` (func 1) and `addOne` (func 2) were inlined into `caller` and pruned,
+        // leaving only import 0 (`ensureTotalCapacityPrecise`) and `caller` (func 1)!
+        try testing.expectEqual(@as(usize, 2), opt_mod.funcs.items.len);
+    }
+
+    // 3. `.small` mode inlining of 1-local, 11–12 op (`<= 32B`) multi-caller leaf accessors
+    //    (`ElementPool.get` = 2 params, 1 local, 11 ops, 27B; `hash_map.header` = 1 param, 1 local, 12 ops, 29B):
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        // Type 0: (param i32, i32) -> (result i32)
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+        // Type 1: (param i32) -> (result i32)
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{.i32}),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        // func 0 (`ElementPool.get` pattern: 2 params, 1 local, 11 ops, 27 bytes, prefix_params < 2):
+        const elem_pool_get = [_]u8{
+            0x20, 0x00, // 1: local.get 0
+            0x28, 0x02, 0x00, // 2: i32.load align=2 offset=0
+            0x20, 0x01, // 3: local.get 1
+            0x41, 24, // 4: i32.const 24
+            0x6c, // 5: i32.mul
+            0x22, 0x02, // 6: local.tee 2
+            0x6a, // 7: i32.add
+            0x28, 0x02, 0x04, // 8: i32.load align=2 offset=4
+            0x20, 0x02, // 9: local.get 2
+            0x6a, // 10: i32.add
+            0x20, 0x00, // 11: local.get 0
+            0x6a, // 12: i32.add
+            0x0f, // return (stripped -> 12 ops, 26 bytes)
+            0x0b, // end
+        };
+
+        // func 1 (`hash_map.header` pattern: 1 param, 1 local, 12 ops, 26 bytes, prefix_params == 0):
+        const hm_header_valid = [_]u8{
+            0x20, 0x00, // 1: local.get 0
+            0x28, 0x02, 0x00, // 2: i32.load align=2 offset=0
+            0x22, 0x01, // 3: local.tee 1
+            0x41, 16, // 4: i32.const 16
+            0x6b, // 5: i32.sub
+            0x28, 0x02, 0x00, // 6: i32.load align=2 offset=0
+            0x20, 0x01, // 7: local.get 1
+            0x6a, // 8: i32.add
+            0x20, 0x00, // 9: local.get 0
+            0x28, 0x02, 0x04, // 10: i32.load align=2 offset=4
+            0x6a, // 11: i32.add
+            0x67, // 12: i32.clz (12 ops, 26 bytes <= 32B)
+            0x0f, // return (stripped -> 12 ops)
+            0x0b, // end
+        };
+
+        // func 2 (exported caller calling both func 0 and func 1 twice):
+        const caller = [_]u8{
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x00, // call $elem_pool_get (1)
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x00, // call $elem_pool_get (2)
+            0x6a,
+            0x20, 0x00,
+            0x10, 0x01, // call $hm_header_valid (1)
+            0x6a,
+            0x20, 0x00,
+            0x10, 0x01, // call $hm_header_valid (2)
+            0x6a,
+            0x0b,
+        };
+
+        var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &elem_pool_get };
+        try f0.local_types.append(allocator, .i32);
+        try mod.funcs.append(allocator, f0);
+        var f1 = Mod.Func{ .decl = .{ .type_var = .{ .index = 1 } }, .code_bytes = &hm_header_valid };
+        try f1.local_types.append(allocator, .i32);
+        try mod.funcs.append(allocator, f1);
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &caller });
+        try mod.exports.append(allocator, .{ .name = "small_12op", .kind = .func, .var_ = .{ .index = 2 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        // Both multi-caller 12-op 1-local helpers were inlined in .small mode and pruned!
+        try testing.expectEqual(@as(usize, 1), opt_mod.funcs.items.len);
+    }
+}
+
 
