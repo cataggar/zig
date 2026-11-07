@@ -2981,6 +2981,92 @@ fn depth0MiscStackDelta(misc_op: u32) ?i32 {
     };
 }
 
+fn depth0SimdStackDelta(simd_op: u32) ?i32 {
+    return switch (simd_op) {
+        0x0c => 1,
+        0x00...0x0a,
+        0x0f...0x16,
+        0x18,
+        0x19,
+        0x1b,
+        0x1d,
+        0x1f,
+        0x21,
+        0x4d,
+        0x53,
+        0x5c...0x64,
+        0x67...0x6a,
+        0x74,
+        0x75,
+        0x7a,
+        0x7c...0x81,
+        0x83,
+        0x84,
+        0x87...0x8a,
+        0x94,
+        0xa0,
+        0xa1,
+        0xa3,
+        0xa4,
+        0xa7...0xaa,
+        0xc0,
+        0xc1,
+        0xc3,
+        0xc4,
+        0xc7...0xca,
+        0xe0,
+        0xe1,
+        0xe3,
+        0xec,
+        0xed,
+        0xef,
+        0xf8...0xff,
+        0x101...0x104,
+        => 0,
+        0x0d,
+        0x0e,
+        0x17,
+        0x1a,
+        0x1c,
+        0x1e,
+        0x20,
+        0x22...0x4c,
+        0x4e...0x51,
+        0x54...0x57,
+        0x65,
+        0x66,
+        0x6b...0x73,
+        0x76...0x79,
+        0x7b,
+        0x82,
+        0x85,
+        0x86,
+        0x8b...0x93,
+        0x95...0x99,
+        0x9b...0x9f,
+        0xab...0xae,
+        0xb1,
+        0xb5...0xba,
+        0xbc...0xbf,
+        0xcb...0xce,
+        0xd1,
+        0xd5...0xdf,
+        0xe4...0xeb,
+        0xf0...0xf7,
+        0x100,
+        0x10d...0x112,
+        => -1,
+        0x0b,
+        0x52,
+        0x58...0x5b,
+        0x105...0x10c,
+        0x113,
+        0x114,
+        => -2,
+        else => null,
+    };
+}
+
 fn classifyTrivialFunc(
     module: *const Mod.Module,
     fidx: u32,
@@ -3248,13 +3334,14 @@ fn classifyTrivialFunc(
                 },
             }
         } else if (depth == 0) {
-            if (decoded.prefix == 0xfc) {
-                if (depth0MiscStackDelta(decoded.code)) |delta| {
-                    depth0_stack += delta;
-                    if (depth0_stack < 0) depth0_stack_exact = false;
-                } else {
-                    depth0_stack_exact = false;
-                }
+            const maybe_delta = switch (decoded.prefix) {
+                0xfc => depth0MiscStackDelta(decoded.code),
+                0xfd => depth0SimdStackDelta(decoded.code),
+                else => null,
+            };
+            if (maybe_delta) |delta| {
+                depth0_stack += delta;
+                if (depth0_stack < 0) depth0_stack_exact = false;
             } else {
                 depth0_stack_exact = false;
             }
@@ -5769,16 +5856,15 @@ test "Optimizer: .small mode single-caller leaf and multi-caller 7-op/1-local ac
             0x20, 0x00,
             0x20, 0x01,
             0x10, 0x01, // call $pool_get (2)
-            0x6a,
-            0x20, 0x00,
-            0x20, 0x01,
+            0x6a, 0x20,
+            0x00, 0x20,
+            0x01,
             0x10, 0x02, // call $global_helper (1)
-            0x6a,
-            0x20, 0x00,
-            0x20, 0x01,
+            0x6a, 0x20,
+            0x00, 0x20,
+            0x01,
             0x10, 0x02, // call $global_helper (2)
-            0x6a,
-            0x0b,
+            0x6a, 0x0b,
         };
 
         try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &append_assume_cap });
@@ -6216,12 +6302,13 @@ test "Optimizer: eliminateLeafStackCopy with padded stack frame (copy_size < sta
         const out_of_range_body = [_]u8{
             0x23, 0x00,
             0x41, 32,
-            0x6b,
-            0x22, 0x01,
-            0x20, 0x00,
-            0x41, 24,
-            0xfc, 0x0a, 0x00, 0x00,
-            0x20, 0x01,
+            0x6b, 0x22,
+            0x01, 0x20,
+            0x00, 0x41,
+            24,   0xfc,
+            0x0a, 0x00,
+            0x00, 0x20,
+            0x01,
             0x28, 0x02, 24, // i32.load offset=24 (24 + 4 > 24 -> out of copied range!)
             0x0b,
         };
@@ -6560,7 +6647,8 @@ test "Optimizer: 0xfc stack delta tracking, post-early-return cold calls, 2-resu
             0x41, 16,
             0x10, 0x01, // call $ensureTotalCapacity
             0x1a, // drop
-            0x20, 0x00,
+            0x20,
+            0x00,
             0x10, 0x02, // call $addOne
             0x0b,
         };
@@ -6648,14 +6736,13 @@ test "Optimizer: 0xfc stack delta tracking, post-early-return cold calls, 2-resu
             0x20, 0x00,
             0x20, 0x01,
             0x10, 0x00, // call $elem_pool_get (2)
-            0x6a,
-            0x20, 0x00,
+            0x6a, 0x20,
+            0x00,
             0x10, 0x01, // call $hm_header_valid (1)
-            0x6a,
-            0x20, 0x00,
+            0x6a, 0x20,
+            0x00,
             0x10, 0x01, // call $hm_header_valid (2)
-            0x6a,
-            0x0b,
+            0x6a, 0x0b,
         };
 
         var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &elem_pool_get };
@@ -6679,4 +6766,118 @@ test "Optimizer: 0xfc stack delta tracking, post-early-return cold calls, 2-resu
     }
 }
 
+test "Optimizer: 0xfd SIMD stack delta tracking and trivial function inlining" {
+    const allocator = testing.allocator;
 
+    // 1. Exhaustive verification that every `std.wasm.SimdOpcode` has a non-null delta in `depth0SimdStackDelta`:
+    for (std.enums.values(std.wasm.SimdOpcode)) |op| {
+        const delta = depth0SimdStackDelta(@backingInt(op));
+        try testing.expect(delta != null);
+    }
+    // Unassigned opcodes in 0xfd space return null:
+    try testing.expectEqual(@as(?i32, null), depth0SimdStackDelta(0x9a));
+    try testing.expectEqual(@as(?i32, null), depth0SimdStackDelta(0xaf));
+    try testing.expectEqual(@as(?i32, null), depth0SimdStackDelta(0x115));
+
+    // 2. Inlining a SIMD helper with early return (`needs_result_block = true`), `v128.load`, `v128.const`,
+    //    `f32x4.extract_lane`, `f32x4.replace_lane`, `f32x4.eq`, `i32x4.all_true`, and trailing `return`:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        // Type 0: (param i32, f32) -> (result i32)
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .f32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const simd_helper = [_]u8{
+            0x02, 0x40, // block (empty)
+            0x20, 0x00, // local.get 0 (ptr)
+            0x0d, 0x00, // br_if 0
+            0x41, 0x00, // i32.const 0
+            0x0f, // return (early return -> needs_result_block = true)
+            0x0b, // end block
+            0x20, 0x00, // local.get 0 (ptr) -> stack: 1
+            0xfd, 0x00, 0x04, 0x00, // v128.load align=4 offset=0 (delta 0) -> stack: 1
+            0x20, 0x01, // local.get 1 (f32) -> stack: 2
+            0xfd, 0x20, 0x01, // f32x4.replace_lane 1 (delta -1) -> stack: 1
+            0xfd, 0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // v128.const 0 (delta +1) -> stack: 2
+            0xfd, 0x1f, 0x00, // f32x4.extract_lane 0 (delta 0) -> stack: 2
+            0xfd, 0x20, 0x02, // f32x4.replace_lane 2 (delta -1) -> stack: 1
+            0xfd, 0x0c, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // v128.const 0 (delta +1) -> stack: 2
+            0xfd, 0x41, // f32x4.eq (delta -1) -> stack: 1
+            0xfd, 0xa3, 0x01, // i32x4.all_true (0xa3 LEB128, delta 0) -> stack: 1
+            0x0f, // trailing return (stripped since depth0_stack_exact and depth0_stack == 1)
+            0x0b, // end
+        };
+        const caller = [_]u8{
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x00, // call $simd_helper
+            0x0b,
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &simd_helper });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &caller });
+        try mod.exports.append(allocator, .{ .name = "run_simd", .kind = .func, .var_ = .{ .index = 1 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        // `simd_helper` was classified as trivial (depth0_stack_exact preserved) and inlined into `run_simd`!
+        try testing.expectEqual(@as(usize, 1), opt_mod.funcs.items.len);
+    }
+
+    // 3. Multi-value return helper using `0xfd` SIMD instructions (`sig.results.len == 2`, requires `depth0_stack_exact`):
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        // Type 0: (param i32) -> (result f32, i32)
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{.i32}),
+            .results = try allocator.dupe(types.ValType, &.{ .f32, .i32 }),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const simd_pair_helper = [_]u8{
+            0x20, 0x00, // local.get 0 -> stack: 1
+            0xfd, 0x00, 0x04, 0x00, // v128.load (delta 0) -> stack: 1
+            0x22, 0x01, // local.tee 1 (v128) -> stack: 1
+            0xfd, 0x1f, 0x00, // f32x4.extract_lane 0 (delta 0) -> stack: 1 (first result: f32)
+            0x20, 0x01, // local.get 1 (v128) -> stack: 2
+            0xfd, 0xa3, 0x01, // i32x4.all_true (delta 0) -> stack: 2 (second result: i32)
+            0x0f, // return
+            0x0b, // end
+        };
+        const caller = [_]u8{
+            0x20, 0x00,
+            0x10, 0x00, // call $simd_pair_helper
+            0x0b,
+        };
+
+        var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &simd_pair_helper };
+        try f0.local_types.append(allocator, .v128);
+        try mod.funcs.append(allocator, f0);
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &caller });
+        try mod.exports.append(allocator, .{ .name = "run_simd_pair", .kind = .func, .var_ = .{ .index = 1 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        // `simd_pair_helper` was inlined and pruned in `.small` mode as well!
+        try testing.expectEqual(@as(usize, 1), opt_mod.funcs.items.len);
+    }
+}
