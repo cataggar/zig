@@ -5277,6 +5277,16 @@ fn convertZcuFnType(
                     },
                 }
             },
+            .auto => {
+                switch (CodeGen.classifyAutoParam(param_type, zcu, target)) {
+                    .scalars => |sc| {
+                        for (sc.fields[0..sc.len]) |f| {
+                            try params_buffer.append(gpa, CodeGen.typeToValtype(f.ty, zcu, target));
+                        }
+                    },
+                    .by_ref => try params_buffer.append(gpa, CodeGen.typeToValtype(param_type, zcu, target)),
+                }
+            },
             else => try params_buffer.append(gpa, CodeGen.typeToValtype(param_type, zcu, target)),
         }
     }
@@ -5499,4 +5509,3 @@ test {
     _ = Archive;
     _ = Object;
 }
-

@@ -1333,7 +1333,31 @@ fn resolveCallingConventionValues(
     }
 
     switch (cc) {
-        .auto, .naked => {
+        .auto => {
+            for (fn_info.param_types.get(ip)) |ty| {
+                const param_ty: Type = .fromInterned(ty);
+                if (!param_ty.hasRuntimeBits(zcu)) {
+                    continue;
+                }
+
+                if (isByRef(param_ty, zcu, target)) {
+                    switch (classifyAutoParam(param_ty, zcu, target)) {
+                        .scalars => |sc| {
+                            for (0..sc.len) |_| {
+                                try args.append(.{ .local = result.local_index });
+                                result.local_index += 1;
+                            }
+                            continue;
+                        },
+                        .by_ref => {},
+                    }
+                }
+
+                try args.append(.{ .local = result.local_index });
+                result.local_index += 1;
+            }
+        },
+        .naked => {
             for (fn_info.param_types.get(ip)) |ty| {
                 if (!Type.fromInterned(ty).hasRuntimeBits(zcu)) {
                     continue;
@@ -1393,26 +1417,53 @@ pub const AutoReturn = union(enum) {
     sret,
 };
 
-fn collectAutoReturnFields(
+pub const max_auto_param_fields = 4;
+
+pub const AutoParamClass = union(enum) {
+    by_ref,
+    scalars: struct {
+        len: u8,
+        fields: [max_auto_param_fields]AutoReturnField,
+    },
+};
+
+fn collectAutoScalarFields(
+    comptime max_fields: usize,
+    comptime allow_vectors: bool,
     ty: Type,
     base_offset: u32,
     zcu: *const Zcu,
     target: *const std.Target,
-    fields: *[2]AutoReturnField,
+    fields: *[max_fields]AutoReturnField,
     count: *usize,
 ) bool {
     if (!ty.hasRuntimeBits(zcu)) return true;
     if (!isByRef(ty, zcu, target)) {
         const leaf_ty = canonicalScalarLeafTypeForTarget(ty, zcu, target) orelse return false;
-        if (leaf_ty.zigTypeTag(zcu) == .vector) return false;
+        if (!allow_vectors and leaf_ty.zigTypeTag(zcu) == .vector) return false;
         const sz = leaf_ty.abiSize(zcu);
-        if (sz == 0 or sz > 8) return false;
-        if (count.* >= 2) return false;
+        const max_leaf_size: u64 = if (allow_vectors) 16 else 8;
+        if (sz == 0 or sz > max_leaf_size) return false;
+        if (count.* >= max_fields) return false;
         fields[count.*] = .{
             .offset = base_offset,
             .ty = leaf_ty,
         };
         count.* += 1;
+        return true;
+    }
+    if (ty.isSlice(zcu)) {
+        if (count.* + 2 > max_fields) return false;
+        const ptr_bytes: u32 = @divExact(target.ptrBitWidth(), 8);
+        fields[count.*] = .{
+            .offset = base_offset,
+            .ty = .usize,
+        };
+        fields[count.* + 1] = .{
+            .offset = base_offset + ptr_bytes,
+            .ty = .usize,
+        };
+        count.* += 2;
         return true;
     }
     switch (ty.zigTypeTag(zcu)) {
@@ -1425,7 +1476,7 @@ fn collectAutoReturnFields(
                 const field_ty = ty.fieldType(field_idx, zcu);
                 if (!field_ty.hasRuntimeBits(zcu)) continue;
                 const field_off: u32 = @intCast(ty.structFieldOffset(field_idx, zcu));
-                if (!collectAutoReturnFields(field_ty, base_offset + field_off, zcu, target, fields, count)) {
+                if (!collectAutoScalarFields(max_fields, allow_vectors, field_ty, base_offset + field_off, zcu, target, fields, count)) {
                     return false;
                 }
             }
@@ -1436,17 +1487,118 @@ fn collectAutoReturnFields(
             if (!elem_ty.hasRuntimeBits(zcu)) return true;
             const elem_size: u32 = @intCast(elem_ty.abiSize(zcu));
             const len = ty.arrayLenIncludingSentinel(zcu);
-            if (len > 2) return false;
+            if (len > max_fields) return false;
             for (0..@as(usize, @intCast(len))) |idx| {
                 const elem_off = base_offset + @as(u32, @intCast(idx)) * elem_size;
-                if (!collectAutoReturnFields(elem_ty, elem_off, zcu, target, fields, count)) {
+                if (!collectAutoScalarFields(max_fields, allow_vectors, elem_ty, elem_off, zcu, target, fields, count)) {
                     return false;
                 }
             }
             return true;
         },
+        .optional => {
+            const pl_ty = ty.optionalChild(zcu);
+            if (ty.optionalReprIsPayload(zcu)) {
+                return collectAutoScalarFields(max_fields, allow_vectors, pl_ty, base_offset, zcu, target, fields, count);
+            }
+            if (pl_ty.hasRuntimeBits(zcu)) {
+                if (!collectAutoScalarFields(max_fields, allow_vectors, pl_ty, base_offset, zcu, target, fields, count)) {
+                    return false;
+                }
+            }
+            if (count.* >= max_fields) return false;
+            fields[count.*] = .{
+                .offset = base_offset + @as(u32, @intCast(pl_ty.abiSize(zcu))),
+                .ty = .u8,
+            };
+            count.* += 1;
+            return true;
+        },
+        .error_union => {
+            const pl_ty = ty.errorUnionPayload(zcu);
+            const err_off: u32 = @intCast(errUnionErrorOffset(pl_ty, @constCast(zcu)));
+            const pl_off: u32 = @intCast(errUnionPayloadOffset(pl_ty, @constCast(zcu)));
+            if (err_off <= pl_off or !pl_ty.hasRuntimeBits(zcu)) {
+                if (count.* >= max_fields) return false;
+                fields[count.*] = .{
+                    .offset = base_offset + err_off,
+                    .ty = .anyerror,
+                };
+                count.* += 1;
+                if (pl_ty.hasRuntimeBits(zcu)) {
+                    if (!collectAutoScalarFields(max_fields, allow_vectors, pl_ty, base_offset + pl_off, zcu, target, fields, count)) {
+                        return false;
+                    }
+                }
+            } else {
+                if (!collectAutoScalarFields(max_fields, allow_vectors, pl_ty, base_offset + pl_off, zcu, target, fields, count)) {
+                    return false;
+                }
+                if (count.* >= max_fields) return false;
+                fields[count.*] = .{
+                    .offset = base_offset + err_off,
+                    .ty = .anyerror,
+                };
+                count.* += 1;
+            }
+            return true;
+        },
         else => return false,
     }
+}
+
+fn collectAutoReturnFields(
+    ty: Type,
+    base_offset: u32,
+    zcu: *const Zcu,
+    target: *const std.Target,
+    fields: *[2]AutoReturnField,
+    count: *usize,
+) bool {
+    return collectAutoScalarFields(2, false, ty, base_offset, zcu, target, fields, count);
+}
+
+pub fn classifyAutoParam(
+    param_ty: Type,
+    zcu: *const Zcu,
+    target: *const std.Target,
+) AutoParamClass {
+    if (!param_ty.hasRuntimeBits(zcu) or !isByRef(param_ty, zcu, target)) return .by_ref;
+    const param_size = param_ty.abiSize(zcu);
+    if (param_size == 0 or param_size > 32) return .by_ref;
+
+    var fields: [max_auto_param_fields]AutoReturnField = undefined;
+    var count: usize = 0;
+    if (!collectAutoScalarFields(max_auto_param_fields, true, param_ty, 0, zcu, target, &fields, &count)) return .by_ref;
+    if (count == 0 or count > max_auto_param_fields) return .by_ref;
+
+    std.mem.sort(AutoReturnField, fields[0..count], {}, struct {
+        fn lessThan(_: void, a: AutoReturnField, b: AutoReturnField) bool {
+            return a.offset < b.offset;
+        }
+    }.lessThan);
+
+    const param_align = param_ty.abiAlignment(zcu);
+    for (fields[0..count], 0..) |f, i| {
+        const f_align = f.ty.abiAlignment(zcu);
+        if (f_align.compareStrict(.gt, param_align)) return .by_ref;
+        const align_bytes: u32 = @intCast(f_align.toByteUnits() orelse 1);
+        if (f.offset % align_bytes != 0) return .by_ref;
+        const f_size: u32 = @intCast(f.ty.abiSize(zcu));
+        if (f.offset + f_size > @as(u32, @intCast(param_size))) return .by_ref;
+        if (i > 0) {
+            const prev = fields[i - 1];
+            const prev_size: u32 = @intCast(prev.ty.abiSize(zcu));
+            if (prev.offset + prev_size > f.offset) return .by_ref;
+        }
+    }
+
+    return .{
+        .scalars = .{
+            .len = @intCast(count),
+            .fields = fields,
+        },
+    };
 }
 
 pub fn classifyAutoReturn(
@@ -1509,11 +1661,26 @@ pub fn firstParamSRet(
 /// Lowers a Zig type and its value based on a given calling convention to ensure
 /// it matches the ABI.
 fn lowerArg(cg: *CodeGen, cc: std.lang.CallingConvention, ty: Type, value: WValue) !void {
-    if (cc != .wasm_mvp) {
+    const zcu = cg.pt.zcu;
+
+    if (cc == .auto) {
+        if (isByRef(ty, zcu, cg.target)) {
+            switch (classifyAutoParam(ty, zcu, cg.target)) {
+                .scalars => |sc| {
+                    for (sc.fields[0..sc.len]) |f| {
+                        _ = try cg.load(value, f.ty, .{ .offset = f.offset });
+                    }
+                    return;
+                },
+                .by_ref => {},
+            }
+        }
         return cg.emitWValue(value);
     }
 
-    const zcu = cg.pt.zcu;
+    if (cc != .wasm_mvp) {
+        return cg.emitWValue(value);
+    }
 
     switch (abi.classifyType(ty, zcu, cg.target)) {
         .direct => |scalar_ty| {
@@ -3294,6 +3461,22 @@ fn airArg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                 }
                 return cg.finishAir(inst, result, &.{});
             },
+        }
+    } else if (cc == .auto and isByRef(arg_ty, zcu, cg.target)) {
+        switch (classifyAutoParam(arg_ty, zcu, cg.target)) {
+            .scalars => |sc| {
+                if (cg.liveness.isUnused(inst)) {
+                    cg.arg_index += sc.len;
+                    return cg.finishAir(inst, .none, &.{});
+                }
+                const result = try cg.allocStack(arg_ty);
+                for (sc.fields[0..sc.len]) |f| {
+                    try cg.store(result, cg.args[cg.arg_index], f.ty, .{ .offset = f.offset });
+                    cg.arg_index += 1;
+                }
+                return cg.finishAir(inst, result, &.{});
+            },
+            .by_ref => cg.arg_index += 1,
         }
     } else {
         cg.arg_index += 1;
@@ -11520,6 +11703,17 @@ const SroaAnalysis = struct {
         const data = datas[@backingInt(inst)];
 
         switch (tag) {
+            .arg => {
+                const arg_ty = self.cg.typeOfIndex(inst);
+                const fn_info = zcu.typeToFunc(zcu.navValue(self.cg.owner_nav).typeOf(zcu)).?;
+                if (fn_info.cc == .auto and !self.cg.liveness.isUnused(inst) and
+                    arg_ty.hasRuntimeBits(zcu) and isByRef(arg_ty, zcu, self.cg.target) and
+                    classifyAutoParam(arg_ty, zcu, self.cg.target) == .scalars)
+                {
+                    _ = try self.tryAddCandidateRoot(inst, arg_ty, .byref_val);
+                }
+            },
+
             .alloc => {
                 const ptr_ty = self.cg.typeOfIndex(inst);
                 const child_ty = ptr_ty.childType(zcu);
@@ -12580,7 +12774,6 @@ const SroaAnalysis = struct {
             .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => {},
 
             .call, .call_always_tail, .call_never_tail, .call_never_inline => {
-                self.escapeAllOperands(inst);
                 const call = self.cg.air.unwrapCall(inst);
                 const callee_ty = self.cg.typeOf(call.callee);
                 const fn_ty = switch (callee_ty.zigTypeTag(zcu)) {
@@ -12588,7 +12781,44 @@ const SroaAnalysis = struct {
                     .pointer => callee_ty.childType(zcu),
                     else => unreachable,
                 };
-                const cc = zcu.typeToFunc(fn_ty).?.cc;
+                const fn_info = zcu.typeToFunc(fn_ty).?;
+                const cc = fn_info.cc;
+                const fixed_arg_count = fn_info.param_types.len;
+                self.markEscaped(call.callee);
+                for (call.args, 0..) |arg, arg_i| {
+                    if (cc == .auto and (!fn_info.is_var_args or arg_i < fixed_arg_count)) {
+                        const arg_ty = self.cg.typeOf(arg);
+                        if (arg_ty.hasRuntimeBits(zcu) and isByRef(arg_ty, zcu, self.cg.target)) {
+                            switch (classifyAutoParam(arg_ty, zcu, self.cg.target)) {
+                                .scalars => |sc| {
+                                    if (self.getRef(arg)) |ref| {
+                                        var all_ok = ref.kind == .byref_val;
+                                        if (all_ok) {
+                                            for (sc.fields[0..sc.len]) |f| {
+                                                if (!self.checkScalarAccess(ref.root_id, ref.offset + f.offset, f.ty)) {
+                                                    all_ok = false;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if (all_ok) {
+                                            for (sc.fields[0..sc.len]) |f| {
+                                                _ = self.markRangeRead(ref.root_id, ref.offset + f.offset, @intCast(f.ty.abiSize(zcu)));
+                                            }
+                                        } else {
+                                            self.markEscaped(arg);
+                                        }
+                                    } else {
+                                        self.markEscaped(arg);
+                                    }
+                                    continue;
+                                },
+                                .by_ref => {},
+                            }
+                        }
+                    }
+                    self.markEscaped(arg);
+                }
                 const ret_ty = self.cg.typeOfIndex(inst);
                 if (cc == .auto and !self.cg.liveness.isUnused(inst) and
                     !ret_ty.isNoReturn(zcu) and ret_ty.hasRuntimeBits(zcu) and
@@ -13939,9 +14169,9 @@ fn analyzeSroa(cg: *CodeGen, main_body: []const Air.Inst.Index) InnerError!void 
             }
             if (write_between) continue;
             try cg.elided_readonly_loads.put(cg.gpa, src_inst, {});
-            if (analysis.getRef(src_inst.toRef())) |ref| {
-                analysis.roots.items[ref.root_id].escaped = true;
-            }
+        }
+        if (analysis.getRef(src_inst.toRef())) |ref| {
+            analysis.roots.items[ref.root_id].escaped = true;
         }
         try cg.readonly_alloc_aliases.put(cg.gpa, cand.alloc_inst, src_inst.toRef());
         try cg.elided_init_stores.put(cg.gpa, init_store, {});
