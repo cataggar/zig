@@ -3929,20 +3929,31 @@ test findMinMax {
 
 /// Exchanges contents of two memory locations.
 pub fn swap(comptime T: type, noalias a: *T, noalias b: *T) void {
-    if (@inComptime()) {
+    if (@inComptime() or @sizeOf(T) <= 16) {
         // In comptime, accessing bytes of values with no defined layout is a compile error.
+        // For small types (<= 16 bytes), direct assignment avoids a runtime loop without
+        // inflating stack frames.
         const tmp = a.*;
         a.* = b.*;
         b.* = tmp;
     } else {
         // Swapping in streaming nature from start to end instead of swapping
         // everything in one step allows easier optimizations and less stack usage.
-        const a_bytes: []align(@alignOf(T)) u8 = @ptrCast(a);
-        const b_bytes: []align(@alignOf(T)) u8 = @ptrCast(b);
-        for (a_bytes, b_bytes) |*ab, *bb| {
-            const tmp = ab.*;
-            ab.* = bb.*;
-            bb.* = tmp;
+        const Chunk = if (@alignOf(T) >= @alignOf(usize) and @sizeOf(T) % @sizeOf(usize) == 0)
+            usize
+        else if (@alignOf(T) >= @alignOf(u32) and @sizeOf(T) % @sizeOf(u32) == 0)
+            u32
+        else if (@alignOf(T) >= @alignOf(u16) and @sizeOf(T) % @sizeOf(u16) == 0)
+            u16
+        else
+            u8;
+        const num_chunks = @sizeOf(T) / @sizeOf(Chunk);
+        const a_chunks: *[num_chunks]Chunk = @ptrCast(a);
+        const b_chunks: *[num_chunks]Chunk = @ptrCast(b);
+        for (a_chunks, b_chunks) |*a_chunk, *b_chunk| {
+            const tmp = a_chunk.*;
+            a_chunk.* = b_chunk.*;
+            b_chunk.* = tmp;
         }
     }
 }
@@ -3956,6 +3967,85 @@ test "swap works at comptime with types with no defined layout" {
         try testing.expectEqual(T{ .val = 1 }, a);
         try testing.expectEqual(T{ .val = 0 }, b);
     }
+}
+
+test swap {
+    const S = struct {
+        fn check() !void {
+            // Zero-sized type
+            {
+                var a: void = {};
+                var b: void = {};
+                swap(void, &a, &b);
+            }
+            // Scalars
+            {
+                var a: u8 = 0x12;
+                var b: u8 = 0x34;
+                swap(u8, &a, &b);
+                try testing.expectEqual(@as(u8, 0x34), a);
+                try testing.expectEqual(@as(u8, 0x12), b);
+            }
+            {
+                var a: u32 = 0x11223344;
+                var b: u32 = 0x55667788;
+                swap(u32, &a, &b);
+                try testing.expectEqual(@as(u32, 0x55667788), a);
+                try testing.expectEqual(@as(u32, 0x11223344), b);
+            }
+            {
+                var a: u64 = 0x0102030405060708;
+                var b: u64 = 0x1112131415161718;
+                swap(u64, &a, &b);
+                try testing.expectEqual(@as(u64, 0x1112131415161718), a);
+                try testing.expectEqual(@as(u64, 0x0102030405060708), b);
+            }
+            // 16-byte struct
+            {
+                const Pair = extern struct { x: u64, y: u64 };
+                var a: Pair = .{ .x = 1, .y = 2 };
+                var b: Pair = .{ .x = 3, .y = 4 };
+                swap(Pair, &a, &b);
+                try testing.expectEqual(Pair{ .x = 3, .y = 4 }, a);
+                try testing.expectEqual(Pair{ .x = 1, .y = 2 }, b);
+            }
+            // >16-byte usize-aligned struct (24 bytes)
+            {
+                const LargeAligned = extern struct { x: u64, y: u64, z: u64 };
+                var a: LargeAligned = .{ .x = 1, .y = 2, .z = 3 };
+                var b: LargeAligned = .{ .x = 4, .y = 5, .z = 6 };
+                swap(LargeAligned, &a, &b);
+                try testing.expectEqual(LargeAligned{ .x = 4, .y = 5, .z = 6 }, a);
+                try testing.expectEqual(LargeAligned{ .x = 1, .y = 2, .z = 3 }, b);
+            }
+            // >16-byte u32-aligned array (20 bytes)
+            {
+                var a: [5]u32 = .{ 1, 2, 3, 4, 5 };
+                var b: [5]u32 = .{ 6, 7, 8, 9, 10 };
+                swap([5]u32, &a, &b);
+                try testing.expectEqual([5]u32{ 6, 7, 8, 9, 10 }, a);
+                try testing.expectEqual([5]u32{ 1, 2, 3, 4, 5 }, b);
+            }
+            // >16-byte u16-aligned array (18 bytes)
+            {
+                var a: [9]u16 = .{ 1, 2, 3, 4, 5, 6, 7, 8, 9 };
+                var b: [9]u16 = .{ 10, 11, 12, 13, 14, 15, 16, 17, 18 };
+                swap([9]u16, &a, &b);
+                try testing.expectEqual([9]u16{ 10, 11, 12, 13, 14, 15, 16, 17, 18 }, a);
+                try testing.expectEqual([9]u16{ 1, 2, 3, 4, 5, 6, 7, 8, 9 }, b);
+            }
+            // >16-byte odd-sized u8-aligned array (17 bytes)
+            {
+                var a: [17]u8 = "abcdefghijklmnopq".*;
+                var b: [17]u8 = "0123456789ABCDEFG".*;
+                swap([17]u8, &a, &b);
+                try testing.expectEqualSlices(u8, "0123456789ABCDEFG", &a);
+                try testing.expectEqualSlices(u8, "abcdefghijklmnopq", &b);
+            }
+        }
+    };
+    try S.check();
+    try comptime S.check();
 }
 
 inline fn reverseVector(comptime N: usize, comptime T: type, a: []T) [N]T {
