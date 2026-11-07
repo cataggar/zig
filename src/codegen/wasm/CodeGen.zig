@@ -1491,20 +1491,6 @@ fn collectAutoScalarFields(
         return true;
     }
     switch (ty.zigTypeTag(zcu)) {
-        .int, .@"enum" => {
-            if (ty.abiSize(zcu) != 16 or ty.intInfo(zcu).bits != 128) return false;
-            if (count.* + 2 > max_fields) return false;
-            fields[count.*] = .{
-                .offset = base_offset,
-                .ty = .u64,
-            };
-            fields[count.* + 1] = .{
-                .offset = base_offset + 8,
-                .ty = .u64,
-            };
-            count.* += 2;
-            return true;
-        },
         .@"struct" => {
             const layout = ty.containerLayout(zcu);
             if (layout != .auto and layout != .@"extern") return false;
@@ -2038,7 +2024,7 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!vo
             return;
         }
         const max_inline_len: u64 = if (cg.hasSimd()) 128 else 32;
-        if (cg.optimizeMode() != .ReleaseSmall and const_len <= max_inline_len) {
+        if (cg.optimizeMode() != .small and const_len <= max_inline_len) {
             const owns_src = src == .stack;
             var src_base = if (owns_src) try src.toLocal(cg, .usize) else src;
             defer if (owns_src) src_base.free(cg);
@@ -2048,39 +2034,56 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!vo
 
             const dst_offset = dst_base.memOffset();
             const src_offset = src_base.memOffset();
+            const ChunkKind = enum { v128, i64, i32, i16, i8 };
+            const Chunk = struct { kind: ChunkKind, off: u64 };
+            var chunks: [12]Chunk = undefined;
+            var chunk_count: usize = 0;
             var off: u64 = 0;
             while (cg.hasSimd() and const_len - off >= 16) : (off += 16) {
-                try cg.emitMemBase(dst_base);
-                try cg.emitMemBase(src_base);
-                try cg.addSimdMemArg(.v128_load, .{ .offset = src_offset + off, .alignment = .@"1" });
-                try cg.addSimdMemArg(.v128_store, .{ .offset = dst_offset + off, .alignment = .@"1" });
+                chunks[chunk_count] = .{ .kind = .v128, .off = off };
+                chunk_count += 1;
             }
             while (const_len - off >= 8) : (off += 8) {
-                try cg.emitMemBase(dst_base);
-                try cg.emitMemBase(src_base);
-                try cg.addMemArg(.i64_load, .{ .offset = src_offset + off, .alignment = .@"1" });
-                try cg.addMemArg(.i64_store, .{ .offset = dst_offset + off, .alignment = .@"1" });
+                chunks[chunk_count] = .{ .kind = .i64, .off = off };
+                chunk_count += 1;
             }
             if (const_len - off >= 4) {
-                try cg.emitMemBase(dst_base);
-                try cg.emitMemBase(src_base);
-                try cg.addMemArg(.i32_load, .{ .offset = src_offset + off, .alignment = .@"1" });
-                try cg.addMemArg(.i32_store, .{ .offset = dst_offset + off, .alignment = .@"1" });
+                chunks[chunk_count] = .{ .kind = .i32, .off = off };
+                chunk_count += 1;
                 off += 4;
             }
             if (const_len - off >= 2) {
-                try cg.emitMemBase(dst_base);
-                try cg.emitMemBase(src_base);
-                try cg.addMemArg(.i32_load16_u, .{ .offset = src_offset + off, .alignment = .@"1" });
-                try cg.addMemArg(.i32_store16, .{ .offset = dst_offset + off, .alignment = .@"1" });
+                chunks[chunk_count] = .{ .kind = .i16, .off = off };
+                chunk_count += 1;
                 off += 2;
             }
             if (const_len - off >= 1) {
+                chunks[chunk_count] = .{ .kind = .i8, .off = off };
+                chunk_count += 1;
+                off += 1;
+            }
+            for (chunks[0..chunk_count]) |chunk| {
                 try cg.emitMemBase(dst_base);
                 try cg.emitMemBase(src_base);
-                try cg.addMemArg(.i32_load8_u, .{ .offset = src_offset + off, .alignment = .@"1" });
-                try cg.addMemArg(.i32_store8, .{ .offset = dst_offset + off, .alignment = .@"1" });
-                off += 1;
+                switch (chunk.kind) {
+                    .v128 => try cg.addSimdMemArg(.v128_load, .{ .offset = src_offset + chunk.off, .alignment = .@"1" }),
+                    .i64 => try cg.addMemArg(.i64_load, .{ .offset = src_offset + chunk.off, .alignment = .@"1" }),
+                    .i32 => try cg.addMemArg(.i32_load, .{ .offset = src_offset + chunk.off, .alignment = .@"1" }),
+                    .i16 => try cg.addMemArg(.i32_load16_u, .{ .offset = src_offset + chunk.off, .alignment = .@"1" }),
+                    .i8 => try cg.addMemArg(.i32_load8_u, .{ .offset = src_offset + chunk.off, .alignment = .@"1" }),
+                }
+            }
+            var idx = chunk_count;
+            while (idx > 0) {
+                idx -= 1;
+                const chunk = chunks[idx];
+                switch (chunk.kind) {
+                    .v128 => try cg.addSimdMemArg(.v128_store, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" }),
+                    .i64 => try cg.addMemArg(.i64_store, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" }),
+                    .i32 => try cg.addMemArg(.i32_store, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" }),
+                    .i16 => try cg.addMemArg(.i32_store16, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" }),
+                    .i8 => try cg.addMemArg(.i32_store8, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" }),
+                }
             }
             return;
         }
@@ -8909,9 +8912,11 @@ fn emitFloatMinMaxSimd(
         return cg.emitBinSimd(ty, lhs, rhs, pminmax_op);
     }
     if (rhs_non_nan) {
+        var rhs_val = if (rhs == .stack) try rhs.toLocal(cg, ty) else rhs;
+        defer if (rhs == .stack) rhs_val.free(cg);
         var lhs_val = if (lhs == .stack) try lhs.toLocal(cg, ty) else lhs;
         defer if (lhs == .stack) lhs_val.free(cg);
-        return cg.emitBinSimd(ty, rhs, lhs_val, pminmax_op);
+        return cg.emitBinSimd(ty, rhs_val, lhs_val, pminmax_op);
     }
 
     var rhs_val = if (rhs == .stack) try rhs.toLocal(cg, ty) else rhs;
@@ -9181,8 +9186,8 @@ fn scalarizeVecBinOp(
                 .div_ceil => try cg.floatDivCeil(float_ty, lhs_elem_val, rhs_elem_val),
                 .rem => try cg.floatRem(float_ty, lhs_elem_val, rhs_elem_val),
                 .mod => try cg.floatMod(float_ty, lhs_elem_val, rhs_elem_val),
-                .max => try cg.floatMax(float_ty, lhs_elem_val, rhs_elem_val),
-                .min => try cg.floatMin(float_ty, lhs_elem_val, rhs_elem_val),
+                .max => try cg.floatMax(float_ty, lhs_elem_val, rhs_elem_val, false, false),
+                .min => try cg.floatMin(float_ty, lhs_elem_val, rhs_elem_val, false, false),
                 else => unreachable,
             };
         } else blk: {
@@ -13834,7 +13839,6 @@ fn instMayWriteOrCall(cg: *const CodeGen, inst: Air.Inst.Index, sroa: ?*const Sr
         .legalize_compiler_rt_call,
         .assembly,
         .loop,
-        .switch_br,
         .loop_switch_br,
         .@"try",
         .try_cold,
@@ -14402,11 +14406,19 @@ fn scanBlockForLoadElisions(
                                 .slice_elem_val => later_data.bin_op.lhs == op,
                                 .is_null, .is_non_null, .is_err, .is_non_err => later_data.un_op == op,
                                 .store, .store_safe => blk: {
-                                    if (in_subblock or self.total_uses != 1 or op != self.inst.toRef()) break :blk false;
-                                    if (self.cg.elided_init_stores.contains(later)) break :blk false;
                                     if (later_data.bin_op.rhs != op or later_data.bin_op.lhs == op) break :blk false;
                                     const lhs_ptr_info = self.cg.typeOf(later_data.bin_op.lhs).ptrInfo(zcu_inner);
                                     if (lhs_ptr_info.flags.is_volatile or lhs_ptr_info.flags.vector_index != .none or lhs_ptr_info.packed_offset.host_size != 0) break :blk false;
+                                    if (self.analysis.getRef(later_data.bin_op.lhs)) |lhs_ref| {
+                                        const lhs_root = self.analysis.roots.items[lhs_ref.root_id];
+                                        if (lhs_ref.kind == .ptr and !lhs_root.escaped and
+                                            !self.analysis.hasSublaneOnlyVectorRead(lhs_ref.root_id))
+                                        {
+                                            break :blk true;
+                                        }
+                                    }
+                                    if (in_subblock or self.total_uses != 1 or op != self.inst.toRef()) break :blk false;
+                                    if (self.cg.elided_init_stores.contains(later)) break :blk false;
                                     const lhs_alloc = baseAllocInst(self.cg, later_data.bin_op.lhs);
                                     const src_alloc = if (self.tag == .load) baseAllocInst(self.cg, self.ptr_op) else null;
                                     break :blk (lhs_alloc != null or src_alloc != null) and
@@ -14492,7 +14504,7 @@ fn scanBlockForLoadElisions(
                                     try self.checkInst(sub_inst, true);
                                     if (!self.readonly_ok.*) return;
                                 }
-                                if (instMayWriteOrCall(self.cg, later, self.analysis)) {
+                                if (self.seen_uses.* < self.needed_uses.* and instMayWriteOrCall(self.cg, later, self.analysis)) {
                                     self.readonly_ok.* = false;
                                 }
                                 return;
@@ -14510,7 +14522,7 @@ fn scanBlockForLoadElisions(
                                     try self.checkInst(sub_inst, true);
                                     if (!self.readonly_ok.*) return;
                                 }
-                                if (instMayWriteOrCall(self.cg, later, self.analysis)) {
+                                if (self.seen_uses.* < self.needed_uses.* and instMayWriteOrCall(self.cg, later, self.analysis)) {
                                     self.readonly_ok.* = false;
                                 }
                                 return;
