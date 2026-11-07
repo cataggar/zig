@@ -2353,6 +2353,203 @@ fn genMainBody(
     try cg.genBody(main_body[air_arg_count..]);
 }
 
+fn isGuaranteedZeroExtended32(cg: *CodeGen, operand: Air.Inst.Ref) bool {
+    const zcu = cg.pt.zcu;
+    const air_tags = cg.air.instructions.items(.tag);
+    const air_datas = cg.air.instructions.items(.data);
+    var cur_inst = operand.toIndex() orelse return false;
+    const tracking = cg.inst_tracking.get(cur_inst) orelse return false;
+    switch (tracking.short) {
+        .register => |reg| if (!reg.isClass(.general_purpose)) return false,
+        else => return false,
+    }
+    for (0..4) |_| {
+        if (air_tags[@backingInt(cur_inst)] != .bit_cast) break;
+        const inner_ref = air_datas[@backingInt(cur_inst)].ty_op.operand;
+        if (cg.typeOf(inner_ref).abiSize(zcu) != 4) return false;
+        cur_inst = inner_ref.toIndex() orelse return false;
+    }
+    const inst_ty = cg.typeOfIndex(cur_inst);
+    if (inst_ty.isVector(zcu)) return false;
+    const int_info = cg.intInfo(inst_ty) orelse return false;
+    if (int_info.bits != 32) return false;
+    return switch (air_tags[@backingInt(cur_inst)]) {
+        .add,
+        .add_optimized,
+        .add_wrap,
+        .add_sat,
+        .sub,
+        .sub_optimized,
+        .sub_wrap,
+        .sub_sat,
+        .mul,
+        .mul_optimized,
+        .mul_wrap,
+        .mul_sat,
+        .div_trunc,
+        .div_trunc_optimized,
+        .div_floor,
+        .div_floor_optimized,
+        .div_exact,
+        .div_exact_optimized,
+        .rem,
+        .rem_optimized,
+        .mod,
+        .mod_optimized,
+        .bit_and,
+        .bit_or,
+        .xor,
+        .shl,
+        .shl_exact,
+        .shl_sat,
+        .shr,
+        .shr_exact,
+        .load,
+        .ctz,
+        .clz,
+        .popcount,
+        .byte_swap,
+        .bit_reverse,
+        => true,
+        else => false,
+    };
+}
+
+const ScaledLeaMatch = struct {
+    scaled_inst: Air.Inst.Index,
+    scaled_rhs_inst: ?Air.Inst.Index,
+    base_add_inst: ?Air.Inst.Index,
+    base_add_const_inst: ?Air.Inst.Index,
+    base_inst: Air.Inst.Index,
+    base_dies: bool,
+    idx_inst: Air.Inst.Index,
+    idx_dies: bool,
+    base_reg: Register,
+    index_reg: Register,
+    sh: u2,
+    disp: i32,
+    bits: u16,
+};
+
+fn getLiveGprOrOffset(cg: *CodeGen, inst: Air.Inst.Index) ?bits.RegisterOffset {
+    const tracking = cg.inst_tracking.get(inst) orelse return null;
+    return switch (tracking.short) {
+        .register => |r| if (r.isClass(.general_purpose)) .{ .reg = r, .off = 0 } else null,
+        .register_offset => |ro| if (ro.reg.isClass(.general_purpose)) ro else null,
+        else => null,
+    };
+}
+
+fn getConstIntImmediate(cg: *CodeGen, ref: Air.Inst.Ref) ?u64 {
+    if (ref.toInterned()) |ip_idx| {
+        const mcv = cg.lowerValue(.fromInterned(ip_idx)) catch return null;
+        return switch (mcv) {
+            .immediate => |imm| imm,
+            else => null,
+        };
+    }
+    const inst = ref.toIndex() orelse return null;
+    const tracking = cg.inst_tracking.get(inst) orelse return null;
+    return switch (tracking.short) {
+        .immediate => |imm| imm,
+        else => null,
+    };
+}
+
+fn matchScaledLeaAdd(cg: *CodeGen, add_inst: Air.Inst.Index) ?ScaledLeaMatch {
+    if (cg.target.cpu.arch != .x86_64) return null;
+    if (cg.liveness.isUnused(add_inst)) return null;
+    const zcu = cg.pt.zcu;
+    const air_tags = cg.air.instructions.items(.tag);
+    const air_datas = cg.air.instructions.items(.data);
+    switch (air_tags[@backingInt(add_inst)]) {
+        .add, .add_optimized, .add_wrap => {},
+        else => return null,
+    }
+    const ty = cg.typeOfIndex(add_inst);
+    if (ty.isVector(zcu)) return null;
+    const int_info = cg.intInfo(ty) orelse return null;
+    if (int_info.bits != 32 and int_info.bits != 64) return null;
+    const add_bin = air_datas[@backingInt(add_inst)].bin_op;
+    if (add_bin.lhs == add_bin.rhs) return null;
+
+    for ([_]u1{ 0, 1 }) |scaled_op_index| {
+        const scaled_ref = if (scaled_op_index == 0) add_bin.lhs else add_bin.rhs;
+        const base_ref = if (scaled_op_index == 0) add_bin.rhs else add_bin.lhs;
+        const base_op_index: u1 = 1 - scaled_op_index;
+        const scaled_inst = scaled_ref.toIndex() orelse continue;
+        if (!cg.liveness.operandDies(add_inst, scaled_op_index)) continue;
+        switch (air_tags[@backingInt(scaled_inst)]) {
+            .shl, .shl_exact => {},
+            else => continue,
+        }
+        if (cg.inst_tracking.get(scaled_inst)) |t| if (t.short != .none) continue;
+        const shl_bin = air_datas[@backingInt(scaled_inst)].bin_op;
+        const sh_imm = cg.getConstIntImmediate(shl_bin.rhs) orelse continue;
+        if (sh_imm < 1 or sh_imm > 3) continue;
+        const sh: u2 = @intCast(sh_imm);
+        const idx_inst = shl_bin.lhs.toIndex() orelse continue;
+        const idx_ro = cg.getLiveGprOrOffset(idx_inst) orelse continue;
+        if (idx_ro.off != 0 or idx_ro.reg.to64() == .rsp) continue;
+
+        const base_cand_inst = base_ref.toIndex() orelse continue;
+        if (cg.getLiveGprOrOffset(base_cand_inst)) |base_ro| {
+            return .{
+                .scaled_inst = scaled_inst,
+                .scaled_rhs_inst = if (cg.liveness.operandDies(scaled_inst, 1)) shl_bin.rhs.toIndex() else null,
+                .base_add_inst = null,
+                .base_add_const_inst = null,
+                .base_inst = base_cand_inst,
+                .base_dies = cg.liveness.operandDies(add_inst, base_op_index),
+                .idx_inst = idx_inst,
+                .idx_dies = cg.liveness.operandDies(scaled_inst, 0),
+                .base_reg = base_ro.reg,
+                .index_reg = idx_ro.reg,
+                .sh = sh,
+                .disp = base_ro.off,
+                .bits = int_info.bits,
+            };
+        }
+        if (!cg.liveness.operandDies(add_inst, base_op_index)) continue;
+        switch (air_tags[@backingInt(base_cand_inst)]) {
+            .add, .add_optimized, .add_wrap => {},
+            else => continue,
+        }
+        if (cg.inst_tracking.get(base_cand_inst)) |t| if (t.short != .none) continue;
+        const inner_bin = air_datas[@backingInt(base_cand_inst)].bin_op;
+        if (inner_bin.lhs == inner_bin.rhs) continue;
+        for ([_]u1{ 0, 1 }) |const_side| {
+            const const_ref = if (const_side == 0) inner_bin.lhs else inner_bin.rhs;
+            const inner_base_ref = if (const_side == 0) inner_bin.rhs else inner_bin.lhs;
+            const inner_base_op_index: u1 = 1 - const_side;
+            const disp_imm = cg.getConstIntImmediate(const_ref) orelse continue;
+            const disp_i32: i32 = if (int_info.bits == 32)
+                @truncate(@as(i64, @bitCast(disp_imm)))
+            else
+                std.math.cast(i32, @as(i64, @bitCast(disp_imm))) orelse continue;
+            const inner_base_inst = inner_base_ref.toIndex() orelse continue;
+            const base_ro = cg.getLiveGprOrOffset(inner_base_inst) orelse continue;
+            const total_disp = std.math.add(i32, base_ro.off, disp_i32) catch continue;
+            return .{
+                .scaled_inst = scaled_inst,
+                .scaled_rhs_inst = if (cg.liveness.operandDies(scaled_inst, 1)) shl_bin.rhs.toIndex() else null,
+                .base_add_inst = base_cand_inst,
+                .base_add_const_inst = if (cg.liveness.operandDies(base_cand_inst, const_side)) const_ref.toIndex() else null,
+                .base_inst = inner_base_inst,
+                .base_dies = cg.liveness.operandDies(base_cand_inst, inner_base_op_index),
+                .idx_inst = idx_inst,
+                .idx_dies = cg.liveness.operandDies(scaled_inst, 0),
+                .base_reg = base_ro.reg,
+                .index_reg = idx_ro.reg,
+                .sh = sh,
+                .disp = total_disp,
+                .bits = int_info.bits,
+            };
+        }
+    }
+    return null;
+}
+
 fn checkInvariantsAfterAirInst(cg: *CodeGen) void {
     assert(!cg.register_manager.lockedRegsExist());
 
@@ -2383,7 +2580,7 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
     const air_tags = cg.air.instructions.items(.tag);
     const air_datas = cg.air.instructions.items(.data);
 
-    for (body) |inst| {
+    for (body, 0..) |inst, body_index| {
         if (cg.liveness.isUnused(inst) and !cg.air.mustLower(inst, ip)) continue;
         wip_mir_log.debug("{f}", .{cg.fmtAir(inst)});
         verbose_tracking_log.debug("{f}", .{cg.fmtTracking()});
@@ -2395,7 +2592,71 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
             .shuffle_one, .shuffle_two => @panic("x86_64 TODO: shuffle_one/shuffle_two"),
 
             .arg => try cg.airArg(inst),
-            .add, .add_optimized, .add_wrap => |air_tag| {
+            .add, .add_optimized, .add_wrap => |air_tag| add_blk: {
+                if (body_index + 1 < body.len) {
+                    if (cg.matchScaledLeaAdd(body[body_index + 1])) |m| {
+                        if (m.base_add_inst == inst and cg.inst_tracking.get(m.scaled_inst) != null) {
+                            cg.inst_tracking.putAssumeCapacityNoClobber(inst, .init(.none));
+                            break :add_blk;
+                        }
+                    }
+                }
+                if (body_index + 2 < body.len) {
+                    if (cg.matchScaledLeaAdd(body[body_index + 2])) |m| {
+                        if (m.base_add_inst == inst and m.scaled_inst == body[body_index + 1]) {
+                            cg.inst_tracking.putAssumeCapacityNoClobber(inst, .init(.none));
+                            break :add_blk;
+                        }
+                    }
+                }
+                if (cg.matchScaledLeaAdd(inst)) |m| {
+                    if (cg.inst_tracking.get(m.scaled_inst)) |scaled_t| if (scaled_t.short == .none) {
+                        cg.inst_tracking.getPtr(m.scaled_inst).?.short = .{ .dead = cg.scope_generation };
+                        if (m.scaled_rhs_inst) |rhs_inst| try cg.processDeath(rhs_inst, .{});
+                        if (m.base_add_inst) |base_add_inst| {
+                            cg.inst_tracking.getPtr(base_add_inst).?.short = .{ .dead = cg.scope_generation };
+                            if (m.base_add_const_inst) |const_inst| try cg.processDeath(const_inst, .{});
+                        }
+                        const dst_size: Memory.Size = if (m.bits == 32) .dword else .qword;
+                        const dst_reg: Register = if (m.base_inst == m.idx_inst) blk: {
+                            if (m.base_dies or m.idx_dies) {
+                                try cg.processDeath(m.base_inst, .{});
+                                break :blk m.base_reg.toSize(dst_size, cg.target);
+                            }
+                            const lock = cg.register_manager.lockReg(m.base_reg);
+                            defer if (lock) |l| cg.register_manager.unlockReg(l);
+                            const r = try cg.register_manager.allocReg(inst, abi.RegisterClass.gp);
+                            break :blk r.toSize(dst_size, cg.target);
+                        } else if (m.base_dies and m.base_reg.to64() != .rsp) blk: {
+                            try cg.processDeath(m.base_inst, .{});
+                            if (m.idx_dies) try cg.processDeath(m.idx_inst, .{});
+                            break :blk m.base_reg.toSize(dst_size, cg.target);
+                        } else if (m.idx_dies) blk: {
+                            try cg.processDeath(m.idx_inst, .{});
+                            if (m.base_dies) try cg.processDeath(m.base_inst, .{});
+                            break :blk m.index_reg.toSize(dst_size, cg.target);
+                        } else blk: {
+                            const base_lock = cg.register_manager.lockReg(m.base_reg);
+                            defer if (base_lock) |l| cg.register_manager.unlockReg(l);
+                            const idx_lock = cg.register_manager.lockReg(m.index_reg);
+                            defer if (idx_lock) |l| cg.register_manager.unlockReg(l);
+                            const r = try cg.register_manager.allocReg(inst, abi.RegisterClass.gp);
+                            if (m.base_dies) try cg.processDeath(m.base_inst, .{});
+                            break :blk r.toSize(dst_size, cg.target);
+                        };
+                        try cg.asmRegisterMemory(.{ ._, .lea }, dst_reg, .{
+                            .base = .{ .reg = m.base_reg.to64() },
+                            .mod = .{ .rm = .{
+                                .size = dst_size,
+                                .index = m.index_reg.to64(),
+                                .scale = .fromLog2(m.sh),
+                                .disp = m.disp,
+                            } },
+                        });
+                        cg.finishAirResult(inst, .{ .register = dst_reg.to64() });
+                        break :add_blk;
+                    };
+                }
                 const bin_op = air_datas[@backingInt(inst)].bin_op;
                 var ops = try cg.tempsFromOperands(inst, .{ bin_op.lhs, bin_op.rhs });
                 var res: [1]Temp = undefined;
@@ -43345,11 +43606,82 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
                 };
                 try res[0].finish(inst, &.{ bin_op.lhs, bin_op.rhs }, &ops, cg);
             },
-            .ptr_add => |air_tag| {
+            .ptr_add => |air_tag| ptr_add_blk: {
                 const ty_pl = air_datas[@backingInt(inst)].ty_pl;
                 const bin_op = cg.air.extraData(Air.Bin, ty_pl.payload).data;
                 var ops = try cg.tempsFromOperands(inst, .{ bin_op.lhs, bin_op.rhs });
                 try ops[0].toSlicePtr(cg);
+                if (cg.target.cpu.arch == .x86_64 and (!hack_around_sema_opv_bugs or ty_pl.ty.childType(zcu).hasRuntimeBits(zcu))) {
+                    const elem_size = ty_pl.ty.childType(zcu).abiSize(zcu);
+                    switch (ops[1].tracking(cg).short) {
+                        .immediate => |imm| if (std.math.cast(i64, elem_size)) |elem_i64| {
+                            const rhs_i64: ?i64 = if (cg.intInfo(cg.typeOf(bin_op.rhs))) |rhs_info| switch (rhs_info.signedness) {
+                                .signed => @as(i64, @bitCast(imm)),
+                                .unsigned => std.math.cast(i64, imm),
+                            } else null;
+                            if (rhs_i64) |r_val| if (std.math.mul(i64, elem_i64, r_val) catch null) |prod| if (std.math.cast(i32, prod)) |off_i32| {
+                                const can_offset = switch (ops[0].unwrap(cg)) {
+                                    .temp => |t_idx| switch (t_idx.tracking(cg).short) {
+                                        .register => |r| r.isClass(.general_purpose),
+                                        .register_offset => |ro| ro.reg.isClass(.general_purpose) and if (std.math.add(i32, ro.off, off_i32)) |_| true else |_| false,
+                                        .lea_frame => |fa| if (std.math.add(i32, fa.off, off_i32)) |_| true else |_| false,
+                                        else => false,
+                                    },
+                                    .ref => switch (ops[0].tracking(cg).short) {
+                                        .register_offset => |ro| ro.reg.isClass(.general_purpose) and if (std.math.add(i32, ro.off, off_i32)) |_| true else |_| false,
+                                        .lea_frame => |fa| if (std.math.add(i32, fa.off, off_i32)) |_| true else |_| false,
+                                        else => false,
+                                    },
+                                    .err_ret_trace => false,
+                                };
+                                if (can_offset) {
+                                    try ops[0].toOffset(off_i32, cg);
+                                    try ops[0].finish(inst, &.{ bin_op.lhs, bin_op.rhs }, &ops, cg);
+                                    break :ptr_add_blk;
+                                }
+                            };
+                        },
+                        .register => |idx_reg| if (idx_reg.isClass(.general_purpose) and idx_reg.to64() != .rsp) {
+                            const scale_opt: ?Memory.Scale = switch (elem_size) {
+                                1 => .@"1",
+                                2 => .@"2",
+                                4 => .@"4",
+                                8 => .@"8",
+                                else => null,
+                            };
+                            if (scale_opt) |scale| switch (ops[0].tracking(cg).short) {
+                                .register_offset => |ro| if (ro.reg.isClass(.general_purpose) and ro.off != 0) {
+                                    var dst_temp = if (ops[0].unwrap(cg) == .temp) blk: {
+                                        const t_idx = ops[0].unwrap(cg).temp;
+                                        try cg.freeValue(t_idx.tracking(cg).long, .{});
+                                        t_idx.tracking(cg).* = .init(.{ .register = ro.reg });
+                                        break :blk ops[0];
+                                    } else if (ops[1].isMut(cg)) ops[1] else blk: {
+                                        const base_lock = cg.register_manager.lockReg(ro.reg);
+                                        defer if (base_lock) |l| cg.register_manager.unlockReg(l);
+                                        const idx_lock = cg.register_manager.lockReg(idx_reg);
+                                        defer if (idx_lock) |l| cg.register_manager.unlockReg(l);
+                                        break :blk try cg.tempAllocReg(ty_pl.ty, abi.RegisterClass.gp);
+                                    };
+                                    const dst_reg = dst_temp.tracking(cg).short.register.to64();
+                                    try cg.asmRegisterMemory(.{ ._, .lea }, dst_reg, .{
+                                        .base = .{ .reg = ro.reg.to64() },
+                                        .mod = .{ .rm = .{
+                                            .size = .qword,
+                                            .index = idx_reg.to64(),
+                                            .scale = scale,
+                                            .disp = ro.off,
+                                        } },
+                                    });
+                                    try dst_temp.finish(inst, &.{ bin_op.lhs, bin_op.rhs }, &ops, cg);
+                                    break :ptr_add_blk;
+                                },
+                                else => {},
+                            };
+                        },
+                        else => {},
+                    }
+                }
                 var res: [1]Temp = undefined;
                 if (!hack_around_sema_opv_bugs or ty_pl.ty.childType(zcu).hasRuntimeBits(zcu)) cg.select(&res, &.{ty_pl.ty}, &ops, comptime &.{ .{
                     .patterns = &.{
@@ -61855,7 +62187,23 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
                 };
                 try res[0].finish(inst, &.{ bin_op.lhs, bin_op.rhs }, &ops, cg);
             },
-            .shl, .shl_exact => |air_tag| {
+            .shl, .shl_exact => |air_tag| shl_blk: {
+                if (body_index + 1 < body.len) {
+                    if (cg.matchScaledLeaAdd(body[body_index + 1])) |m| {
+                        if (m.scaled_inst == inst and (m.base_add_inst == null or cg.inst_tracking.get(m.base_add_inst.?) != null)) {
+                            cg.inst_tracking.putAssumeCapacityNoClobber(inst, .init(.none));
+                            break :shl_blk;
+                        }
+                    }
+                }
+                if (body_index + 2 < body.len) {
+                    if (cg.matchScaledLeaAdd(body[body_index + 2])) |m| {
+                        if (m.scaled_inst == inst and m.base_add_inst == body[body_index + 1]) {
+                            cg.inst_tracking.putAssumeCapacityNoClobber(inst, .init(.none));
+                            break :shl_blk;
+                        }
+                    }
+                }
                 const bin_op = air_datas[@backingInt(inst)].bin_op;
                 var ops = try cg.tempsFromOperands(inst, .{ bin_op.lhs, bin_op.rhs });
                 var res: [1]Temp = undefined;
@@ -93450,9 +93798,16 @@ fn genBody(cg: *CodeGen, body: []const Air.Inst.Index) InnerError!void {
                 const ty_op = air_datas[@backingInt(inst)].ty_op;
                 const dst_ty = ty_op.ty;
                 const src_ty = cg.typeOf(ty_op.operand);
+                const is_zero_ext_u32_to_64 = cg.target.cpu.arch == .x86_64 and
+                    !src_ty.isVector(zcu) and !dst_ty.isVector(zcu) and
+                    dst_ty.abiSize(zcu) == 8 and
+                    if (cg.intInfo(src_ty)) |src_info|
+                        src_info.signedness == .unsigned and src_info.bits == 32 and cg.isGuaranteedZeroExtended32(ty_op.operand)
+                    else
+                        false;
                 var ops = try cg.tempsFromOperands(inst, .{ty_op.operand});
                 var res: [1]Temp = undefined;
-                cg.select(&res, &.{dst_ty}, &ops, if (dst_ty.scalarType(zcu).abiSize(zcu) <= src_ty.scalarType(zcu).abiSize(zcu)) comptime &.{ .{
+                cg.select(&res, &.{dst_ty}, &ops, if (dst_ty.scalarType(zcu).abiSize(zcu) <= src_ty.scalarType(zcu).abiSize(zcu) or is_zero_ext_u32_to_64) comptime &.{ .{
                     .dst_constraints = .{ .{ .int = .dword }, .any },
                     .patterns = &.{
                         .{ .src = .{ .mut_mem, .none, .none } },
@@ -179107,10 +179462,15 @@ fn genSetReg(
         .eflags => |cc| try cg.asmSetccRegister(cc, dst_reg.to8()),
         .immediate => |imm| {
             if (imm == 0) {
-                // 32-bit moves zero-extend to 64-bit, so xoring the 32-bit
-                // register is the fastest way to zero a register.
-                try cg.spillEflagsIfOccupied();
-                try cg.asmRegisterRegister(.{ ._, .xor }, dst_reg.to32(), dst_reg.to32());
+                if (cg.eflags_inst != null) {
+                    // 32-bit moves zero-extend to 64-bit without clobbering EFLAGS.
+                    try cg.asmRegisterImmediate(.{ ._, .mov }, dst_reg.to32(), .u(0));
+                } else {
+                    // 32-bit moves zero-extend to 64-bit, so xoring the 32-bit
+                    // register is the fastest way to zero a register.
+                    try cg.spillEflagsIfOccupied();
+                    try cg.asmRegisterRegister(.{ ._, .xor }, dst_reg.to32(), dst_reg.to32());
+                }
             } else if (abi_size > 4 and std.math.cast(u32, imm) != null) {
                 // 32-bit moves zero-extend to 64-bit.
                 try cg.asmRegisterImmediate(.{ ._, .mov }, dst_reg.to32(), .u(imm));
@@ -182748,6 +183108,8 @@ const Temp = struct {
         switch (mcv) {
             else => std.debug.panic("{s}: {f}\n", .{ @src().fn_name, mcv }),
             .register => |reg| {
+                const lock = cg.register_manager.lockReg(reg);
+                defer if (lock) |l| cg.register_manager.unlockReg(l);
                 const new_reg = try cg.register_manager.allocReg(new_temp_index.toIndex(), abi.RegisterClass.gp);
                 new_temp_index.tracking(cg).* = .init(.{ .register = new_reg });
                 try cg.asmRegisterMemory(.{ ._, .lea }, new_reg.to64(), .{
@@ -182756,22 +183118,35 @@ const Temp = struct {
                 });
             },
             .register_offset => |reg_off| {
+                const lock = cg.register_manager.lockReg(reg_off.reg);
+                defer if (lock) |l| cg.register_manager.unlockReg(l);
                 const new_reg = try cg.register_manager.allocReg(new_temp_index.toIndex(), abi.RegisterClass.gp);
-                new_temp_index.tracking(cg).* = .init(.{ .register = new_reg });
-                try cg.asmRegisterMemory(.{ ._, .lea }, new_reg.to64(), .{
-                    .base = .{ .reg = reg_off.reg.to64() },
-                    .mod = .{ .rm = .{ .disp = reg_off.off + off } },
-                });
+                if (std.math.add(i32, reg_off.off, off)) |total_off| {
+                    new_temp_index.tracking(cg).* = .init(.{ .register = new_reg });
+                    try cg.asmRegisterMemory(.{ ._, .lea }, new_reg.to64(), .{
+                        .base = .{ .reg = reg_off.reg.to64() },
+                        .mod = .{ .rm = .{ .disp = total_off } },
+                    });
+                } else |_| {
+                    new_temp_index.tracking(cg).* = .init(.{ .register_offset = .{ .reg = new_reg, .off = off } });
+                    try cg.genSetReg(new_reg, .usize, mcv, .{});
+                }
             },
             .load_frame, .load_nav, .lea_nav, .load_uav, .lea_uav, .load_lazy_sym, .lea_lazy_sym => {
                 const new_reg = try cg.register_manager.allocReg(new_temp_index.toIndex(), abi.RegisterClass.gp);
                 new_temp_index.tracking(cg).* = .init(.{ .register_offset = .{ .reg = new_reg, .off = off } });
                 try cg.genSetReg(new_reg, .usize, mcv, .{});
             },
-            .lea_frame => |frame_addr| new_temp_index.tracking(cg).* = .init(.{ .lea_frame = .{
-                .index = frame_addr.index,
-                .off = frame_addr.off + off,
-            } }),
+            .lea_frame => |frame_addr| if (std.math.add(i32, frame_addr.off, off)) |total_off| {
+                new_temp_index.tracking(cg).* = .init(.{ .lea_frame = .{
+                    .index = frame_addr.index,
+                    .off = total_off,
+                } });
+            } else |_| {
+                const new_reg = try cg.register_manager.allocReg(new_temp_index.toIndex(), abi.RegisterClass.gp);
+                new_temp_index.tracking(cg).* = .init(.{ .register_offset = .{ .reg = new_reg, .off = off } });
+                try cg.genSetReg(new_reg, .usize, mcv, .{});
+            },
         }
         return .{ .index = new_temp_index.toIndex() };
     }
@@ -182792,22 +183167,22 @@ const Temp = struct {
                         } });
                         return;
                     },
-                    .register_offset => |reg_off| {
+                    .register_offset => |reg_off| if (std.math.add(i32, reg_off.off, off)) |total_off| {
                         try cg.freeValue(temp_tracking.long, .{});
                         temp_tracking.* = .init(.{ .register_offset = .{
                             .reg = reg_off.reg,
-                            .off = reg_off.off + off,
+                            .off = total_off,
                         } });
                         return;
-                    },
-                    .lea_frame => |frame_addr| {
+                    } else |_| {},
+                    .lea_frame => |frame_addr| if (std.math.add(i32, frame_addr.off, off)) |total_off| {
                         assert(std.meta.eql(temp_tracking.long.lea_frame, frame_addr));
                         temp_tracking.* = .init(.{ .lea_frame = .{
                             .index = frame_addr.index,
-                            .off = frame_addr.off + off,
+                            .off = total_off,
                         } });
                         return;
-                    },
+                    } else |_| {},
                 }
             },
         }
@@ -192389,7 +192764,11 @@ const Select = struct {
                         } },
                         .eflags => unreachable,
                         .register => |reg| .{ .reg = s.lowerReg(reg.toSize(op.flags.base.size, s.cg.target)) },
-                        .register_pair, .register_triple, .register_quadruple, .register_offset, .register_overflow => unreachable,
+                        .register_offset => |reg_off| switch (reg_off.off) {
+                            0 => .{ .reg = s.lowerReg(reg_off.reg.toSize(op.flags.base.size, s.cg.target)) },
+                            else => unreachable,
+                        },
+                        .register_pair, .register_triple, .register_quadruple, .register_overflow => unreachable,
                         .register_mask => |reg_mask| .{ .reg = s.lowerReg(reg_mask.reg.toSize(op.flags.base.size, s.cg.target)) },
                         .lea_nav => |nav| .{ .imm = .{ .nav = .{ .index = nav } } },
                         .lea_uav => |uav| .{ .imm = .{ .uav = uav } },
@@ -192425,12 +192804,13 @@ const Select = struct {
                         else => unreachable,
                         .none => .none,
                         .register => |index_reg| index_reg.toSize(.ptr, s.cg.target),
+                        .register_offset => |index_reg_off| index_reg_off.reg.toSize(.ptr, s.cg.target),
                     },
                     .scale = op.flags.index.scale,
                     .disp = op.adjustedImm(i32, s) + switch (op.flags.index.ref.valueOf(s)) {
                         else => unreachable,
                         .none, .register, .lea_nav, .lea_uav, .lea_lazy_sym, .lea_extern_func => 0,
-                        .register_offset => |base_reg_off| base_reg_off.off,
+                        .register_offset => |index_reg_off| std.math.mul(i32, index_reg_off.off, op.flags.index.scale.toFactor()) catch unreachable,
                     },
                 }) },
                 .mem => .{ .mem = try op.flags.base.ref.valueOf(s).mem(s.cg, .{
@@ -192439,9 +192819,14 @@ const Select = struct {
                         else => unreachable,
                         .none => .none,
                         .register => |index_reg| index_reg.toSize(.ptr, s.cg.target),
+                        .register_offset => |index_reg_off| index_reg_off.reg.toSize(.ptr, s.cg.target),
                     },
                     .scale = op.flags.index.scale,
-                    .disp = op.adjustedImm(i32, s),
+                    .disp = op.adjustedImm(i32, s) + switch (op.flags.index.ref.valueOf(s)) {
+                        else => unreachable,
+                        .none, .register, .lea_nav, .lea_uav, .lea_lazy_sym, .lea_extern_func => 0,
+                        .register_offset => |index_reg_off| std.math.mul(i32, index_reg_off.off, op.flags.index.scale.toFactor()) catch unreachable,
+                    },
                 }) },
             };
         }
@@ -192546,6 +192931,13 @@ fn select(
             var tmp_locks: [s_tmp_temps.len][2]?RegisterLock = @splat(@splat(null));
             for (&tmp_locks, case.extra_temps) |*tmp_lock, tmp_spec| tmp_lock.* = try tmp_spec.kind.lock(cg);
 
+            if (case.clobbers.eflags and for (src_temps) |src_temp| {
+                switch (src_temp.tracking(cg).short) {
+                    .eflags, .register_overflow => break false,
+                    else => {},
+                }
+            } else true) try cg.spillEflagsIfOccupied();
+
             while (true) for (pattern.src[0..src_temps.len], src_temps) |src_pattern, *src_temp| {
                 if (try src_pattern.convert(src_temp, cg)) break;
             } else break;
@@ -192554,6 +192946,7 @@ fn select(
                 const regs: [2]Register = switch (src_temp.tracking(cg).short) {
                     else => continue,
                     .register => |reg| .{ reg, .none },
+                    .register_offset => |reg_off| .{ reg_off.reg, .none },
                     .register_pair => |regs| regs,
                 };
                 for (regs, locks) |reg, *lock| {
