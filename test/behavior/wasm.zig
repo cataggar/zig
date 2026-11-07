@@ -1647,3 +1647,128 @@ test "vector_index lane accesses in SROA and readonly alloc alias" {
     const sp_after = S.readSp();
     try expect(sp_before == sp_after);
 }
+
+test "wasm SROA avoids over-promoting large copy-modify-pass aggregates" {
+    if (builtin.zig_backend != .stage2_wasm) return error.SkipZigTest;
+    if (builtin.cpu.arch != .wasm32) return error.SkipZigTest;
+
+    const S = struct {
+        const SlugInstance = extern struct {
+            f0: f32 = 0,
+            f1: f32 = 1,
+            f2: f32 = 2,
+            f3: f32 = 3,
+            f4: f32 = 4,
+            f5: f32 = 5,
+            f6: f32 = 6,
+            f7: f32 = 7,
+            f8: f32 = 8,
+            f9: f32 = 9,
+            f10: f32 = 10,
+            f11: f32 = 11,
+            f12: f32 = 12,
+            f13: f32 = 13,
+            f14: f32 = 14,
+            f15: f32 = 15,
+            f16: f32 = 16,
+            f17: f32 = 17,
+            clip_node: f32 = -1,
+        };
+
+        const SlugList = struct {
+            items: []SlugInstance,
+            len: usize = 0,
+
+            noinline fn appendAssumeCapacity(self: *SlugList, item: SlugInstance) void {
+                self.items[self.len] = item;
+                self.len += 1;
+            }
+        };
+
+        const Instance = extern struct {
+            f0: f32 = 0,
+            f1: f32 = 1,
+            f2: f32 = 2,
+            f3: f32 = 3,
+            f4: f32 = 4,
+            f5: f32 = 5,
+            f6: f32 = 6,
+            f7: f32 = 7,
+            f8: f32 = 8,
+            f9: f32 = 9,
+            f10: f32 = 10,
+            f11: f32 = 11,
+            f12: f32 = 12,
+            f13: f32 = 13,
+            f14: f32 = 14,
+            f15: f32 = 15,
+            f16: f32 = 16,
+            f17: f32 = 17,
+            f18: f32 = 18,
+            f19: f32 = 19,
+            f20: f32 = 20,
+            f21: f32 = 21,
+            f22: f32 = 22,
+            f23: f32 = 23,
+            f24: f32 = 24,
+            f25: f32 = 25,
+        };
+
+        noinline fn pushTextInstance(list: *SlugList, instance: SlugInstance, clip_node: f32) void {
+            var out = instance;
+            out.clip_node = clip_node;
+            list.appendAssumeCapacity(out);
+        }
+
+        noinline fn pushInstances(out_slice: []Instance, insts: []const Instance, clip: f32) void {
+            for (insts, 0..) |inst, i| {
+                var out = inst;
+                out.f0 += 1.0;
+                out.f25 = clip;
+                out_slice[i] = out;
+            }
+        }
+
+        noinline fn destroyAndReplace(box_b: *[16]u32, a: [16]u32, box_a: *[16]u32) void {
+            box_a.* = undefined;
+            box_b.* = a;
+        }
+    };
+
+    var slug_buf: [2]S.SlugInstance = undefined;
+    var slug_list: S.SlugList = .{ .items = &slug_buf };
+    var base_slug: S.SlugInstance = .{};
+    base_slug.f0 = 100.5;
+    base_slug.f17 = 200.25;
+    S.pushTextInstance(&slug_list, base_slug, 42.0);
+    S.pushTextInstance(&slug_list, base_slug, 99.0);
+    try expect(slug_list.len == 2);
+    try expect(slug_buf[0].f0 == 100.5);
+    try expect(slug_buf[0].f9 == 9.0);
+    try expect(slug_buf[0].f17 == 200.25);
+    try expect(slug_buf[0].clip_node == 42.0);
+    try expect(slug_buf[1].clip_node == 99.0);
+
+    const src_insts = [2]S.Instance{
+        .{ .f0 = 10.0, .f12 = 123.0, .f25 = 0.0 },
+        .{ .f0 = 20.0, .f12 = 456.0, .f25 = 0.0 },
+    };
+    var dst_insts: [2]S.Instance = undefined;
+    S.pushInstances(&dst_insts, &src_insts, 77.5);
+    try expect(dst_insts[0].f0 == 11.0);
+    try expect(dst_insts[0].f12 == 123.0);
+    try expect(dst_insts[0].f24 == 24.0);
+    try expect(dst_insts[0].f25 == 77.5);
+    try expect(dst_insts[1].f0 == 21.0);
+    try expect(dst_insts[1].f12 == 456.0);
+    try expect(dst_insts[1].f24 == 24.0);
+    try expect(dst_insts[1].f25 == 77.5);
+
+    var buf_a: [16]u32 = @splat(0);
+    buf_a[0] = 1234;
+    var buf_b: [16]u32 = undefined;
+    var box_a: *[16]u32 = &buf_a;
+    _ = &box_a;
+    S.destroyAndReplace(&buf_b, buf_a, box_a);
+    try expect(buf_b[0] == 1234);
+}
