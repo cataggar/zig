@@ -150,7 +150,11 @@ pub fn analyze(isel: *Select, air_body: []const Air.Inst.Index) !void {
         .save_err_return_trace_index,
         .runtime_nav_ptr,
         .c_va_start,
-        => {
+        => |air_tag| {
+            switch (air_tag) {
+                .ret_addr, .frame_addr, .c_va_start => isel.saved_registers.insert(.fp),
+                else => {},
+            }
             try isel.def_order.putNoClobber(gpa, air_inst_index, {});
 
             air_body_index += 1;
@@ -900,18 +904,29 @@ fn isSingleUseInCurrentBlock(
     const inst_index = ref.toIndex() orelse return null;
     if (isel.use_counts.get(inst_index) != 1) return null;
     if (isel.live_values.contains(inst_index)) return null;
-    if (std.mem.indexOfScalar(Air.Inst.Index, air.body[0..air.body_index], inst_index) == null) return null;
-    return inst_index;
+    const start = air.body_index -| 16;
+    var idx = air.body_index;
+    while (idx > start) {
+        idx -= 1;
+        const cur = air.body[idx];
+        if (cur == inst_index) return inst_index;
+        switch (air.tag(cur)) {
+            .call, .call_always_tail, .call_never_tail, .call_never_inline => return null,
+            else => {},
+        }
+    }
+    return null;
 }
 
 fn constIntSigned(isel: *const Select, ref: Air.Inst.Ref, bits: u16) ?i64 {
     if (bits == 0 or bits > 64) return null;
     const ip_index = ref.toInterned() orelse return null;
     const zcu = isel.pt.zcu;
+    const ip = &zcu.intern_pool;
     const val: Constant = .fromInterned(ip_index);
     if (val.isUndef(zcu)) return null;
-    const ty = isel.air.typeOf(ref, &zcu.intern_pool);
-    if (ty.isAbiInt(zcu)) {
+    const ty = isel.air.typeOf(ref, ip);
+    if (ty.zigTypeTag(zcu) == .int) {
         const int_val: u64 = switch (ty.intInfo(zcu).signedness) {
             .signed => @bitCast(val.toSignedInt(zcu)),
             .unsigned => val.toUnsignedInt(zcu),
@@ -919,8 +934,24 @@ fn constIntSigned(isel: *const Select, ref: Air.Inst.Ref, bits: u16) ?i64 {
         const shift: u6 = @intCast(64 - bits);
         return @as(i64, @bitCast(int_val << shift)) >> shift;
     }
+    if (ty.zigTypeTag(zcu) == .@"enum") {
+        const int_val: Constant = switch (ip.indexToKey(ip_index)) {
+            .enum_tag => |enum_tag| .fromInterned(enum_tag.int),
+            .int => val,
+            else => return null,
+        };
+        const raw: u64 = switch (ty.intInfo(zcu).signedness) {
+            .signed => @bitCast(int_val.toSignedInt(zcu)),
+            .unsigned => int_val.toUnsignedInt(zcu),
+        };
+        const shift: u6 = @intCast(64 - bits);
+        return @as(i64, @bitCast(raw << shift)) >> shift;
+    }
     if (ty.zigTypeTag(zcu) == .optional and ty.optionalReprIsPayload(zcu)) {
         if (val.isNull(zcu)) return 0;
+    }
+    if (ty.isPtrAtRuntime(zcu)) {
+        if (val.getUnsignedInt(zcu)) |addr| if (addr == 0) return 0;
     }
     return null;
 }
@@ -946,8 +977,7 @@ fn constShiftOperand(
     if (lhs_info.bits != bits) return null;
     const sh_ty = isel.air.typeOf(shift_op.rhs, ip);
     if (!sh_ty.isAbiInt(zcu)) return null;
-    const sh_bits = sh_ty.intInfo(zcu).bits;
-    const sh_imm = isel.constIntSigned(shift_op.rhs, sh_bits) orelse return null;
+    const sh_imm = isel.constIntSigned(shift_op.rhs, 64) orelse return null;
     if (sh_imm <= 0 or sh_imm >= bits) return null;
     const amount: u6 = @intCast(sh_imm);
     return .{
@@ -1001,11 +1031,11 @@ const AirIterator = struct {
     body_index: u32,
     inst_index: Air.Inst.Index,
 
-    fn tag(it: *@This(), inst_index: Air.Inst.Index) Air.Inst.Tag {
+    fn tag(it: *const @This(), inst_index: Air.Inst.Index) Air.Inst.Tag {
         return it.tag_items[@backingInt(inst_index)];
     }
 
-    fn data(it: *@This(), inst_index: Air.Inst.Index) Air.Inst.Data {
+    fn data(it: *const @This(), inst_index: Air.Inst.Index) Air.Inst.Data {
         return it.data_items[@backingInt(inst_index)];
     }
 
@@ -1145,22 +1175,25 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
                         }
 
                         // 2. MADD / MSUB / MNEG fusion: a + (b * c), (b * c) + a, a - (b * c), 0 - (b * c).
-                        const mul_match: ?struct { mul_idx: Air.Inst.Index, acc_ref: Air.Inst.Ref } =
+                        const MulMatch = struct { mul_idx: Air.Inst.Index, acc_ref: Air.Inst.Ref };
+                        const rhs_mul: ?MulMatch =
                             if (isel.isSingleUseInCurrentBlock(air, bin_op.rhs)) |rhs_idx|
                                 switch (air.tag(rhs_idx)) {
                                     .mul, .mul_wrap => .{ .mul_idx = rhs_idx, .acc_ref = bin_op.lhs },
                                     else => null,
                                 }
-                            else if (!is_sub)
-                                if (isel.isSingleUseInCurrentBlock(air, bin_op.lhs)) |lhs_idx|
-                                    switch (air.tag(lhs_idx)) {
-                                        .mul, .mul_wrap => .{ .mul_idx = lhs_idx, .acc_ref = bin_op.rhs },
-                                        else => null,
-                                    }
-                                else
-                                    null
                             else
                                 null;
+                        const mul_match: ?MulMatch = rhs_mul orelse if (!is_sub)
+                            if (isel.isSingleUseInCurrentBlock(air, bin_op.lhs)) |lhs_idx|
+                                switch (air.tag(lhs_idx)) {
+                                    .mul, .mul_wrap => .{ .mul_idx = lhs_idx, .acc_ref = bin_op.rhs },
+                                    else => null,
+                                }
+                            else
+                                null
+                        else
+                            null;
                         if (mul_match) |m| {
                             const dst_ra = try dst_vi.defReg(isel) orelse break :unused;
                             const mul_op = air.data(m.mul_idx).bin_op;
@@ -3934,6 +3967,7 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
                 if (std.mem.eql(u8, clobber_name, "nzcv")) continue;
                 const clobber_reg = Register.parse(clobber_name) orelse
                     return isel.fail("unable to parse clobber: '{s}'", .{clobber_name});
+                isel.saved_registers.insert(clobber_reg.alias);
                 const live_vi = isel.live_registers.getPtr(clobber_reg.alias);
                 switch (live_vi.*) {
                     _ => {},
@@ -4052,7 +4086,7 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
                                             const shr_op = air.data(shr_idx).bin_op;
                                             const sh_ty = isel.air.typeOf(shr_op.rhs, ip);
                                             if (sh_ty.isAbiInt(zcu)) {
-                                                if (isel.constIntSigned(shr_op.rhs, sh_ty.intInfo(zcu).bits)) |lsb_imm| {
+                                                if (isel.constIntSigned(shr_op.rhs, 64)) |lsb_imm| {
                                                     if (lsb_imm > 0 and lsb_imm + width <= int_info.bits) {
                                                         const lsb: u6 = @intCast(lsb_imm);
                                                         const imms: u6 = @intCast(lsb_imm + width - 1);
@@ -4085,13 +4119,17 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
                     }
 
                     // 2. BIC / ORN / EON fusion when one operand is a single-use in-block .not.
-                    const not_match: ?struct { plain_ref: Air.Inst.Ref, not_op_ref: Air.Inst.Ref } =
+                    const NotMatch = struct { plain_ref: Air.Inst.Ref, not_op_ref: Air.Inst.Ref };
+                    const rhs_not: ?NotMatch =
                         if (isel.isSingleUseInCurrentBlock(air, bin_op.rhs)) |rhs_idx|
                             if (air.tag(rhs_idx) == .not)
                                 .{ .plain_ref = bin_op.lhs, .not_op_ref = air.data(rhs_idx).ty_op.operand }
                             else
                                 null
-                        else if (isel.isSingleUseInCurrentBlock(air, bin_op.lhs)) |lhs_idx|
+                        else
+                            null;
+                    const not_match: ?NotMatch = rhs_not orelse
+                        if (isel.isSingleUseInCurrentBlock(air, bin_op.lhs)) |lhs_idx|
                             if (air.tag(lhs_idx) == .not)
                                 .{ .plain_ref = bin_op.rhs, .not_op_ref = air.data(lhs_idx).ty_op.operand }
                             else
@@ -9625,23 +9663,30 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) codegen.Error!void 
                             else
                                 null;
                             if (maybe_op_ref) |op_ref| {
+                                const op_vi = try isel.use(op_ref);
+                                const op_mat = try op_vi.matReg(isel);
+                                const op_reg = switch (bits) {
+                                    32 => op_mat.ra.w(),
+                                    64 => op_mat.ra.x(),
+                                    else => unreachable,
+                                };
                                 const disp = (isel.instructions.items.len + 1 - else_label) << 2;
                                 if (std.math.cast(i21, disp)) |disp21| {
-                                    const op_vi = try isel.use(op_ref);
-                                    const op_mat = try op_vi.matReg(isel);
-                                    const op_reg = switch (bits) {
-                                        32 => op_mat.ra.w(),
-                                        64 => op_mat.ra.x(),
-                                        else => unreachable,
-                                    };
                                     try isel.emit(switch (cmp_tag) {
                                         .cmp_eq => .cbnz(op_reg, disp21),
                                         .cmp_neq => .cbz(op_reg, disp21),
                                         else => unreachable,
                                     });
-                                    try op_mat.finish(isel);
-                                    break :cond_br_done;
+                                } else {
+                                    try isel.emit(.b(@intCast(disp)));
+                                    try isel.emit(switch (cmp_tag) {
+                                        .cmp_eq => .cbz(op_reg, 2 << 2),
+                                        .cmp_neq => .cbnz(op_reg, 2 << 2),
+                                        else => unreachable,
+                                    });
                                 }
+                                try op_mat.finish(isel);
+                                break :cond_br_done;
                             }
                         }
                     }
@@ -10362,6 +10407,7 @@ pub fn layout(
 
         // frame record
         const need_frame_record = !mod.strip or is_sysv_var_args or
+            ip.indexToKey(nav.resolved.?.type).func_type.is_var_args or
             isel.saved_registers.contains(.lr) or isel.saved_registers.contains(.fp) or
             stack_size > 0 or isel.stack_align != .@"16" or incoming.nsaa > 0 or
             saves_len > 0 or deferred_gr != null or saved_gra_len > 0 or saved_vra_len > 0;
@@ -12890,19 +12936,18 @@ pub const Value = struct {
         }
 
         pub fn isConstZero(vi: Value.Index, isel: *Select) codegen.Error!bool {
-            const root_vi = vi.root(isel);
+            const off, const root_vi = vi.valueParent(isel);
             const constant = switch (root_vi.parent(isel)) {
                 .constant => |c| c,
                 else => return false,
             };
             const zcu = isel.pt.zcu;
             if (constant.isUndef(zcu)) return false;
-            var bytes_buf: [8]u8 = @splat(0);
+            var bytes_buf: [64]u8 = @splat(0);
             const part_size = vi.size(isel);
             if (part_size == 0 or part_size > 8) return false;
-            const off = vi.get(isel).offset_from_parent;
             const root_size = root_vi.size(isel);
-            if (root_size <= 8) {
+            if (root_size <= bytes_buf.len and off + part_size <= root_size) {
                 if (!try isel.writeToMemory(constant, bytes_buf[0..@intCast(root_size)])) return false;
                 return std.mem.allEqual(u8, bytes_buf[@intCast(off)..][0..@intCast(part_size)], 0);
             }
@@ -12911,24 +12956,26 @@ pub const Value = struct {
 
         pub fn constIntSigned(vi: Value.Index, isel: *Select, bits: u16) codegen.Error!?i64 {
             if (bits == 0 or bits > 64) return null;
-            const root_vi = vi.root(isel);
+            const off, const root_vi = vi.valueParent(isel);
             const constant = switch (root_vi.parent(isel)) {
                 .constant => |c| c,
                 else => return null,
             };
             const zcu = isel.pt.zcu;
             if (constant.isUndef(zcu)) return null;
-            var bytes_buf: [8]u8 = @splat(0);
+            var bytes_buf: [64]u8 = @splat(0);
             const part_size = vi.size(isel);
             if (part_size == 0 or part_size > 8) return null;
-            const off = vi.get(isel).offset_from_parent;
             const root_size = root_vi.size(isel);
-            if (root_size > 8) return null;
+            if (root_size > bytes_buf.len or off + part_size > root_size) return null;
             if (!try isel.writeToMemory(constant, bytes_buf[0..@intCast(root_size)])) return null;
-            const raw_u64 = std.mem.readInt(u64, &bytes_buf, isel.target.cpu.arch.endian());
-            const shifted = raw_u64 >> @intCast(off * 8);
+            const raw_u64 = std.mem.readVarInt(
+                u64,
+                bytes_buf[@intCast(off)..][0..@intCast(part_size)],
+                isel.target.cpu.arch.endian(),
+            );
             const sign_shift: u6 = @intCast(64 - bits);
-            return @as(i64, @bitCast(shifted << sign_shift)) >> sign_shift;
+            return @as(i64, @bitCast(raw_u64 << sign_shift)) >> sign_shift;
         }
 
         pub fn liveIn(
