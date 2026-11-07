@@ -52,6 +52,25 @@ pub fn simplifyLocals(
     return Pass(Inst).simplifyLocals(gpa, insts, out);
 }
 
+pub fn hoistLoopInvariantLocalSets(
+    gpa: Allocator,
+    insts: anytype,
+    out: anytype,
+) Allocator.Error!bool {
+    const Inst = std.meta.Elem(@TypeOf(insts));
+    return Pass(Inst).hoistLoopInvariantLocalSets(gpa, insts, out);
+}
+
+pub fn optimizeMemoryAccesses(
+    gpa: Allocator,
+    out: anytype,
+    insts: anytype,
+    mir_extra: *std.ArrayList(u32),
+) Allocator.Error!bool {
+    const Inst = std.meta.Elem(@TypeOf(insts));
+    return Pass(Inst).optimizeMemoryAccesses(gpa, out, insts, mir_extra);
+}
+
 pub fn compactLocals(
     gpa: Allocator,
     mir_instructions: anytype,
@@ -183,12 +202,22 @@ fn Pass(comptime Inst: type) type {
             while (round < max_pass_rounds) : (round += 1) {
                 var round_changed = false;
 
+                if (try Self.hoistLoopInvariantLocalSets(gpa, current.items, &next)) {
+                    std.mem.swap(std.ArrayList(Inst), &current, &next);
+                    round_changed = true;
+                }
+
                 if (try Self.simplifyLocals(gpa, current.items, &next)) {
                     std.mem.swap(std.ArrayList(Inst), &current, &next);
                     round_changed = true;
                 }
 
                 if (try Self.foldConstants(gpa, current.items, &next, mir_extra)) {
+                    std.mem.swap(std.ArrayList(Inst), &current, &next);
+                    round_changed = true;
+                }
+
+                if (try Self.optimizeMemoryAccesses(gpa, &next, current.items, mir_extra)) {
                     std.mem.swap(std.ArrayList(Inst), &current, &next);
                     round_changed = true;
                 }
@@ -362,6 +391,14 @@ fn Pass(comptime Inst: type) type {
                     out.items[len - 1] = makeI32Const(if (last.data.imm32 == 0) 1 else 0);
                     return true;
                 }
+                if (last.tag == .i32_xor) {
+                    out.items[len - 1].tag = .i32_eq;
+                    if (len >= 2 and out.items[len - 2].tag == .i32_const and out.items[len - 2].data.imm32 == 0) {
+                        out.items.len = len - 2;
+                        _ = emitOrFoldI32Eqz(out, mir_extra);
+                    }
+                    return true;
+                }
                 if (invertComparisonTag(last.tag)) |inv| {
                     out.items[len - 1].tag = inv;
                     if (inv == .i32_eq and len >= 2 and out.items[len - 2].tag == .i32_const and out.items[len - 2].data.imm32 == 0) {
@@ -423,6 +460,22 @@ fn Pass(comptime Inst: type) type {
             }
         }
 
+        fn invalidateModifiedLocalsInSpan(
+            known_locals: *std.AutoArrayHashMapUnmanaged(u32, Inst),
+            span: []const Inst,
+        ) void {
+            if (known_locals.count() == 0) return;
+            for (span) |inst| {
+                switch (inst.tag) {
+                    .local_set, .local_tee => {
+                        invalidateLocal(known_locals, inst.data.local);
+                        if (known_locals.count() == 0) return;
+                    },
+                    else => {},
+                }
+            }
+        }
+
         fn recordLocalSet(
             gpa: Allocator,
             known_locals: *std.AutoArrayHashMapUnmanaged(u32, Inst),
@@ -431,7 +484,7 @@ fn Pass(comptime Inst: type) type {
         ) Allocator.Error!void {
             invalidateLocal(known_locals, local);
             const prev = prev_inst orelse return;
-            if (isConstTag(prev.tag)) {
+            if (isConstTag(prev.tag) and prev.tag != .error_name_table_ref) {
                 try known_locals.put(gpa, local, prev);
             } else if (prev.tag == .local_get) {
                 const resolved = if (known_locals.get(prev.data.local)) |known| known else prev;
@@ -450,6 +503,11 @@ fn Pass(comptime Inst: type) type {
             }
         }
 
+        const ScopeFrame = struct {
+            start_idx: usize,
+            entry_known: std.AutoArrayHashMapUnmanaged(u32, Inst),
+        };
+
         fn simplifyLocals(
             gpa: Allocator,
             insts: []const Inst,
@@ -461,20 +519,74 @@ fn Pass(comptime Inst: type) type {
             var known_locals: std.AutoArrayHashMapUnmanaged(u32, Inst) = .empty;
             defer known_locals.deinit(gpa);
 
+            var scope_stack: std.ArrayList(ScopeFrame) = .empty;
+            defer {
+                for (scope_stack.items) |*frame| {
+                    frame.entry_known.deinit(gpa);
+                }
+                scope_stack.deinit(gpa);
+            }
+
             var changed = false;
             var i: usize = 0;
             while (i < insts.len) {
                 const inst = insts[i];
                 switch (inst.tag) {
-                    .block,
-                    .loop,
-                    .end,
+                    .loop => {
+                        if (findMatchingEnd(insts, i)) |end_idx| {
+                            invalidateModifiedLocalsInSpan(&known_locals, insts[i + 1 .. end_idx]);
+                            const cloned = try known_locals.clone(gpa);
+                            errdefer {
+                                var c = cloned;
+                                c.deinit(gpa);
+                            }
+                            try scope_stack.append(gpa, .{
+                                .start_idx = i,
+                                .entry_known = cloned,
+                            });
+                        } else {
+                            known_locals.clearRetainingCapacity();
+                        }
+                    },
+                    .block => {
+                        if (findMatchingEnd(insts, i) != null) {
+                            const cloned = try known_locals.clone(gpa);
+                            errdefer {
+                                var c = cloned;
+                                c.deinit(gpa);
+                            }
+                            try scope_stack.append(gpa, .{
+                                .start_idx = i,
+                                .entry_known = cloned,
+                            });
+                        } else {
+                            known_locals.clearRetainingCapacity();
+                        }
+                    },
+                    .br_if => {},
                     .br,
-                    .br_if,
                     .br_table,
                     .@"return",
                     .@"unreachable",
-                    => known_locals.clearRetainingCapacity(),
+                    => {
+                        known_locals.clearRetainingCapacity();
+                    },
+                    .end => {
+                        if (scope_stack.pop()) |frame_val| {
+                            var frame = frame_val;
+                            defer frame.entry_known.deinit(gpa);
+                            known_locals.clearRetainingCapacity();
+                            const keys = frame.entry_known.keys();
+                            const vals = frame.entry_known.values();
+                            try known_locals.ensureTotalCapacity(gpa, keys.len);
+                            for (keys, vals) |k_local, v_inst| {
+                                known_locals.putAssumeCapacity(k_local, v_inst);
+                            }
+                            invalidateModifiedLocalsInSpan(&known_locals, insts[frame.start_idx + 1 .. i]);
+                        } else {
+                            known_locals.clearRetainingCapacity();
+                        }
+                    },
                     else => {},
                 }
                 if (inst.tag == .local_get) {
@@ -518,15 +630,34 @@ fn Pass(comptime Inst: type) type {
                         const local = inst.data.local;
                         const keep_set = isLocalReadBeforeOverwriteOrExit(insts, k + 1, local, k);
                         if (crossed_block) {
-                            known_locals.clearRetainingCapacity();
                             const const_inst = out.pop().?;
-                            for (insts[i + 1 .. k]) |inter_inst| {
+                            if (keep_set) {
+                                try recordLocalSet(gpa, &known_locals, local, const_inst);
+                            } else {
+                                invalidateLocal(&known_locals, local);
+                            }
+                            for (i + 1..k) |inter_idx| {
+                                const inter_inst = insts[inter_idx];
+                                if (inter_inst.tag == .block) {
+                                    if (findMatchingEnd(insts, inter_idx) != null) {
+                                        const cloned = try known_locals.clone(gpa);
+                                        errdefer {
+                                            var c = cloned;
+                                            c.deinit(gpa);
+                                        }
+                                        try scope_stack.append(gpa, .{
+                                            .start_idx = inter_idx,
+                                            .entry_known = cloned,
+                                        });
+                                    } else {
+                                        known_locals.clearRetainingCapacity();
+                                    }
+                                }
                                 out.appendAssumeCapacity(inter_inst);
                             }
                             out.appendAssumeCapacity(const_inst);
                             if (keep_set) {
                                 out.appendAssumeCapacity(.{ .tag = .local_tee, .data = .{ .local = local } });
-                                try recordLocalSet(gpa, &known_locals, local, const_inst);
                             }
                         } else {
                             const val_inst: ?Inst = if (out.items.len >= 1) out.items[out.items.len - 1] else null;
@@ -574,6 +705,514 @@ fn Pass(comptime Inst: type) type {
             return changed;
         }
 
+        fn pureNonTrappingPops(tag: Inst.Tag) ?i32 {
+            return switch (tag) {
+                .i32_const,
+                .i64_const,
+                .f32_const,
+                .f64_const,
+                .local_get,
+                .uav_ref,
+                .uav_ref_off,
+                .nav_ref,
+                .nav_ref_off,
+                .func_ref,
+                .tls_nav_ref,
+                .errors_len,
+                .error_name_table_ref,
+                .enum_tag_name_table_ref,
+                => 0,
+
+                .i32_eqz,
+                .i64_eqz,
+                .i32_clz,
+                .i32_ctz,
+                .i32_popcnt,
+                .i64_clz,
+                .i64_ctz,
+                .i64_popcnt,
+                .f32_abs,
+                .f32_neg,
+                .f32_ceil,
+                .f32_floor,
+                .f32_trunc,
+                .f32_nearest,
+                .f32_sqrt,
+                .f64_abs,
+                .f64_neg,
+                .f64_ceil,
+                .f64_floor,
+                .f64_trunc,
+                .f64_nearest,
+                .f64_sqrt,
+                .i32_wrap_i64,
+                .i64_extend_i32_s,
+                .i64_extend_i32_u,
+                .f32_convert_i32_s,
+                .f32_convert_i32_u,
+                .f32_convert_i64_s,
+                .f32_convert_i64_u,
+                .f32_demote_f64,
+                .f64_convert_i32_s,
+                .f64_convert_i32_u,
+                .f64_convert_i64_s,
+                .f64_convert_i64_u,
+                .f64_promote_f32,
+                .i32_reinterpret_f32,
+                .i64_reinterpret_f64,
+                .f32_reinterpret_i32,
+                .f64_reinterpret_i64,
+                .i32_extend8_s,
+                .i32_extend16_s,
+                .i64_extend8_s,
+                .i64_extend16_s,
+                .i64_extend32_s,
+                => 1,
+
+                .i32_eq,
+                .i32_ne,
+                .i32_lt_s,
+                .i32_lt_u,
+                .i32_gt_s,
+                .i32_gt_u,
+                .i32_le_s,
+                .i32_le_u,
+                .i32_ge_s,
+                .i32_ge_u,
+                .i64_eq,
+                .i64_ne,
+                .i64_lt_s,
+                .i64_lt_u,
+                .i64_gt_s,
+                .i64_gt_u,
+                .i64_le_s,
+                .i64_le_u,
+                .i64_ge_s,
+                .i64_ge_u,
+                .f32_eq,
+                .f32_ne,
+                .f32_lt,
+                .f32_gt,
+                .f32_le,
+                .f32_ge,
+                .f64_eq,
+                .f64_ne,
+                .f64_lt,
+                .f64_gt,
+                .f64_le,
+                .f64_ge,
+                .i32_add,
+                .i32_sub,
+                .i32_mul,
+                .i32_and,
+                .i32_or,
+                .i32_xor,
+                .i32_shl,
+                .i32_shr_s,
+                .i32_shr_u,
+                .i64_add,
+                .i64_sub,
+                .i64_mul,
+                .i64_and,
+                .i64_or,
+                .i64_xor,
+                .i64_shl,
+                .i64_shr_s,
+                .i64_shr_u,
+                .f32_add,
+                .f32_sub,
+                .f32_mul,
+                .f32_div,
+                .f32_min,
+                .f32_max,
+                .f32_copysign,
+                .f64_add,
+                .f64_sub,
+                .f64_mul,
+                .f64_div,
+                .f64_min,
+                .f64_max,
+                .f64_copysign,
+                => 2,
+
+                .select => 3,
+
+                else => null,
+            };
+        }
+
+        fn isLocalModifiedInSpan(span: []const Inst, local: u32) bool {
+            for (span) |inst| {
+                switch (inst.tag) {
+                    .local_set, .local_tee => {
+                        if (inst.data.local == local) return true;
+                    },
+                    else => {},
+                }
+            }
+            return false;
+        }
+
+        fn hoistLoopInvariantLocalSets(
+            gpa: Allocator,
+            insts: []const Inst,
+            out: *std.ArrayList(Inst),
+        ) Allocator.Error!bool {
+            out.clearRetainingCapacity();
+            try out.ensureTotalCapacity(gpa, insts.len);
+
+            const StmtSpan = struct {
+                start: usize,
+                end: usize,
+                hoist: bool,
+                target_local: u32,
+            };
+            var prefix_stmts: std.ArrayList(StmtSpan) = .empty;
+            defer prefix_stmts.deinit(gpa);
+
+            var changed = false;
+            var i: usize = 0;
+            while (i < insts.len) {
+                const inst = insts[i];
+                if (inst.tag == .loop) {
+                    if (findMatchingEnd(insts, i)) |end_idx| {
+                        prefix_stmts.clearRetainingCapacity();
+                        var cursor: usize = i + 1;
+                        var any_hoisted = false;
+
+                        while (cursor < end_idx) {
+                            while (cursor < end_idx and insts[cursor].tag == .dbg_line) : (cursor += 1) {}
+                            if (cursor >= end_idx) break;
+
+                            const stmt_start = cursor;
+                            var stack_height: i32 = 0;
+                            var k: usize = stmt_start;
+                            var found_set = false;
+                            while (k < end_idx) {
+                                const cur = insts[k];
+                                if (cur.tag == .dbg_line) {
+                                    k += 1;
+                                    continue;
+                                }
+                                if (cur.tag == .local_set and stack_height == 1) {
+                                    found_set = true;
+                                    break;
+                                }
+                                const pops = pureNonTrappingPops(cur.tag) orelse break;
+                                if (stack_height < pops) break;
+                                stack_height = stack_height - pops + 1;
+                                k += 1;
+                            }
+                            if (!found_set) break;
+
+                            const target_local = insts[k].data.local;
+                            var can_hoist = true;
+
+                            // 1. `target_local` must be written only once in `insts[i + 1 .. end_idx]` (at `k`)
+                            //    and never read before `k` inside the loop.
+                            for (i + 1..end_idx) |m| {
+                                if (m == k) continue;
+                                const m_inst = insts[m];
+                                if ((m_inst.tag == .local_set or m_inst.tag == .local_tee) and m_inst.data.local == target_local) {
+                                    can_hoist = false;
+                                    break;
+                                }
+                                if (m < k and m_inst.tag == .local_get and m_inst.data.local == target_local) {
+                                    can_hoist = false;
+                                    break;
+                                }
+                            }
+
+                            // 2. Every `local_get Y` in `<val_expr>` must have `Y != target_local` and `Y`
+                            //    never modified in `insts[i + 1 .. end_idx]` (unless `Y` was already hoisted).
+                            if (can_hoist) {
+                                for (stmt_start..k) |m| {
+                                    const m_inst = insts[m];
+                                    if (m_inst.tag == .local_get) {
+                                        const y = m_inst.data.local;
+                                        if (y == target_local) {
+                                            can_hoist = false;
+                                            break;
+                                        }
+                                        var y_hoisted = false;
+                                        for (prefix_stmts.items) |prev_stmt| {
+                                            if (prev_stmt.hoist and prev_stmt.target_local == y) {
+                                                y_hoisted = true;
+                                                break;
+                                            }
+                                        }
+                                        if (!y_hoisted and isLocalModifiedInSpan(insts[i + 1 .. end_idx], y)) {
+                                            can_hoist = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            try prefix_stmts.append(gpa, .{
+                                .start = stmt_start,
+                                .end = k + 1,
+                                .hoist = can_hoist,
+                                .target_local = target_local,
+                            });
+                            if (can_hoist) any_hoisted = true;
+                            cursor = k + 1;
+                        }
+
+                        if (any_hoisted) {
+                            // Emit hoisted statements before `.loop`
+                            for (prefix_stmts.items) |stmt| {
+                                if (stmt.hoist) {
+                                    for (insts[stmt.start..stmt.end]) |h_inst| {
+                                        if (h_inst.tag != .dbg_line) {
+                                            out.appendAssumeCapacity(h_inst);
+                                        }
+                                    }
+                                }
+                            }
+                            // Emit `.loop`
+                            out.appendAssumeCapacity(inst);
+                            // Emit non-hoisted prefix instructions and leading `.dbg_line`s
+                            var prev_end: usize = i + 1;
+                            for (prefix_stmts.items) |stmt| {
+                                for (insts[prev_end..stmt.start]) |d_inst| {
+                                    out.appendAssumeCapacity(d_inst);
+                                }
+                                if (!stmt.hoist) {
+                                    for (insts[stmt.start..stmt.end]) |u_inst| {
+                                        out.appendAssumeCapacity(u_inst);
+                                    }
+                                }
+                                prev_end = stmt.end;
+                            }
+                            changed = true;
+                            i = prev_end;
+                            continue;
+                        }
+                    }
+                }
+                out.appendAssumeCapacity(inst);
+                i += 1;
+            }
+            return changed;
+        }
+
+        const ShiftPlusMinusOne = struct {
+            shift: u6,
+            is_add: bool,
+        };
+
+        fn matchShiftPlusMinusOne(c: u64, max_shift: u6) ?ShiftPlusMinusOne {
+            if (c <= 2 or std.math.isPowerOfTwo(c)) return null;
+            if (std.math.isPowerOfTwo(c - 1)) {
+                const k = @ctz(c - 1);
+                if (k >= 1 and k <= max_shift) {
+                    return .{ .shift = @intCast(k), .is_add = true };
+                }
+            }
+            if (c < std.math.maxInt(u64) and std.math.isPowerOfTwo(c + 1)) {
+                const k = @ctz(c + 1);
+                if (k >= 2 and k <= max_shift) {
+                    return .{ .shift = @intCast(k), .is_add = false };
+                }
+            }
+            return null;
+        }
+
+        fn instEquals(a: Inst, b: Inst, mir_extra: []const u32) bool {
+            if (a.tag != b.tag) return false;
+            return switch (a.tag) {
+                .local_get, .local_set, .local_tee => a.data.local == b.data.local,
+                .i32_const => a.data.imm32 == b.data.imm32,
+                .f32_const => @as(u32, @bitCast(a.data.float32)) == @as(u32, @bitCast(b.data.float32)),
+                .i64_const, .f64_const => readImm64(mir_extra, a.data.payload) == readImm64(mir_extra, b.data.payload),
+                .global_get,
+                .uav_ref,
+                .uav_ref_off,
+                .nav_ref,
+                .nav_ref_off,
+                .func_ref,
+                .tls_nav_ref,
+                .enum_tag_name_table_ref,
+                => a.data.payload == b.data.payload,
+                .errors_len, .error_name_table_ref => true,
+                else => false,
+            };
+        }
+
+        fn possibleOnesI32(expr: []const Inst, mir_extra: []const u32) u32 {
+            const last_idx = prevNonDbgIndex(expr, expr.len) orelse return std.math.maxInt(u32);
+            const last = expr[last_idx];
+            return switch (last.tag) {
+                .i32_const => @bitCast(last.data.imm32),
+                .i32_load8_u => 0xFF,
+                .i32_load16_u => 0xFFFF,
+                .i32_wrap_i64 => @truncate(possibleOnesI64(expr[0..last_idx], mir_extra)),
+                .i32_and, .i32_or, .i32_xor => blk: {
+                    const rhs_start = findValStartIndex(expr[0..last_idx], mir_extra) orelse break :blk std.math.maxInt(u32);
+                    const lhs_ones = possibleOnesI32(expr[0..rhs_start], mir_extra);
+                    const rhs_ones = possibleOnesI32(expr[rhs_start..last_idx], mir_extra);
+                    break :blk switch (last.tag) {
+                        .i32_and => lhs_ones & rhs_ones,
+                        .i32_or, .i32_xor => lhs_ones | rhs_ones,
+                        else => unreachable,
+                    };
+                },
+                .i32_shr_u => blk: {
+                    const c_idx = prevNonDbgIndex(expr, last_idx) orelse break :blk std.math.maxInt(u32);
+                    if (expr[c_idx].tag != .i32_const) break :blk std.math.maxInt(u32);
+                    const shift_amt: u5 = @truncate(@as(u32, @bitCast(expr[c_idx].data.imm32)));
+                    const lhs_ones = possibleOnesI32(expr[0..c_idx], mir_extra);
+                    break :blk lhs_ones >> shift_amt;
+                },
+                .i32_shl => blk: {
+                    const c_idx = prevNonDbgIndex(expr, last_idx) orelse break :blk std.math.maxInt(u32);
+                    if (expr[c_idx].tag != .i32_const) break :blk std.math.maxInt(u32);
+                    const shift_amt: u5 = @truncate(@as(u32, @bitCast(expr[c_idx].data.imm32)));
+                    const lhs_ones = possibleOnesI32(expr[0..c_idx], mir_extra);
+                    break :blk lhs_ones << shift_amt;
+                },
+                .select => blk: {
+                    const cond_start = findValStartIndex(expr[0..last_idx], mir_extra) orelse break :blk std.math.maxInt(u32);
+                    const op2_start = findValStartIndex(expr[0..cond_start], mir_extra) orelse break :blk std.math.maxInt(u32);
+                    const op1_ones = possibleOnesI32(expr[0..op2_start], mir_extra);
+                    const op2_ones = possibleOnesI32(expr[op2_start..cond_start], mir_extra);
+                    break :blk op1_ones | op2_ones;
+                },
+                else => if (isBoolProducerTag(last.tag)) 1 else std.math.maxInt(u32),
+            };
+        }
+
+        fn possibleOnesI64(expr: []const Inst, mir_extra: []const u32) u64 {
+            const last_idx = prevNonDbgIndex(expr, expr.len) orelse return std.math.maxInt(u64);
+            const last = expr[last_idx];
+            return switch (last.tag) {
+                .i64_const => readImm64(mir_extra, last.data.payload),
+                .i64_load8_u => 0xFF,
+                .i64_load16_u => 0xFFFF,
+                .i64_load32_u => 0xFFFF_FFFF,
+                .i64_extend_i32_u => @as(u64, possibleOnesI32(expr[0..last_idx], mir_extra)),
+                .i64_and, .i64_or, .i64_xor => blk: {
+                    const rhs_start = findValStartIndex(expr[0..last_idx], mir_extra) orelse break :blk std.math.maxInt(u64);
+                    const lhs_ones = possibleOnesI64(expr[0..rhs_start], mir_extra);
+                    const rhs_ones = possibleOnesI64(expr[rhs_start..last_idx], mir_extra);
+                    break :blk switch (last.tag) {
+                        .i64_and => lhs_ones & rhs_ones,
+                        .i64_or, .i64_xor => lhs_ones | rhs_ones,
+                        else => unreachable,
+                    };
+                },
+                .i64_shr_u => blk: {
+                    const c_idx = prevNonDbgIndex(expr, last_idx) orelse break :blk std.math.maxInt(u64);
+                    if (expr[c_idx].tag != .i64_const) break :blk std.math.maxInt(u64);
+                    const shift_amt: u6 = @truncate(readImm64(mir_extra, expr[c_idx].data.payload));
+                    const lhs_ones = possibleOnesI64(expr[0..c_idx], mir_extra);
+                    break :blk lhs_ones >> shift_amt;
+                },
+                .i64_shl => blk: {
+                    const c_idx = prevNonDbgIndex(expr, last_idx) orelse break :blk std.math.maxInt(u64);
+                    if (expr[c_idx].tag != .i64_const) break :blk std.math.maxInt(u64);
+                    const shift_amt: u6 = @truncate(readImm64(mir_extra, expr[c_idx].data.payload));
+                    const lhs_ones = possibleOnesI64(expr[0..c_idx], mir_extra);
+                    break :blk lhs_ones << shift_amt;
+                },
+                .select => blk: {
+                    const cond_start = findValStartIndex(expr[0..last_idx], mir_extra) orelse break :blk std.math.maxInt(u64);
+                    const op2_start = findValStartIndex(expr[0..cond_start], mir_extra) orelse break :blk std.math.maxInt(u64);
+                    const op1_ones = possibleOnesI64(expr[0..op2_start], mir_extra);
+                    const op2_ones = possibleOnesI64(expr[op2_start..cond_start], mir_extra);
+                    break :blk op1_ones | op2_ones;
+                },
+                else => std.math.maxInt(u64),
+            };
+        }
+
+        fn emitSignedDivByConstI32(
+            gpa: Allocator,
+            out: *std.ArrayList(Inst),
+            mir_extra: *std.ArrayList(u32),
+            local: u32,
+            d_s: i32,
+        ) Allocator.Error!void {
+            assert(d_s > 1);
+            const d: u32 = @bitCast(d_s);
+            if (std.math.isPowerOfTwo(d)) {
+                const k: i32 = @intCast(@ctz(d));
+                out.appendAssumeCapacity(.{ .tag = .local_get, .data = .{ .local = local } });
+                out.appendAssumeCapacity(makeI32Const(31));
+                out.appendAssumeCapacity(.{ .tag = .i32_shr_s, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(makeI32Const(32 - k));
+                out.appendAssumeCapacity(.{ .tag = .i32_shr_u, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(.{ .tag = .i32_add, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(makeI32Const(k));
+                out.appendAssumeCapacity(.{ .tag = .i32_shr_s, .data = .{ .tag = {} } });
+            } else {
+                const l: u6 = @intCast(32 - @clz(d - 1));
+                const shift: u7 = 31 + @as(u7, l);
+                const m: u64 = @intCast(((@as(u128, 1) << shift) / @as(u128, d)) + 1);
+                const m_inst = try makeI64Const(gpa, mir_extra, m);
+                const shift_inst = try makeI64Const(gpa, mir_extra, shift);
+                out.appendAssumeCapacity(.{ .tag = .i64_extend_i32_s, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(m_inst);
+                out.appendAssumeCapacity(.{ .tag = .i64_mul, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(shift_inst);
+                out.appendAssumeCapacity(.{ .tag = .i64_shr_s, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(.{ .tag = .i32_wrap_i64, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(.{ .tag = .local_get, .data = .{ .local = local } });
+                out.appendAssumeCapacity(makeI32Const(31));
+                out.appendAssumeCapacity(.{ .tag = .i32_shr_u, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(.{ .tag = .i32_add, .data = .{ .tag = {} } });
+            }
+        }
+
+        fn emitUnsignedDivByConstI32(
+            gpa: Allocator,
+            out: *std.ArrayList(Inst),
+            mir_extra: *std.ArrayList(u32),
+            d: u32,
+            numerator_local: ?u32,
+        ) Allocator.Error!bool {
+            assert(d > 1 and !std.math.isPowerOfTwo(d));
+            const l: u5 = @intCast(31 - @clz(d));
+            const shift_low: u6 = 32 + @as(u6, l);
+            const two_pow_32_plus_l: u128 = @as(u128, 1) << shift_low;
+            const m_low_128: u128 = (two_pow_32_plus_l / @as(u128, d)) + 1;
+            if ((m_low_128 * @as(u128, d) - two_pow_32_plus_l) <= (@as(u128, 1) << l) and
+                m_low_128 < (@as(u128, 1) << 32))
+            {
+                const m_low: u64 = @intCast(m_low_128);
+                const m_inst = try makeI64Const(gpa, mir_extra, m_low);
+                const shift_inst = try makeI64Const(gpa, mir_extra, shift_low);
+                out.appendAssumeCapacity(.{ .tag = .i64_extend_i32_u, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(m_inst);
+                out.appendAssumeCapacity(.{ .tag = .i64_mul, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(shift_inst);
+                out.appendAssumeCapacity(.{ .tag = .i64_shr_u, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(.{ .tag = .i32_wrap_i64, .data = .{ .tag = {} } });
+                return true;
+            }
+            const x_local = numerator_local orelse return false;
+            const s: u6 = @as(u6, l) + 1;
+            const shift_high: u7 = 32 + @as(u7, s);
+            const m_full: u128 = ((@as(u128, 1) << shift_high) / @as(u128, d)) + 1;
+            const m_prime: u64 = @intCast(m_full - (@as(u128, 1) << 32));
+            const m_prime_inst = try makeI64Const(gpa, mir_extra, m_prime);
+            const c32_inst = try makeI64Const(gpa, mir_extra, 32);
+            const s_inst = try makeI64Const(gpa, mir_extra, s);
+            out.appendAssumeCapacity(.{ .tag = .i64_extend_i32_u, .data = .{ .tag = {} } });
+            out.appendAssumeCapacity(m_prime_inst);
+            out.appendAssumeCapacity(.{ .tag = .i64_mul, .data = .{ .tag = {} } });
+            out.appendAssumeCapacity(c32_inst);
+            out.appendAssumeCapacity(.{ .tag = .i64_shr_u, .data = .{ .tag = {} } });
+            out.appendAssumeCapacity(.{ .tag = .local_get, .data = .{ .local = x_local } });
+            out.appendAssumeCapacity(.{ .tag = .i64_extend_i32_u, .data = .{ .tag = {} } });
+            out.appendAssumeCapacity(.{ .tag = .i64_add, .data = .{ .tag = {} } });
+            out.appendAssumeCapacity(s_inst);
+            out.appendAssumeCapacity(.{ .tag = .i64_shr_u, .data = .{ .tag = {} } });
+            out.appendAssumeCapacity(.{ .tag = .i32_wrap_i64, .data = .{ .tag = {} } });
+            return true;
+        }
+
         fn foldConstants(
             gpa: Allocator,
             insts: []const Inst,
@@ -586,6 +1225,7 @@ fn Pass(comptime Inst: type) type {
             var changed = false;
 
             for (insts) |inst| {
+                try out.ensureUnusedCapacity(gpa, 16);
                 const len = out.items.len;
 
                 // Constant drop: `<const>, .drop` -> remove both
@@ -609,6 +1249,14 @@ fn Pass(comptime Inst: type) type {
                         changed = true;
                         continue;
                     }
+                    // `select(a, a, cond) -> a` when `a == b` and `cond` are pure zero-pop instructions
+                    if (isPureZeroPopTag(c1.tag) and isPureZeroPopTag(c2.tag) and isPureZeroPopTag(cond.tag) and
+                        instEquals(c1, c2, mir_extra.items))
+                    {
+                        out.items.len = len - 2;
+                        changed = true;
+                        continue;
+                    }
                 }
 
                 // Select condition normalization:
@@ -622,6 +1270,172 @@ fn Pass(comptime Inst: type) type {
                         out.appendAssumeCapacity(inst);
                         changed = true;
                         continue;
+                    }
+                    // `select(a, b, i32_eqz(c)) -> select(b, a, c)` when `a` and `b` are pure zero-pop instructions
+                    if (out.items[len - 1].tag == .i32_eqz) {
+                        if (findValStartIndex(out.items[0 .. len - 1], mir_extra.items)) |c_start| {
+                            if (c_start >= 2) {
+                                const a = out.items[c_start - 2];
+                                const b = out.items[c_start - 1];
+                                if (isPureZeroPopTag(a.tag) and isPureZeroPopTag(b.tag)) {
+                                    out.items[c_start - 2] = b;
+                                    out.items[c_start - 1] = a;
+                                    out.items[len - 1] = inst;
+                                    changed = true;
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Conversion, sign-extension, and float unary idempotents
+                if (len >= 1) {
+                    const prev = out.items[len - 1];
+                    switch (inst.tag) {
+                        .i32_wrap_i64 => {
+                            if (prev.tag == .i64_extend_i32_s or prev.tag == .i64_extend_i32_u) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_extend8_s => {
+                            if (prev.tag == .i32_load8_u) {
+                                out.items[len - 1].tag = .i32_load8_s;
+                                changed = true;
+                                continue;
+                            }
+                            if (prev.tag == .i32_load8_s or prev.tag == .i32_extend8_s) {
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_extend16_s => {
+                            if (prev.tag == .i32_load16_u) {
+                                out.items[len - 1].tag = .i32_load16_s;
+                                changed = true;
+                                continue;
+                            }
+                            if (prev.tag == .i32_load16_s or prev.tag == .i32_extend16_s or
+                                prev.tag == .i32_load8_s or prev.tag == .i32_extend8_s)
+                            {
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_extend8_s => {
+                            if (prev.tag == .i64_load8_u) {
+                                out.items[len - 1].tag = .i64_load8_s;
+                                changed = true;
+                                continue;
+                            }
+                            if (prev.tag == .i64_load8_s or prev.tag == .i64_extend8_s) {
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_extend16_s => {
+                            if (prev.tag == .i64_load16_u) {
+                                out.items[len - 1].tag = .i64_load16_s;
+                                changed = true;
+                                continue;
+                            }
+                            if (prev.tag == .i64_load16_s or prev.tag == .i64_extend16_s or
+                                prev.tag == .i64_load8_s or prev.tag == .i64_extend8_s)
+                            {
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_extend32_s => {
+                            if (prev.tag == .i64_load32_u) {
+                                out.items[len - 1].tag = .i64_load32_s;
+                                changed = true;
+                                continue;
+                            }
+                            if (prev.tag == .i64_load32_s or prev.tag == .i64_extend32_s or
+                                prev.tag == .i64_load16_s or prev.tag == .i64_extend16_s or
+                                prev.tag == .i64_load8_s or prev.tag == .i64_extend8_s or
+                                prev.tag == .i64_extend_i32_s)
+                            {
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i64_eqz => {
+                            if (prev.tag == .i64_xor) {
+                                out.items[len - 1].tag = .i64_eq;
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .f32_abs => {
+                            if (prev.tag == .f32_abs or prev.tag == .f32_neg) {
+                                out.items[len - 1].tag = .f32_abs;
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .f32_neg => {
+                            if (prev.tag == .f32_neg) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .f64_abs => {
+                            if (prev.tag == .f64_abs or prev.tag == .f64_neg) {
+                                out.items[len - 1].tag = .f64_abs;
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .f64_neg => {
+                            if (prev.tag == .f64_neg) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        else => {},
+                    }
+                }
+
+                // Same-local `local_get L; local_get L; <op>` folds
+                if (len >= 2 and out.items[len - 2].tag == .local_get and out.items[len - 1].tag == .local_get and
+                    out.items[len - 2].data.local == out.items[len - 1].data.local)
+                {
+                    switch (inst.tag) {
+                        .i32_sub, .i32_xor, .i32_ne, .i32_lt_s, .i32_lt_u, .i32_gt_s, .i32_gt_u,
+                        .i64_ne, .i64_lt_s, .i64_lt_u, .i64_gt_s, .i64_gt_u,
+                        => {
+                            out.items.len = len - 1;
+                            out.items[len - 2] = makeI32Const(0);
+                            changed = true;
+                            continue;
+                        },
+                        .i64_sub, .i64_xor => {
+                            const zero = try makeI64Const(gpa, mir_extra, 0);
+                            out.items.len = len - 1;
+                            out.items[len - 2] = zero;
+                            changed = true;
+                            continue;
+                        },
+                        .i32_eq, .i32_le_s, .i32_le_u, .i32_ge_s, .i32_ge_u,
+                        .i64_eq, .i64_le_s, .i64_le_u, .i64_ge_s, .i64_ge_u,
+                        => {
+                            out.items.len = len - 1;
+                            out.items[len - 2] = makeI32Const(1);
+                            changed = true;
+                            continue;
+                        },
+                        .i32_and, .i32_or, .i64_and, .i64_or => {
+                            out.items.len = len - 1;
+                            changed = true;
+                            continue;
+                        },
+                        else => {},
                     }
                 }
 
@@ -804,7 +1618,8 @@ fn Pass(comptime Inst: type) type {
                             }
                         },
                         .i32_and => {
-                            if (rhs == -1 or (len >= 2 and isBoolProducerTag(out.items[len - 2].tag) and (rhs & 1) == 1)) {
+                            const possible_ones = possibleOnesI32(out.items[0 .. len - 1], mir_extra.items);
+                            if ((possible_ones & ~rhs_u) == 0) {
                                 _ = out.pop();
                                 changed = true;
                                 continue;
@@ -855,10 +1670,40 @@ fn Pass(comptime Inst: type) type {
                                 changed = true;
                                 continue;
                             }
+                            if (len >= 2 and (out.items[len - 2].tag == .local_get or out.items[len - 2].tag == .local_tee)) {
+                                if (matchShiftPlusMinusOne(rhs_u, 31)) |spm| {
+                                    const local = out.items[len - 2].data.local;
+                                    out.items[len - 1] = makeI32Const(spm.shift);
+                                    out.appendAssumeCapacity(.{ .tag = .i32_shl, .data = .{ .tag = {} } });
+                                    out.appendAssumeCapacity(.{ .tag = .local_get, .data = .{ .local = local } });
+                                    out.appendAssumeCapacity(.{ .tag = if (spm.is_add) .i32_add else .i32_sub, .data = .{ .tag = {} } });
+                                    changed = true;
+                                    continue;
+                                }
+                            }
                         },
                         .i32_div_s => {
                             if (rhs == 1) {
                                 _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                            if (rhs > 1 and len >= 2 and out.items[len - 2].tag == .local_get) {
+                                const local = out.items[len - 2].data.local;
+                                _ = out.pop();
+                                try emitSignedDivByConstI32(gpa, out, mir_extra, local, rhs);
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .i32_rem_s => {
+                            if (rhs > 1 and len >= 2 and out.items[len - 2].tag == .local_get) {
+                                const local = out.items[len - 2].data.local;
+                                out.items[len - 1] = .{ .tag = .local_get, .data = .{ .local = local } };
+                                try emitSignedDivByConstI32(gpa, out, mir_extra, local, rhs);
+                                out.appendAssumeCapacity(makeI32Const(rhs));
+                                out.appendAssumeCapacity(.{ .tag = .i32_mul, .data = .{ .tag = {} } });
+                                out.appendAssumeCapacity(.{ .tag = .i32_sub, .data = .{ .tag = {} } });
                                 changed = true;
                                 continue;
                             }
@@ -875,11 +1720,34 @@ fn Pass(comptime Inst: type) type {
                                 changed = true;
                                 continue;
                             }
+                            if (rhs_u > 1 and !std.math.isPowerOfTwo(rhs_u)) {
+                                const num_local: ?u32 = if (len >= 2 and out.items[len - 2].tag == .local_get)
+                                    out.items[len - 2].data.local
+                                else
+                                    null;
+                                _ = out.pop();
+                                if (try emitUnsignedDivByConstI32(gpa, out, mir_extra, rhs_u, num_local)) {
+                                    changed = true;
+                                    continue;
+                                }
+                                out.appendAssumeCapacity(makeI32Const(rhs));
+                            }
                         },
                         .i32_rem_u => {
                             if (rhs_u >= 1 and std.math.isPowerOfTwo(rhs_u)) {
                                 out.items[len - 1] = makeI32Const(@bitCast(rhs_u - 1));
                                 out.appendAssumeCapacity(.{ .tag = .i32_and, .data = .{ .tag = {} } });
+                                changed = true;
+                                continue;
+                            }
+                            if (rhs_u > 1 and !std.math.isPowerOfTwo(rhs_u) and len >= 2 and out.items[len - 2].tag == .local_get) {
+                                const local = out.items[len - 2].data.local;
+                                out.items[len - 1] = .{ .tag = .local_get, .data = .{ .local = local } };
+                                const emitted = try emitUnsignedDivByConstI32(gpa, out, mir_extra, rhs_u, local);
+                                assert(emitted);
+                                out.appendAssumeCapacity(makeI32Const(rhs));
+                                out.appendAssumeCapacity(.{ .tag = .i32_mul, .data = .{ .tag = {} } });
+                                out.appendAssumeCapacity(.{ .tag = .i32_sub, .data = .{ .tag = {} } });
                                 changed = true;
                                 continue;
                             }
@@ -932,6 +1800,17 @@ fn Pass(comptime Inst: type) type {
                                 out.appendAssumeCapacity(.{ .tag = .i32_shl, .data = .{ .tag = {} } });
                                 changed = true;
                                 continue;
+                            }
+                            if (x_inst.tag == .local_get) {
+                                if (matchShiftPlusMinusOne(lhs_u, 31)) |spm| {
+                                    out.items[len - 2] = x_inst;
+                                    out.items[len - 1] = makeI32Const(spm.shift);
+                                    out.appendAssumeCapacity(.{ .tag = .i32_shl, .data = .{ .tag = {} } });
+                                    out.appendAssumeCapacity(x_inst);
+                                    out.appendAssumeCapacity(.{ .tag = if (spm.is_add) .i32_add else .i32_sub, .data = .{ .tag = {} } });
+                                    changed = true;
+                                    continue;
+                                }
                             }
                         },
                         else => {},
@@ -1112,7 +1991,8 @@ fn Pass(comptime Inst: type) type {
                             }
                         },
                         .i64_and => {
-                            if (rhs_s == -1) {
+                            const possible_ones = possibleOnesI64(out.items[0 .. len - 1], mir_extra.items);
+                            if ((possible_ones & ~rhs_u) == 0) {
                                 _ = out.pop();
                                 changed = true;
                                 continue;
@@ -1143,6 +2023,17 @@ fn Pass(comptime Inst: type) type {
                                 out.appendAssumeCapacity(.{ .tag = .i64_shl, .data = .{ .tag = {} } });
                                 changed = true;
                                 continue;
+                            }
+                            if (len >= 2 and (out.items[len - 2].tag == .local_get or out.items[len - 2].tag == .local_tee)) {
+                                if (matchShiftPlusMinusOne(rhs_u, 63)) |spm| {
+                                    const local = out.items[len - 2].data.local;
+                                    out.items[len - 1] = try makeI64Const(gpa, mir_extra, spm.shift);
+                                    out.appendAssumeCapacity(.{ .tag = .i64_shl, .data = .{ .tag = {} } });
+                                    out.appendAssumeCapacity(.{ .tag = .local_get, .data = .{ .local = local } });
+                                    out.appendAssumeCapacity(.{ .tag = if (spm.is_add) .i64_add else .i64_sub, .data = .{ .tag = {} } });
+                                    changed = true;
+                                    continue;
+                                }
                             }
                         },
                         .i64_div_s => {
@@ -1221,6 +2112,17 @@ fn Pass(comptime Inst: type) type {
                                 out.appendAssumeCapacity(.{ .tag = .i64_shl, .data = .{ .tag = {} } });
                                 changed = true;
                                 continue;
+                            }
+                            if (x_inst.tag == .local_get) {
+                                if (matchShiftPlusMinusOne(lhs_u, 63)) |spm| {
+                                    out.items[len - 2] = x_inst;
+                                    out.items[len - 1] = try makeI64Const(gpa, mir_extra, spm.shift);
+                                    out.appendAssumeCapacity(.{ .tag = .i64_shl, .data = .{ .tag = {} } });
+                                    out.appendAssumeCapacity(x_inst);
+                                    out.appendAssumeCapacity(.{ .tag = if (spm.is_add) .i64_add else .i64_sub, .data = .{ .tag = {} } });
+                                    changed = true;
+                                    continue;
+                                }
                             }
                         },
                         else => {},
@@ -1920,6 +2822,571 @@ fn Pass(comptime Inst: type) type {
             return .{ .tag = inst.tag, .data = .{ .payload = new_payload } };
         }
 
+        const TrackedMemEntry = struct {
+            base_local: u32,
+            offset: u64,
+            size: u8,
+            store_or_load_tag: Inst.Tag,
+            val_inst: Inst,
+            store_out_start: ?usize,
+            store_out_end: ?usize,
+        };
+
+        fn isScalarLoadTag(tag: Inst.Tag) bool {
+            return switch (tag) {
+                .i32_load,
+                .i64_load,
+                .f32_load,
+                .f64_load,
+                .i32_load8_s,
+                .i32_load8_u,
+                .i32_load16_s,
+                .i32_load16_u,
+                .i64_load8_s,
+                .i64_load8_u,
+                .i64_load16_s,
+                .i64_load16_u,
+                .i64_load32_s,
+                .i64_load32_u,
+                => true,
+                else => false,
+            };
+        }
+
+        fn isScalarStoreTag(tag: Inst.Tag) bool {
+            return switch (tag) {
+                .i32_store,
+                .i64_store,
+                .f32_store,
+                .f64_store,
+                .i32_store8,
+                .i32_store16,
+                .i64_store8,
+                .i64_store16,
+                .i64_store32,
+                => true,
+                else => false,
+            };
+        }
+
+        fn scalarMemAccessSize(tag: Inst.Tag) ?u8 {
+            return switch (tag) {
+                .i32_load8_s,
+                .i32_load8_u,
+                .i64_load8_s,
+                .i64_load8_u,
+                .i32_store8,
+                .i64_store8,
+                => 1,
+                .i32_load16_s,
+                .i32_load16_u,
+                .i64_load16_s,
+                .i64_load16_u,
+                .i32_store16,
+                .i64_store16,
+                => 2,
+                .i32_load,
+                .f32_load,
+                .i64_load32_s,
+                .i64_load32_u,
+                .i32_store,
+                .f32_store,
+                .i64_store32,
+                => 4,
+                .i64_load,
+                .f64_load,
+                .i64_store,
+                .f64_store,
+                => 8,
+                else => null,
+            };
+        }
+
+        fn rangesOverlap(off_a: u64, size_a: u8, off_b: u64, size_b: u8) bool {
+            const a0: u128 = off_a;
+            const a1: u128 = a0 + size_a;
+            const b0: u128 = off_b;
+            const b1: u128 = b0 + size_b;
+            return a0 < b1 and b0 < a1;
+        }
+
+        fn rangeContains(outer_off: u64, outer_size: u8, inner_off: u64, inner_size: u8) bool {
+            const o0: u128 = outer_off;
+            const o1: u128 = o0 + outer_size;
+            const in0: u128 = inner_off;
+            const in1: u128 = in0 + inner_size;
+            return o0 <= in0 and in1 <= o1;
+        }
+
+        fn invalidateTrackedLocal(entries: *std.ArrayList(TrackedMemEntry), local: u32) void {
+            var idx: usize = entries.items.len;
+            while (idx > 0) {
+                idx -= 1;
+                const e = entries.items[idx];
+                if (e.base_local == local or (e.val_inst.tag == .local_get and e.val_inst.data.local == local)) {
+                    _ = entries.orderedRemove(idx);
+                }
+            }
+        }
+
+        fn tryForwardLoad(
+            gpa: Allocator,
+            out: *std.ArrayList(Inst),
+            mir_extra: *std.ArrayList(u32),
+            entry: TrackedMemEntry,
+            load_tag: Inst.Tag,
+            load_off: u64,
+            load_size: u8,
+        ) Allocator.Error!bool {
+            if (entry.store_or_load_tag == .drop) return false;
+
+            if (load_off == entry.offset and load_size == entry.size) {
+                switch (load_tag) {
+                    .i32_load => {
+                        if (entry.store_or_load_tag == .i32_store or entry.store_or_load_tag == .i32_load) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                    },
+                    .i64_load => {
+                        if (entry.store_or_load_tag == .i64_store or entry.store_or_load_tag == .i64_load) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                    },
+                    .f32_load => {
+                        if (entry.store_or_load_tag == .f32_store or entry.store_or_load_tag == .f32_load) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                    },
+                    .f64_load => {
+                        if (entry.store_or_load_tag == .f64_store or entry.store_or_load_tag == .f64_load) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                    },
+                    .i32_load8_u => {
+                        if (entry.store_or_load_tag == .i32_load8_u) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                        if (entry.store_or_load_tag == .i32_store8 or entry.store_or_load_tag == .i32_load8_s) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            out.appendAssumeCapacity(makeI32Const(0xFF));
+                            out.appendAssumeCapacity(.{ .tag = .i32_and, .data = .{ .tag = {} } });
+                            return true;
+                        }
+                    },
+                    .i32_load16_u => {
+                        if (entry.store_or_load_tag == .i32_load16_u) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                        if (entry.store_or_load_tag == .i32_store16 or entry.store_or_load_tag == .i32_load16_s) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            out.appendAssumeCapacity(makeI32Const(0xFFFF));
+                            out.appendAssumeCapacity(.{ .tag = .i32_and, .data = .{ .tag = {} } });
+                            return true;
+                        }
+                    },
+                    .i64_load8_u => {
+                        if (entry.store_or_load_tag == .i64_load8_u) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                        if (entry.store_or_load_tag == .i64_store8 or entry.store_or_load_tag == .i64_load8_s) {
+                            const mask = try makeI64Const(gpa, mir_extra, 0xFF);
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            out.appendAssumeCapacity(mask);
+                            out.appendAssumeCapacity(.{ .tag = .i64_and, .data = .{ .tag = {} } });
+                            return true;
+                        }
+                    },
+                    .i64_load16_u => {
+                        if (entry.store_or_load_tag == .i64_load16_u) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                        if (entry.store_or_load_tag == .i64_store16 or entry.store_or_load_tag == .i64_load16_s) {
+                            const mask = try makeI64Const(gpa, mir_extra, 0xFFFF);
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            out.appendAssumeCapacity(mask);
+                            out.appendAssumeCapacity(.{ .tag = .i64_and, .data = .{ .tag = {} } });
+                            return true;
+                        }
+                    },
+                    .i64_load32_u => {
+                        if (entry.store_or_load_tag == .i64_load32_u) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                        if (entry.store_or_load_tag == .i64_store32 or entry.store_or_load_tag == .i64_load32_s) {
+                            const mask = try makeI64Const(gpa, mir_extra, 0xFFFF_FFFF);
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            out.appendAssumeCapacity(mask);
+                            out.appendAssumeCapacity(.{ .tag = .i64_and, .data = .{ .tag = {} } });
+                            return true;
+                        }
+                    },
+                    .i32_load8_s => {
+                        if (entry.store_or_load_tag == .i32_load8_s) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                        if (entry.store_or_load_tag == .i32_store8 or entry.store_or_load_tag == .i32_load8_u) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            out.appendAssumeCapacity(.{ .tag = .i32_extend8_s, .data = .{ .tag = {} } });
+                            return true;
+                        }
+                    },
+                    .i32_load16_s => {
+                        if (entry.store_or_load_tag == .i32_load16_s) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                        if (entry.store_or_load_tag == .i32_store16 or entry.store_or_load_tag == .i32_load16_u) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            out.appendAssumeCapacity(.{ .tag = .i32_extend16_s, .data = .{ .tag = {} } });
+                            return true;
+                        }
+                    },
+                    .i64_load8_s => {
+                        if (entry.store_or_load_tag == .i64_load8_s) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                        if (entry.store_or_load_tag == .i64_store8 or entry.store_or_load_tag == .i64_load8_u) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            out.appendAssumeCapacity(.{ .tag = .i64_extend8_s, .data = .{ .tag = {} } });
+                            return true;
+                        }
+                    },
+                    .i64_load16_s => {
+                        if (entry.store_or_load_tag == .i64_load16_s) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                        if (entry.store_or_load_tag == .i64_store16 or entry.store_or_load_tag == .i64_load16_u) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            out.appendAssumeCapacity(.{ .tag = .i64_extend16_s, .data = .{ .tag = {} } });
+                            return true;
+                        }
+                    },
+                    .i64_load32_s => {
+                        if (entry.store_or_load_tag == .i64_load32_s) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            return true;
+                        }
+                        if (entry.store_or_load_tag == .i64_store32 or entry.store_or_load_tag == .i64_load32_u) {
+                            out.items[out.items.len - 1] = entry.val_inst;
+                            out.appendAssumeCapacity(.{ .tag = .i64_extend32_s, .data = .{ .tag = {} } });
+                            return true;
+                        }
+                    },
+                    else => {},
+                }
+            } else if (load_size < entry.size) {
+                const is_i32_source = switch (entry.store_or_load_tag) {
+                    .i32_store, .i32_load, .i32_store16, .i32_load16_u, .i32_load16_s => true,
+                    else => false,
+                };
+                const is_i32_subload = switch (load_tag) {
+                    .i32_load8_u, .i32_load8_s, .i32_load16_u, .i32_load16_s => true,
+                    else => false,
+                };
+                if (is_i32_source and is_i32_subload) {
+                    const bit_shift: i32 = @intCast((load_off - entry.offset) * 8);
+                    out.items[out.items.len - 1] = entry.val_inst;
+                    if (bit_shift > 0) {
+                        out.appendAssumeCapacity(makeI32Const(bit_shift));
+                        out.appendAssumeCapacity(.{ .tag = .i32_shr_u, .data = .{ .tag = {} } });
+                    }
+                    switch (load_tag) {
+                        .i32_load8_u => {
+                            out.appendAssumeCapacity(makeI32Const(0xFF));
+                            out.appendAssumeCapacity(.{ .tag = .i32_and, .data = .{ .tag = {} } });
+                        },
+                        .i32_load16_u => {
+                            out.appendAssumeCapacity(makeI32Const(0xFFFF));
+                            out.appendAssumeCapacity(.{ .tag = .i32_and, .data = .{ .tag = {} } });
+                        },
+                        .i32_load8_s => {
+                            out.appendAssumeCapacity(.{ .tag = .i32_extend8_s, .data = .{ .tag = {} } });
+                        },
+                        .i32_load16_s => {
+                            out.appendAssumeCapacity(.{ .tag = .i32_extend16_s, .data = .{ .tag = {} } });
+                        },
+                        else => unreachable,
+                    }
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        fn optimizeMemoryAccesses(
+            gpa: Allocator,
+            out: *std.ArrayList(Inst),
+            insts: []const Inst,
+            mir_extra: *std.ArrayList(u32),
+        ) Allocator.Error!bool {
+            out.clearRetainingCapacity();
+            try out.ensureTotalCapacity(gpa, insts.len);
+
+            var tracked_entries: std.ArrayList(TrackedMemEntry) = .empty;
+            defer tracked_entries.deinit(gpa);
+
+            var changed = false;
+            var i: usize = 0;
+            while (i < insts.len) {
+                try out.ensureUnusedCapacity(gpa, 8);
+                const inst = insts[i];
+
+                if (isScalarStoreTag(inst.tag)) {
+                    const size = scalarMemAccessSize(inst.tag).?;
+                    const off = readMemArgOffset(mir_extra.items, inst.data.payload);
+
+                    if (findValStartIndex(out.items, mir_extra.items)) |orig_val_start| {
+                        if (orig_val_start >= 1 and out.items[orig_val_start - 1].tag == .local_get) {
+                            var addr_idx = orig_val_start - 1;
+                            var val_start = orig_val_start;
+                            const base_local = out.items[addr_idx].data.local;
+
+                            // Overwrite DSE: check if any active entry on `base_local` is covered by `[off, off + size)`
+                            // and has not been observed by any load or branch since it was emitted.
+                            var e_idx: usize = tracked_entries.items.len;
+                            while (e_idx > 0) {
+                                e_idx -= 1;
+                                const entry = tracked_entries.items[e_idx];
+                                if (entry.base_local == base_local and
+                                    rangeContains(off, size, entry.offset, entry.size) and
+                                    entry.store_out_start != null)
+                                {
+                                    const dead_start = entry.store_out_start.?;
+                                    const dead_end = entry.store_out_end.?;
+                                    const removed_len = dead_end - dead_start;
+                                    std.mem.copyForwards(Inst, out.items[dead_start..], out.items[dead_end..]);
+                                    out.items.len -= removed_len;
+                                    addr_idx -= removed_len;
+                                    val_start -= removed_len;
+
+                                    for (tracked_entries.items) |*other| {
+                                        if (other.store_out_start) |s| {
+                                            if (s >= dead_end) {
+                                                other.store_out_start = s - removed_len;
+                                                other.store_out_end = other.store_out_end.? - removed_len;
+                                            } else if (s >= dead_start) {
+                                                other.store_out_start = null;
+                                                other.store_out_end = null;
+                                            }
+                                        }
+                                    }
+                                    _ = tracked_entries.orderedRemove(e_idx);
+                                    changed = true;
+                                }
+                            }
+
+                            // Remove any existing tracked entries that overlap `[off, off + size)` on `base_local`
+                            // (or are on a different `base_local` that could alias), while preserving non-overlapping
+                            // entries on `base_local`.
+                            e_idx = tracked_entries.items.len;
+                            while (e_idx > 0) {
+                                e_idx -= 1;
+                                const entry = tracked_entries.items[e_idx];
+                                if (entry.base_local != base_local or rangesOverlap(entry.offset, entry.size, off, size)) {
+                                    _ = tracked_entries.orderedRemove(e_idx);
+                                }
+                            }
+
+                            var val_is_pure = true;
+                            for (out.items[val_start..]) |v_inst| {
+                                if (v_inst.tag != .dbg_line and pureNonTrappingPops(v_inst.tag) == null) {
+                                    val_is_pure = false;
+                                    break;
+                                }
+                            }
+
+                            const val_tag = out.items[val_start].tag;
+                            const is_single_zero_pop = (val_start + 1 == out.items.len) and
+                                ((isConstTag(val_tag) and val_tag != .error_name_table_ref) or
+                                    (val_tag == .local_get and out.items[val_start].data.local != base_local));
+                            const val_inst: Inst = if (is_single_zero_pop) out.items[val_start] else .{ .tag = .drop, .data = .{ .tag = {} } };
+
+                            out.appendAssumeCapacity(inst);
+                            if (is_single_zero_pop or val_is_pure) {
+                                try tracked_entries.append(gpa, .{
+                                    .base_local = base_local,
+                                    .offset = off,
+                                    .size = size,
+                                    .store_or_load_tag = if (is_single_zero_pop) inst.tag else .drop,
+                                    .val_inst = val_inst,
+                                    .store_out_start = if (val_is_pure) addr_idx else null,
+                                    .store_out_end = if (val_is_pure) out.items.len else null,
+                                });
+                            }
+                            i += 1;
+                            continue;
+                        }
+                    }
+
+                    tracked_entries.clearRetainingCapacity();
+                    out.appendAssumeCapacity(inst);
+                    i += 1;
+                    continue;
+                }
+
+                if (isScalarLoadTag(inst.tag)) {
+                    const size = scalarMemAccessSize(inst.tag).?;
+                    const off = readMemArgOffset(mir_extra.items, inst.data.payload);
+
+                    if (out.items.len >= 1 and out.items[out.items.len - 1].tag == .local_get) {
+                        const base_local = out.items[out.items.len - 1].data.local;
+
+                        for (tracked_entries.items) |*entry| {
+                            if (entry.base_local != base_local or rangesOverlap(entry.offset, entry.size, off, size)) {
+                                entry.store_out_start = null;
+                                entry.store_out_end = null;
+                            }
+                        }
+
+                        var forwarded = false;
+                        var e_idx: usize = tracked_entries.items.len;
+                        while (e_idx > 0) {
+                            e_idx -= 1;
+                            const entry = tracked_entries.items[e_idx];
+                            if (entry.base_local == base_local and rangeContains(entry.offset, entry.size, off, size)) {
+                                if (try tryForwardLoad(gpa, out, mir_extra, entry, inst.tag, off, size)) {
+                                    forwarded = true;
+                                    changed = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (forwarded) {
+                            i += 1;
+                            continue;
+                        }
+
+                        out.appendAssumeCapacity(inst);
+                        if (i + 1 < insts.len and
+                            (insts[i + 1].tag == .local_set or insts[i + 1].tag == .local_tee))
+                        {
+                            const v_local = insts[i + 1].data.local;
+                            invalidateTrackedLocal(&tracked_entries, v_local);
+                            out.appendAssumeCapacity(insts[i + 1]);
+                            if (v_local != base_local) {
+                                var r_idx: usize = tracked_entries.items.len;
+                                while (r_idx > 0) {
+                                    r_idx -= 1;
+                                    const entry = tracked_entries.items[r_idx];
+                                    if (entry.base_local == base_local and rangesOverlap(entry.offset, entry.size, off, size)) {
+                                        _ = tracked_entries.orderedRemove(r_idx);
+                                    }
+                                }
+                                try tracked_entries.append(gpa, .{
+                                    .base_local = base_local,
+                                    .offset = off,
+                                    .size = size,
+                                    .store_or_load_tag = inst.tag,
+                                    .val_inst = .{ .tag = .local_get, .data = .{ .local = v_local } },
+                                    .store_out_start = null,
+                                    .store_out_end = null,
+                                });
+                            }
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        continue;
+                    }
+
+                    for (tracked_entries.items) |*entry| {
+                        entry.store_out_start = null;
+                        entry.store_out_end = null;
+                    }
+                    out.appendAssumeCapacity(inst);
+                    i += 1;
+                    continue;
+                }
+
+                switch (inst.tag) {
+                    .local_set, .local_tee => {
+                        invalidateTrackedLocal(&tracked_entries, inst.data.local);
+                    },
+                    .br_if => {
+                        for (tracked_entries.items) |*entry| {
+                            entry.store_out_start = null;
+                            entry.store_out_end = null;
+                        }
+                    },
+                    .block,
+                    .loop,
+                    .end,
+                    .br,
+                    .br_table,
+                    .@"return",
+                    .@"unreachable",
+                    .call_nav,
+                    .call_indirect,
+                    .call_tag_index,
+                    .call_intrinsic,
+                    .memory_grow,
+                    .atomics_prefix,
+                    .misc_prefix,
+                    .cont_new,
+                    .cont_bind,
+                    .@"suspend",
+                    .@"resume",
+                    .resume_throw,
+                    .resume_throw_ref,
+                    .@"switch",
+                    => {
+                        tracked_entries.clearRetainingCapacity();
+                    },
+                    .simd_prefix => {
+                        if (memOpInfo(inst, mir_extra.items)) |info| {
+                            if (info.val_operands == 0) {
+                                for (tracked_entries.items) |*entry| {
+                                    entry.store_out_start = null;
+                                    entry.store_out_end = null;
+                                }
+                            } else {
+                                tracked_entries.clearRetainingCapacity();
+                            }
+                        } else {
+                            const opcode = mir_extra.items[inst.data.payload];
+                            switch (@as(std.wasm.SimdOpcode, @fromBackingInt(opcode))) {
+                                .v128_store,
+                                .v128_store8_lane,
+                                .v128_store16_lane,
+                                .v128_store32_lane,
+                                .v128_store64_lane,
+                                => tracked_entries.clearRetainingCapacity(),
+                                .v128_load8_lane,
+                                .v128_load16_lane,
+                                .v128_load32_lane,
+                                .v128_load64_lane,
+                                => {
+                                    for (tracked_entries.items) |*entry| {
+                                        entry.store_out_start = null;
+                                        entry.store_out_end = null;
+                                    }
+                                },
+                                else => {},
+                            }
+                        }
+                    },
+                    else => {},
+                }
+
+                out.appendAssumeCapacity(inst);
+                i += 1;
+            }
+
+            return changed;
+        }
+
         fn simplifyControlFlow(
             gpa: Allocator,
             current: *std.ArrayList(Inst),
@@ -1987,6 +3454,12 @@ fn Pass(comptime Inst: type) type {
                             (out.items[len - 2].tag == .i32_eqz and out.items[len - 1].tag == .i32_eqz)))
                     {
                         out.items.len = len - 2;
+                        out.appendAssumeCapacity(inst);
+                        changed = true;
+                        continue;
+                    }
+                    if (len >= 1 and out.items[len - 1].tag == .i32_xor) {
+                        out.items[len - 1].tag = .i32_ne;
                         out.appendAssumeCapacity(inst);
                         changed = true;
                         continue;
@@ -4873,3 +6346,431 @@ test "simplifyLocals: dead zero-pop local_set, self-set elimination, and intra-b
         try testing.expectEqual(@as(u32, 1), datas[1].local);
     }
 }
+
+test "simplifyLocals and hoistLoopInvariantLocalSets: structured block/loop scope preservation and LICM (#197)" {
+    // 1. Unmodified known_locals survive across `.block`, `.loop`, `.br_if`, and `.end` even when
+    // an inner branch + `return` clears `known_locals` inside the block, while loop-modified locals are invalidated.
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Local 4 = 100 (invariant), Local 5 = local 0 (invariant copy), Local 6 = 50 (modified inside loop)
+        try m.addI32(100);
+        try m.addLocal(.local_set, 4);
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_set, 5);
+        try m.addI32(50);
+        try m.addLocal(.local_set, 6);
+
+        try m.addBlock(.loop, .empty);
+        // Inside loop: conditional block that has a `return` (clearing known_locals on the return path)
+        try m.addBlock(.block, .empty);
+        try m.addLocal(.local_get, 1);
+        try m.addLabel(.br_if, 0);
+        try m.addLocal(.local_get, 4); // propagates 100
+        try m.addTag(.@"return");
+        try m.addTag(.end);
+
+        // After the inner `.end`, invariant locals 4 and 5 are restored from `entry_known`!
+        try m.addLocal(.local_get, 4); // -> i32_const 100
+        try m.addLocal(.local_get, 5); // -> local_get 0
+        try m.addTag(.i32_add);
+        try m.addLocal(.local_get, 6); // modified in loop -> stays local_get 6
+        try m.addTag(.i32_add);
+        try m.addLocal(.local_tee, 6);
+        try m.addLabel(.br_if, 0);
+        try m.addTag(.end);
+
+        // After loop `.end`, invariant local 4 (100) and local 5 (local 0) are still known!
+        try m.addLocal(.local_get, 4);
+        try m.addLocal(.local_get, 5);
+        try m.addTag(.i32_add);
+        try m.addLocal(.local_get, 6);
+        try m.addTag(.i32_add);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        // Local 4 and Local 5 should be completely eliminated!
+        for (tags, datas) |t, d| {
+            if (t == .local_get or t == .local_set or t == .local_tee) {
+                try testing.expect(d.local != 4 and d.local != 5);
+            }
+        }
+    }
+
+    // 2. `hoistLoopInvariantLocalSets` hoists `<val_expr>; local_set X` out of `.loop` header
+    // and then `simplifyLocals` propagates or folds it across the loop!
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        try m.addBlock(.loop, .empty);
+        // Loop-invariant header local_set: local 7 = local 0 + 16
+        try m.addLocal(.local_get, 0);
+        try m.addI32(16);
+        try m.addTag(.i32_add);
+        try m.addLocal(.local_set, 7);
+
+        // Non-invariant local 8 (modified twice in loop -> must NOT be hoisted)
+        try m.addI32(1);
+        try m.addLocal(.local_set, 8);
+
+        // Loop body uses local 7 and modifies local 1 and local 8
+        try m.addLocal(.local_get, 7);
+        try m.memOp(.i32_load, 0, 2);
+        try m.addLocal(.local_get, 8);
+        try m.addTag(.i32_add);
+        try m.addLocal(.local_set, 8);
+
+        try m.addLocal(.local_get, 1);
+        try m.addI32(1);
+        try m.addTag(.i32_sub);
+        try m.addLocal(.local_tee, 1);
+        try m.addLabel(.br_if, 0);
+        try m.addTag(.end);
+
+        try m.addLocal(.local_get, 8);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        // The invariant `local_get 0; i32_const 16; i32_add; local_set 7` must appear BEFORE `.loop`!
+        var loop_idx: ?usize = null;
+        for (tags, 0..) |t, idx| {
+            if (t == .loop) {
+                loop_idx = idx;
+                break;
+            }
+        }
+        try testing.expect(loop_idx != null);
+        try testing.expectEqual(@as(usize, 4), loop_idx.?);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{ .local_get, .i32_const, .i32_add, .local_set },
+            tags[0..loop_idx.?],
+        );
+    }
+}
+
+test "optimizeMemoryAccesses: store-to-load forwarding, narrow bit-slice extraction, non-overlap disambiguation, and DSE (#198)" {
+    // 1. Overwrite DSE + Non-overlapping store-to-load forwarding on the same base_local
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Store 111 to [base+0..4], then overwrite [base+0..4] with 222 -> first store is DSE-eliminated!
+        try m.addLocal(.local_get, 0);
+        try m.addI32(111);
+        try m.memOp(.i32_store, 0, 2);
+
+        try m.addLocal(.local_get, 0);
+        try m.addI32(222);
+        try m.memOp(.i32_store, 0, 2);
+
+        // Non-overlapping store 333 to [base+4..8] -> preserves [base+0..4] == 222!
+        try m.addLocal(.local_get, 0);
+        try m.addI32(333);
+        try m.memOp(.i32_store, 4, 2);
+
+        // Load from [base+0..4] and [base+4..8] -> both forward to constants 222 and 333 and fold to 555!
+        try m.addLocal(.local_get, 0);
+        try m.memOp(.i32_load, 0, 2);
+        try m.addLocal(.local_get, 0);
+        try m.memOp(.i32_load, 4, 2);
+        try m.addTag(.i32_add);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        const datas = m.instructions.items(.data);
+        try testing.expectEqualSlices(
+            Mir.Inst.Tag,
+            &.{
+                .local_get, .i32_const, .i32_store,
+                .local_get, .i32_const, .i32_store,
+                .i32_const, .@"return", .end,
+                .dbg_epilogue_begin,
+            },
+            tags,
+        );
+        try testing.expectEqual(@as(i32, 222), datas[1].imm32);
+        try testing.expectEqual(@as(i32, 333), datas[4].imm32);
+        try testing.expectEqual(@as(i32, 555), datas[6].imm32);
+    }
+
+    // 2. Narrow bit-slice extraction (i32_store -> i32_load8_u, i32_load8_s, i32_load16_u, i32_load16_s)
+    // and sub-word store-to-load forwarding
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Store 0x80FF_7F01 to [base+0..4]
+        try m.addLocal(.local_get, 0);
+        try m.addI32(@bitCast(@as(u32, 0x80FF_7F01)));
+        try m.memOp(.i32_store, 0, 2);
+
+        // Load byte at offset 1 (unsigned -> 0x7F = 127)
+        try m.addLocal(.local_get, 0);
+        try m.memOp(.i32_load8_u, 1, 0);
+
+        // Load byte at offset 3 (signed -> 0x80 sign-extended = -128)
+        try m.addLocal(.local_get, 0);
+        try m.memOp(.i32_load8_s, 3, 0);
+        try m.addTag(.i32_add); // 127 + (-128) = -1
+
+        // Sub-word store8 of local 1 at offset 8 followed by load8_u and load8_s
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 1);
+        try m.memOp(.i32_store8, 8, 0);
+        try m.addLocal(.local_get, 0);
+        try m.memOp(.i32_load8_u, 8, 0);
+        try m.addLocal(.local_get, 0);
+        try m.memOp(.i32_load8_s, 8, 0);
+        try m.addTag(.i32_add);
+        try m.addTag(.i32_add);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        // No i32_load8_u or i32_load8_s instructions should remain!
+        for (tags) |t| {
+            try testing.expect(t != .i32_load8_u and t != .i32_load8_s);
+        }
+    }
+
+    // 3. Redundant load-to-load elimination (`local_get base; i32_load off; local_set V; ...; local_get base; i32_load off`)
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        try m.addLocal(.local_get, 0);
+        try m.memOp(.i32_load, 12, 2);
+        try m.addLocal(.local_set, 2);
+
+        // Second load from the same (base=0, offset=12) forwards from local 2!
+        try m.addLocal(.local_get, 0);
+        try m.memOp(.i32_load, 12, 2);
+        try m.addLocal(.local_get, 2);
+        try m.addTag(.i32_add);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        var load_count: usize = 0;
+        for (tags) |t| {
+            if (t == .i32_load) load_count += 1;
+        }
+        try testing.expectEqual(@as(usize, 1), load_count);
+    }
+}
+
+test "peepholes: mul by 2^k +- 1, magic div/rem strength reduction, possibleOnes mask stripping, and conversions (#199)" {
+    // 1. `mul` by 2^k +- 1 (`* 3`, `* 5`, `* 7`, `* 9`) and non-power-of-two `div_u`/`rem_u`/`div_s`/`rem_s`
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // local 0 * 3 -> (local 0 << 1) + local 0
+        try m.addLocal(.local_get, 0);
+        try m.addI32(3);
+        try m.addTag(.i32_mul);
+
+        // local 0 * 7 -> (local 0 << 3) - local 0
+        try m.addLocal(.local_get, 0);
+        try m.addI32(7);
+        try m.addTag(.i32_mul);
+        try m.addTag(.i32_add);
+
+        // local 0 /u 10 -> magic u64 multiply + shr_u
+        try m.addLocal(.local_get, 0);
+        try m.addI32(10);
+        try m.addTag(.i32_div_u);
+        try m.addTag(.i32_add);
+
+        // local 0 %u 10 -> magic quotient * 10 subtracted from local 0
+        try m.addLocal(.local_get, 0);
+        try m.addI32(10);
+        try m.addTag(.i32_rem_u);
+        try m.addTag(.i32_add);
+
+        // local 0 /s 4 (power of two signed div) and local 0 /s 10 (non-power-of-two signed div)
+        try m.addLocal(.local_get, 0);
+        try m.addI32(4);
+        try m.addTag(.i32_div_s);
+        try m.addTag(.i32_add);
+
+        try m.addLocal(.local_get, 0);
+        try m.addI32(10);
+        try m.addTag(.i32_div_s);
+        try m.addTag(.i32_add);
+
+        try m.addLocal(.local_get, 0);
+        try m.addI32(10);
+        try m.addTag(.i32_rem_s);
+        try m.addTag(.i32_add);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        for (tags) |t| {
+            try testing.expect(t != .i32_div_u and t != .i32_rem_u and t != .i32_div_s and t != .i32_rem_s);
+        }
+    }
+
+    // 2. `possibleOnesI32`/`possibleOnesI64` redundant mask stripping, extend/wrap conversions,
+    // `eqz(xor)` -> `eq`, `br_if(xor)` -> `br_if(ne)`, `select` negation, float unary idempotents, and same-local ops
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Redundant mask on i32_load8_u (& 0xFF and & 0xFFFF stripped)
+        try m.addLocal(.local_get, 0);
+        try m.memOp(.i32_load8_u, 0, 0);
+        try m.addI32(0xFF);
+        try m.addTag(.i32_and);
+
+        // i32_extend8_s(i32_load8_u) -> i32_load8_s (and redundant second i32_extend8_s stripped)
+        try m.addLocal(.local_get, 0);
+        try m.memOp(.i32_load8_u, 1, 0);
+        try m.addTag(.i32_extend8_s);
+        try m.addTag(.i32_extend8_s);
+        try m.addTag(.i32_add);
+
+        // i32_wrap_i64(i64_extend_i32_u(x)) -> x
+        try m.addLocal(.local_get, 1);
+        try m.addTag(.i64_extend_i32_u);
+        try m.addI64(0xFFFF_FFFF);
+        try m.addTag(.i64_and); // stripped by possibleOnesI64!
+        try m.addTag(.i32_wrap_i64); // elided with i64_extend_i32_u!
+        try m.addTag(.i32_add);
+
+        // i32_eqz(i32_xor(a, b)) -> i32_eq(a, b)
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 1);
+        try m.addTag(.i32_xor);
+        try m.addTag(.i32_eqz);
+        try m.addTag(.i32_add);
+
+        // select(local 0, local 1, i32_eqz(local 2)) -> select(local 1, local 0, local 2)
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 1);
+        try m.addLocal(.local_get, 2);
+        try m.addTag(.i32_eqz);
+        try m.addTag(.select);
+        try m.addTag(.i32_add);
+
+        // select(local 0, local 0, local 2) -> local 0
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 2);
+        try m.addTag(.select);
+        try m.addTag(.i32_add);
+
+        // Same-local folds: (L0 ^ L0) + (L0 == L0) -> 0 + 1 = 1
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 0);
+        try m.addTag(.i32_xor);
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 0);
+        try m.addTag(.i32_eq);
+        try m.addTag(.i32_add);
+        try m.addTag(.i32_add);
+
+        // br_if(i32_xor(a, b)) -> br_if(i32_ne(a, b))
+        try m.addBlock(.block, .empty);
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 1);
+        try m.addTag(.i32_xor);
+        try m.addLabel(.br_if, 0);
+        try m.addLocal(.local_get, 2);
+        try m.addTag(.@"return");
+        try m.addTag(.end);
+
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        const tags = m.instructions.items(.tag);
+        for (tags) |t| {
+            try testing.expect(t != .i32_and and t != .i64_and);
+            try testing.expect(t != .i32_extend8_s);
+            try testing.expect(t != .i64_extend_i32_u and t != .i32_wrap_i64);
+            try testing.expect(t != .i32_xor and t != .i32_eqz);
+        }
+    }
+
+    // 3. Exact 64-bit unsigned magic division/remainder verification across cheap (d=3, d=10)
+    // and needs-add (d=7) divisors on boundary u32 inputs (including >= 0x80000000).
+    {
+        const divisors = [_]u32{ 3, 7, 10 };
+        const inputs = [_]u32{
+            0,          1,          2,          3,          6,
+            7,          8,          9,          10,         11,
+            0x7FFFFFFF, 0x80000000, 0xC0000000, 0xFFFFFFFE, 0xFFFFFFFF,
+        };
+
+        for (divisors) |d| {
+            for ([_]Mir.Inst.Tag{ .i32_div_u, .i32_rem_u }) |op_tag| {
+                // First optimize `local_get 0; i32_const d; <div_u/rem_u>; return`
+                var base: TestMir = .{};
+                defer base.deinit();
+
+                try base.addLocal(.local_get, 0);
+                try base.addI32(@bitCast(d));
+                try base.addTag(op_tag);
+                try base.addTag(.@"return");
+                try base.finishFunc();
+                try base.run();
+
+                // Verify the division/remainder was strength-reduced (no i32_div_u / i32_rem_u remains)
+                for (base.instructions.items(.tag)) |t| {
+                    try testing.expect(t != .i32_div_u and t != .i32_rem_u);
+                }
+
+                // Now substitute `local_get 0` with `i32_const x` in the strength-reduced sequence
+                // and run the optimizer to evaluate the exact emitted 64-bit arithmetic sequence!
+                for (inputs) |x| {
+                    var eval_mir: TestMir = .{};
+                    defer eval_mir.deinit();
+
+                    try eval_mir.extra.appendSlice(testing.allocator, base.extra.items);
+                    for (base.instructions.items(.tag), base.instructions.items(.data)) |t, data| {
+                        if (t == .local_get and data.local == 0) {
+                            try eval_mir.addI32(@bitCast(x));
+                        } else {
+                            try eval_mir.instructions.append(testing.allocator, .{ .tag = t, .data = data });
+                        }
+                    }
+                    try eval_mir.run();
+
+                    const eval_tags = eval_mir.instructions.items(.tag);
+                    const eval_datas = eval_mir.instructions.items(.data);
+                    try testing.expectEqualSlices(
+                        Mir.Inst.Tag,
+                        &.{ .i32_const, .@"return", .end, .dbg_epilogue_begin },
+                        eval_tags,
+                    );
+                    const expected: u32 = if (op_tag == .i32_div_u) (x / d) else (x % d);
+                    try testing.expectEqual(@as(i32, @bitCast(expected)), eval_datas[0].imm32);
+                }
+            }
+        }
+    }
+}
+
+
