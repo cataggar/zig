@@ -1185,24 +1185,6 @@ fn matchFpFillAt(slice: []const Instr, idx: usize, fp: u32) ?struct { end_idx: u
     };
 }
 
-fn isFollowedByPtrSub(slice: []const Instr, pos: usize) bool {
-    if (pos >= slice.len) return false;
-    if (slice[pos] == .numeric_op and slice[pos].numeric_op == 0x6b) return true;
-    if (pos + 1 < slice.len) {
-        if (slice[pos] == .i32_const and slice[pos].i32_const < 0 and
-            slice[pos + 1] == .numeric_op and slice[pos + 1].numeric_op == 0x6a)
-        {
-            return true;
-        }
-        if (isPureZeroPopInstr(slice[pos]) and
-            slice[pos + 1] == .numeric_op and slice[pos + 1].numeric_op == 0x6b)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
 fn rangesOverlap(a_start: u64, a_len: u64, b_start: u64, b_len: u64) bool {
     return a_start < b_start + b_len and b_start < a_start + a_len;
 }
@@ -2284,19 +2266,29 @@ fn analyzeFpUsesInSlice(
                         i = fill_cand.end_idx;
                         continue;
                     }
-                    // Escaped forward pointer `local.get fp; i32.const esc_off; i32.add` (`0 < esc_off <= frame_size`):
-                    // A pointer to `fp + esc_off` passed to a callee or expression cannot legally access slots below `esc_off`.
-                    if (i + 2 < slice.len and
-                        slice[i + 1] == .i32_const and slice[i + 1].i32_const > 0 and
+                    // In-function non-escaping address `local.get fp; i32.const c; i32.add` (`c >= 0`)
+                    // consumed directly by a load or store (never passed to a call or stored as a pointer,
+                    // preserving `@fieldParentPtr` safety):
+                    if (i + 3 < slice.len and
+                        slice[i + 1] == .i32_const and slice[i + 1].i32_const >= 0 and
                         slice[i + 2] == .numeric_op and slice[i + 2].numeric_op == 0x6a)
                     {
-                        const esc_off: u64 = @intCast(slice[i + 1].i32_const);
-                        if (esc_off <= frame_size and !isFollowedByPtrSub(slice, i + 3)) {
-                            const rem_size: u64 = frame_size - esc_off;
-                            if (rem_size > 0 and rem_size <= std.math.maxInt(u32)) {
-                                try recordShadowSlotAccess(arena, slots, esc_off, @intCast(rem_size), null, true, in_loop);
+                        const add_off: u64 = @intCast(slice[i + 1].i32_const);
+                        if (decodeLoadAccess(slice[i + 3])) |access| {
+                            if (access.mem_idx != 0 or (access.opcode == 0xfd and access.simd_sub > 0x0a)) return false;
+                            if (add_off + access.offset + access.size > frame_size) return false;
+                            try recordShadowSlotAccess(arena, slots, add_off + access.offset, access.size, null, false, in_loop);
+                            i += 4;
+                            continue;
+                        }
+                        if (findSingleValueStoreIdx(slice, i + 3, fp)) |store_idx| {
+                            const access = decodeStoreAccess(slice[store_idx]).?;
+                            if (access.mem_idx != 0 or add_off + access.offset + access.size > frame_size) return false;
+                            if (!(try analyzeFpUsesInSlice(arena, slice[i + 3 .. store_idx], fp, sp_save, frame_size, in_loop, slots))) {
+                                return false;
                             }
-                            i += 3;
+                            try recordShadowSlotAccess(arena, slots, add_off + access.offset, access.size, null, true, in_loop);
+                            i = store_idx + 1;
                             continue;
                         }
                     }
@@ -2535,12 +2527,17 @@ fn isForwardableMemVal(inst: Instr, base_local: u32) bool {
     };
 }
 
-fn checkFpNeverEscapesToCallOrMem(slice: []const Instr, fp: u32) bool {
+fn checkFpNeverEscapesToCallOrMem(slice: []const Instr, fp: u32, sp_updated_in_prologue: bool) bool {
     var i: usize = 0;
     while (i < slice.len) : (i += 1) {
         switch (slice[i]) {
             .local_set => |l| if (l == fp) return false,
             .local_tee => |l| if (l == fp) return false,
+            .call, .return_call, .return_call_indirect => if (!sp_updated_in_prologue) return false,
+            .raw => |r| if (!sp_updated_in_prologue and r.len > 0) switch (r[0]) {
+                0x10, 0x11, 0x12, 0x13, 0x14, 0x15 => return false,
+                else => {},
+            },
             .local_get => |l| if (l == fp) {
                 if (i + 1 < slice.len) {
                     if (decodeLoadAccess(slice[i + 1]) != null) {
@@ -2553,17 +2550,18 @@ fn checkFpNeverEscapesToCallOrMem(slice: []const Instr, fp: u32) bool {
                         continue;
                     }
                     if (findSingleValueStoreIdx(slice, i + 1, fp)) |store_idx| {
+                        if (!checkFpNeverEscapesToCallOrMem(slice[i + 1 .. store_idx], fp, sp_updated_in_prologue)) return false;
                         i = store_idx;
                         continue;
                     }
                 }
                 return false;
             },
-            .block => |b| if (!checkFpNeverEscapesToCallOrMem(b.body.items, fp)) return false,
-            .loop => |lp| if (!checkFpNeverEscapesToCallOrMem(lp.body.items, fp)) return false,
+            .block => |b| if (!checkFpNeverEscapesToCallOrMem(b.body.items, fp, sp_updated_in_prologue)) return false,
+            .loop => |lp| if (!checkFpNeverEscapesToCallOrMem(lp.body.items, fp, sp_updated_in_prologue)) return false,
             .if_ => |if_inst| {
-                if (!checkFpNeverEscapesToCallOrMem(if_inst.then_body.items, fp)) return false;
-                if (if_inst.has_else and !checkFpNeverEscapesToCallOrMem(if_inst.else_body.items, fp)) return false;
+                if (!checkFpNeverEscapesToCallOrMem(if_inst.then_body.items, fp, sp_updated_in_prologue)) return false;
+                if (if_inst.has_else and !checkFpNeverEscapesToCallOrMem(if_inst.else_body.items, fp, sp_updated_in_prologue)) return false;
             },
             else => {},
         }
@@ -2683,6 +2681,17 @@ fn invalidateClobberedMemEntriesInSlice(
                         return;
                     };
                     if (sub >= 0x08 and sub <= 0x0b) {
+                        active.clearRetainingCapacity();
+                        return;
+                    }
+                },
+                0xfd => {
+                    var p: usize = 1;
+                    const sub = readU32(r, &p) catch {
+                        active.clearRetainingCapacity();
+                        return;
+                    };
+                    if (sub >= 0x58 and sub <= 0x5b) {
                         active.clearRetainingCapacity();
                         return;
                     }
@@ -3232,6 +3241,14 @@ fn forwardAndEliminateMemBlock(
                             active.clearRetainingCapacity();
                         }
                     },
+                    0xfd => {
+                        var p: usize = 1;
+                        const sub = readU32(r, &p) catch 0xffff;
+                        if (sub >= 0x54 and sub <= 0x5b) {
+                            for (pending_stores.items) |*ps| ps.active = false;
+                            if (sub >= 0x58) active.clearRetainingCapacity();
+                        }
+                    },
                     else => {},
                 };
                 out.append(arena, inst) catch return error.OutOfMemory;
@@ -3278,7 +3295,7 @@ fn forwardAndEliminateMemoryOps(arena: std.mem.Allocator, root_list: *InstrList)
     var active: std.ArrayListUnmanaged(TrackedMemEntry) = .empty;
     if (detectShadowStackFrame(root_list.items)) |frame| {
         const body_slice = root_list.items[frame.body_start..frame.body_end];
-        const fp_never_escapes = checkFpNeverEscapesToCallOrMem(body_slice, frame.fp);
+        const fp_never_escapes = checkFpNeverEscapesToCallOrMem(body_slice, frame.fp, frame.has_epilogue);
         const non_escaping_fp: ?u32 = if (fp_never_escapes) frame.fp else null;
 
         // If `scalarizeShadowStackSlots` intentionally preserved a single-store + single-load full-width slot
@@ -3456,15 +3473,17 @@ fn getLocalValType(module: *const Mod.Module, func: *const Mod.Func, local_idx: 
 }
 
 fn inferExprValType(cand: []const Instr, module: *const Mod.Module, func: *const Mod.Func) ?types.ValType {
-    if (cand.len == 0) return null;
-    return switch (cand[cand.len - 1]) {
+    var end = cand.len;
+    while (end > 0 and cand[end - 1] == .nop) end -= 1;
+    if (end == 0) return null;
+    return switch (cand[end - 1]) {
         .i32_const => .i32,
         .i64_const => .i64,
         .local_get => |l| getLocalValType(module, func, l),
         .numeric_op => |op| switch (op) {
-            0x45...0x78, 0xa7...0xab, 0xb6, 0xbc, 0xc0, 0xc1 => .i32,
+            0x45...0x78, 0xa7...0xab, 0xbc, 0xc0, 0xc1 => .i32,
             0x79...0x8a, 0xac...0xb1, 0xbd, 0xc2...0xc4 => .i64,
-            0x8b...0x98, 0xb2...0xb5, 0xbe => .f32,
+            0x8b...0x98, 0xb2...0xb6, 0xbe => .f32,
             0x99...0xa6, 0xb7...0xbb, 0xbf => .f64,
             else => null,
         },
@@ -3481,7 +3500,11 @@ fn inferExprValType(cand: []const Instr, module: *const Mod.Module, func: *const
                 if (g < module.globals.items.len) break :blk module.globals.items[g].type.val_type;
                 break :blk null;
             },
-            0x1b => if (cand.len >= 4) inferExprValType(cand[0 .. cand.len - 1], module, func) else null,
+            0x1b => blk: {
+                const c = findPrevSingleValueExprStart(cand, end - 1) orelse break :blk null;
+                const v2 = findPrevSingleValueExprStart(cand, c) orelse break :blk null;
+                break :blk inferExprValType(cand[0..v2], module, func) orelse inferExprValType(cand[0..c], module, func);
+            },
             0xfc => blk: {
                 var p: usize = 1;
                 const sub = readU32(r, &p) catch break :blk null;
@@ -3495,8 +3518,8 @@ fn inferExprValType(cand: []const Instr, module: *const Mod.Module, func: *const
                 var p: usize = 1;
                 const sub = readU32(r, &p) catch break :blk null;
                 break :blk switch (sub) {
-                    0x15...0x1c, 0x63, 0x64, 0x83, 0x84, 0xa3, 0xa4, 0xc3, 0xc4 => .i32,
-                    0x1d, 0x1e => .i64,
+                    0x15, 0x16, 0x18, 0x19, 0x1b, 0x53, 0x63, 0x64, 0x83, 0x84, 0xa3, 0xa4, 0xc3, 0xc4 => .i32,
+                    0x1d => .i64,
                     0x1f => .f32,
                     0x21 => .f64,
                     else => .v128,
@@ -3548,13 +3571,13 @@ fn isLoopInvariantExpr(
         }
 
         switch (inst) {
-            .i32_const, .i64_const => {},
+            .nop, .i32_const, .i64_const => {},
             .local_get => |l| if (effects.modified_locals.contains(l)) return false,
             .local_set, .local_tee => return false,
             .numeric_op => |op| switch (op) {
                 // Trapping integer div/rem and float-to-int truncations cannot be hoisted speculatively
-                0x6d...0x70, 0x7f...0x82, 0xa8...0xaf => return false,
-                0x45...0x6c, 0x71...0x7e, 0x83...0xa7, 0xb0...0xc4 => {},
+                0x6d...0x70, 0x7f...0x82, 0xa8...0xab, 0xae...0xb1 => return false,
+                0x45...0x6c, 0x71...0x7e, 0x83...0xa7, 0xac, 0xad, 0xb2...0xc4 => {},
                 else => return false,
             },
             .raw => |r| {
@@ -3769,7 +3792,7 @@ fn hoistLoopInvariantCode(
     var non_escaping_fp: ?u32 = null;
     if (detectShadowStackFrame(root_list.items)) |frame| {
         const body_slice = root_list.items[frame.body_start..frame.body_end];
-        if (checkFpNeverEscapesToCallOrMem(body_slice, frame.fp)) {
+        if (checkFpNeverEscapesToCallOrMem(body_slice, frame.fp, frame.has_epilogue)) {
             non_escaping_fp = frame.fp;
         }
     }
@@ -4116,6 +4139,7 @@ fn findPrevSingleValueExprStart(slice: []const Instr, end_pos: usize) ?usize {
     var pos: usize = end_pos;
     while (pos > 0) {
         pos -= 1;
+        if (pos < end_pos - 1 and slice[pos] == .nop) continue;
         const eff = valExprStackEffect(slice[pos], null) orelse return null;
         if (eff.pushes == 0) return null;
         needed = needed - eff.pushes + eff.pops;
@@ -10567,6 +10591,76 @@ test "Optimizer: structured Wasm LICM (hoistLoopInvariantCode)" {
         }
     }
     try testing.expect(found_loop);
+
+    // 2. Hoist loop-invariant `i64` `select` expression and verify scratch local has type `.i64`:
+    {
+        var mod2 = Mod.Module.init(allocator);
+        defer mod2.deinit();
+
+        // Type 0: (param i64 a, i64 b, i32 cond, i32 n) -> (result i64)
+        try mod2.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i64, .i64, .i32, .i32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i64}),
+        } });
+        try mod2.type_meta.append(allocator, .{});
+
+        // local 4 = i (i32), local 5 = acc (i64)
+        const select_loop_code = [_]u8{
+            0x03, 0x40, // loop (empty)
+            0x20, 0x05, // local.get 5 (acc)
+            // Loop-invariant i64 select: `select(a, b, cond)`
+            0x20, 0x00, // local.get 0 (a: i64)
+            0x20, 0x01, // local.get 1 (b: i64)
+            0x20, 0x02, // local.get 2 (cond: i32)
+            0x1b, // select (result is i64!)
+            0x7c, // i64.add
+            0x21, 0x05, // local.set 5 (acc)
+            0x20, 0x04, // local.get 4 (i)
+            0x41, 0x01, // i32.const 1
+            0x6a, // i32.add
+            0x22, 0x04, // local.tee 4 (i)
+            0x20, 0x03, // local.get 3 (n)
+            0x49, // i32.lt_u
+            0x0d, 0x00, // br_if 0
+            0x0b, // end loop
+            0x20, 0x05, // local.get 5 (acc)
+            0x0b, // end
+        };
+
+        var f_sel = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &select_loop_code };
+        try f_sel.local_types.appendSlice(allocator, &.{ .i32, .i64 });
+        try mod2.funcs.append(allocator, f_sel);
+        try mod2.exports.append(allocator, .{ .name = "licm_i64_select", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm2 = try writer.writeModule(allocator, &mod2);
+        defer allocator.free(wasm2);
+        const opt2 = try optimize(allocator, wasm2, .{ .optimize_mode = .fast });
+        defer allocator.free(opt2);
+        var opt_mod2 = try reader.readModule(allocator, opt2);
+        defer opt_mod2.deinit();
+
+        var arena2 = std.heap.ArenaAllocator.init(allocator);
+        defer arena2.deinit();
+        var pos2: usize = 0;
+        var parsed2: InstrList = .empty;
+        _ = try parseInstrBlock(arena2.allocator(), opt_mod2.funcs.items[0].code_bytes, &pos2, false, &parsed2);
+
+        // Verify `select` (`0x1b`) was hoisted out of `.loop` and the new scratch local is `.i64`:
+        var i64_locals: usize = 0;
+        for (opt_mod2.funcs.items[0].local_types.items) |lt| {
+            if (lt == .i64) i64_locals += 1;
+        }
+        try testing.expectEqual(@as(usize, 2), i64_locals); // `acc` + hoisted `select` scratch local
+        for (parsed2.items) |inst| {
+            if (inst == .loop) {
+                for (inst.loop.body.items) |lp_inst| {
+                    if (lp_inst == .raw and lp_inst.raw.len > 0) {
+                        try testing.expect(lp_inst.raw[0] != 0x1b);
+                    }
+                }
+            }
+        }
+    }
 }
 
 test "Optimizer: store-to-load forwarding, redundant-load elimination, narrow bit-slice extraction, and DSE" {
@@ -10711,6 +10805,77 @@ test "Optimizer: store-to-load forwarding, redundant-load elimination, narrow bi
             0x0b, // end
         };
         try testing.expectEqualSlices(u8, &expected, opt_mod.funcs.items[0].code_bytes);
+    }
+
+    // 3. Storing `fp + 16` into `[fp + 0]` escapes `fp` into memory; store to `[fp + 16]` must NOT be eliminated:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.globals.append(allocator, .{
+            .type = .{ .val_type = .i32, .mutability = .mutable },
+            .init_expr_bytes = &[_]u8{ 0x41, 0x80, 0x80, 0x04 },
+        });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{.i32}),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const escaped_fp_store_code = [_]u8{
+            0x23, 0x00, // global.get 0
+            0x41, 32, // i32.const 32
+            0x6b, // i32.sub
+            0x22, 0x01, // local.tee 1 (fp)
+            0x24, 0x00, // global.set 0
+            // Store `fp + 16` as a pointer value into `[fp + 0]`:
+            0x20, 0x01, // local.get 1 (fp)
+            0x20, 0x01, // local.get 1 (fp)
+            0x41, 16, // i32.const 16
+            0x6a, // i32.add
+            0x36, 0x02, 0x00, // i32.store offset=0
+            // Store `x` into `[fp + 16]`:
+            0x20, 0x01, // local.get 1 (fp)
+            0x20, 0x00, // local.get 0 (x)
+            0x36, 0x02, 16, // i32.store offset=16 (LIVE: read indirectly via `[fp + 0]` below!)
+            // Load pointer `p = [fp + 0]` and dereference `[p + 0]`:
+            0x20, 0x01, // local.get 1 (fp)
+            0x28, 0x02, 0x00, // i32.load offset=0
+            0x28, 0x02, 0x00, // i32.load offset=0
+            // Epilogue:
+            0x20, 0x01, // local.get 1 (fp)
+            0x41, 32, // i32.const 32
+            0x6a, // i32.add
+            0x24, 0x00, // global.set 0
+            0x0b, // end
+        };
+
+        var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &escaped_fp_store_code };
+        try f0.local_types.append(allocator, .i32); // local 1 (fp)
+        try mod.funcs.append(allocator, f0);
+        try mod.exports.append(allocator, .{ .name = "escaped_fp_val", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        var parse_pos: usize = 0;
+        var parsed: InstrList = .empty;
+        _ = try parseInstrBlock(arena_state.allocator(), opt_mod.funcs.items[0].code_bytes, &parse_pos, false, &parsed);
+
+        var stores_to_16: usize = 0;
+        for (parsed.items) |inst| {
+            if (decodeStoreAccess(inst)) |acc| {
+                if (acc.offset == 16) stores_to_16 += 1;
+            }
+        }
+        try testing.expectEqual(@as(usize, 1), stores_to_16);
     }
 }
 
@@ -10942,9 +11107,9 @@ test "Optimizer: 2-pass bottom-up inlining, unconditional 1-call wrapper inlinin
         try testing.expectEqual(@as(usize, 1), opt_mod.funcs.items.len);
     }
 
-    // 2. Partial-frame per-slot shadow-stack scalarization when `fp + 16` escapes to a call:
-    //    Slots at `[fp + 0 .. fp + 4]` (`offset + size <= 16`) are provably unreachable from `fp + 16`
-    //    and are scalarized into locals while keeping the stack frame for `fp + 16`.
+    // 2. Partial-frame per-slot shadow-stack scalarization when `[fp + 16]` has overlapping mixed-type
+    //    accesses (`i64.store` + `i32.load`) while `[fp + 0]` is a clean scalar `i32` slot:
+    //    Slot `[fp + 0]` is promoted to a local while keeping the stack frame for `[fp + 16]`.
     {
         var mod = Mod.Module.init(allocator);
         defer mod.deinit();
@@ -10954,13 +11119,95 @@ test "Optimizer: 2-pass bottom-up inlining, unconditional 1-call wrapper inlinin
             .type = .{ .val_type = .i32, .mutability = .mutable },
             .init_expr_bytes = &[_]u8{ 0x41, 0x80, 0x80, 0x04 },
         });
-        // Type 0: (param i32) -> () (imported sink taking `fp + 16`)
+        // Type 0: (param i32, i64) -> (result i32)
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i64 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const partial_frame_code = [_]u8{
+            0x23, 0x00, // global.get 0
+            0x41, 32, // i32.const 32
+            0x6b, // i32.sub
+            0x22, 0x02, // local.tee 2 (fp)
+            0x24, 0x00, // global.set 0
+            // Clean scalar slot at `fp + 0`:
+            0x20, 0x02, // local.get 2 (fp)
+            0x20, 0x00, // local.get 0 (p0: i32)
+            0x41, 0x07, // i32.const 7
+            0x6a, // i32.add
+            0x36, 0x02, 0x00, // i32.store offset=0
+            // Non-promotable overlapping mixed-type slot at `fp + 16` (`i64.store` + `i32.load` at offset=20):
+            0x20, 0x02, // local.get 2 (fp)
+            0x20, 0x01, // local.get 1 (p1: i64)
+            0x37, 0x03, 16, // i64.store offset=16
+            0x20, 0x02, // local.get 2 (fp)
+            0x28, 0x02, 20, // i32.load offset=20 (overlaps [16..24))
+            // Read clean scalar slot `fp + 0` twice:
+            0x20, 0x02, // local.get 2 (fp)
+            0x28, 0x02, 0x00, // i32.load offset=0
+            0x6a, // i32.add
+            0x20, 0x02, // local.get 2 (fp)
+            0x28, 0x02, 0x00, // i32.load offset=0
+            0x6a, // i32.add
+            // Epilogue:
+            0x20, 0x02, // local.get 2 (fp)
+            0x41, 32, // i32.const 32
+            0x6a, // i32.add
+            0x24, 0x00, // global.set 0
+            0x0b, // end
+        };
+
+        var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &partial_frame_code };
+        try f0.local_types.append(allocator, .i32); // local 2 (fp)
+        try mod.funcs.append(allocator, f0);
+        try mod.exports.append(allocator, .{ .name = "partial_sroa", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        var parse_pos: usize = 0;
+        var parsed: InstrList = .empty;
+        _ = try parseInstrBlock(arena_state.allocator(), opt_mod.funcs.items[0].code_bytes, &parse_pos, false, &parsed);
+
+        var stores_at_0: usize = 0;
+        var loads_at_0: usize = 0;
+        for (parsed.items) |inst| {
+            if (decodeStoreAccess(inst)) |acc| {
+                if (acc.offset == 0) stores_at_0 += 1;
+            }
+            if (decodeLoadAccess(inst)) |acc| {
+                if (acc.offset == 0) loads_at_0 += 1;
+            }
+        }
+        // Clean scalar slot `fp + 0` was promoted to a local (0 stores/loads at offset 0)!
+        try testing.expectEqual(@as(usize, 0), stores_at_0);
+        try testing.expectEqual(@as(usize, 0), loads_at_0);
+    }
+
+    // 3. `@fieldParentPtr` safety: when `fp + 16` escapes to an opaque `call`, `[fp + 0]` is NOT promoted
+    //    because the callee could compute `@fieldParentPtr` (`(fp + 16) - 16`) to access `[fp + 0]`:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.globals.append(allocator, .{
+            .type = .{ .val_type = .i32, .mutability = .mutable },
+            .init_expr_bytes = &[_]u8{ 0x41, 0x80, 0x80, 0x04 },
+        });
         try mod.module_types.append(allocator, .{ .func_type = .{
             .params = try allocator.dupe(types.ValType, &.{.i32}),
             .results = &.{},
         } });
         try mod.type_meta.append(allocator, .{});
-        // Type 1: (param i32) -> (result i32)
         try mod.module_types.append(allocator, .{ .func_type = .{
             .params = try allocator.dupe(types.ValType, &.{.i32}),
             .results = try allocator.dupe(types.ValType, &.{.i32}),
@@ -10969,7 +11216,7 @@ test "Optimizer: 2-pass bottom-up inlining, unconditional 1-call wrapper inlinin
 
         try mod.imports.append(allocator, .{
             .module_name = "env",
-            .field_name = "use_buf",
+            .field_name = "use_field_ptr",
             .kind = .func,
             .func = .{ .type_var = .{ .index = 0 } },
         });
@@ -10977,31 +11224,23 @@ test "Optimizer: 2-pass bottom-up inlining, unconditional 1-call wrapper inlinin
             .is_import = true,
             .decl = .{ .type_var = .{ .index = 0 } },
         });
+        mod.num_func_imports = 1;
 
-        const partial_frame_code = [_]u8{
+        const escaped_call_code = [_]u8{
             0x23, 0x00, // global.get 0
             0x41, 32, // i32.const 32
             0x6b, // i32.sub
             0x22, 0x01, // local.tee 1 (fp)
             0x24, 0x00, // global.set 0
-            // Non-escaping scalar slot at `fp + 0` (0 + 4 <= 16):
             0x20, 0x01, // local.get 1 (fp)
             0x20, 0x00, // local.get 0 (param)
-            0x41, 0x07, // i32.const 7
-            0x6a, // i32.add
             0x36, 0x02, 0x00, // i32.store offset=0
-            // Pass `fp + 16` to imported `use_buf`:
             0x20, 0x01, // local.get 1 (fp)
             0x41, 16, // i32.const 16
             0x6a, // i32.add
-            0x10, 0x00, // call $use_buf
-            // Read non-escaping scalar slot `fp + 0` twice:
+            0x10, 0x00, // call $use_field_ptr (could subtract 16 via @fieldParentPtr!)
             0x20, 0x01, // local.get 1 (fp)
             0x28, 0x02, 0x00, // i32.load offset=0
-            0x20, 0x01, // local.get 1 (fp)
-            0x28, 0x02, 0x00, // i32.load offset=0
-            0x6a, // i32.add
-            // Epilogue:
             0x20, 0x01, // local.get 1 (fp)
             0x41, 32, // i32.const 32
             0x6a, // i32.add
@@ -11009,10 +11248,10 @@ test "Optimizer: 2-pass bottom-up inlining, unconditional 1-call wrapper inlinin
             0x0b, // end
         };
 
-        var f1 = Mod.Func{ .decl = .{ .type_var = .{ .index = 1 } }, .code_bytes = &partial_frame_code };
+        var f1 = Mod.Func{ .decl = .{ .type_var = .{ .index = 1 } }, .code_bytes = &escaped_call_code };
         try f1.local_types.append(allocator, .i32); // local 1 (fp)
         try mod.funcs.append(allocator, f1);
-        try mod.exports.append(allocator, .{ .name = "partial_sroa", .kind = .func, .var_ = .{ .index = 1 } });
+        try mod.exports.append(allocator, .{ .name = "field_parent_ptr_safe", .kind = .func, .var_ = .{ .index = 1 } });
 
         const wasm = try writer.writeModule(allocator, &mod);
         defer allocator.free(wasm);
@@ -11035,8 +11274,8 @@ test "Optimizer: 2-pass bottom-up inlining, unconditional 1-call wrapper inlinin
                 if (inst.raw[0] == 0x28) i32_loads += 1;
             }
         }
-        // Slot `fp + 0` was scalarized (0 stores, 0 loads), even though `fp + 16` escaped to `use_buf`!
-        try testing.expectEqual(@as(usize, 0), i32_stores);
-        try testing.expectEqual(@as(usize, 0), i32_loads);
+        // Both store and load at `[fp + 0]` remain in memory because `fp + 16` escaped to `use_field_ptr`!
+        try testing.expectEqual(@as(usize, 1), i32_stores);
+        try testing.expectEqual(@as(usize, 1), i32_loads);
     }
 }
