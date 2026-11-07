@@ -386,6 +386,11 @@ const FdEntry = struct {
     position: u64 = 0,
     preopen_name_ptr: [*]const u8 = undefined,
     preopen_name_len: usize = 0,
+    read_stream: i32 = -1,
+    read_stream_offset: u64 = 0,
+    write_stream: i32 = -1,
+    write_stream_offset: u64 = 0,
+    write_stream_append: bool = false,
 };
 
 var stdin_handle: i32 = -1;
@@ -453,6 +458,45 @@ fn getFdEntry(fd: wasi.fd_t) ?*FdEntry {
     if (idx >= max_fds) return null;
     if (!fd_table[idx].in_use) return null;
     return &fd_table[idx];
+}
+
+fn dropReadStream(entry: *FdEntry) void {
+    if (entry.read_stream >= 0) {
+        if (builtin.os.tag == .wasip2) @"[resource-drop]input-stream"(entry.read_stream);
+        entry.read_stream = -1;
+        entry.read_stream_offset = 0;
+    }
+}
+
+fn dropWriteStream(entry: *FdEntry) void {
+    if (entry.write_stream >= 0) {
+        if (builtin.os.tag == .wasip2) @"[resource-drop]output-stream"(entry.write_stream);
+        entry.write_stream = -1;
+        entry.write_stream_offset = 0;
+        entry.write_stream_append = false;
+    }
+}
+
+fn invalidateStreams(entry: *FdEntry) void {
+    dropReadStream(entry);
+    dropWriteStream(entry);
+}
+
+fn invalidateReadStreamsForEntry(target: *FdEntry) void {
+    dropReadStream(target);
+    for (&fd_table) |*entry| {
+        if (entry.in_use and entry.handle == target.handle) {
+            dropReadStream(entry);
+        }
+    }
+}
+
+fn invalidateAllReadStreams() void {
+    for (&fd_table) |*entry| {
+        if (entry.in_use) {
+            dropReadStream(entry);
+        }
+    }
 }
 
 const ResolvedPath = struct {
@@ -654,6 +698,7 @@ pub fn fd_close(fd: wasi.fd_t) callconv(.c) wasi.errno_t {
     if (fd < 0) return .BADF;
     if (fd <= 2) return .SUCCESS;
     const entry = getFdEntry(fd) orelse return .BADF;
+    invalidateStreams(entry);
     if (!entry.is_preopen) {
         @"[resource-drop]descriptor"(entry.handle);
         entry.* = .{};
@@ -663,6 +708,7 @@ pub fn fd_close(fd: wasi.fd_t) callconv(.c) wasi.errno_t {
 
 pub fn fd_datasync(fd: wasi.fd_t) callconv(.c) wasi.errno_t {
     const entry = getFdEntry(fd) orelse return .BADF;
+    invalidateStreams(entry);
     var ret: [8]u8 align(4) = @splat(0);
     @"[method]descriptor.sync-data"(entry.handle, &ret);
     return descriptorErrorOnlyResult(&ret);
@@ -715,6 +761,7 @@ pub fn fd_fdstat_get(fd: wasi.fd_t, buf: *wasi.fdstat_t) callconv(.c) wasi.errno
 
 pub fn fd_fdstat_set_flags(fd: wasi.fd_t, flags: wasi.fdflags_t) callconv(.c) wasi.errno_t {
     const entry = getFdEntry(fd) orelse return .BADF;
+    invalidateStreams(entry);
     entry.append = flags.APPEND;
     return .SUCCESS;
 }
@@ -762,6 +809,8 @@ pub fn fd_filestat_get(fd: wasi.fd_t, buf: *wasi.filestat_t) callconv(.c) wasi.e
 
 pub fn fd_filestat_set_size(fd: wasi.fd_t, st_size: wasi.filesize_t) callconv(.c) wasi.errno_t {
     const entry = getFdEntry(fd) orelse return .BADF;
+    invalidateStreams(entry);
+    invalidateAllReadStreams();
     var ret: [8]u8 align(4) = @splat(0);
     @"[method]descriptor.set-size"(entry.handle, st_size, &ret);
     return descriptorErrorOnlyResult(&ret);
@@ -863,14 +912,57 @@ pub fn fd_prestat_dir_name(fd: wasi.fd_t, path: [*]u8, path_len: usize) callconv
 }
 
 fn writeOutputStreamIovs(stream: i32, iovs: [*]const wasi.ciovec_t, iovs_len: usize, nwritten: *usize) wasi.errno_t {
+    var non_empty_count: usize = 0;
+    var single_iov: wasi.ciovec_t = .{ .base = undefined, .len = 0 };
+    for (0..iovs_len) |i| {
+        const iov = iovs[i];
+        if (iov.len > 0) {
+            non_empty_count += 1;
+            single_iov = iov;
+        }
+    }
+    if (non_empty_count == 0) {
+        nwritten.* = 0;
+        return .SUCCESS;
+    }
+    if (non_empty_count == 1 and single_iov.len <= 4096) {
+        var write_ret: [12]u8 align(4) = @splat(0);
+        @"[method]output-stream.blocking-write-and-flush"(stream, single_iov.base, single_iov.len, &write_ret);
+        if (write_ret[0] != 0) {
+            if (write_ret[4] == 0) {
+                @"[resource-drop]error"(std.mem.readInt(i32, write_ret[8..12], .little));
+            }
+            nwritten.* = 0;
+            return if (write_ret[4] == 1) .PIPE else .IO;
+        }
+        nwritten.* = single_iov.len;
+        return .SUCCESS;
+    }
+
     var total: usize = 0;
     for (0..iovs_len) |i| {
         const iov = iovs[i];
         var off: usize = 0;
         while (off < iov.len) {
-            const chunk = @min(iov.len - off, 4096);
+            var check_ret: [16]u8 align(8) = @splat(0);
+            @"[method]output-stream.check-write"(stream, &check_ret);
+            if (check_ret[0] != 0) {
+                if (check_ret[8] == 0) {
+                    @"[resource-drop]error"(std.mem.readInt(i32, check_ret[12..16], .little));
+                }
+                nwritten.* = total;
+                return if (check_ret[8] == 1) .PIPE else .IO;
+            }
+            const permit = std.mem.readInt(u64, check_ret[8..16], .little);
+            if (permit == 0) {
+                const pollable = @"[method]output-stream.subscribe"(stream);
+                @"[method]pollable.block"(pollable);
+                @"[resource-drop]pollable"(pollable);
+                continue;
+            }
+            const chunk: usize = @intCast(@min(@as(u64, iov.len - off), permit));
             var write_ret: [12]u8 align(4) = @splat(0);
-            @"[method]output-stream.blocking-write-and-flush"(stream, iov.base + off, chunk, &write_ret);
+            @"[method]output-stream.write"(stream, iov.base + off, chunk, &write_ret);
             if (write_ret[0] != 0) {
                 if (write_ret[4] == 0) {
                     @"[resource-drop]error"(std.mem.readInt(i32, write_ret[8..12], .little));
@@ -880,6 +972,17 @@ fn writeOutputStreamIovs(stream: i32, iovs: [*]const wasi.ciovec_t, iovs_len: us
             }
             off += chunk;
             total += chunk;
+        }
+    }
+    if (total > 0) {
+        var flush_ret: [12]u8 align(4) = @splat(0);
+        @"[method]output-stream.blocking-flush"(stream, &flush_ret);
+        if (flush_ret[0] != 0) {
+            if (flush_ret[4] == 0) {
+                @"[resource-drop]error"(std.mem.readInt(i32, flush_ret[8..12], .little));
+            }
+            nwritten.* = total;
+            return if (flush_ret[4] == 1) .PIPE else .IO;
         }
     }
     nwritten.* = total;
@@ -896,6 +999,7 @@ pub fn fd_pwrite(
     nwritten.* = 0;
     if (fd >= 0 and fd <= 2) return .SPIPE;
     const entry = getFdEntry(fd) orelse return .BADF;
+    invalidateReadStreamsForEntry(entry);
 
     var stream_ret: [8]u8 align(4) = @splat(0);
     @"[method]descriptor.write-via-stream"(entry.handle, offset, &stream_ret);
@@ -946,11 +1050,55 @@ pub fn fd_read(
     if (fd == 1 or fd == 2) return .BADF;
 
     const entry = getFdEntry(fd) orelse return .BADF;
-    const err = fd_pread(fd, iovs, iovs_len, entry.position, nread);
-    if (err == .SUCCESS) {
-        entry.position += nread.*;
+    dropWriteStream(entry);
+
+    if (entry.read_stream < 0 or entry.read_stream_offset != entry.position) {
+        dropReadStream(entry);
+        var stream_ret: [8]u8 align(4) = @splat(0);
+        @"[method]descriptor.read-via-stream"(entry.handle, entry.position, &stream_ret);
+        if (stream_ret[0] != 0) return errorCodeToErrno(stream_ret[4]);
+        entry.read_stream = std.mem.readInt(i32, stream_ret[4..8], .little);
+        entry.read_stream_offset = entry.position;
     }
-    return err;
+
+    var total: usize = 0;
+    for (0..iovs_len) |i| {
+        const iov = iovs[i];
+        if (iov.len == 0) continue;
+
+        var read_ret: [12]u8 align(4) = @splat(0);
+        @"[method]input-stream.blocking-read"(entry.read_stream, iov.len, &read_ret);
+        if (read_ret[0] != 0) {
+            if (read_ret[4] == 1) {
+                dropReadStream(entry);
+                break; // stream-error::closed (EOF)
+            }
+            @"[resource-drop]error"(std.mem.readInt(i32, read_ret[8..12], .little));
+            dropReadStream(entry);
+            if (total > 0) break;
+            return .IO;
+        }
+
+        const ptr_addr = std.mem.readInt(usize, read_ret[4..8], .little);
+        const len = std.mem.readInt(usize, read_ret[8..12], .little);
+        const copy_len = @min(len, iov.len);
+        if (copy_len > 0) {
+            const ptr: [*]u8 = @ptrFromInt(ptr_addr);
+            @memcpy(iov.base[0..copy_len], ptr[0..copy_len]);
+        }
+        if (len > 0) {
+            freeGuestSlice(@ptrFromInt(ptr_addr), len);
+        }
+        total += copy_len;
+        if (copy_len < iov.len) break;
+    }
+
+    entry.position += total;
+    if (entry.read_stream >= 0) {
+        entry.read_stream_offset += total;
+    }
+    nread.* = total;
+    return .SUCCESS;
 }
 
 pub fn fd_readdir(
@@ -1035,7 +1183,9 @@ pub fn fd_renumber(from: wasi.fd_t, to: wasi.fd_t) callconv(.c) wasi.errno_t {
     if (to_idx >= max_fds) return .BADF;
     if (from_entry.is_preopen or fd_table[to_idx].is_preopen) return .OPNOTSUPP;
 
+    invalidateStreams(from_entry);
     if (fd_table[to_idx].in_use) {
+        invalidateStreams(&fd_table[to_idx]);
         @"[resource-drop]descriptor"(fd_table[to_idx].handle);
     }
 
@@ -1057,6 +1207,8 @@ pub fn fd_seek(
         .SET => 0,
         .CUR => @intCast(entry.position),
         .END => blk: {
+            if (builtin.os.tag != .wasip2) return .NOSYS;
+            dropWriteStream(entry);
             var stat_ret: [104]u8 align(8) = @splat(0);
             @"[method]descriptor.stat"(entry.handle, &stat_ret);
             if (stat_ret[0] != 0) return errorCodeToErrno(stat_ret[8]);
@@ -1066,13 +1218,18 @@ pub fn fd_seek(
 
     const target = std.math.add(i64, base, offset) catch return .OVERFLOW;
     if (target < 0) return .INVAL;
-    entry.position = @intCast(target);
+    const new_pos: u64 = @intCast(target);
+    if (new_pos != entry.position) {
+        invalidateStreams(entry);
+        entry.position = new_pos;
+    }
     newoffset.* = entry.position;
     return .SUCCESS;
 }
 
 pub fn fd_sync(fd: wasi.fd_t) callconv(.c) wasi.errno_t {
     const entry = getFdEntry(fd) orelse return .BADF;
+    invalidateStreams(entry);
     var ret: [8]u8 align(4) = @splat(0);
     @"[method]descriptor.sync"(entry.handle, &ret);
     return descriptorErrorOnlyResult(&ret);
@@ -1099,7 +1256,9 @@ pub fn fd_write(
     }
 
     const entry = getFdEntry(fd) orelse return .BADF;
+    invalidateReadStreamsForEntry(entry);
     if (entry.append) {
+        dropWriteStream(entry);
         var stream_ret: [8]u8 align(4) = @splat(0);
         @"[method]descriptor.append-via-stream"(entry.handle, &stream_ret);
         if (stream_ret[0] != 0) return errorCodeToErrno(stream_ret[4]);
@@ -1119,9 +1278,26 @@ pub fn fd_write(
         return err;
     }
 
-    const err = fd_pwrite(fd, iovs, iovs_len, entry.position, nwritten);
+    if (entry.write_stream < 0 or entry.write_stream_append or entry.write_stream_offset != entry.position) {
+        dropWriteStream(entry);
+        var stream_ret: [8]u8 align(4) = @splat(0);
+        @"[method]descriptor.write-via-stream"(entry.handle, entry.position, &stream_ret);
+        if (stream_ret[0] != 0) return errorCodeToErrno(stream_ret[4]);
+        entry.write_stream = std.mem.readInt(i32, stream_ret[4..8], .little);
+        entry.write_stream_offset = entry.position;
+        entry.write_stream_append = false;
+    }
+
+    const err = writeOutputStreamIovs(entry.write_stream, iovs, iovs_len, nwritten);
     if (err == .SUCCESS) {
         entry.position += nwritten.*;
+        entry.write_stream_offset += nwritten.*;
+    } else {
+        dropWriteStream(entry);
+        if (nwritten.* > 0) {
+            entry.position += nwritten.*;
+            return .SUCCESS;
+        }
     }
     return err;
 }
@@ -1609,10 +1785,12 @@ test "canonical ABI struct layouts and timestamp decoding" {
     err_ret_canon[1] = 20; // no-entry at offset 1
     try std.testing.expectEqual(wasi.errno_t.NOENT, descriptorErrorOnlyResult(&err_ret_canon));
 
-    var n: usize = 0;
-    try std.testing.expectEqual(wasi.errno_t.SPIPE, fd_pread(0, undefined, 0, 0, &n));
-    try std.testing.expectEqual(wasi.errno_t.SPIPE, fd_pwrite(1, undefined, 0, 0, &n));
-    try std.testing.expectEqual(wasi.errno_t.SPIPE, fd_pwrite(2, undefined, 0, 0, &n));
+    if (builtin.os.tag.isWasi()) {
+        var n: usize = 0;
+        try std.testing.expectEqual(wasi.errno_t.SPIPE, fd_pread(0, undefined, 0, 0, &n));
+        try std.testing.expectEqual(wasi.errno_t.SPIPE, fd_pwrite(1, undefined, 0, 0, &n));
+        try std.testing.expectEqual(wasi.errno_t.SPIPE, fd_pwrite(2, undefined, 0, 0, &n));
+    }
 }
 
 test "stripPreopenPrefix and resolvePathEntry" {
@@ -1667,4 +1845,58 @@ test "stripPreopenPrefix and resolvePathEntry" {
     const unmatched = resolvePathEntry(3, "/nonexistent", 12).?;
     try std.testing.expectEqual(@as(i32, 10), unmatched.entry.handle);
     try std.testing.expectEqualStrings("/nonexistent", unmatched.path[0..unmatched.path_len]);
+}
+
+test "FdEntry stream caching and invalidation" {
+    if (builtin.os.tag.isWasi()) return error.SkipZigTest;
+
+    const saved_init = preopens_initialized;
+    const saved_fd5 = fd_table[5];
+    const saved_fd6 = fd_table[6];
+    defer {
+        preopens_initialized = saved_init;
+        fd_table[5] = saved_fd5;
+        fd_table[6] = saved_fd6;
+    }
+
+    preopens_initialized = true;
+    fd_table[5] = .{
+        .in_use = true,
+        .handle = 50,
+        .position = 128,
+        .read_stream = 101,
+        .read_stream_offset = 128,
+        .write_stream = 102,
+        .write_stream_offset = 128,
+    };
+    fd_table[6] = .{
+        .in_use = true,
+        .handle = 60,
+        .position = 64,
+        .read_stream = 201,
+        .read_stream_offset = 64,
+    };
+
+    // Writing to fd 5 invalidates fd 5's read stream, but preserves fd 6's read stream.
+    invalidateReadStreamsForEntry(&fd_table[5]);
+    try std.testing.expectEqual(@as(i32, -1), fd_table[5].read_stream);
+    try std.testing.expectEqual(@as(u64, 0), fd_table[5].read_stream_offset);
+    try std.testing.expectEqual(@as(i32, 102), fd_table[5].write_stream);
+    try std.testing.expectEqual(@as(i32, 201), fd_table[6].read_stream);
+
+    // Seeking to the current position preserves cached streams.
+    var newoffset: wasi.filesize_t = 0;
+    try std.testing.expectEqual(wasi.errno_t.SUCCESS, fd_seek(6, 0, .CUR, &newoffset));
+    try std.testing.expectEqual(@as(wasi.filesize_t, 64), newoffset);
+    try std.testing.expectEqual(@as(i32, 201), fd_table[6].read_stream);
+
+    // Seeking to a different position invalidates cached streams.
+    try std.testing.expectEqual(wasi.errno_t.SUCCESS, fd_seek(6, 16, .CUR, &newoffset));
+    try std.testing.expectEqual(@as(wasi.filesize_t, 80), newoffset);
+    try std.testing.expectEqual(@as(i32, -1), fd_table[6].read_stream);
+
+    try std.testing.expectEqual(wasi.errno_t.SUCCESS, fd_fdstat_set_flags(5, .{ .APPEND = true }));
+    try std.testing.expect(fd_table[5].append);
+    try std.testing.expectEqual(@as(i32, -1), fd_table[5].write_stream);
+    try std.testing.expectEqual(@as(u64, 0), fd_table[5].write_stream_offset);
 }

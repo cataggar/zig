@@ -500,6 +500,10 @@ pub const TaskContext = struct {
         if (builtin.mode == .debug or builtin.mode == .safe) {
             self.shadow_stack.verifyCanaryAndBounds();
         }
+        if (self.waitable_set) |ws| {
+            if (builtin.os.tag == .wasip3) waitable_set.drop(ws);
+            self.waitable_set = null;
+        }
         self.status = .completed;
         setActiveTask(self.prev_task);
         self.prev_task = null;
@@ -549,21 +553,35 @@ pub const TaskContext = struct {
     }
 };
 
+fn acquireWaitableSet() i32 {
+    if (getActiveTask()) |task| {
+        if (task.waitable_set) |ws| return ws;
+        const ws = if (builtin.os.tag == .wasip3) waitable_set.new() else 1;
+        task.waitable_set = ws;
+        return ws;
+    }
+    const s = globalState();
+    if (s.root_waitable_set <= 0) {
+        s.root_waitable_set = if (builtin.os.tag == .wasip3) waitable_set.new() else 1;
+    }
+    return s.root_waitable_set;
+}
+
 fn waitReady(waitable_handle: i32) u32 {
-    const ws = waitable_set.new();
-    defer waitable_set.drop(ws);
+    const ws = acquireWaitableSet();
     waitable.join(waitable_handle, ws);
     var payload: [2]i32 = .{ 0, 0 };
-    if (getActiveTask()) |task| {
-        task.waitable_set = ws;
-        task.suspendTask();
-        defer {
-            task.resumeTask();
-            task.waitable_set = null;
+    while (true) {
+        var event_code: i32 = 0;
+        if (getActiveTask()) |task| {
+            task.waitable_set = ws;
+            task.suspendTask();
+            defer task.resumeTask();
+            event_code = waitable_set.wait(ws, &payload);
+        } else {
+            event_code = waitable_set.wait(ws, &payload);
         }
-        _ = waitable_set.wait(ws, &payload);
-    } else {
-        _ = waitable_set.wait(ws, &payload);
+        if (event_code != 0 and payload[0] == waitable_handle) break;
     }
     waitable.join(waitable_handle, 0);
     return @bitCast(payload[1]);
@@ -574,8 +592,7 @@ pub fn awaitAsyncCall(callstatus: i32) void {
     const state = ustatus & 0xf;
     const subtask_handle: i32 = @intCast(ustatus >> 4);
     if (state != 2) { // 2 == RETURNED
-        const ws = waitable_set.new();
-        defer waitable_set.drop(ws);
+        const ws = acquireWaitableSet();
         waitable.join(subtask_handle, ws);
         var payload: [2]i32 = .{ 0, 0 };
         while (true) {
@@ -585,7 +602,6 @@ pub fn awaitAsyncCall(callstatus: i32) void {
                 task.suspendTask();
                 defer {
                     task.resumeTask();
-                    task.waitable_set = null;
                     task.subtask = null;
                 }
                 _ = waitable_set.wait(ws, &payload);
@@ -594,6 +610,7 @@ pub fn awaitAsyncCall(callstatus: i32) void {
             }
             if (payload[0] == subtask_handle and (@as(u32, @bitCast(payload[1])) & 0xf) == 2) break;
         }
+        waitable.join(subtask_handle, 0);
         subtask.drop(subtask_handle);
     }
 }
@@ -973,6 +990,9 @@ const FdEntry = extern struct {
     position: u64 = 0,
     preopen_name_ptr: [*]const u8 = undefined,
     preopen_name_len: usize = 0,
+    read_stream: i32 = -1,
+    read_fut: i32 = -1,
+    read_stream_offset: u64 = 0,
 };
 
 pub const State = extern struct {
@@ -984,6 +1004,7 @@ pub const State = extern struct {
     cached_env: CanonEnvList = .{ .ptr = 0, .len = 0 },
     env_initialized: bool = false,
     active_task: ?*TaskContext = null,
+    root_waitable_set: i32 = -1,
 };
 
 pub var local_state: State = .{};
@@ -1028,6 +1049,43 @@ fn getFdEntry(fd: wasi.fd_t) ?*FdEntry {
     const s = globalState();
     if (!s.fd_table[idx].in_use) return null;
     return &s.fd_table[idx];
+}
+
+fn dropFuture(comptime Fut: type, fut_handle: i32) void {
+    if (fut_handle >= 0) {
+        if (builtin.os.tag == .wasip3) Fut.@"drop-readable"(fut_handle);
+    }
+}
+
+fn dropReadStream(entry: *FdEntry) void {
+    if (entry.read_stream >= 0) {
+        if (builtin.os.tag == .wasip3) stream_u8.@"drop-readable"(entry.read_stream);
+        entry.read_stream = -1;
+    }
+    if (entry.read_fut >= 0) {
+        dropFuture(future_fs_read, entry.read_fut);
+        entry.read_fut = -1;
+    }
+    entry.read_stream_offset = 0;
+}
+
+fn invalidateReadStreamsForEntry(target: *FdEntry) void {
+    dropReadStream(target);
+    const s = globalState();
+    for (&s.fd_table) |*entry| {
+        if (entry.in_use and entry.handle == target.handle) {
+            dropReadStream(entry);
+        }
+    }
+}
+
+fn invalidateAllReadStreams() void {
+    const s = globalState();
+    for (&s.fd_table) |*entry| {
+        if (entry.in_use) {
+            dropReadStream(entry);
+        }
+    }
 }
 
 const ResolvedPath = struct {
@@ -1236,6 +1294,7 @@ pub fn fd_close(fd: wasi.fd_t) callconv(.c) wasi.errno_t {
     if (fd < 0) return .BADF;
     if (fd <= 2) return .SUCCESS;
     const entry = getFdEntry(fd) orelse return .BADF;
+    dropReadStream(entry);
     if (!entry.is_preopen) {
         @"[resource-drop]descriptor"(entry.handle);
         entry.* = .{};
@@ -1245,6 +1304,7 @@ pub fn fd_close(fd: wasi.fd_t) callconv(.c) wasi.errno_t {
 
 pub fn fd_datasync(fd: wasi.fd_t) callconv(.c) wasi.errno_t {
     const entry = getFdEntry(fd) orelse return .BADF;
+    dropReadStream(entry);
     var ret: [20]u8 align(4) = @splat(0);
     awaitAsyncCall(@"[method]descriptor.sync-data"(entry.handle, &ret));
     return descriptorResult20ToErrno(&ret);
@@ -1346,6 +1406,7 @@ pub fn fd_filestat_get(fd: wasi.fd_t, buf: *wasi.filestat_t) callconv(.c) wasi.e
 
 pub fn fd_filestat_set_size(fd: wasi.fd_t, st_size: wasi.filesize_t) callconv(.c) wasi.errno_t {
     const entry = getFdEntry(fd) orelse return .BADF;
+    invalidateAllReadStreams();
     var ret: [20]u8 align(4) = @splat(0);
     awaitAsyncCall(@"[method]descriptor.set-size"(entry.handle, st_size, &ret));
     return descriptorResult20ToErrno(&ret);
@@ -1453,6 +1514,7 @@ pub fn fd_pwrite(
     nwritten.* = 0;
     if (fd >= 0 and fd <= 2) return .SPIPE;
     const entry = getFdEntry(fd) orelse return .BADF;
+    invalidateReadStreamsForEntry(entry);
 
     const pair = stream_u8.new();
     const rx: i32 = @bitCast(@as(u32, @truncate(pair)));
@@ -1507,11 +1569,58 @@ pub fn fd_read(
     if (fd == 1 or fd == 2) return .BADF;
 
     const entry = getFdEntry(fd) orelse return .BADF;
-    const err = fd_pread(fd, iovs, iovs_len, entry.position, nread);
-    if (err == .SUCCESS) {
-        entry.position += nread.*;
+    if (entry.read_stream < 0 or entry.read_stream_offset != entry.position) {
+        dropReadStream(entry);
+        var pair: [2]i32 = .{ 0, 0 };
+        @"[method]descriptor.read-via-stream"(entry.handle, entry.position, &pair);
+        entry.read_stream = pair[0];
+        entry.read_fut = pair[1];
+        entry.read_stream_offset = entry.position;
     }
-    return err;
+
+    var total: usize = 0;
+    var saw_end = false;
+    outer: for (0..iovs_len) |i| {
+        const iov = iovs[i];
+        if (iov.len == 0) continue;
+
+        var off: usize = 0;
+        while (off < iov.len) {
+            var rc = stream_u8.read(entry.read_stream, iov.base + off, iov.len - off);
+            if (@as(u32, @truncate(rc)) == BLOCKED) {
+                rc = waitReady(entry.read_stream);
+            }
+            const status = rc & 0xf;
+            const count: usize = @intCast(rc >> 4);
+            off += count;
+            total += count;
+            if (status == 1 or status == 2) {
+                saw_end = true;
+                break :outer;
+            }
+            if (count == 0) {
+                break :outer;
+            }
+        }
+    }
+
+    entry.position += total;
+    entry.read_stream_offset += total;
+
+    if (saw_end) {
+        if (total == 0 and entry.read_fut >= 0) {
+            const fut = entry.read_fut;
+            entry.read_fut = -1;
+            dropReadStream(entry);
+            const err = awaitFsFuture(future_fs_read, fut);
+            if (err != .SUCCESS) return err;
+        } else {
+            dropReadStream(entry);
+        }
+    }
+
+    nread.* = total;
+    return .SUCCESS;
 }
 
 pub fn fd_readdir(
@@ -1624,7 +1733,9 @@ pub fn fd_renumber(from: wasi.fd_t, to: wasi.fd_t) callconv(.c) wasi.errno_t {
     const s = globalState();
     if (from_entry.is_preopen or s.fd_table[to_idx].is_preopen) return .OPNOTSUPP;
 
+    dropReadStream(from_entry);
     if (s.fd_table[to_idx].in_use) {
+        dropReadStream(&s.fd_table[to_idx]);
         @"[resource-drop]descriptor"(s.fd_table[to_idx].handle);
     }
 
@@ -1646,6 +1757,7 @@ pub fn fd_seek(
         .SET => 0,
         .CUR => @intCast(entry.position),
         .END => blk: {
+            if (builtin.os.tag != .wasip3) return .NOSYS;
             var stat_ret: [112]u8 align(8) = @splat(0);
             awaitAsyncCall(@"[method]descriptor.stat"(entry.handle, &stat_ret));
             if (stat_ret[0] != 0) return descriptorStatResultToErrno(&stat_ret);
@@ -1656,13 +1768,18 @@ pub fn fd_seek(
 
     const target = std.math.add(i64, base, offset) catch return .OVERFLOW;
     if (target < 0) return .INVAL;
-    entry.position = @intCast(target);
+    const new_pos: u64 = @intCast(target);
+    if (new_pos != entry.position) {
+        dropReadStream(entry);
+        entry.position = new_pos;
+    }
     newoffset.* = entry.position;
     return .SUCCESS;
 }
 
 pub fn fd_sync(fd: wasi.fd_t) callconv(.c) wasi.errno_t {
     const entry = getFdEntry(fd) orelse return .BADF;
+    dropReadStream(entry);
     var ret: [20]u8 align(4) = @splat(0);
     awaitAsyncCall(@"[method]descriptor.sync"(entry.handle, &ret));
     return descriptorResult20ToErrno(&ret);
@@ -1706,6 +1823,7 @@ pub fn fd_write(
     }
 
     const entry = getFdEntry(fd) orelse return .BADF;
+    invalidateReadStreamsForEntry(entry);
     if (entry.append) {
         const pair = stream_u8.new();
         const rx: i32 = @bitCast(@as(u32, @truncate(pair)));
@@ -2535,6 +2653,83 @@ test "TaskContext.run trampoline, status transitions, and nested active_task bin
     try std.testing.expectEqual(state.outer_sp_recorded, state.resumed_sp_recorded);
     try std.testing.expectEqual(@as(?*TaskContext, null), getActiveTask());
     try std.testing.expectEqual(host_sp, getStackPointer());
+}
+
+test "TaskContext waitable_set persistence and FdEntry read stream invalidation" {
+    if (builtin.os.tag.isWasi()) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    var pool: ShadowStackPool = .{
+        .max_cached = 2,
+        .stack_size = 4096,
+    };
+    defer pool.deinit(allocator);
+
+    const orig_sp = getStackPointer();
+    defer setStackPointer(orig_sp);
+    const orig_active = getActiveTask();
+    defer setActiveTask(orig_active);
+    setActiveTask(null);
+
+    if (!builtin.cpu.arch.isWasm()) {
+        setStackPointer(0x7FFF_4000);
+    }
+
+    var task = TaskContext.init(try pool.acquire(allocator));
+    task.enter();
+    task.waitable_set = 42;
+    try std.testing.expectEqual(@as(i32, 42), acquireWaitableSet());
+
+    task.suspendTask();
+    task.resumeTask();
+    try std.testing.expectEqual(@as(?i32, 42), task.waitable_set);
+    try std.testing.expectEqual(@as(i32, 42), acquireWaitableSet());
+
+    task.complete(&pool, allocator);
+    try std.testing.expectEqual(@as(?i32, null), task.waitable_set);
+
+    const s = globalState();
+    const saved_init = s.preopens_initialized;
+    const saved_fd5 = s.fd_table[5];
+    const saved_fd6 = s.fd_table[6];
+    defer {
+        s.preopens_initialized = saved_init;
+        s.fd_table[5] = saved_fd5;
+        s.fd_table[6] = saved_fd6;
+    }
+
+    s.preopens_initialized = true;
+    s.fd_table[5] = .{
+        .in_use = true,
+        .handle = 50,
+        .position = 256,
+        .read_stream = 301,
+        .read_fut = 302,
+        .read_stream_offset = 256,
+    };
+    s.fd_table[6] = .{
+        .in_use = true,
+        .handle = 60,
+        .position = 128,
+        .read_stream = 401,
+        .read_fut = 402,
+        .read_stream_offset = 128,
+    };
+
+    invalidateReadStreamsForEntry(&s.fd_table[5]);
+    try std.testing.expectEqual(@as(i32, -1), s.fd_table[5].read_stream);
+    try std.testing.expectEqual(@as(i32, -1), s.fd_table[5].read_fut);
+    try std.testing.expectEqual(@as(u64, 0), s.fd_table[5].read_stream_offset);
+    try std.testing.expectEqual(@as(i32, 401), s.fd_table[6].read_stream);
+
+    var newoffset: wasi.filesize_t = 0;
+    try std.testing.expectEqual(wasi.errno_t.SUCCESS, fd_seek(6, 0, .CUR, &newoffset));
+    try std.testing.expectEqual(@as(wasi.filesize_t, 128), newoffset);
+    try std.testing.expectEqual(@as(i32, 401), s.fd_table[6].read_stream);
+
+    try std.testing.expectEqual(wasi.errno_t.SUCCESS, fd_seek(6, 32, .CUR, &newoffset));
+    try std.testing.expectEqual(@as(wasi.filesize_t, 160), newoffset);
+    try std.testing.expectEqual(@as(i32, -1), s.fd_table[6].read_stream);
 }
 
 
