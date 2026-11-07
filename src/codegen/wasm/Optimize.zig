@@ -504,10 +504,7 @@ fn Pass(comptime Inst: type) type {
         }
 
         const ScopeFrame = struct {
-            is_loop: bool,
             start_idx: usize,
-            end_idx: usize,
-            unreachable_tail: bool,
             entry_known: std.AutoArrayHashMapUnmanaged(u32, Inst),
         };
 
@@ -544,10 +541,7 @@ fn Pass(comptime Inst: type) type {
                                 c.deinit(gpa);
                             }
                             try scope_stack.append(gpa, .{
-                                .is_loop = true,
                                 .start_idx = i,
-                                .end_idx = end_idx,
-                                .unreachable_tail = false,
                                 .entry_known = cloned,
                             });
                         } else {
@@ -555,17 +549,14 @@ fn Pass(comptime Inst: type) type {
                         }
                     },
                     .block => {
-                        if (findMatchingEnd(insts, i)) |end_idx| {
+                        if (findMatchingEnd(insts, i) != null) {
                             const cloned = try known_locals.clone(gpa);
                             errdefer {
                                 var c = cloned;
                                 c.deinit(gpa);
                             }
                             try scope_stack.append(gpa, .{
-                                .is_loop = false,
                                 .start_idx = i,
-                                .end_idx = end_idx,
-                                .unreachable_tail = false,
                                 .entry_known = cloned,
                             });
                         } else {
@@ -579,9 +570,6 @@ fn Pass(comptime Inst: type) type {
                     .@"unreachable",
                     => {
                         known_locals.clearRetainingCapacity();
-                        if (scope_stack.items.len > 0) {
-                            scope_stack.items[scope_stack.items.len - 1].unreachable_tail = true;
-                        }
                     },
                     .end => {
                         if (scope_stack.pop()) |frame_val| {
@@ -651,17 +639,14 @@ fn Pass(comptime Inst: type) type {
                             for (i + 1..k) |inter_idx| {
                                 const inter_inst = insts[inter_idx];
                                 if (inter_inst.tag == .block) {
-                                    if (findMatchingEnd(insts, inter_idx)) |end_idx| {
+                                    if (findMatchingEnd(insts, inter_idx) != null) {
                                         const cloned = try known_locals.clone(gpa);
                                         errdefer {
                                             var c = cloned;
                                             c.deinit(gpa);
                                         }
                                         try scope_stack.append(gpa, .{
-                                            .is_loop = false,
                                             .start_idx = inter_idx,
-                                            .end_idx = end_idx,
-                                            .unreachable_tail = false,
                                             .entry_known = cloned,
                                         });
                                     } else {
@@ -1180,6 +1165,54 @@ fn Pass(comptime Inst: type) type {
             }
         }
 
+        fn emitUnsignedDivByConstI32(
+            gpa: Allocator,
+            out: *std.ArrayList(Inst),
+            mir_extra: *std.ArrayList(u32),
+            d: u32,
+            numerator_local: ?u32,
+        ) Allocator.Error!bool {
+            assert(d > 1 and !std.math.isPowerOfTwo(d));
+            const l: u5 = @intCast(31 - @clz(d));
+            const shift_low: u6 = 32 + @as(u6, l);
+            const two_pow_32_plus_l: u128 = @as(u128, 1) << shift_low;
+            const m_low_128: u128 = (two_pow_32_plus_l / @as(u128, d)) + 1;
+            if ((m_low_128 * @as(u128, d) - two_pow_32_plus_l) <= (@as(u128, 1) << l) and
+                m_low_128 < (@as(u128, 1) << 32))
+            {
+                const m_low: u64 = @intCast(m_low_128);
+                const m_inst = try makeI64Const(gpa, mir_extra, m_low);
+                const shift_inst = try makeI64Const(gpa, mir_extra, shift_low);
+                out.appendAssumeCapacity(.{ .tag = .i64_extend_i32_u, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(m_inst);
+                out.appendAssumeCapacity(.{ .tag = .i64_mul, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(shift_inst);
+                out.appendAssumeCapacity(.{ .tag = .i64_shr_u, .data = .{ .tag = {} } });
+                out.appendAssumeCapacity(.{ .tag = .i32_wrap_i64, .data = .{ .tag = {} } });
+                return true;
+            }
+            const x_local = numerator_local orelse return false;
+            const s: u6 = @as(u6, l) + 1;
+            const shift_high: u7 = 32 + @as(u7, s);
+            const m_full: u128 = ((@as(u128, 1) << shift_high) / @as(u128, d)) + 1;
+            const m_prime: u64 = @intCast(m_full - (@as(u128, 1) << 32));
+            const m_prime_inst = try makeI64Const(gpa, mir_extra, m_prime);
+            const c32_inst = try makeI64Const(gpa, mir_extra, 32);
+            const s_inst = try makeI64Const(gpa, mir_extra, s);
+            out.appendAssumeCapacity(.{ .tag = .i64_extend_i32_u, .data = .{ .tag = {} } });
+            out.appendAssumeCapacity(m_prime_inst);
+            out.appendAssumeCapacity(.{ .tag = .i64_mul, .data = .{ .tag = {} } });
+            out.appendAssumeCapacity(c32_inst);
+            out.appendAssumeCapacity(.{ .tag = .i64_shr_u, .data = .{ .tag = {} } });
+            out.appendAssumeCapacity(.{ .tag = .local_get, .data = .{ .local = x_local } });
+            out.appendAssumeCapacity(.{ .tag = .i64_extend_i32_u, .data = .{ .tag = {} } });
+            out.appendAssumeCapacity(.{ .tag = .i64_add, .data = .{ .tag = {} } });
+            out.appendAssumeCapacity(s_inst);
+            out.appendAssumeCapacity(.{ .tag = .i64_shr_u, .data = .{ .tag = {} } });
+            out.appendAssumeCapacity(.{ .tag = .i32_wrap_i64, .data = .{ .tag = {} } });
+            return true;
+        }
+
         fn foldConstants(
             gpa: Allocator,
             insts: []const Inst,
@@ -1687,20 +1720,17 @@ fn Pass(comptime Inst: type) type {
                                 changed = true;
                                 continue;
                             }
-                            if (rhs_u > 1 and rhs_u < 0x8000_0000) {
-                                const s: u6 = @intCast(32 - @clz(rhs_u - 1));
-                                const shift: u7 = 32 + @as(u7, s);
-                                const m: u64 = @intCast(((@as(u128, 1) << shift) / @as(u128, rhs_u)) + 1);
-                                const m_inst = try makeI64Const(gpa, mir_extra, m);
-                                const shift_inst = try makeI64Const(gpa, mir_extra, shift);
-                                out.items[len - 1] = .{ .tag = .i64_extend_i32_u, .data = .{ .tag = {} } };
-                                out.appendAssumeCapacity(m_inst);
-                                out.appendAssumeCapacity(.{ .tag = .i64_mul, .data = .{ .tag = {} } });
-                                out.appendAssumeCapacity(shift_inst);
-                                out.appendAssumeCapacity(.{ .tag = .i64_shr_u, .data = .{ .tag = {} } });
-                                out.appendAssumeCapacity(.{ .tag = .i32_wrap_i64, .data = .{ .tag = {} } });
-                                changed = true;
-                                continue;
+                            if (rhs_u > 1 and !std.math.isPowerOfTwo(rhs_u)) {
+                                const num_local: ?u32 = if (len >= 2 and out.items[len - 2].tag == .local_get)
+                                    out.items[len - 2].data.local
+                                else
+                                    null;
+                                _ = out.pop();
+                                if (try emitUnsignedDivByConstI32(gpa, out, mir_extra, rhs_u, num_local)) {
+                                    changed = true;
+                                    continue;
+                                }
+                                out.appendAssumeCapacity(makeI32Const(rhs));
                             }
                         },
                         .i32_rem_u => {
@@ -1710,20 +1740,11 @@ fn Pass(comptime Inst: type) type {
                                 changed = true;
                                 continue;
                             }
-                            if (rhs_u > 1 and rhs_u < 0x8000_0000 and len >= 2 and out.items[len - 2].tag == .local_get) {
+                            if (rhs_u > 1 and !std.math.isPowerOfTwo(rhs_u) and len >= 2 and out.items[len - 2].tag == .local_get) {
                                 const local = out.items[len - 2].data.local;
-                                const s: u6 = @intCast(32 - @clz(rhs_u - 1));
-                                const shift: u7 = 32 + @as(u7, s);
-                                const m: u64 = @intCast(((@as(u128, 1) << shift) / @as(u128, rhs_u)) + 1);
-                                const m_inst = try makeI64Const(gpa, mir_extra, m);
-                                const shift_inst = try makeI64Const(gpa, mir_extra, shift);
                                 out.items[len - 1] = .{ .tag = .local_get, .data = .{ .local = local } };
-                                out.appendAssumeCapacity(.{ .tag = .i64_extend_i32_u, .data = .{ .tag = {} } });
-                                out.appendAssumeCapacity(m_inst);
-                                out.appendAssumeCapacity(.{ .tag = .i64_mul, .data = .{ .tag = {} } });
-                                out.appendAssumeCapacity(shift_inst);
-                                out.appendAssumeCapacity(.{ .tag = .i64_shr_u, .data = .{ .tag = {} } });
-                                out.appendAssumeCapacity(.{ .tag = .i32_wrap_i64, .data = .{ .tag = {} } });
+                                const emitted = try emitUnsignedDivByConstI32(gpa, out, mir_extra, rhs_u, local);
+                                assert(emitted);
                                 out.appendAssumeCapacity(makeI32Const(rhs));
                                 out.appendAssumeCapacity(.{ .tag = .i32_mul, .data = .{ .tag = {} } });
                                 out.appendAssumeCapacity(.{ .tag = .i32_sub, .data = .{ .tag = {} } });
@@ -3186,9 +3207,10 @@ fn Pass(comptime Inst: type) type {
                                 }
                             }
 
+                            const val_tag = out.items[val_start].tag;
                             const is_single_zero_pop = (val_start + 1 == out.items.len) and
-                                isPureZeroPopTag(out.items[val_start].tag) and
-                                !(out.items[val_start].tag == .local_get and out.items[val_start].data.local == base_local);
+                                ((isConstTag(val_tag) and val_tag != .error_name_table_ref) or
+                                    (val_tag == .local_get and out.items[val_start].data.local != base_local));
                             const val_inst: Inst = if (is_single_zero_pop) out.items[val_start] else .{ .tag = .drop, .data = .{ .tag = {} } };
 
                             out.appendAssumeCapacity(inst);
@@ -6691,5 +6713,64 @@ test "peepholes: mul by 2^k +- 1, magic div/rem strength reduction, possibleOnes
             try testing.expect(t != .i32_xor and t != .i32_eqz);
         }
     }
+
+    // 3. Exact 64-bit unsigned magic division/remainder verification across cheap (d=3, d=10)
+    // and needs-add (d=7) divisors on boundary u32 inputs (including >= 0x80000000).
+    {
+        const divisors = [_]u32{ 3, 7, 10 };
+        const inputs = [_]u32{
+            0,          1,          2,          3,          6,
+            7,          8,          9,          10,         11,
+            0x7FFFFFFF, 0x80000000, 0xC0000000, 0xFFFFFFFE, 0xFFFFFFFF,
+        };
+
+        for (divisors) |d| {
+            for ([_]Mir.Inst.Tag{ .i32_div_u, .i32_rem_u }) |op_tag| {
+                // First optimize `local_get 0; i32_const d; <div_u/rem_u>; return`
+                var base: TestMir = .{};
+                defer base.deinit();
+
+                try base.addLocal(.local_get, 0);
+                try base.addI32(@bitCast(d));
+                try base.addTag(op_tag);
+                try base.addTag(.@"return");
+                try base.finishFunc();
+                try base.run();
+
+                // Verify the division/remainder was strength-reduced (no i32_div_u / i32_rem_u remains)
+                for (base.instructions.items(.tag)) |t| {
+                    try testing.expect(t != .i32_div_u and t != .i32_rem_u);
+                }
+
+                // Now substitute `local_get 0` with `i32_const x` in the strength-reduced sequence
+                // and run the optimizer to evaluate the exact emitted 64-bit arithmetic sequence!
+                for (inputs) |x| {
+                    var eval_mir: TestMir = .{};
+                    defer eval_mir.deinit();
+
+                    try eval_mir.extra.appendSlice(testing.allocator, base.extra.items);
+                    for (base.instructions.items(.tag), base.instructions.items(.data)) |t, data| {
+                        if (t == .local_get and data.local == 0) {
+                            try eval_mir.addI32(@bitCast(x));
+                        } else {
+                            try eval_mir.instructions.append(testing.allocator, .{ .tag = t, .data = data });
+                        }
+                    }
+                    try eval_mir.run();
+
+                    const eval_tags = eval_mir.instructions.items(.tag);
+                    const eval_datas = eval_mir.instructions.items(.data);
+                    try testing.expectEqualSlices(
+                        Mir.Inst.Tag,
+                        &.{ .i32_const, .@"return", .end, .dbg_epilogue_begin },
+                        eval_tags,
+                    );
+                    const expected: u32 = if (op_tag == .i32_div_u) (x / d) else (x % d);
+                    try testing.expectEqual(@as(i32, @bitCast(expected)), eval_datas[0].imm32);
+                }
+            }
+        }
+    }
 }
+
 
