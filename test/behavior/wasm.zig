@@ -1030,3 +1030,201 @@ test "small 1-scalar and 2-scalar aggregate returns avoid sret" {
     const sp_after = S.readSp();
     try expect(sp_before == sp_after);
 }
+
+test "sroa unread fields, bitcast byte-array loads, and readonly by-ref arg alias" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.cpu.arch != .wasm32) return error.SkipZigTest;
+
+    const S = struct {
+        const Padding = struct {
+            value: [4]f32,
+
+            noinline fn top(self: Padding) f32 {
+                return self.value[0];
+            }
+
+            noinline fn left(self: Padding) f32 {
+                return self.value[3];
+            }
+        };
+
+        const Element = struct {
+            id: u32,
+            weight: f32,
+        };
+
+        const ElementPool = struct {
+            items: []const Element,
+            capacity: usize,
+
+            noinline fn getPtr(self: *const ElementPool, idx: u16) *const Element {
+                return &self.items.ptr[idx];
+            }
+        };
+
+        const Curve = struct {
+            p0: [2]f32,
+            p1: [2]f32,
+            p2: [2]f32,
+        };
+
+        noinline fn curveExtent(curve: Curve, axis: u1) [2]f32 {
+            const a = curve.p0[axis];
+            const b = curve.p1[axis];
+            const c = curve.p2[axis];
+            return .{
+                @min(a, @min(b, c)),
+                @max(a, @max(b, c)),
+            };
+        }
+
+        noinline fn curveExtentFromPtr(curve_ptr: *const Curve, axis: u1) [2]f32 {
+            const curve = curve_ptr.*;
+            const a = curve.p0[axis];
+            const b = curve.p1[axis];
+            const c = curve.p2[axis];
+            return .{
+                @min(a, @min(b, c)),
+                @max(a, @max(b, c)),
+            };
+        }
+
+        noinline fn curveExtentVarFromPtr(curve_ptr: *const Curve, axis: u1) [2]f32 {
+            var curve = curve_ptr.*;
+            _ = &curve;
+            const a = curve.p0[axis];
+            const b = curve.p1[axis];
+            const c = curve.p2[axis];
+            return .{
+                @min(a, @min(b, c)),
+                @max(a, @max(b, c)),
+            };
+        }
+
+        noinline fn bitcastAfterBreakingCondBrWrite(p: *[4]u8, c: bool, d: bool) u32 {
+            const v = p.*;
+            blk: {
+                if (c) {
+                    p[0] = 0xFF;
+                    if (d) break :blk;
+                    unreachable;
+                }
+            }
+            return @bitCast(v);
+        }
+
+        noinline fn readU16Le(bytes: *const [2]u8) u16 {
+            return std.mem.readInt(u16, bytes, .little);
+        }
+
+        noinline fn readU32Le(bytes: *const [4]u8) u32 {
+            return std.mem.readInt(u32, bytes, .little);
+        }
+
+        noinline fn readU64Le(bytes: *const [8]u8) u64 {
+            return std.mem.readInt(u64, bytes, .little);
+        }
+
+        noinline fn bitcastF64FromBytes(bytes: *const [8]u8) f64 {
+            return @bitCast(bytes.*);
+        }
+
+        fn readSp() u32 {
+            return asm (
+                \\ .globaltype __stack_pointer, i32
+                \\ global.get __stack_pointer
+                \\ local.set %[ret]
+                : [ret] "=r" (-> u32),
+            );
+        }
+        inline fn fillRedZone(sp: u32) void {
+            const rz: [*]volatile u8 = @ptrFromInt(sp - 64);
+            for (0..64) |i| rz[i] = 0xA5;
+        }
+
+        inline fn checkRedZone(sp: u32) bool {
+            const rz: [*]volatile u8 = @ptrFromInt(sp - 64);
+            for (0..64) |i| {
+                if (rz[i] != 0xA5) return false;
+            }
+            return true;
+        }
+    };
+
+    const sp_before = S.readSp();
+
+    const pad: S.Padding = .{ .value = .{ 1.25, 2.5, 3.75, 8.5 } };
+    S.fillRedZone(sp_before);
+    const pad_top = pad.top();
+    const pad_left = pad.left();
+    const rz_pad = S.checkRedZone(sp_before);
+    try expect(pad_top == 1.25);
+    try expect(pad_left == 8.5);
+    if (!rz_pad) return error.PadTouchedRedZone;
+
+    const elems = [_]S.Element{
+        .{ .id = 10, .weight = 1.5 },
+        .{ .id = 20, .weight = 3.5 },
+        .{ .id = 30, .weight = 5.5 },
+    };
+    const pool: S.ElementPool = .{ .items = &elems, .capacity = 8 };
+    S.fillRedZone(sp_before);
+    const elem_ptr = pool.getPtr(2);
+    const rz_pool = S.checkRedZone(sp_before);
+    try expect(elem_ptr.id == 30);
+    try expect(elem_ptr.weight == 5.5);
+    if (!rz_pool) return error.PoolTouchedRedZone;
+
+    const curve: S.Curve = .{
+        .p0 = .{ 4.0, -3.0 },
+        .p1 = .{ -1.5, 7.25 },
+        .p2 = .{ 2.0, 1.0 },
+    };
+    S.fillRedZone(sp_before);
+    const ext_x = S.curveExtent(curve, 0);
+    const ext_y = S.curveExtent(curve, 1);
+    if (!S.checkRedZone(sp_before)) return error.CurveExtentTouchedRedZone;
+    const ext_ptr_y = S.curveExtentFromPtr(&curve, 1);
+    const ext_var_ptr_y = S.curveExtentVarFromPtr(&curve, 1);
+    const rz_curve = S.checkRedZone(sp_before);
+    try expect(ext_x[0] == -1.5);
+    try expect(ext_x[1] == 4.0);
+    try expect(ext_y[0] == -3.0);
+    try expect(ext_y[1] == 7.25);
+    try expect(ext_ptr_y[0] == -3.0);
+    try expect(ext_ptr_y[1] == 7.25);
+    try expect(ext_var_ptr_y[0] == -3.0);
+    try expect(ext_var_ptr_y[1] == 7.25);
+    if (!rz_curve) return error.CurvePtrTouchedRedZone;
+
+    var mut_bytes = [4]u8{ 1, 2, 3, 4 };
+    var rt_true_c = true;
+    var rt_true_d = true;
+    _ = &rt_true_c;
+    _ = &rt_true_d;
+    try expect(S.bitcastAfterBreakingCondBrWrite(&mut_bytes, rt_true_c, rt_true_d) == 0x04030201);
+    try expect(mut_bytes[0] == 0xFF);
+
+    const raw_bytes align(8) = [_]u8{
+        0xef, 0xcd, 0xab, 0x90, 0x78, 0x56, 0x34, 0x12,
+        0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    };
+    const f64_bytes: [8]u8 = @bitCast(@as(f64, 42.125));
+    // Test both aligned and unaligned offsets
+    S.fillRedZone(sp_before);
+    const u16_val = S.readU16Le(raw_bytes[1..3]);
+    const u32_val = S.readU32Le(raw_bytes[1..5]);
+    const u64_val0 = S.readU64Le(raw_bytes[0..8]);
+    const u64_val1 = S.readU64Le(raw_bytes[3..11]);
+    const f64_val = S.bitcastF64FromBytes(&f64_bytes);
+    const rz_read = S.checkRedZone(sp_before);
+    try expect(u16_val == 0xabcd);
+    try expect(u32_val == 0x7890abcd);
+    try expect(u64_val0 == 0x1234567890abcdef);
+    try expect(u64_val1 == 0x3322111234567890);
+    try expect(f64_val == 42.125);
+    if (!rz_read) return error.ReadTouchedRedZone;
+
+    const sp_after = S.readSp();
+    try expect(sp_before == sp_after);
+}

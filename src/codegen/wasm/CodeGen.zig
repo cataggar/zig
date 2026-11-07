@@ -282,6 +282,10 @@ promoted_slots: std.ArrayList(PromotedSlot) = .empty,
 promoted_fields: std.ArrayList(PromotedField) = .empty,
 promoted_insts: std.AutoArrayHashMapUnmanaged(Air.Inst.Index, u32) = .empty,
 cmp_vector_reduce_only: std.AutoHashMapUnmanaged(Air.Inst.Index, void) = .empty,
+bitcast_load_aligns: std.AutoHashMapUnmanaged(Air.Inst.Index, Alignment) = .empty,
+readonly_alloc_aliases: std.AutoHashMapUnmanaged(Air.Inst.Index, Air.Inst.Ref) = .empty,
+elided_init_stores: std.AutoHashMapUnmanaged(Air.Inst.Index, void) = .empty,
+elided_readonly_loads: std.AutoHashMapUnmanaged(Air.Inst.Index, void) = .empty,
 current_air_inst: ?Air.Inst.Index = null,
 
 /// When in debug mode, this tracks if no `finishAir` was missed.
@@ -297,6 +301,7 @@ const PromotedField = struct {
     size: u32,
     ty: Type,
     local: u32,
+    is_read: bool = false,
 };
 
 const PromotedSlot = struct {
@@ -478,6 +483,10 @@ pub fn deinit(cg: *CodeGen) void {
     cg.promoted_fields.deinit(gpa);
     cg.promoted_insts.deinit(gpa);
     cg.cmp_vector_reduce_only.deinit(gpa);
+    cg.bitcast_load_aligns.deinit(gpa);
+    cg.readonly_alloc_aliases.deinit(gpa);
+    cg.elided_init_stores.deinit(gpa);
+    cg.elided_readonly_loads.deinit(gpa);
     cg.mir_instructions.deinit(gpa);
     cg.mir_extra.deinit(gpa);
     cg.mir_locals.deinit(gpa);
@@ -1720,6 +1729,8 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!vo
             for (dst_fields, src_fields) |dst_f, src_f| {
                 assert(dst_f.offset - dst.promoted.offset == src_f.offset - src.promoted.offset);
                 assert(dst_f.size == src_f.size);
+                if (!dst_f.is_read) continue;
+                assert(src_f.is_read);
                 if (src_f.local == dst_f.local) continue;
                 try cg.addLocal(.local_get, src_f.local);
                 try cg.addLocal(.local_set, dst_f.local);
@@ -1734,6 +1745,7 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!vo
             const base_src_off: u32 = @intCast(src.uav_ref.offset);
             var all_ok = true;
             for (dst_fields, 0..) |dst_f, i| {
+                if (!dst_f.is_read) continue;
                 const target_off = base_src_off + (dst_f.offset - dst.promoted.offset);
                 if (try cg.extractComptimeLeafWValue(root_val, target_off, dst_f.ty)) |wval| {
                     leaf_wvals[i] = wval;
@@ -1744,6 +1756,7 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!vo
             }
             if (all_ok) {
                 for (dst_fields, 0..) |dst_f, i| {
+                    if (!dst_f.is_read) continue;
                     try cg.emitWValue(leaf_wvals[i]);
                     try cg.addLocal(.local_set, dst_f.local);
                 }
@@ -1753,11 +1766,22 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!vo
 
         if (dst == .promoted) {
             const dst_fields = cg.promotedSlotFieldsInRange(dst.promoted.slot, dst.promoted.offset, copy_len);
-            if (dst_fields.len == 0) return;
+            var any_read = false;
+            for (dst_fields) |dst_f| {
+                if (dst_f.is_read) {
+                    any_read = true;
+                    break;
+                }
+            }
+            if (!any_read) {
+                if (src == .stack) try cg.addTag(.drop);
+                return;
+            }
             const owns_src = src == .stack;
             var src_base = try src.toLocal(cg, .usize);
             defer if (owns_src) src_base.free(cg);
             for (dst_fields) |dst_f| {
+                if (!dst_f.is_read) continue;
                 const rel_off = dst_f.offset - dst.promoted.offset;
                 _ = try cg.load(src_base, dst_f.ty, .{ .offset = rel_off, .alignment = .@"1" });
                 try cg.addLocal(.local_set, dst_f.local);
@@ -1772,6 +1796,7 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!vo
             var dst_base = try dst.toLocal(cg, .usize);
             defer if (owns_dst) dst_base.free(cg);
             for (src_fields) |src_f| {
+                assert(src_f.is_read);
                 const rel_off = src_f.offset - src.promoted.offset;
                 try cg.store(dst_base, .{ .local = src_f.local }, src_f.ty, .{ .offset = rel_off, .alignment = .@"1" });
             }
@@ -2808,7 +2833,11 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) 
                     const result = try cg.allocStack(ret_ty);
                     if (result == .promoted) {
                         const pf0 = cg.findPromotedField(result.promoted.slot, f.offset, @intCast(f.ty.abiSize(zcu)));
-                        try cg.addLocal(.local_set, pf0.local);
+                        if (pf0.is_read) {
+                            try cg.addLocal(.local_set, pf0.local);
+                        } else {
+                            try cg.addTag(.drop);
+                        }
                     } else {
                         var local0 = try cg.allocLocal(f.ty);
                         defer local0.free(cg);
@@ -2827,8 +2856,16 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) 
                     if (result == .promoted) {
                         const pf0 = cg.findPromotedField(result.promoted.slot, fs[0].offset, @intCast(fs[0].ty.abiSize(zcu)));
                         const pf1 = cg.findPromotedField(result.promoted.slot, fs[1].offset, @intCast(fs[1].ty.abiSize(zcu)));
-                        try cg.addLocal(.local_set, pf1.local);
-                        try cg.addLocal(.local_set, pf0.local);
+                        if (pf1.is_read) {
+                            try cg.addLocal(.local_set, pf1.local);
+                        } else {
+                            try cg.addTag(.drop);
+                        }
+                        if (pf0.is_read) {
+                            try cg.addLocal(.local_set, pf0.local);
+                        } else {
+                            try cg.addTag(.drop);
+                        }
                     } else {
                         var local1 = try cg.allocLocal(fs[1].ty);
                         defer local1.free(cg);
@@ -2943,6 +2980,17 @@ fn airVaArg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 }
 
 fn airAlloc(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
+    if (cg.readonly_alloc_aliases.get(inst)) |src_ref| {
+        if (cg.values.get(src_ref)) |value| {
+            if (value == .local and value.local >= cg.wasm_param_count) {
+                const local = &cg.local_pool.locals.items[value.local - cg.wasm_param_count];
+                assert(local.ref_count > 0);
+                local.ref_count += 1;
+            }
+            return cg.finishAir(inst, value, &.{});
+        }
+        return cg.finishAir(inst, .none, &.{});
+    }
     const value = try cg.allocStackPtr(inst);
     return cg.finishAir(inst, value, &.{});
 }
@@ -2951,6 +2999,19 @@ fn airStore(cg: *CodeGen, inst: Air.Inst.Index, safety: bool) InnerError!void {
     const pt = cg.pt;
     const zcu = pt.zcu;
     const bin_op = cg.air.instructions.items(.data)[@backingInt(inst)].bin_op;
+
+    if (cg.elided_init_stores.contains(inst)) {
+        if (!cg.values.contains(bin_op.lhs)) {
+            const value = try cg.resolveInst(bin_op.rhs);
+            if (value == .local and value.local >= cg.wasm_param_count) {
+                const local = &cg.local_pool.locals.items[value.local - cg.wasm_param_count];
+                assert(local.ref_count > 0);
+                local.ref_count += 1;
+            }
+            try cg.values.putNoClobber(cg.gpa, bin_op.lhs, value);
+        }
+        return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
+    }
 
     const lhs = try cg.resolveInst(bin_op.lhs);
     const ptr_ty = cg.typeOf(bin_op.lhs);
@@ -3013,6 +3074,10 @@ fn store(cg: *CodeGen, lhs: WValue, rhs: WValue, ty: Type, memarg: MemArg) Inner
     if (lhs == .promoted) {
         const target_offset = lhs.promoted.offset + @as(u32, @intCast(memarg.offset));
         const f = cg.findPromotedField(lhs.promoted.slot, target_offset, @intCast(abi_size));
+        if (!f.is_read) {
+            if (rhs == .stack) try cg.addTag(.drop);
+            return;
+        }
         try cg.emitWValue(rhs);
         try cg.addLocal(.local_set, f.local);
         return;
@@ -3083,6 +3148,10 @@ fn airLoad(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         },
         else => |index| @backingInt(index) * elem_ty.abiSize(zcu),
     };
+    if (operand != .promoted and (cg.bitcast_load_aligns.contains(inst) or cg.elided_readonly_loads.contains(inst))) {
+        const result = try cg.offsetPointer(operand, offset);
+        return cg.finishAir(inst, result, &.{ty_op.operand});
+    }
     const result = try cg.load(operand, elem_ty, .{
         .offset = offset,
         .alignment = ptr_ty.ptrAlignment(zcu),
@@ -3116,6 +3185,7 @@ fn load(cg: *CodeGen, operand: WValue, ty: Type, memarg: MemArg) InnerError!WVal
     if (operand == .promoted) {
         const target_offset = operand.promoted.offset + @as(u32, @intCast(memarg.offset));
         const f = cg.findPromotedField(operand.promoted.slot, target_offset, @intCast(ty.abiSize(zcu)));
+        assert(f.is_read);
         try cg.addLocal(.local_get, f.local);
         return .stack;
     }
@@ -7212,8 +7282,12 @@ fn airBitcast(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const operand = try cg.resolveInst(ty_op.operand);
     const dest_ty = cg.typeOfIndex(inst);
     const src_ty = cg.typeOf(ty_op.operand);
+    const src_align = if (ty_op.operand.toIndex()) |src_inst|
+        cg.bitcast_load_aligns.get(src_inst) orelse .none
+    else
+        .none;
 
-    const result = try cg.bitcast(dest_ty, src_ty, operand);
+    const result = try cg.bitcast(dest_ty, src_ty, operand, src_align);
 
     return cg.finishAir(inst, result, &.{ty_op.operand});
 }
@@ -7240,7 +7314,7 @@ fn bitcastClass(cg: *CodeGen, ty: Type) BitcastClass {
     };
 }
 
-fn bitcast(cg: *CodeGen, dest_ty: Type, src_ty: Type, operand: WValue) InnerError!WValue {
+fn bitcast(cg: *CodeGen, dest_ty: Type, src_ty: Type, operand: WValue, src_align: Alignment) InnerError!WValue {
     if (dest_ty.eql(src_ty)) return operand;
 
     const zcu = cg.pt.zcu;
@@ -7270,7 +7344,7 @@ fn bitcast(cg: *CodeGen, dest_ty: Type, src_ty: Type, operand: WValue) InnerErro
     }
 
     if (src_by_ref) {
-        return try cg.load(operand, dest_ty, .{});
+        return try cg.load(operand, dest_ty, .{ .alignment = src_align });
     }
 
     switch (src_class) {
@@ -8178,6 +8252,7 @@ fn memset(cg: *CodeGen, elem_ty: Type, ptr: WValue, raw_len: WValue, value: WVal
             const byte_val: u8 = @truncate(value.imm32);
             const leaves = cg.promotedSlotFieldsInRange(ptr.promoted.slot, ptr.promoted.offset, byte_len);
             for (leaves) |f| {
+                if (!f.is_read) continue;
                 const leaf_wval = try cg.emitBytePatternForLeaf(f.ty, byte_val);
                 try cg.emitWValue(leaf_wval);
                 try cg.addLocal(.local_set, f.local);
@@ -10679,12 +10754,12 @@ fn airAsm(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     return cg.finishAirResult(inst, result);
 }
 
-fn typeOf(cg: *CodeGen, inst: Air.Inst.Ref) Type {
+fn typeOf(cg: *const CodeGen, inst: Air.Inst.Ref) Type {
     const zcu = cg.pt.zcu;
     return cg.air.typeOf(inst, &zcu.intern_pool);
 }
 
-fn typeOfIndex(cg: *CodeGen, inst: Air.Inst.Index) Type {
+fn typeOfIndex(cg: *const CodeGen, inst: Air.Inst.Index) Type {
     const zcu = cg.pt.zcu;
     return cg.air.typeOfIndex(inst, &zcu.intern_pool);
 }
@@ -10931,12 +11006,21 @@ const SroaAnalysis = struct {
         to_root: u32,
     };
 
+    const CopyEdge = struct {
+        dst_root: u32,
+        dst_offset: u32,
+        src_root: u32,
+        src_offset: u32,
+        size: u32,
+    };
+
     cg: *CodeGen,
     roots: std.ArrayList(CandidateRoot) = .empty,
     all_fields: std.ArrayList(PromotedField) = .empty,
     temp_fields: std.ArrayList(PromotedField) = .empty,
     inst_refs: std.AutoHashMapUnmanaged(Air.Inst.Index, RefInfo) = .empty,
     escape_edges: std.ArrayList(EscapeEdge) = .empty,
+    copy_edges: std.ArrayList(CopyEdge) = .empty,
 
     fn deinit(self: *SroaAnalysis) void {
         const gpa = self.cg.gpa;
@@ -10945,11 +11029,46 @@ const SroaAnalysis = struct {
         self.temp_fields.deinit(gpa);
         self.inst_refs.deinit(gpa);
         self.escape_edges.deinit(gpa);
+        self.copy_edges.deinit(gpa);
     }
 
     fn rootFields(self: *const SroaAnalysis, root_id: u32) []const PromotedField {
         const r = self.roots.items[root_id];
         return self.all_fields.items[r.fields_start..][0..r.fields_len];
+    }
+
+    fn rootFieldsMut(self: *SroaAnalysis, root_id: u32) []PromotedField {
+        const r = self.roots.items[root_id];
+        return self.all_fields.items[r.fields_start..][0..r.fields_len];
+    }
+
+    fn markRangeRead(self: *SroaAnalysis, root_id: u32, offset: u32, size: u32) bool {
+        if (size == 0) return false;
+        const end = offset + size;
+        var changed = false;
+        for (self.rootFieldsMut(root_id)) |*f| {
+            if (f.offset >= offset and f.offset + f.size <= end) {
+                if (!f.is_read) {
+                    f.is_read = true;
+                    changed = true;
+                }
+            }
+            if (f.offset >= end) break;
+        }
+        return changed;
+    }
+
+    fn markIsNullRead(self: *SroaAnalysis, root_id: u32, offset: u32, optional_ty: Type) void {
+        const zcu = self.cg.pt.zcu;
+        const payload_ty = optional_ty.optionalChild(zcu);
+        if (!optional_ty.optionalReprIsPayload(zcu)) {
+            if (!payload_ty.hasRuntimeBits(zcu)) return;
+            const tag_off = offset + @as(u32, @intCast(payload_ty.abiSize(zcu)));
+            _ = self.markRangeRead(root_id, tag_off, 1);
+        } else {
+            const read_ty: Type = if (payload_ty.zigTypeTag(zcu) == .error_set) .anyerror else .usize;
+            _ = self.markRangeRead(root_id, offset, @intCast(read_ty.abiSize(zcu)));
+        }
     }
 
     fn tryAddCandidateRoot(self: *SroaAnalysis, inst: Air.Inst.Index, ty: Type, kind: RefKind) !bool {
@@ -11478,12 +11597,16 @@ const SroaAnalysis = struct {
                     {
                         const f_off = ref.offset + @as(u32, @intCast(struct_ty.structFieldOffset(field_idx, zcu)));
                         if (try self.checkAccess(ref.root_id, f_off, field_ty)) {
-                            if (field_ty.hasRuntimeBits(zcu) and isByRef(field_ty, zcu, self.cg.target)) {
-                                try self.inst_refs.put(self.cg.gpa, inst, .{
-                                    .root_id = ref.root_id,
-                                    .offset = f_off,
-                                    .kind = .byref_val,
-                                });
+                            if (field_ty.hasRuntimeBits(zcu)) {
+                                if (isByRef(field_ty, zcu, self.cg.target)) {
+                                    try self.inst_refs.put(self.cg.gpa, inst, .{
+                                        .root_id = ref.root_id,
+                                        .offset = f_off,
+                                        .kind = .byref_val,
+                                    });
+                                } else {
+                                    _ = self.markRangeRead(ref.root_id, f_off, @intCast(field_ty.abiSize(zcu)));
+                                }
                             }
                             return;
                         }
@@ -11495,19 +11618,37 @@ const SroaAnalysis = struct {
             .load => {
                 const ty_op = data.ty_op;
                 const elem_ty = ty_op.ty;
+                var src_ref_opt: ?RefInfo = null;
                 if (self.getRef(ty_op.operand)) |ref| {
                     const ptr_info = self.cg.typeOf(ty_op.operand).ptrInfo(zcu);
                     if (ref.kind == .ptr and !ptr_info.flags.is_volatile and
                         ptr_info.flags.vector_index == .none and ptr_info.packed_offset.host_size == 0 and
                         (try self.checkAccess(ref.root_id, ref.offset, elem_ty)))
                     {
-                        // Valid load from promoted slot.
+                        src_ref_opt = ref;
                     } else {
                         self.markEscaped(ty_op.operand);
                     }
                 }
+                const elem_size: u32 = if (elem_ty.hasRuntimeBits(zcu)) @intCast(elem_ty.abiSize(zcu)) else 0;
                 if (isByRef(elem_ty, zcu, self.cg.target)) {
-                    _ = try self.tryAddCandidateRoot(inst, elem_ty, .byref_val);
+                    const added = try self.tryAddCandidateRoot(inst, elem_ty, .byref_val);
+                    if (src_ref_opt) |src_ref| {
+                        if (added) {
+                            const dst_root = self.inst_refs.get(inst).?.root_id;
+                            try self.copy_edges.append(self.cg.gpa, .{
+                                .dst_root = dst_root,
+                                .dst_offset = 0,
+                                .src_root = src_ref.root_id,
+                                .src_offset = src_ref.offset,
+                                .size = elem_size,
+                            });
+                        } else {
+                            _ = self.markRangeRead(src_ref.root_id, src_ref.offset, elem_size);
+                        }
+                    }
+                } else if (src_ref_opt) |src_ref| {
+                    _ = self.markRangeRead(src_ref.root_id, src_ref.offset, elem_size);
                 }
             },
 
@@ -11516,25 +11657,42 @@ const SroaAnalysis = struct {
                 const ptr_ty = self.cg.typeOf(bin_op.lhs);
                 const ptr_info = ptr_ty.ptrInfo(zcu);
                 const elem_ty = ptr_ty.childType(zcu);
+                const elem_size: u32 = if (elem_ty.hasRuntimeBits(zcu)) @intCast(elem_ty.abiSize(zcu)) else 0;
 
+                var valid_rhs_ref: ?RefInfo = null;
                 if (self.getRef(bin_op.rhs)) |rhs_ref| {
                     if (rhs_ref.kind == .byref_val and isByRef(elem_ty, zcu, self.cg.target) and
                         (try self.checkSubAggregateAccess(rhs_ref.root_id, rhs_ref.offset, elem_ty)))
                     {
-                        // Valid by-ref value source in store.
+                        valid_rhs_ref = rhs_ref;
                     } else {
                         self.markEscaped(bin_op.rhs);
                     }
                 }
 
+                var valid_lhs_ref: ?RefInfo = null;
                 if (self.getRef(bin_op.lhs)) |lhs_ref| {
                     if (lhs_ref.kind == .ptr and !ptr_info.flags.is_volatile and
                         ptr_info.flags.vector_index == .none and ptr_info.packed_offset.host_size == 0 and
                         (try self.checkAccess(lhs_ref.root_id, lhs_ref.offset, elem_ty)))
                     {
-                        // Valid store into promoted slot.
+                        valid_lhs_ref = lhs_ref;
                     } else {
                         self.markEscaped(bin_op.lhs);
+                    }
+                }
+
+                if (valid_rhs_ref) |rhs_ref| {
+                    if (valid_lhs_ref) |lhs_ref| {
+                        try self.copy_edges.append(self.cg.gpa, .{
+                            .dst_root = lhs_ref.root_id,
+                            .dst_offset = lhs_ref.offset,
+                            .src_root = rhs_ref.root_id,
+                            .src_offset = rhs_ref.offset,
+                            .size = elem_size,
+                        });
+                    } else {
+                        _ = self.markRangeRead(rhs_ref.root_id, rhs_ref.offset, elem_size);
                     }
                 }
             },
@@ -11543,6 +11701,7 @@ const SroaAnalysis = struct {
                 const op = data.ty_op.operand;
                 if (self.getRef(op)) |ref| {
                     if (ref.kind == .byref_val and self.checkScalarAccess(ref.root_id, ref.offset, .usize)) {
+                        _ = self.markRangeRead(ref.root_id, ref.offset, self.cg.ptrSize());
                         return;
                     }
                     self.markEscaped(op);
@@ -11552,7 +11711,9 @@ const SroaAnalysis = struct {
             .slice_len => {
                 const op = data.ty_op.operand;
                 if (self.getRef(op)) |ref| {
-                    if (ref.kind == .byref_val and self.checkScalarAccess(ref.root_id, ref.offset + self.cg.ptrSize(), .usize)) {
+                    const len_off = ref.offset + self.cg.ptrSize();
+                    if (ref.kind == .byref_val and self.checkScalarAccess(ref.root_id, len_off, .usize)) {
+                        _ = self.markRangeRead(ref.root_id, len_off, self.cg.ptrSize());
                         return;
                     }
                     self.markEscaped(op);
@@ -11590,7 +11751,9 @@ const SroaAnalysis = struct {
                 const bin_op = data.bin_op;
                 self.markEscaped(bin_op.rhs);
                 if (self.getRef(bin_op.lhs)) |ref| {
-                    if (!(ref.kind == .byref_val and self.checkScalarAccess(ref.root_id, ref.offset, .usize))) {
+                    if (ref.kind == .byref_val and self.checkScalarAccess(ref.root_id, ref.offset, .usize)) {
+                        _ = self.markRangeRead(ref.root_id, ref.offset, self.cg.ptrSize());
+                    } else {
                         self.markEscaped(bin_op.lhs);
                     }
                 }
@@ -11604,7 +11767,9 @@ const SroaAnalysis = struct {
                 const bin_op = self.cg.air.extraData(Air.Bin, data.ty_pl.payload).data;
                 self.markEscaped(bin_op.rhs);
                 if (self.getRef(bin_op.lhs)) |ref| {
-                    if (!(ref.kind == .byref_val and self.checkScalarAccess(ref.root_id, ref.offset, .usize))) {
+                    if (ref.kind == .byref_val and self.checkScalarAccess(ref.root_id, ref.offset, .usize)) {
+                        _ = self.markRangeRead(ref.root_id, ref.offset, self.cg.ptrSize());
+                    } else {
                         self.markEscaped(bin_op.lhs);
                     }
                 }
@@ -11617,12 +11782,13 @@ const SroaAnalysis = struct {
                 const elem_size: u32 = @intCast(elem_ty.abiSize(zcu));
                 self.markEscaped(bin_op.rhs);
 
+                var src_elem_ref: ?RefInfo = null;
                 if (self.getRef(bin_op.lhs)) |ref| {
                     if (ptr_ty.isSlice(zcu)) {
                         if (ref.kind == .byref_val and !ptr_ty.isVolatilePtr(zcu) and
                             self.checkScalarAccess(ref.root_id, ref.offset, .usize))
                         {
-                            // Valid slice ptr load.
+                            _ = self.markRangeRead(ref.root_id, ref.offset, self.cg.ptrSize());
                         } else {
                             self.markEscaped(bin_op.lhs);
                         }
@@ -11632,7 +11798,11 @@ const SroaAnalysis = struct {
                             if (elem_off + elem_size <= self.roots.items[ref.root_id].size and
                                 (try self.checkAccess(ref.root_id, elem_off, elem_ty)))
                             {
-                                // Valid constant-indexed element load from promoted slot.
+                                src_elem_ref = .{
+                                    .root_id = ref.root_id,
+                                    .offset = elem_off,
+                                    .kind = .ptr,
+                                };
                             } else {
                                 self.markEscaped(bin_op.lhs);
                             }
@@ -11645,7 +11815,23 @@ const SroaAnalysis = struct {
                 }
 
                 if (isByRef(elem_ty, zcu, self.cg.target)) {
-                    _ = try self.tryAddCandidateRoot(inst, elem_ty, .byref_val);
+                    const added = try self.tryAddCandidateRoot(inst, elem_ty, .byref_val);
+                    if (src_elem_ref) |src_ref| {
+                        if (added) {
+                            const dst_root = self.inst_refs.get(inst).?.root_id;
+                            try self.copy_edges.append(self.cg.gpa, .{
+                                .dst_root = dst_root,
+                                .dst_offset = 0,
+                                .src_root = src_ref.root_id,
+                                .src_offset = src_ref.offset,
+                                .size = elem_size,
+                            });
+                        } else {
+                            _ = self.markRangeRead(src_ref.root_id, src_ref.offset, elem_size);
+                        }
+                    }
+                } else if (src_elem_ref) |src_ref| {
+                    _ = self.markRangeRead(src_ref.root_id, src_ref.offset, elem_size);
                 }
             },
 
@@ -11658,9 +11844,11 @@ const SroaAnalysis = struct {
 
                 if (self.getRef(bin_op.lhs)) |ref| {
                     if (ptr_ty.isSlice(zcu)) {
-                        if (!(ref.kind == .byref_val and !ptr_ty.isVolatilePtr(zcu) and
-                            self.checkScalarAccess(ref.root_id, ref.offset, .usize)))
+                        if (ref.kind == .byref_val and !ptr_ty.isVolatilePtr(zcu) and
+                            self.checkScalarAccess(ref.root_id, ref.offset, .usize))
                         {
+                            _ = self.markRangeRead(ref.root_id, ref.offset, self.cg.ptrSize());
+                        } else {
                             self.markEscaped(bin_op.lhs);
                         }
                     } else if (ref.kind == .ptr and !ptr_ty.isVolatilePtr(zcu)) {
@@ -11698,12 +11886,16 @@ const SroaAnalysis = struct {
                             if (elem_off + elem_size <= self.roots.items[ref.root_id].size and
                                 (try self.checkAccess(ref.root_id, elem_off, elem_ty)))
                             {
-                                if (isByRef(elem_ty, zcu, self.cg.target)) {
-                                    try self.inst_refs.put(self.cg.gpa, inst, .{
-                                        .root_id = ref.root_id,
-                                        .offset = elem_off,
-                                        .kind = .byref_val,
-                                    });
+                                if (elem_ty.hasRuntimeBits(zcu)) {
+                                    if (isByRef(elem_ty, zcu, self.cg.target)) {
+                                        try self.inst_refs.put(self.cg.gpa, inst, .{
+                                            .root_id = ref.root_id,
+                                            .offset = elem_off,
+                                            .kind = .byref_val,
+                                        });
+                                    } else {
+                                        _ = self.markRangeRead(ref.root_id, elem_off, elem_size);
+                                    }
                                 }
                                 return;
                             }
@@ -11730,6 +11922,11 @@ const SroaAnalysis = struct {
             .aggregate_init => {
                 const res_ty = self.cg.typeOfIndex(inst);
                 if (!res_ty.isVector(zcu)) {
+                    const dst_root_opt: ?u32 = if (isByRef(res_ty, zcu, self.cg.target) and
+                        (try self.tryAddCandidateRoot(inst, res_ty, .byref_val)))
+                        self.inst_refs.get(inst).?.root_id
+                    else
+                        null;
                     const elements_len = @as(usize, @intCast(res_ty.arrayLen(zcu)));
                     const elements: []const Air.Inst.Ref = @ptrCast(self.cg.air.extra.items[data.ty_pl.payload..][0..elements_len]);
                     for (elements, 0..) |elem, elem_idx| {
@@ -11742,14 +11939,27 @@ const SroaAnalysis = struct {
                             if (elem_ref.kind == .byref_val and isByRef(elem_ty, zcu, self.cg.target) and
                                 (try self.checkSubAggregateAccess(elem_ref.root_id, elem_ref.offset, elem_ty)))
                             {
-                                // Valid byref element copied into aggregate_init.
+                                const elem_size: u32 = if (elem_ty.hasRuntimeBits(zcu)) @intCast(elem_ty.abiSize(zcu)) else 0;
+                                if (dst_root_opt) |dst_root| {
+                                    const elem_off: u32 = switch (res_ty.zigTypeTag(zcu)) {
+                                        .array => @as(u32, @intCast(elem_idx)) * elem_size,
+                                        .@"struct" => @intCast(res_ty.structFieldOffset(elem_idx, zcu)),
+                                        else => unreachable,
+                                    };
+                                    try self.copy_edges.append(self.cg.gpa, .{
+                                        .dst_root = dst_root,
+                                        .dst_offset = elem_off,
+                                        .src_root = elem_ref.root_id,
+                                        .src_offset = elem_ref.offset,
+                                        .size = elem_size,
+                                    });
+                                } else {
+                                    _ = self.markRangeRead(elem_ref.root_id, elem_ref.offset, elem_size);
+                                }
                             } else {
                                 self.markEscaped(elem);
                             }
                         }
-                    }
-                    if (isByRef(res_ty, zcu, self.cg.target)) {
-                        _ = try self.tryAddCandidateRoot(inst, res_ty, .byref_val);
                     }
                 } else {
                     self.escapeAllOperands(inst);
@@ -11790,8 +12000,12 @@ const SroaAnalysis = struct {
                     const opt_ty = self.cg.typeOf(op);
                     const pl_ty = self.cg.typeOfIndex(inst);
                     if (ref.kind == .byref_val and (try self.checkAccess(ref.root_id, ref.offset, pl_ty))) {
-                        if (pl_ty.hasRuntimeBits(zcu) and (opt_ty.optionalReprIsPayload(zcu) or isByRef(pl_ty, zcu, self.cg.target))) {
-                            try self.inst_refs.put(self.cg.gpa, inst, ref);
+                        if (pl_ty.hasRuntimeBits(zcu)) {
+                            if (opt_ty.optionalReprIsPayload(zcu) or isByRef(pl_ty, zcu, self.cg.target)) {
+                                try self.inst_refs.put(self.cg.gpa, inst, ref);
+                            } else {
+                                _ = self.markRangeRead(ref.root_id, ref.offset, @intCast(pl_ty.abiSize(zcu)));
+                            }
                         }
                         return;
                     }
@@ -11816,16 +12030,32 @@ const SroaAnalysis = struct {
                     return;
                 }
 
+                var valid_src_ref: ?RefInfo = null;
                 if (self.getRef(op)) |ref| {
                     if (ref.kind == .byref_val and isByRef(payload_ty, zcu, self.cg.target) and
                         (try self.checkSubAggregateAccess(ref.root_id, ref.offset, payload_ty)))
                     {
-                        // Valid payload copy into wrap_optional.
+                        valid_src_ref = ref;
                     } else {
                         self.markEscaped(op);
                     }
                 }
-                _ = try self.tryAddCandidateRoot(inst, opt_ty, .byref_val);
+                const added = try self.tryAddCandidateRoot(inst, opt_ty, .byref_val);
+                if (valid_src_ref) |src_ref| {
+                    const pl_size: u32 = @intCast(payload_ty.abiSize(zcu));
+                    if (added) {
+                        const dst_root = self.inst_refs.get(inst).?.root_id;
+                        try self.copy_edges.append(self.cg.gpa, .{
+                            .dst_root = dst_root,
+                            .dst_offset = 0,
+                            .src_root = src_ref.root_id,
+                            .src_offset = src_ref.offset,
+                            .size = pl_size,
+                        });
+                    } else {
+                        _ = self.markRangeRead(src_ref.root_id, src_ref.offset, pl_size);
+                    }
+                }
             },
 
             .is_null, .is_non_null => {
@@ -11833,6 +12063,7 @@ const SroaAnalysis = struct {
                 if (self.getRef(op)) |ref| {
                     const opt_ty = self.cg.typeOf(op);
                     if (ref.kind == .byref_val and self.checkIsNullAccess(ref.root_id, ref.offset, opt_ty)) {
+                        self.markIsNullRead(ref.root_id, ref.offset, opt_ty);
                         return;
                     }
                     self.markEscaped(op);
@@ -11844,6 +12075,7 @@ const SroaAnalysis = struct {
                 if (self.getRef(op)) |ref| {
                     const opt_ty = self.cg.typeOf(op).childType(zcu);
                     if (ref.kind == .ptr and self.checkIsNullAccess(ref.root_id, ref.offset, opt_ty)) {
+                        self.markIsNullRead(ref.root_id, ref.offset, opt_ty);
                         return;
                     }
                     self.markEscaped(op);
@@ -11859,6 +12091,7 @@ const SroaAnalysis = struct {
                     if (ref.kind == .byref_val and pl_ty.hasRuntimeBits(zcu) and
                         self.checkScalarAccess(ref.root_id, err_off, .anyerror))
                     {
+                        _ = self.markRangeRead(ref.root_id, err_off, @intCast(Type.anyerror.abiSize(zcu)));
                         return;
                     }
                     self.markEscaped(op);
@@ -11872,6 +12105,7 @@ const SroaAnalysis = struct {
                     const pl_ty = eu_ty.errorUnionPayload(zcu);
                     const err_off = ref.offset + @as(u32, @intCast(errUnionErrorOffset(pl_ty, zcu)));
                     if (ref.kind == .ptr and self.checkScalarAccess(ref.root_id, err_off, .anyerror)) {
+                        _ = self.markRangeRead(ref.root_id, err_off, @intCast(Type.anyerror.abiSize(zcu)));
                         return;
                     }
                     self.markEscaped(op);
@@ -11887,6 +12121,7 @@ const SroaAnalysis = struct {
                     if (ref.kind == .byref_val and pl_ty.hasRuntimeBits(zcu) and
                         self.checkScalarAccess(ref.root_id, err_off, .anyerror))
                     {
+                        _ = self.markRangeRead(ref.root_id, err_off, @intCast(Type.anyerror.abiSize(zcu)));
                         return;
                     }
                     self.markEscaped(op);
@@ -11918,12 +12153,16 @@ const SroaAnalysis = struct {
                     const pl_ty = eu_ty.errorUnionPayload(zcu);
                     const pl_off = ref.offset + @as(u32, @intCast(errUnionPayloadOffset(pl_ty, zcu)));
                     if (ref.kind == .byref_val and (try self.checkAccess(ref.root_id, pl_off, pl_ty))) {
-                        if (pl_ty.hasRuntimeBits(zcu) and isByRef(pl_ty, zcu, self.cg.target)) {
-                            try self.inst_refs.put(self.cg.gpa, inst, .{
-                                .root_id = ref.root_id,
-                                .offset = pl_off,
-                                .kind = .byref_val,
-                            });
+                        if (pl_ty.hasRuntimeBits(zcu)) {
+                            if (isByRef(pl_ty, zcu, self.cg.target)) {
+                                try self.inst_refs.put(self.cg.gpa, inst, .{
+                                    .root_id = ref.root_id,
+                                    .offset = pl_off,
+                                    .kind = .byref_val,
+                                });
+                            } else {
+                                _ = self.markRangeRead(ref.root_id, pl_off, @intCast(pl_ty.abiSize(zcu)));
+                            }
                         }
                         return;
                     }
@@ -11982,16 +12221,33 @@ const SroaAnalysis = struct {
                     self.markEscaped(op);
                     return;
                 }
+                var valid_src_ref: ?RefInfo = null;
                 if (self.getRef(op)) |ref| {
                     if (ref.kind == .byref_val and isByRef(pl_ty, zcu, self.cg.target) and
                         (try self.checkSubAggregateAccess(ref.root_id, ref.offset, pl_ty)))
                     {
-                        // Valid payload copy into wrap_errunion_payload.
+                        valid_src_ref = ref;
                     } else {
                         self.markEscaped(op);
                     }
                 }
-                _ = try self.tryAddCandidateRoot(inst, err_ty, .byref_val);
+                const added = try self.tryAddCandidateRoot(inst, err_ty, .byref_val);
+                if (valid_src_ref) |src_ref| {
+                    const pl_size: u32 = @intCast(pl_ty.abiSize(zcu));
+                    const dst_pl_off: u32 = @intCast(errUnionPayloadOffset(pl_ty, zcu));
+                    if (added) {
+                        const dst_root = self.inst_refs.get(inst).?.root_id;
+                        try self.copy_edges.append(self.cg.gpa, .{
+                            .dst_root = dst_root,
+                            .dst_offset = dst_pl_off,
+                            .src_root = src_ref.root_id,
+                            .src_offset = src_ref.offset,
+                            .size = pl_size,
+                        });
+                    } else {
+                        _ = self.markRangeRead(src_ref.root_id, src_ref.offset, pl_size);
+                    }
+                }
             },
 
             .wrap_errunion_err => {
@@ -12016,12 +12272,15 @@ const SroaAnalysis = struct {
                         self.checkScalarAccess(ref.root_id, err_off, .anyerror) and
                         (try self.checkAccess(ref.root_id, pl_off, pl_ty)))
                     {
+                        _ = self.markRangeRead(ref.root_id, err_off, @intCast(Type.anyerror.abiSize(zcu)));
                         if (isByRef(pl_ty, zcu, self.cg.target)) {
                             try self.inst_refs.put(self.cg.gpa, inst, .{
                                 .root_id = ref.root_id,
                                 .offset = pl_off,
                                 .kind = .byref_val,
                             });
+                        } else {
+                            _ = self.markRangeRead(ref.root_id, pl_off, @intCast(pl_ty.abiSize(zcu)));
                         }
                     } else {
                         self.markEscaped(op);
@@ -12039,6 +12298,7 @@ const SroaAnalysis = struct {
                     const err_off = ref.offset + @as(u32, @intCast(errUnionErrorOffset(pl_ty, zcu)));
                     const pl_off = ref.offset + @as(u32, @intCast(errUnionPayloadOffset(pl_ty, zcu)));
                     if (ref.kind == .ptr and self.checkScalarAccess(ref.root_id, err_off, .anyerror)) {
+                        _ = self.markRangeRead(ref.root_id, err_off, @intCast(Type.anyerror.abiSize(zcu)));
                         if (pl_ty.hasRuntimeBits(zcu)) {
                             try self.inst_refs.put(self.cg.gpa, inst, .{
                                 .root_id = ref.root_id,
@@ -12084,6 +12344,7 @@ const SroaAnalysis = struct {
                             if (!isByRef(scalar_ty, zcu, self.cg.target) and
                                 self.checkScalarAccess(ref.root_id, ref.offset, scalar_ty))
                             {
+                                _ = self.markRangeRead(ref.root_id, ref.offset, @intCast(ret_ty.abiSize(zcu)));
                                 return;
                             }
                         } else if (fn_info.cc == .auto) {
@@ -12095,10 +12356,14 @@ const SroaAnalysis = struct {
                                     self.checkScalarAccess(ref.root_id, ref.offset + fs[1].offset, fs[1].ty),
                                 .sret => unreachable,
                             };
-                            if (ok) return;
+                            if (ok) {
+                                _ = self.markRangeRead(ref.root_id, ref.offset, @intCast(ret_ty.abiSize(zcu)));
+                                return;
+                            }
                         } else if (!isByRef(ret_ty, zcu, self.cg.target) and
                             self.checkScalarAccess(ref.root_id, ref.offset, ret_ty))
                         {
+                            _ = self.markRangeRead(ref.root_id, ref.offset, @intCast(ret_ty.abiSize(zcu)));
                             return;
                         }
                     }
@@ -12117,6 +12382,7 @@ const SroaAnalysis = struct {
                             if (isByRef(ret_ty, zcu, self.cg.target) and
                                 (try self.checkSubAggregateAccess(ref.root_id, ref.offset, ret_ty)))
                             {
+                                _ = self.markRangeRead(ref.root_id, ref.offset, @intCast(ret_ty.abiSize(zcu)));
                                 return;
                             }
                         } else if (fn_info.cc == .wasm_mvp) {
@@ -12128,6 +12394,7 @@ const SroaAnalysis = struct {
                             if (!isByRef(scalar_ty, zcu, self.cg.target) and
                                 self.checkScalarAccess(ref.root_id, ref.offset, scalar_ty))
                             {
+                                _ = self.markRangeRead(ref.root_id, ref.offset, @intCast(ret_ty.abiSize(zcu)));
                                 return;
                             }
                         } else if (fn_info.cc == .auto) {
@@ -12138,7 +12405,10 @@ const SroaAnalysis = struct {
                                     self.checkScalarAccess(ref.root_id, ref.offset + fs[1].offset, fs[1].ty),
                                 .sret => unreachable,
                             };
-                            if (ok) return;
+                            if (ok) {
+                                _ = self.markRangeRead(ref.root_id, ref.offset, @intCast(ret_ty.abiSize(zcu)));
+                                return;
+                            }
                         }
                     }
                     self.markEscaped(op);
@@ -12155,6 +12425,7 @@ const SroaAnalysis = struct {
                             self.checkScalarAccess(lhs_ref.root_id, lhs_ref.offset, .usize) and
                             self.checkScalarAccess(lhs_ref.root_id, lhs_ref.offset + self.cg.ptrSize(), .usize))
                         {
+                            _ = self.markRangeRead(lhs_ref.root_id, lhs_ref.offset, self.cg.ptrSize() * 2);
                             allowed = true;
                         }
                     } else if (lhs_ref.kind == .ptr and ptr_ty.ptrSize(zcu) == .one) {
@@ -12191,7 +12462,7 @@ const SroaAnalysis = struct {
                     if (rhs_ref.kind == .byref_val and isByRef(elem_ty, zcu, self.cg.target) and
                         (try self.checkSubAggregateAccess(rhs_ref.root_id, rhs_ref.offset, elem_ty)))
                     {
-                        // Valid by-ref element value for memset.
+                        _ = self.markRangeRead(rhs_ref.root_id, rhs_ref.offset, @intCast(elem_ty.abiSize(zcu)));
                     } else {
                         self.markEscaped(bin_op.rhs);
                     }
@@ -12207,7 +12478,7 @@ const SroaAnalysis = struct {
                             self.checkScalarAccess(ref.root_id, ref.offset, .usize) and
                             self.checkScalarAccess(ref.root_id, ref.offset + self.cg.ptrSize(), .usize))
                         {
-                            // Valid slice ptr + len read.
+                            _ = self.markRangeRead(ref.root_id, ref.offset, self.cg.ptrSize() * 2);
                         } else {
                             self.markEscaped(op);
                         }
@@ -12223,10 +12494,13 @@ const SroaAnalysis = struct {
                     if (pl_ty.hasRuntimeBits(zcu) and !isByRef(pl_ty, zcu, self.cg.target)) {
                         for ([_]Air.Inst.Ref{ bin_op.lhs, bin_op.rhs }) |op| {
                             if (self.getRef(op)) |ref| {
-                                if (!(ref.kind == .byref_val and
+                                if (ref.kind == .byref_val and
                                     self.checkIsNullAccess(ref.root_id, ref.offset, op_ty) and
-                                    self.checkScalarAccess(ref.root_id, ref.offset, pl_ty)))
+                                    self.checkScalarAccess(ref.root_id, ref.offset, pl_ty))
                                 {
+                                    self.markIsNullRead(ref.root_id, ref.offset, op_ty);
+                                    _ = self.markRangeRead(ref.root_id, ref.offset, @intCast(pl_ty.abiSize(zcu)));
+                                } else {
                                     self.markEscaped(op);
                                 }
                             }
@@ -12287,6 +12561,15 @@ const SroaAnalysis = struct {
                                 .from_root = block_ref.root_id,
                                 .to_root = op_ref.root_id,
                             });
+                            if (block_ty.hasRuntimeBits(zcu)) {
+                                try self.copy_edges.append(self.cg.gpa, .{
+                                    .dst_root = block_ref.root_id,
+                                    .dst_offset = block_ref.offset,
+                                    .src_root = op_ref.root_id,
+                                    .src_offset = op_ref.offset,
+                                    .size = @intCast(block_ty.abiSize(zcu)),
+                                });
+                            }
                             return;
                         }
                     }
@@ -12723,8 +13006,881 @@ const CmpVectorReduceAnalysis = struct {
     }
 };
 
+fn bodyIsPureAbort(cg: *const CodeGen, body: []const Air.Inst.Index) bool {
+    if (body.len == 0) return false;
+    const tags = cg.air.instructions.items(.tag);
+    const last_tag = tags[@backingInt(body[body.len - 1])];
+    if (last_tag != .unreach and last_tag != .trap) return false;
+    for (body[0 .. body.len - 1]) |inst| {
+        switch (tags[@backingInt(inst)]) {
+            .dbg_stmt,
+            .dbg_empty_stmt,
+            .dbg_var_ptr,
+            .dbg_var_val,
+            .dbg_arg_inline,
+            .call,
+            .call_never_inline,
+            => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
+fn instMayWriteOrCall(cg: *const CodeGen, inst: Air.Inst.Index) bool {
+    const tags = cg.air.instructions.items(.tag);
+    return switch (tags[@backingInt(inst)]) {
+        .block => {
+            const block = cg.air.unwrapBlock(inst);
+            for (block.body) |sub_inst| {
+                if (instMayWriteOrCall(cg, sub_inst)) return true;
+            }
+            return false;
+        },
+        .dbg_inline_block => {
+            const block = cg.air.unwrapDbgBlock(inst);
+            for (block.body) |sub_inst| {
+                if (instMayWriteOrCall(cg, sub_inst)) return true;
+            }
+            return false;
+        },
+        .cond_br => {
+            const branch = cg.air.unwrapCondBr(inst);
+            if (!bodyIsPureAbort(cg, branch.then_body)) {
+                for (branch.then_body) |sub_inst| {
+                    if (instMayWriteOrCall(cg, sub_inst)) return true;
+                }
+            }
+            if (!bodyIsPureAbort(cg, branch.else_body)) {
+                for (branch.else_body) |sub_inst| {
+                    if (instMayWriteOrCall(cg, sub_inst)) return true;
+                }
+            }
+            return false;
+        },
+        .store,
+        .store_safe,
+        => !cg.elided_init_stores.contains(inst),
+        .memset,
+        .memset_safe,
+        .memcpy,
+        .memmove,
+        .atomic_store_unordered,
+        .atomic_store_monotonic,
+        .atomic_store_release,
+        .atomic_store_seq_cst,
+        .atomic_rmw,
+        .cmpxchg_weak,
+        .cmpxchg_strong,
+        .optional_payload_ptr_set,
+        .errunion_payload_ptr_set,
+        .set_union_tag,
+        .legalize_vec_store_elem,
+        .c_va_start,
+        .c_va_copy,
+        .c_va_arg,
+        .c_va_end,
+        .set_err_return_trace,
+        .save_err_return_trace_index,
+        .wasm_memory_grow,
+        .call,
+        .call_always_tail,
+        .call_never_tail,
+        .call_never_inline,
+        .legalize_compiler_rt_call,
+        .assembly,
+        .loop,
+        .switch_br,
+        .loop_switch_br,
+        .@"try",
+        .try_cold,
+        .try_ptr,
+        .try_ptr_cold,
+        .switch_dispatch,
+        .repeat,
+        .ret,
+        .ret_safe,
+        .ret_load,
+        .unreach,
+        .trap,
+        => true,
+        else => false,
+    };
+}
+
+fn forEachRuntimeOperand(
+    cg: *const CodeGen,
+    inst: Air.Inst.Index,
+    ctx: anytype,
+    comptime func: fn (@TypeOf(ctx), Air.Inst.Ref) void,
+) void {
+    const zcu = cg.pt.zcu;
+    const tags = cg.air.instructions.items(.tag);
+    const datas = cg.air.instructions.items(.data);
+    const tag = tags[@backingInt(inst)];
+    const data = datas[@backingInt(inst)];
+
+    switch (tag) {
+        .arg,
+        .alloc,
+        .ret_ptr,
+        .breakpoint,
+        .dbg_stmt,
+        .dbg_empty_stmt,
+        .unreach,
+        .trap,
+        .repeat,
+        .wasm_memory_size,
+        .err_return_trace,
+        .save_err_return_trace_index,
+        .frame_addr,
+        .ret_addr,
+        .c_va_start,
+        .work_item_id,
+        .work_group_size,
+        .work_group_id,
+        .runtime_nav_ptr,
+        .dbg_var_ptr,
+        .dbg_var_val,
+        .dbg_arg_inline,
+        .block,
+        .loop,
+        .dbg_inline_block,
+        => {},
+
+        .not,
+        .bit_cast,
+        .bit_cast_safe,
+        .ptr_cast,
+        .ptr_from_int,
+        .int_from_ptr,
+        .error_cast,
+        .error_from_int,
+        .int_from_error,
+        .union_from_enum,
+        .load,
+        .fpext,
+        .fptrunc,
+        .int_cast,
+        .int_cast_safe,
+        .trunc,
+        .optional_payload,
+        .optional_payload_ptr,
+        .optional_payload_ptr_set,
+        .wrap_optional,
+        .unwrap_errunion_payload,
+        .unwrap_errunion_err,
+        .unwrap_errunion_payload_ptr,
+        .unwrap_errunion_err_ptr,
+        .errunion_payload_ptr_set,
+        .wrap_errunion_payload,
+        .wrap_errunion_err,
+        .slice_ptr,
+        .slice_len,
+        .ptr_slice_len_ptr,
+        .ptr_slice_ptr_ptr,
+        .array_to_slice,
+        .array_to_vector,
+        .int_from_float,
+        .int_from_float_optimized,
+        .int_from_float_safe,
+        .int_from_float_optimized_safe,
+        .float_from_int,
+        .splat,
+        .get_union_tag,
+        .clz,
+        .ctz,
+        .popcount,
+        .byte_swap,
+        .bit_reverse,
+        .abs,
+        .addrspace_cast,
+        .error_set_has_value,
+        .c_va_arg,
+        .c_va_copy,
+        .struct_field_ptr_index_0,
+        .struct_field_ptr_index_1,
+        .struct_field_ptr_index_2,
+        .struct_field_ptr_index_3,
+        => func(ctx, data.ty_op.operand),
+
+        .is_null,
+        .is_non_null,
+        .is_null_ptr,
+        .is_non_null_ptr,
+        .is_err,
+        .is_non_err,
+        .is_err_ptr,
+        .is_non_err_ptr,
+        .ret,
+        .ret_safe,
+        .ret_load,
+        .is_named_enum_value,
+        .tag_name,
+        .error_name,
+        .sqrt,
+        .sin,
+        .cos,
+        .tan,
+        .exp,
+        .exp2,
+        .log,
+        .log2,
+        .log10,
+        .floor,
+        .ceil,
+        .round,
+        .trunc_float,
+        .neg,
+        .neg_optimized,
+        .cmp_lte_errors_len,
+        .set_err_return_trace,
+        .c_va_end,
+        => func(ctx, data.un_op),
+
+        .add,
+        .add_safe,
+        .add_optimized,
+        .add_wrap,
+        .add_sat,
+        .sub,
+        .sub_safe,
+        .sub_optimized,
+        .sub_wrap,
+        .sub_sat,
+        .mul,
+        .mul_safe,
+        .mul_optimized,
+        .mul_wrap,
+        .mul_sat,
+        .div_float,
+        .div_float_optimized,
+        .div_trunc,
+        .div_trunc_optimized,
+        .div_floor,
+        .div_floor_optimized,
+        .div_ceil,
+        .div_ceil_optimized,
+        .div_exact,
+        .div_exact_optimized,
+        .rem,
+        .rem_optimized,
+        .mod,
+        .mod_optimized,
+        .bit_and,
+        .bit_or,
+        .xor,
+        .cmp_lt,
+        .cmp_lt_optimized,
+        .cmp_lte,
+        .cmp_lte_optimized,
+        .cmp_eq,
+        .cmp_eq_optimized,
+        .cmp_gte,
+        .cmp_gte_optimized,
+        .cmp_gt,
+        .cmp_gt_optimized,
+        .cmp_neq,
+        .cmp_neq_optimized,
+        .store,
+        .store_safe,
+        .array_elem_val,
+        .slice_elem_val,
+        .ptr_elem_val,
+        .legalize_vec_elem_val,
+        .shl,
+        .shl_exact,
+        .shl_sat,
+        .shr,
+        .shr_exact,
+        .set_union_tag,
+        .min,
+        .max,
+        .memcpy,
+        .memmove,
+        .memset,
+        .memset_safe,
+        .atomic_store_unordered,
+        .atomic_store_monotonic,
+        .atomic_store_release,
+        .atomic_store_seq_cst,
+        => {
+            func(ctx, data.bin_op.lhs);
+            func(ctx, data.bin_op.rhs);
+        },
+
+        .ptr_add,
+        .ptr_sub,
+        .add_with_overflow,
+        .sub_with_overflow,
+        .mul_with_overflow,
+        .shl_with_overflow,
+        .slice,
+        .slice_elem_ptr,
+        .ptr_elem_ptr,
+        => {
+            const bin = cg.air.extraData(Air.Bin, data.ty_pl.payload).data;
+            func(ctx, bin.lhs);
+            func(ctx, bin.rhs);
+        },
+
+        .struct_field_ptr, .agg_field_val, .spirv_runtime_array_len => {
+            const extra = cg.air.extraData(Air.StructField, data.ty_pl.payload).data;
+            func(ctx, extra.struct_operand);
+        },
+
+        .field_parent_ptr => {
+            const extra = cg.air.extraData(Air.FieldParentPtr, data.ty_pl.payload).data;
+            func(ctx, extra.field_ptr);
+        },
+
+        .br, .switch_dispatch => func(ctx, data.br.operand),
+
+        .cond_br,
+        .switch_br,
+        .loop_switch_br,
+        .@"try",
+        .try_cold,
+        .wasm_memory_grow,
+        => func(ctx, data.pl_op.operand),
+
+        .try_ptr, .try_ptr_cold => {
+            const unwrapped = cg.air.unwrapTryPtr(inst);
+            func(ctx, unwrapped.error_union_ptr);
+        },
+
+        .call, .call_always_tail, .call_never_tail, .call_never_inline => {
+            func(ctx, data.pl_op.operand);
+            const extra = cg.air.extraData(Air.Call, data.pl_op.payload);
+            const args: []const Air.Inst.Ref = @ptrCast(cg.air.extra.items[extra.end..][0..extra.data.args_len]);
+            for (args) |arg| func(ctx, arg);
+        },
+
+        .legalize_compiler_rt_call => {
+            const unwrapped = cg.air.unwrapCompilerRtCall(inst);
+            for (unwrapped.args) |arg| func(ctx, arg);
+        },
+
+        .aggregate_init => {
+            const res_ty = cg.typeOfIndex(inst);
+            const elements_len = @as(usize, @intCast(res_ty.arrayLen(zcu)));
+            const elements: []const Air.Inst.Ref = @ptrCast(cg.air.extra.items[data.ty_pl.payload..][0..elements_len]);
+            for (elements) |elem| func(ctx, elem);
+        },
+
+        .union_init => {
+            const extra = cg.air.extraData(Air.UnionInit, data.ty_pl.payload).data;
+            func(ctx, extra.init);
+        },
+
+        .prefetch => func(ctx, data.prefetch.ptr),
+
+        .mul_add, .select, .legalize_vec_store_elem => {
+            const bin = cg.air.extraData(Air.Bin, data.pl_op.payload).data;
+            func(ctx, data.pl_op.operand);
+            func(ctx, bin.lhs);
+            func(ctx, bin.rhs);
+        },
+
+        .shuffle_one => {
+            const unwrapped = cg.air.unwrapShuffleOne(zcu, inst);
+            func(ctx, unwrapped.operand);
+        },
+        .shuffle_two => {
+            const unwrapped = cg.air.unwrapShuffleTwo(zcu, inst);
+            func(ctx, unwrapped.operand_a);
+            func(ctx, unwrapped.operand_b);
+        },
+        .cmp_vector, .cmp_vector_optimized => {
+            const extra = cg.air.extraData(Air.VectorCmp, data.ty_pl.payload).data;
+            func(ctx, extra.lhs);
+            func(ctx, extra.rhs);
+        },
+        .reduce, .reduce_optimized => func(ctx, data.reduce.operand),
+
+        .atomic_load => func(ctx, data.atomic_load.ptr),
+        .atomic_rmw => {
+            const extra = cg.air.extraData(Air.AtomicRmw, data.pl_op.payload).data;
+            func(ctx, data.pl_op.operand);
+            func(ctx, extra.operand);
+        },
+        .cmpxchg_weak, .cmpxchg_strong => {
+            const extra = cg.air.extraData(Air.Cmpxchg, data.ty_pl.payload).data;
+            func(ctx, extra.ptr);
+            func(ctx, extra.expected_value);
+            func(ctx, extra.new_value);
+        },
+
+        .assembly => {
+            const unwrapped = cg.air.unwrapAsm(inst);
+            for (unwrapped.outputs) |out| if (out != .none) func(ctx, out);
+            for (unwrapped.inputs) |in| func(ctx, in);
+        },
+
+        .inferred_alloc, .inferred_alloc_comptime => unreachable,
+    }
+}
+
+fn countBodyUses(cg: *const CodeGen, body: []const Air.Inst.Index, use_counts: []u32) void {
+    const tags = cg.air.instructions.items(.tag);
+    const Helper = struct {
+        fn addUse(counts: []u32, op: Air.Inst.Ref) void {
+            if (op.toIndex()) |idx| {
+                counts[@backingInt(idx)] += 1;
+            }
+        }
+    };
+    for (body) |inst| {
+        forEachRuntimeOperand(cg, inst, use_counts, Helper.addUse);
+        switch (tags[@backingInt(inst)]) {
+            .block, .loop => countBodyUses(cg, cg.air.unwrapBlock(inst).body, use_counts),
+            .dbg_inline_block => countBodyUses(cg, cg.air.unwrapDbgBlock(inst).body, use_counts),
+            .cond_br => {
+                const branch = cg.air.unwrapCondBr(inst);
+                countBodyUses(cg, branch.then_body, use_counts);
+                countBodyUses(cg, branch.else_body, use_counts);
+            },
+            .switch_br, .loop_switch_br => {
+                const switch_br = cg.air.unwrapSwitch(inst);
+                var it = switch_br.iterateCases();
+                while (it.next()) |case| countBodyUses(cg, case.body, use_counts);
+                countBodyUses(cg, it.elseBody(), use_counts);
+            },
+            .@"try", .try_cold => countBodyUses(cg, cg.air.unwrapTry(inst).else_body, use_counts),
+            .try_ptr, .try_ptr_cold => countBodyUses(cg, cg.air.unwrapTryPtr(inst).else_body, use_counts),
+            else => {},
+        }
+    }
+}
+
+fn scanBlockForLoadElisions(
+    cg: *CodeGen,
+    analysis: *const SroaAnalysis,
+    use_counts: []const u32,
+    body: []const Air.Inst.Index,
+) InnerError!void {
+    const zcu = cg.pt.zcu;
+    const tags = cg.air.instructions.items(.tag);
+    const datas = cg.air.instructions.items(.data);
+
+    var derived_byref: std.AutoHashMapUnmanaged(Air.Inst.Index, void) = .empty;
+    defer derived_byref.deinit(cg.gpa);
+
+    for (body, 0..) |inst, i| {
+        switch (tags[@backingInt(inst)]) {
+            .block, .loop => try scanBlockForLoadElisions(cg, analysis, use_counts, cg.air.unwrapBlock(inst).body),
+            .dbg_inline_block => try scanBlockForLoadElisions(cg, analysis, use_counts, cg.air.unwrapDbgBlock(inst).body),
+            .cond_br => {
+                const branch = cg.air.unwrapCondBr(inst);
+                try scanBlockForLoadElisions(cg, analysis, use_counts, branch.then_body);
+                try scanBlockForLoadElisions(cg, analysis, use_counts, branch.else_body);
+            },
+            .switch_br, .loop_switch_br => {
+                const switch_br = cg.air.unwrapSwitch(inst);
+                var it = switch_br.iterateCases();
+                while (it.next()) |case| try scanBlockForLoadElisions(cg, analysis, use_counts, case.body);
+                try scanBlockForLoadElisions(cg, analysis, use_counts, it.elseBody());
+            },
+            .@"try", .try_cold => try scanBlockForLoadElisions(cg, analysis, use_counts, cg.air.unwrapTry(inst).else_body),
+            .try_ptr, .try_ptr_cold => try scanBlockForLoadElisions(cg, analysis, use_counts, cg.air.unwrapTryPtr(inst).else_body),
+            .load => {
+                if (cg.promoted_insts.contains(inst)) continue;
+                const total_uses = use_counts[@backingInt(inst)];
+                if (total_uses == 0) continue;
+
+                const ty_op = datas[@backingInt(inst)].ty_op;
+                const elem_ty = ty_op.ty;
+                if (!elem_ty.hasRuntimeBits(zcu) or !isByRef(elem_ty, zcu, cg.target)) continue;
+
+                const ptr_ty = cg.typeOf(ty_op.operand);
+                const ptr_info = ptr_ty.ptrInfo(zcu);
+                if (ptr_info.flags.is_volatile or ptr_info.flags.vector_index != .none or ptr_info.packed_offset.host_size != 0) continue;
+                if (analysis.getRef(ty_op.operand)) |ref| {
+                    if (!analysis.roots.items[ref.root_id].escaped) continue;
+                }
+
+                // 1. Check if all uses of this by-ref load are scalar bit_casts in this block.
+                var bitcast_ok = true;
+                var bitcast_seen: u32 = 0;
+                for (body[i + 1 ..]) |later| {
+                    const MatchCtx = struct {
+                        target: Air.Inst.Ref,
+                        count: u32 = 0,
+                        fn cb(self: *@This(), op: Air.Inst.Ref) void {
+                            if (op == self.target) self.count += 1;
+                        }
+                    };
+                    var mctx: MatchCtx = .{ .target = inst.toRef() };
+                    forEachRuntimeOperand(cg, later, &mctx, MatchCtx.cb);
+                    if (mctx.count > 0) {
+                        if (mctx.count != 1 or tags[@backingInt(later)] != .bit_cast) {
+                            bitcast_ok = false;
+                            break;
+                        }
+                        const dest_ty = cg.typeOfIndex(later);
+                        if (!dest_ty.hasRuntimeBits(zcu) or isByRef(dest_ty, zcu, cg.target) or
+                            dest_ty.abiSize(zcu) != elem_ty.abiSize(zcu))
+                        {
+                            bitcast_ok = false;
+                            break;
+                        }
+                        const valid_size = switch (dest_ty.abiSize(zcu)) {
+                            1, 2, 4, 8 => true,
+                            16 => dest_ty.zigTypeTag(zcu) == .vector,
+                            else => false,
+                        };
+                        if (!valid_size) {
+                            bitcast_ok = false;
+                            break;
+                        }
+                        bitcast_seen += 1;
+                        if (bitcast_seen == total_uses) break;
+                    }
+                    if (instMayWriteOrCall(cg, later)) {
+                        bitcast_ok = false;
+                        break;
+                    }
+                }
+                if (bitcast_ok and bitcast_seen == total_uses) {
+                    try cg.bitcast_load_aligns.put(cg.gpa, inst, ptr_ty.ptrAlignment(zcu));
+                    continue;
+                }
+
+                // 2. Check if all uses of this by-ref load are read-only value extractions in this block.
+                if (ptr_ty.ptrAlignment(zcu).compare(.lt, elem_ty.abiAlignment(zcu))) continue;
+                derived_byref.clearRetainingCapacity();
+                try derived_byref.put(cg.gpa, inst, {});
+                var needed_uses: u32 = total_uses;
+                var seen_uses: u32 = 0;
+                var readonly_ok = true;
+
+                for (body[i + 1 ..]) |later| {
+                    const SetCtx = struct {
+                        set: *const std.AutoHashMapUnmanaged(Air.Inst.Index, void),
+                        count: u32 = 0,
+                        matched_op: Air.Inst.Ref = .none,
+                        fn cb(self: *@This(), op: Air.Inst.Ref) void {
+                            if (op.toIndex()) |idx| {
+                                if (self.set.contains(idx)) {
+                                    self.count += 1;
+                                    self.matched_op = op;
+                                }
+                            }
+                        }
+                    };
+                    var sctx: SetCtx = .{ .set = &derived_byref };
+                    forEachRuntimeOperand(cg, later, &sctx, SetCtx.cb);
+                    if (sctx.count > 0) {
+                        if (sctx.count != 1) {
+                            readonly_ok = false;
+                            break;
+                        }
+                        const later_tag = tags[@backingInt(later)];
+                        const later_data = datas[@backingInt(later)];
+                        const op = sctx.matched_op;
+                        const valid_extract = switch (later_tag) {
+                            .agg_field_val => blk: {
+                                const extra = cg.air.extraData(Air.StructField, later_data.ty_pl.payload).data;
+                                const st_ty = cg.typeOf(op);
+                                const layout = st_ty.containerLayout(zcu);
+                                break :blk extra.struct_operand == op and st_ty.zigTypeTag(zcu) == .@"struct" and
+                                    (layout == .auto or layout == .@"extern");
+                            },
+                            .array_elem_val => later_data.bin_op.lhs == op and isByRef(cg.typeOf(op), zcu, cg.target),
+                            .slice_ptr, .slice_len, .optional_payload, .unwrap_errunion_err, .unwrap_errunion_payload => later_data.ty_op.operand == op,
+                            .slice_elem_val => later_data.bin_op.lhs == op,
+                            .is_null, .is_non_null, .is_err, .is_non_err => later_data.un_op == op,
+                            else => false,
+                        };
+                        if (!valid_extract) {
+                            readonly_ok = false;
+                            break;
+                        }
+                        seen_uses += 1;
+                        const later_ty = cg.typeOfIndex(later);
+                        if (later_ty.hasRuntimeBits(zcu) and isByRef(later_ty, zcu, cg.target) and
+                            switch (later_tag) {
+                                .agg_field_val, .array_elem_val, .optional_payload, .unwrap_errunion_payload => true,
+                                else => false,
+                            })
+                        {
+                            try derived_byref.put(cg.gpa, later, {});
+                            needed_uses += use_counts[@backingInt(later)];
+                        }
+                        if (seen_uses == needed_uses) break;
+                    }
+                    if (instMayWriteOrCall(cg, later)) {
+                        readonly_ok = false;
+                        break;
+                    }
+                }
+                if (readonly_ok and seen_uses == needed_uses) {
+                    try cg.elided_readonly_loads.put(cg.gpa, inst, {});
+                }
+            },
+            else => {},
+        }
+    }
+}
+
+const ReadOnlyAllocAliasAnalysis = struct {
+    const Candidate = struct {
+        alloc_inst: Air.Inst.Index,
+        alloc_body_idx: usize,
+        init_store: ?Air.Inst.Index = null,
+        src_inst: ?Air.Inst.Index = null,
+        src_is_load: bool = false,
+        src_load_body_idx: usize = 0,
+        last_use_body_idx: usize = 0,
+        used_in_subblock: bool = false,
+        invalid: bool = false,
+    };
+
+    cg: *CodeGen,
+    sroa: *const SroaAnalysis,
+    use_counts: []const u32,
+    candidates: std.AutoArrayHashMapUnmanaged(Air.Inst.Index, Candidate) = .empty,
+    derived_to_alloc: std.AutoHashMapUnmanaged(Air.Inst.Index, Air.Inst.Index) = .empty,
+    seen_top_level: std.AutoHashMapUnmanaged(Air.Inst.Index, usize) = .empty,
+
+    fn deinit(self: *ReadOnlyAllocAliasAnalysis) void {
+        const gpa = self.cg.gpa;
+        self.candidates.deinit(gpa);
+        self.derived_to_alloc.deinit(gpa);
+        self.seen_top_level.deinit(gpa);
+    }
+
+    fn invalidateOp(self: *ReadOnlyAllocAliasAnalysis, op: Air.Inst.Ref) void {
+        const idx = op.toIndex() orelse return;
+        if (self.derived_to_alloc.get(idx)) |alloc_inst| {
+            if (self.candidates.getPtr(alloc_inst)) |cand| {
+                cand.invalid = true;
+            }
+        }
+    }
+
+    fn scanBody(self: *ReadOnlyAllocAliasAnalysis, body: []const Air.Inst.Index, in_top_level: bool) InnerError!void {
+        const zcu = self.cg.pt.zcu;
+        const tags = self.cg.air.instructions.items(.tag);
+        const datas = self.cg.air.instructions.items(.data);
+        var top_level_active = in_top_level;
+
+        for (body, 0..) |inst, body_idx| {
+            const tag = tags[@backingInt(inst)];
+            const data = datas[@backingInt(inst)];
+
+            if (top_level_active) {
+                try self.seen_top_level.put(self.cg.gpa, inst, body_idx);
+            }
+
+            if (top_level_active and tag == .alloc) {
+                const alloc_promoted = if (self.sroa.getRef(inst.toRef())) |ref|
+                    !self.sroa.roots.items[ref.root_id].escaped
+                else
+                    false;
+                if (!alloc_promoted and !self.cg.liveness.isUnused(inst)) {
+                    const ptr_ty = self.cg.typeOfIndex(inst);
+                    const elem_ty = ptr_ty.childType(zcu);
+                    if (!ptr_ty.isVolatilePtr(zcu) and elem_ty.hasRuntimeBits(zcu) and isByRef(elem_ty, zcu, self.cg.target)) {
+                        try self.candidates.put(self.cg.gpa, inst, .{
+                            .alloc_inst = inst,
+                            .alloc_body_idx = body_idx,
+                        });
+                        try self.derived_to_alloc.put(self.cg.gpa, inst, inst);
+                    }
+                }
+                continue;
+            }
+
+            if (top_level_active and (tag == .store or tag == .store_safe)) {
+                const bin_op = data.bin_op;
+                if (bin_op.lhs.toIndex()) |lhs_idx| {
+                    if (self.candidates.getPtr(lhs_idx)) |cand| {
+                        if (!cand.invalid and cand.init_store == null) {
+                            var ok = false;
+                            if (bin_op.rhs.toIndex()) |rhs_idx| {
+                                const rhs_tag = tags[@backingInt(rhs_idx)];
+                                const alloc_ptr_ty = self.cg.typeOfIndex(lhs_idx);
+                                const ptr_info = alloc_ptr_ty.ptrInfo(zcu);
+                                const elem_ty = alloc_ptr_ty.childType(zcu);
+                                const rhs_ty = self.cg.typeOfIndex(rhs_idx);
+                                if (ptr_info.flags.vector_index == .none and ptr_info.packed_offset.host_size == 0 and
+                                    self.use_counts[@backingInt(rhs_idx)] == 1 and
+                                    isByRef(rhs_ty, zcu, self.cg.target) and
+                                    rhs_ty.abiSize(zcu) == elem_ty.abiSize(zcu))
+                                {
+                                    if (rhs_tag == .arg and self.seen_top_level.contains(rhs_idx) and
+                                        alloc_ptr_ty.ptrAlignment(zcu).compare(.lte, rhs_ty.abiAlignment(zcu)))
+                                    {
+                                        cand.init_store = inst;
+                                        cand.src_inst = rhs_idx;
+                                        cand.src_is_load = false;
+                                        ok = true;
+                                    } else if (rhs_tag == .load) {
+                                        if (self.seen_top_level.get(rhs_idx)) |load_body_idx| {
+                                            const load_ty_op = datas[@backingInt(rhs_idx)].ty_op;
+                                            const load_ptr_ty = self.cg.typeOf(load_ty_op.operand);
+                                            const load_ptr_info = load_ptr_ty.ptrInfo(zcu);
+                                            const src_escaped = if (self.sroa.getRef(load_ty_op.operand)) |ref|
+                                                self.sroa.roots.items[ref.root_id].escaped
+                                            else
+                                                true;
+                                            if (!load_ptr_info.flags.is_volatile and
+                                                load_ptr_info.flags.vector_index == .none and
+                                                load_ptr_info.packed_offset.host_size == 0 and
+                                                src_escaped and
+                                                alloc_ptr_ty.ptrAlignment(zcu).compare(.lte, load_ptr_ty.ptrAlignment(zcu)))
+                                            {
+                                                cand.init_store = inst;
+                                                cand.src_inst = rhs_idx;
+                                                cand.src_is_load = true;
+                                                cand.src_load_body_idx = load_body_idx;
+                                                cand.last_use_body_idx = body_idx;
+                                                ok = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (!ok) cand.invalid = true;
+                            self.invalidateOp(bin_op.rhs);
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // Check if this instruction uses any pointer derived from a candidate alloc.
+            const OpCheck = struct {
+                analysis: *ReadOnlyAllocAliasAnalysis,
+                matched_alloc: ?Air.Inst.Index = null,
+                matched_op: Air.Inst.Ref = .none,
+                match_count: u32 = 0,
+                fn cb(ctx: *@This(), op: Air.Inst.Ref) void {
+                    if (op.toIndex()) |idx| {
+                        if (ctx.analysis.derived_to_alloc.get(idx)) |alloc_inst| {
+                            ctx.match_count += 1;
+                            ctx.matched_alloc = alloc_inst;
+                            ctx.matched_op = op;
+                        }
+                    }
+                }
+            };
+            var op_check: OpCheck = .{ .analysis = self };
+            forEachRuntimeOperand(self.cg, inst, &op_check, OpCheck.cb);
+
+            if (op_check.match_count > 0) {
+                if (op_check.match_count != 1) {
+                    forEachRuntimeOperand(self.cg, inst, self, invalidateOp);
+                } else {
+                    const alloc_inst = op_check.matched_alloc.?;
+                    const cand = self.candidates.getPtr(alloc_inst).?;
+                    const op = op_check.matched_op;
+                    if (cand.invalid or cand.init_store == null) {
+                        cand.invalid = true;
+                    } else {
+                        if (in_top_level) {
+                            if (body_idx > cand.last_use_body_idx) cand.last_use_body_idx = body_idx;
+                        } else {
+                            cand.used_in_subblock = true;
+                        }
+                        var derived_ok = false;
+                        var read_ok = false;
+                        switch (tag) {
+                            .struct_field_ptr => {
+                                const extra = self.cg.air.extraData(Air.StructField, data.ty_pl.payload).data;
+                                derived_ok = extra.struct_operand == op and !self.cg.typeOfIndex(inst).isVolatilePtr(zcu);
+                            },
+                            .struct_field_ptr_index_0,
+                            .struct_field_ptr_index_1,
+                            .struct_field_ptr_index_2,
+                            .struct_field_ptr_index_3,
+                            .optional_payload_ptr,
+                            .unwrap_errunion_payload_ptr,
+                            .unwrap_errunion_err_ptr,
+                            .ptr_slice_ptr_ptr,
+                            .ptr_slice_len_ptr,
+                            => {
+                                derived_ok = data.ty_op.operand == op and !self.cg.typeOfIndex(inst).isVolatilePtr(zcu);
+                            },
+                            .ptr_elem_ptr => {
+                                const bin = self.cg.air.extraData(Air.Bin, data.ty_pl.payload).data;
+                                derived_ok = bin.lhs == op and !self.cg.typeOf(op).isSlice(zcu) and !self.cg.typeOfIndex(inst).isVolatilePtr(zcu);
+                            },
+                            .ptr_add, .ptr_sub => {
+                                const bin = self.cg.air.extraData(Air.Bin, data.ty_pl.payload).data;
+                                derived_ok = bin.lhs == op and !self.cg.typeOfIndex(inst).isVolatilePtr(zcu);
+                            },
+                            .ptr_cast => {
+                                const dst_ty = self.cg.typeOfIndex(inst);
+                                derived_ok = data.ty_op.operand == op and dst_ty.zigTypeTag(zcu) == .pointer and
+                                    !dst_ty.isSlice(zcu) and !dst_ty.isVolatilePtr(zcu);
+                            },
+                            .load => {
+                                const res_ty = self.cg.typeOfIndex(inst);
+                                read_ok = data.ty_op.operand == op and !self.cg.typeOf(op).isVolatilePtr(zcu) and
+                                    (!cand.src_is_load or !isByRef(res_ty, zcu, self.cg.target));
+                            },
+                            .ptr_elem_val => {
+                                const res_ty = self.cg.typeOfIndex(inst);
+                                read_ok = data.bin_op.lhs == op and !self.cg.typeOf(op).isVolatilePtr(zcu) and
+                                    !self.cg.typeOf(op).isSlice(zcu) and
+                                    (!cand.src_is_load or !isByRef(res_ty, zcu, self.cg.target));
+                            },
+                            .is_null_ptr,
+                            .is_non_null_ptr,
+                            .is_err_ptr,
+                            .is_non_err_ptr,
+                            .ret_load,
+                            => {
+                                read_ok = data.un_op == op;
+                            },
+                            else => {},
+                        }
+                        if (derived_ok) {
+                            try self.derived_to_alloc.put(self.cg.gpa, inst, alloc_inst);
+                        } else if (!read_ok) {
+                            cand.invalid = true;
+                        }
+                    }
+                }
+            }
+
+            switch (tag) {
+                .block => try self.scanBody(self.cg.air.unwrapBlock(inst).body, false),
+                .dbg_inline_block => try self.scanBody(self.cg.air.unwrapDbgBlock(inst).body, false),
+                .loop => {
+                    top_level_active = false;
+                    try self.scanBody(self.cg.air.unwrapBlock(inst).body, false);
+                },
+                .cond_br => {
+                    const branch = self.cg.air.unwrapCondBr(inst);
+                    try self.scanBody(branch.then_body, false);
+                    try self.scanBody(branch.else_body, false);
+                },
+                .switch_br, .loop_switch_br => {
+                    const switch_br = self.cg.air.unwrapSwitch(inst);
+                    var it = switch_br.iterateCases();
+                    while (it.next()) |case| try self.scanBody(case.body, false);
+                    try self.scanBody(it.elseBody(), false);
+                },
+                .@"try", .try_cold => try self.scanBody(self.cg.air.unwrapTry(inst).else_body, false),
+                .try_ptr, .try_ptr_cold => try self.scanBody(self.cg.air.unwrapTryPtr(inst).else_body, false),
+                .ret, .ret_safe, .ret_load, .unreach, .trap, .repeat => {
+                    top_level_active = false;
+                },
+                else => {},
+            }
+        }
+    }
+};
+
 fn analyzeSroa(cg: *CodeGen, main_body: []const Air.Inst.Index) InnerError!void {
     cg.cmp_vector_reduce_only.clearRetainingCapacity();
+    cg.bitcast_load_aligns.clearRetainingCapacity();
+    cg.readonly_alloc_aliases.clearRetainingCapacity();
+    cg.elided_init_stores.clearRetainingCapacity();
+    cg.elided_readonly_loads.clearRetainingCapacity();
     if (cg.hasSimd()) {
         var cmp_analysis: CmpVectorReduceAnalysis = .{ .cg = cg };
         defer cmp_analysis.deinit();
@@ -12754,6 +13910,68 @@ fn analyzeSroa(cg: *CodeGen, main_body: []const Air.Inst.Index) InnerError!void 
         }
     }
 
+    const use_counts = try cg.gpa.alloc(u32, cg.air.instructions.len);
+    defer cg.gpa.free(use_counts);
+    @memset(use_counts, 0);
+    countBodyUses(cg, main_body, use_counts);
+
+    var alloc_alias: ReadOnlyAllocAliasAnalysis = .{
+        .cg = cg,
+        .sroa = &analysis,
+        .use_counts = use_counts,
+    };
+    defer alloc_alias.deinit();
+    try alloc_alias.scanBody(main_body, true);
+
+    for (alloc_alias.candidates.values()) |cand| {
+        if (cand.invalid) continue;
+        const init_store = cand.init_store orelse continue;
+        const src_inst = cand.src_inst orelse continue;
+        if (cand.src_is_load) {
+            if (cand.used_in_subblock) continue;
+            var write_between = false;
+            for (main_body[cand.src_load_body_idx + 1 .. cand.last_use_body_idx + 1]) |between_inst| {
+                if (between_inst == init_store) continue;
+                if (instMayWriteOrCall(cg, between_inst)) {
+                    write_between = true;
+                    break;
+                }
+            }
+            if (write_between) continue;
+            try cg.elided_readonly_loads.put(cg.gpa, src_inst, {});
+            if (analysis.getRef(src_inst.toRef())) |ref| {
+                analysis.roots.items[ref.root_id].escaped = true;
+            }
+        }
+        try cg.readonly_alloc_aliases.put(cg.gpa, cand.alloc_inst, src_inst.toRef());
+        try cg.elided_init_stores.put(cg.gpa, init_store, {});
+    }
+
+    for (analysis.copy_edges.items) |edge| {
+        if (!analysis.roots.items[edge.src_root].escaped and analysis.roots.items[edge.dst_root].escaped) {
+            _ = analysis.markRangeRead(edge.src_root, edge.src_offset, edge.size);
+        }
+    }
+
+    changed = true;
+    while (changed) {
+        changed = false;
+        for (analysis.copy_edges.items) |edge| {
+            if (analysis.roots.items[edge.src_root].escaped or analysis.roots.items[edge.dst_root].escaped) continue;
+            const dst_fields = analysis.rootFields(edge.dst_root);
+            const dst_end = edge.dst_offset + edge.size;
+            for (dst_fields) |df| {
+                if (df.offset >= edge.dst_offset and df.offset + df.size <= dst_end and df.is_read) {
+                    const src_off = edge.src_offset + (df.offset - edge.dst_offset);
+                    if (analysis.markRangeRead(edge.src_root, src_off, df.size)) {
+                        changed = true;
+                    }
+                }
+                if (df.offset >= dst_end) break;
+            }
+        }
+    }
+
     for (analysis.roots.items, 0..) |root, root_id| {
         if (root.escaped) continue;
 
@@ -12762,12 +13980,13 @@ fn analyzeSroa(cg: *CodeGen, main_body: []const Air.Inst.Index) InnerError!void 
         const src_fields = analysis.rootFields(@intCast(root_id));
 
         for (src_fields) |f| {
-            const local = try cg.ensureAllocLocal(f.ty);
+            const local_idx = if (f.is_read) (try cg.ensureAllocLocal(f.ty)).local else math.maxInt(u32);
             try cg.promoted_fields.append(cg.gpa, .{
                 .offset = f.offset,
                 .size = f.size,
                 .ty = f.ty,
-                .local = local.local,
+                .local = local_idx,
+                .is_read = f.is_read,
             });
         }
 
@@ -12779,6 +13998,8 @@ fn analyzeSroa(cg: *CodeGen, main_body: []const Air.Inst.Index) InnerError!void 
         });
         try cg.promoted_insts.putNoClobber(cg.gpa, root.inst, slot_idx);
     }
+
+    try scanBlockForLoadElisions(cg, &analysis, use_counts, main_body);
 }
 
 test {
