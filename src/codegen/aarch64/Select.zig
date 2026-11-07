@@ -45,6 +45,8 @@ stack_align: InternPool.Alignment,
 live_registers: LiveRegisters,
 live_values: std.AutoHashMapUnmanaged(Air.Inst.Index, Value.Index),
 values: std.ArrayList(Value),
+use_counts: std.AutoHashMapUnmanaged(Air.Inst.Index, u2) = .empty,
+next_spill_reg: u4 = 0,
 
 pub const LiveRegisters = std.enums.EnumArray(Register.Alias, Value.Index);
 
@@ -121,7 +123,7 @@ pub fn deinit(isel: *Select) void {
 
     isel.live_values.deinit(gpa);
     isel.values.deinit(gpa);
-
+    isel.use_counts.deinit(gpa);
     isel.* = undefined;
 }
 
@@ -870,6 +872,8 @@ pub fn analyze(isel: *Select, air_body: []const Air.Inst.Index) !void {
 
 fn analyzeUse(isel: *Select, air_ref: Air.Inst.Ref) !void {
     const air_inst_index = air_ref.toIndex() orelse return;
+    const use_gop = try isel.use_counts.getOrPut(isel.pt.zcu.gpa, air_inst_index);
+    use_gop.value_ptr.* = if (use_gop.found_existing) use_gop.value_ptr.* +| 1 else 1;
     const def_order_index = isel.def_order.getIndex(air_inst_index).?;
 
     // Loop liveness
@@ -886,6 +890,77 @@ fn analyzeUse(isel: *Select, air_ref: Air.Inst.Ref) !void {
             try isel.loop_live.set.getOrPut(isel.pt.zcu.gpa, .{ active_loop, air_inst_index });
         if (!loop_live_gop.found_existing) active_loop.get(isel).live += 1;
     }
+}
+
+fn isSingleUseInCurrentBlock(
+    isel: *const Select,
+    air: *const AirIterator,
+    ref: Air.Inst.Ref,
+) ?Air.Inst.Index {
+    const inst_index = ref.toIndex() orelse return null;
+    if (isel.use_counts.get(inst_index) != 1) return null;
+    if (isel.live_values.contains(inst_index)) return null;
+    if (std.mem.indexOfScalar(Air.Inst.Index, air.body[0..air.body_index], inst_index) == null) return null;
+    return inst_index;
+}
+
+fn constIntSigned(isel: *const Select, ref: Air.Inst.Ref, bits: u16) ?i64 {
+    if (bits == 0 or bits > 64) return null;
+    const ip_index = ref.toInterned() orelse return null;
+    const zcu = isel.pt.zcu;
+    const val: Constant = .fromInterned(ip_index);
+    if (val.isUndef(zcu)) return null;
+    const ty = isel.air.typeOf(ref, &zcu.intern_pool);
+    if (ty.isAbiInt(zcu)) {
+        const int_val: u64 = switch (ty.intInfo(zcu).signedness) {
+            .signed => @bitCast(val.toSignedInt(zcu)),
+            .unsigned => val.toUnsignedInt(zcu),
+        };
+        const shift: u6 = @intCast(64 - bits);
+        return @as(i64, @bitCast(int_val << shift)) >> shift;
+    }
+    if (ty.zigTypeTag(zcu) == .optional and ty.optionalReprIsPayload(zcu)) {
+        if (val.isNull(zcu)) return 0;
+    }
+    return null;
+}
+
+fn constShiftOperand(
+    isel: *const Select,
+    air: *const AirIterator,
+    ref: Air.Inst.Ref,
+    bits: u16,
+) ?struct { lhs: Air.Inst.Ref, shift: codegen.aarch64.encoding.Instruction.DataProcessingRegister.Shift } {
+    const shift_idx = isel.isSingleUseInCurrentBlock(air, ref) orelse return null;
+    const zcu = isel.pt.zcu;
+    const ip = &zcu.intern_pool;
+    const shift_tag = air.tag(shift_idx);
+    switch (shift_tag) {
+        .shl, .shl_exact, .shr, .shr_exact => {},
+        else => return null,
+    }
+    const shift_op = air.data(shift_idx).bin_op;
+    const lhs_ty = isel.air.typeOf(shift_op.lhs, ip);
+    if (lhs_ty.isVector(zcu) or !lhs_ty.isAbiInt(zcu)) return null;
+    const lhs_info = lhs_ty.intInfo(zcu);
+    if (lhs_info.bits != bits) return null;
+    const sh_ty = isel.air.typeOf(shift_op.rhs, ip);
+    if (!sh_ty.isAbiInt(zcu)) return null;
+    const sh_bits = sh_ty.intInfo(zcu).bits;
+    const sh_imm = isel.constIntSigned(shift_op.rhs, sh_bits) orelse return null;
+    if (sh_imm <= 0 or sh_imm >= bits) return null;
+    const amount: u6 = @intCast(sh_imm);
+    return .{
+        .lhs = shift_op.lhs,
+        .shift = switch (shift_tag) {
+            .shl, .shl_exact => .{ .lsl = amount },
+            .shr, .shr_exact => switch (lhs_info.signedness) {
+                .unsigned => .{ .lsr = amount },
+                .signed => .{ .asr = amount },
+            },
+            else => unreachable,
+        },
+    };
 }
 
 pub fn finishAnalysis(isel: *Select) !void {
@@ -1006,18 +1081,182 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
 
                 const bin_op = air.data(air.inst_index).bin_op;
                 const ty = isel.air.typeOf(bin_op.lhs, ip);
-                if (!ty.isRuntimeFloat()) try res_vi.value.addOrSubtract(isel, ty, try isel.use(bin_op.lhs), switch (air_tag) {
-                    else => unreachable,
-                    .add, .add_safe, .add_wrap => .add,
-                    .sub, .sub_safe, .sub_wrap => .sub,
-                }, try isel.use(bin_op.rhs), .{
-                    .overflow = switch (air_tag) {
+                if (!ty.isRuntimeFloat()) int_add_sub: {
+                    const is_wrapping = switch (air_tag) {
+                        .add, .add_wrap, .sub, .sub_wrap => true,
+                        else => false,
+                    };
+                    if (is_wrapping and !ty.isVector(zcu) and ty.isAbiInt(zcu)) scalar_fast: {
+                        const int_info = ty.intInfo(zcu);
+                        if (int_info.bits != 32 and int_info.bits != 64) break :scalar_fast;
+                        const dst_vi = res_vi.value.parts(isel).only() orelse break :scalar_fast;
+                        const is_sub = switch (air_tag) {
+                            .sub, .sub_wrap => true,
+                            else => false,
+                        };
+
+                        // 1. Constant immediate on RHS (or LHS for commutative add): #imm12 or #imm12, lsl #12,
+                        //    and negative immediate via opposite instruction (.sub <-> .add).
+                        const imm_pair: ?struct { op_ref: Air.Inst.Ref, imm: i64, sub: bool } =
+                            if (isel.constIntSigned(bin_op.rhs, int_info.bits)) |rhs_imm|
+                                .{ .op_ref = bin_op.lhs, .imm = rhs_imm, .sub = is_sub }
+                            else if (!is_sub)
+                                if (isel.constIntSigned(bin_op.lhs, int_info.bits)) |lhs_imm|
+                                    .{ .op_ref = bin_op.rhs, .imm = lhs_imm, .sub = false }
+                                else
+                                    null
+                            else
+                                null;
+                        if (imm_pair) |pair| {
+                            const abs_imm: i64 = if (pair.imm < 0 and pair.imm > std.math.minInt(i64)) -pair.imm else pair.imm;
+                            const eff_sub = if (pair.imm < 0 and pair.imm > std.math.minInt(i64)) !pair.sub else pair.sub;
+                            const is_imm12 = abs_imm >= 0 and abs_imm <= std.math.maxInt(u12);
+                            const is_shifted12 = abs_imm > 0 and (abs_imm & 0xfff) == 0 and (abs_imm >> 12) <= std.math.maxInt(u12);
+                            if (is_imm12 or is_shifted12) {
+                                const dst_ra = try dst_vi.defReg(isel) orelse break :unused;
+                                const lhs_vi = try isel.use(pair.op_ref);
+                                const lhs_mat = try lhs_vi.matReg(isel);
+                                const dst_reg = switch (int_info.bits) {
+                                    32 => dst_ra.w(),
+                                    64 => dst_ra.x(),
+                                    else => unreachable,
+                                };
+                                const lhs_reg = switch (int_info.bits) {
+                                    32 => lhs_mat.ra.w(),
+                                    64 => lhs_mat.ra.x(),
+                                    else => unreachable,
+                                };
+                                if (is_imm12) {
+                                    const imm12: u12 = @intCast(abs_imm);
+                                    try isel.emit(if (eff_sub)
+                                        .sub(dst_reg, lhs_reg, .{ .immediate = imm12 })
+                                    else
+                                        .add(dst_reg, lhs_reg, .{ .immediate = imm12 }));
+                                } else {
+                                    const imm12: u12 = @intCast(abs_imm >> 12);
+                                    try isel.emit(if (eff_sub)
+                                        .sub(dst_reg, lhs_reg, .{ .shifted_immediate = .{ .immediate = imm12, .lsl = .@"12" } })
+                                    else
+                                        .add(dst_reg, lhs_reg, .{ .shifted_immediate = .{ .immediate = imm12, .lsl = .@"12" } }));
+                                }
+                                try lhs_mat.finish(isel);
+                                break :int_add_sub;
+                            }
+                        }
+
+                        // 2. MADD / MSUB / MNEG fusion: a + (b * c), (b * c) + a, a - (b * c), 0 - (b * c).
+                        const mul_match: ?struct { mul_idx: Air.Inst.Index, acc_ref: Air.Inst.Ref } =
+                            if (isel.isSingleUseInCurrentBlock(air, bin_op.rhs)) |rhs_idx|
+                                switch (air.tag(rhs_idx)) {
+                                    .mul, .mul_wrap => .{ .mul_idx = rhs_idx, .acc_ref = bin_op.lhs },
+                                    else => null,
+                                }
+                            else if (!is_sub)
+                                if (isel.isSingleUseInCurrentBlock(air, bin_op.lhs)) |lhs_idx|
+                                    switch (air.tag(lhs_idx)) {
+                                        .mul, .mul_wrap => .{ .mul_idx = lhs_idx, .acc_ref = bin_op.rhs },
+                                        else => null,
+                                    }
+                                else
+                                    null
+                            else
+                                null;
+                        if (mul_match) |m| {
+                            const dst_ra = try dst_vi.defReg(isel) orelse break :unused;
+                            const mul_op = air.data(m.mul_idx).bin_op;
+                            const mul_lhs_vi = try isel.use(mul_op.lhs);
+                            const mul_rhs_vi = try isel.use(mul_op.rhs);
+                            const acc_is_zero = isel.constIntSigned(m.acc_ref, int_info.bits) == 0;
+                            const opt_acc_vi = if (acc_is_zero) null else try isel.use(m.acc_ref);
+                            const mul_lhs_mat = try mul_lhs_vi.matReg(isel);
+                            const mul_rhs_mat = try mul_rhs_vi.matReg(isel);
+                            const opt_acc_mat = if (opt_acc_vi) |acc_vi| try acc_vi.matReg(isel) else null;
+                            const dst_reg = switch (int_info.bits) {
+                                32 => dst_ra.w(),
+                                64 => dst_ra.x(),
+                                else => unreachable,
+                            };
+                            const mul_lhs_reg = switch (int_info.bits) {
+                                32 => mul_lhs_mat.ra.w(),
+                                64 => mul_lhs_mat.ra.x(),
+                                else => unreachable,
+                            };
+                            const mul_rhs_reg = switch (int_info.bits) {
+                                32 => mul_rhs_mat.ra.w(),
+                                64 => mul_rhs_mat.ra.x(),
+                                else => unreachable,
+                            };
+                            const acc_ra: Register.Alias = if (opt_acc_mat) |acc_mat| acc_mat.ra else .zr;
+                            const acc_reg = switch (int_info.bits) {
+                                32 => acc_ra.w(),
+                                64 => acc_ra.x(),
+                                else => unreachable,
+                            };
+                            try isel.emit(if (is_sub)
+                                .msub(dst_reg, mul_lhs_reg, mul_rhs_reg, acc_reg)
+                            else
+                                .madd(dst_reg, mul_lhs_reg, mul_rhs_reg, acc_reg));
+                            if (opt_acc_mat) |acc_mat| try acc_mat.finish(isel);
+                            try mul_rhs_mat.finish(isel);
+                            try mul_lhs_mat.finish(isel);
+                            break :int_add_sub;
+                        }
+
+                        // 3. Shifted-register ADD / SUB fusion: a +/- (b << sh) or a +/- (b >> sh).
+                        const shift_match: ?struct { unshifted_ref: Air.Inst.Ref, shifted_ref: Air.Inst.Ref, shift: codegen.aarch64.encoding.Instruction.DataProcessingRegister.Shift } =
+                            if (isel.constShiftOperand(air, bin_op.rhs, int_info.bits)) |s|
+                                .{ .unshifted_ref = bin_op.lhs, .shifted_ref = s.lhs, .shift = s.shift }
+                            else if (!is_sub)
+                                if (isel.constShiftOperand(air, bin_op.lhs, int_info.bits)) |s|
+                                    .{ .unshifted_ref = bin_op.rhs, .shifted_ref = s.lhs, .shift = s.shift }
+                                else
+                                    null
+                            else
+                                null;
+                        if (shift_match) |sm| {
+                            const dst_ra = try dst_vi.defReg(isel) orelse break :unused;
+                            const unshifted_vi = try isel.use(sm.unshifted_ref);
+                            const shifted_vi = try isel.use(sm.shifted_ref);
+                            const unshifted_mat = try unshifted_vi.matReg(isel);
+                            const shifted_mat = try shifted_vi.matReg(isel);
+                            const dst_reg = switch (int_info.bits) {
+                                32 => dst_ra.w(),
+                                64 => dst_ra.x(),
+                                else => unreachable,
+                            };
+                            const unshifted_reg = switch (int_info.bits) {
+                                32 => unshifted_mat.ra.w(),
+                                64 => unshifted_mat.ra.x(),
+                                else => unreachable,
+                            };
+                            const shifted_reg = switch (int_info.bits) {
+                                32 => shifted_mat.ra.w(),
+                                64 => shifted_mat.ra.x(),
+                                else => unreachable,
+                            };
+                            try isel.emit(if (is_sub)
+                                .sub(dst_reg, unshifted_reg, .{ .shifted_register = .{ .register = shifted_reg, .shift = sm.shift } })
+                            else
+                                .add(dst_reg, unshifted_reg, .{ .shifted_register = .{ .register = shifted_reg, .shift = sm.shift } }));
+                            try shifted_mat.finish(isel);
+                            try unshifted_mat.finish(isel);
+                            break :int_add_sub;
+                        }
+                    }
+
+                    try res_vi.value.addOrSubtract(isel, ty, try isel.use(bin_op.lhs), switch (air_tag) {
                         else => unreachable,
-                        .add, .sub => .@"unreachable",
-                        .add_safe, .sub_safe => .{ .panic = .integer_overflow },
-                        .add_wrap, .sub_wrap => .wrap,
-                    },
-                }) else switch (ty.floatBits(isel.target)) {
+                        .add, .add_safe, .add_wrap => .add,
+                        .sub, .sub_safe, .sub_wrap => .sub,
+                    }, try isel.use(bin_op.rhs), .{
+                        .overflow = switch (air_tag) {
+                            else => unreachable,
+                            .add, .sub => .@"unreachable",
+                            .add_safe, .sub_safe => .{ .panic = .integer_overflow },
+                            .add_wrap, .sub_wrap => .wrap,
+                        },
+                    });
+                } else switch (ty.floatBits(isel.target)) {
                     else => unreachable,
                     16, 32, 64 => |bits| {
                         const res_ra = try res_vi.value.defReg(isel) orelse break :unused;
@@ -3772,7 +4011,7 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
             if (air.next()) |next_air_tag| continue :air_tag next_air_tag;
         },
         .bit_and, .bit_or, .xor => |air_tag| {
-            if (isel.live_values.fetchRemove(air.inst_index)) |res_vi| {
+            if (isel.live_values.fetchRemove(air.inst_index)) |res_vi| unused: {
                 defer res_vi.value.deref(isel);
 
                 const bin_op = air.data(air.inst_index).bin_op;
@@ -3786,6 +4025,151 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
                 else
                     return isel.fail("bad {t} {f}", .{ air_tag, isel.fmtType(ty) });
                 if (int_info.bits > 64 * Value.max_parts) return isel.fail("too big {t} {f}", .{ air_tag, isel.fmtType(ty) });
+
+                if (!ty.isVector(zcu) and (int_info.bits == 32 or int_info.bits == 64)) scalar_logic: {
+                    const dst_vi = res_vi.value.parts(isel).only() orelse break :scalar_logic;
+
+                    // 1. UBFX fusion in .bit_and: (x >> lsb) & ((1 << width) - 1).
+                    if (air_tag == .bit_and) {
+                        const ubfx_pair: ?struct { shr_ref: Air.Inst.Ref, mask_imm: i64 } =
+                            if (isel.constIntSigned(bin_op.rhs, int_info.bits)) |rhs_imm|
+                                .{ .shr_ref = bin_op.lhs, .mask_imm = rhs_imm }
+                            else if (isel.constIntSigned(bin_op.lhs, int_info.bits)) |lhs_imm|
+                                .{ .shr_ref = bin_op.rhs, .mask_imm = lhs_imm }
+                            else
+                                null;
+                        if (ubfx_pair) |up| {
+                            const u_mask: u64 = if (int_info.bits == 32)
+                                @as(u32, @truncate(@as(u64, @bitCast(up.mask_imm))))
+                            else
+                                @bitCast(up.mask_imm);
+                            if (u_mask > 0 and (u_mask & (u_mask +% 1)) == 0) {
+                                const width: u16 = @ctz(u_mask +% 1);
+                                if (width >= 1 and width < int_info.bits) {
+                                    if (isel.isSingleUseInCurrentBlock(air, up.shr_ref)) |shr_idx| {
+                                        const shr_tag = air.tag(shr_idx);
+                                        if (shr_tag == .shr or shr_tag == .shr_exact) {
+                                            const shr_op = air.data(shr_idx).bin_op;
+                                            const sh_ty = isel.air.typeOf(shr_op.rhs, ip);
+                                            if (sh_ty.isAbiInt(zcu)) {
+                                                if (isel.constIntSigned(shr_op.rhs, sh_ty.intInfo(zcu).bits)) |lsb_imm| {
+                                                    if (lsb_imm > 0 and lsb_imm + width <= int_info.bits) {
+                                                        const lsb: u6 = @intCast(lsb_imm);
+                                                        const imms: u6 = @intCast(lsb_imm + width - 1);
+                                                        const dst_ra = try dst_vi.defReg(isel) orelse break :unused;
+                                                        const shr_lhs_vi = try isel.use(shr_op.lhs);
+                                                        const shr_lhs_mat = try shr_lhs_vi.matReg(isel);
+                                                        try isel.emit(switch (int_info.bits) {
+                                                            32 => .ubfm(dst_ra.w(), shr_lhs_mat.ra.w(), .{
+                                                                .N = .word,
+                                                                .immr = lsb,
+                                                                .imms = imms,
+                                                            }),
+                                                            64 => .ubfm(dst_ra.x(), shr_lhs_mat.ra.x(), .{
+                                                                .N = .doubleword,
+                                                                .immr = lsb,
+                                                                .imms = imms,
+                                                            }),
+                                                            else => unreachable,
+                                                        });
+                                                        try shr_lhs_mat.finish(isel);
+                                                        break :unused;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // 2. BIC / ORN / EON fusion when one operand is a single-use in-block .not.
+                    const not_match: ?struct { plain_ref: Air.Inst.Ref, not_op_ref: Air.Inst.Ref } =
+                        if (isel.isSingleUseInCurrentBlock(air, bin_op.rhs)) |rhs_idx|
+                            if (air.tag(rhs_idx) == .not)
+                                .{ .plain_ref = bin_op.lhs, .not_op_ref = air.data(rhs_idx).ty_op.operand }
+                            else
+                                null
+                        else if (isel.isSingleUseInCurrentBlock(air, bin_op.lhs)) |lhs_idx|
+                            if (air.tag(lhs_idx) == .not)
+                                .{ .plain_ref = bin_op.rhs, .not_op_ref = air.data(lhs_idx).ty_op.operand }
+                            else
+                                null
+                        else
+                            null;
+                    if (not_match) |nm| {
+                        const dst_ra = try dst_vi.defReg(isel) orelse break :unused;
+                        const plain_vi = try isel.use(nm.plain_ref);
+                        const not_op_vi = try isel.use(nm.not_op_ref);
+                        const plain_mat = try plain_vi.matReg(isel);
+                        const not_op_mat = try not_op_vi.matReg(isel);
+                        const dst_reg = switch (int_info.bits) {
+                            32 => dst_ra.w(),
+                            64 => dst_ra.x(),
+                            else => unreachable,
+                        };
+                        const plain_reg = switch (int_info.bits) {
+                            32 => plain_mat.ra.w(),
+                            64 => plain_mat.ra.x(),
+                            else => unreachable,
+                        };
+                        const not_op_reg = switch (int_info.bits) {
+                            32 => not_op_mat.ra.w(),
+                            64 => not_op_mat.ra.x(),
+                            else => unreachable,
+                        };
+                        try isel.emit(switch (air_tag) {
+                            .bit_and => .bic(dst_reg, plain_reg, .{ .register = not_op_reg }),
+                            .bit_or => .orn(dst_reg, plain_reg, .{ .register = not_op_reg }),
+                            .xor => .eon(dst_reg, plain_reg, .{ .register = not_op_reg }),
+                            else => unreachable,
+                        });
+                        try not_op_mat.finish(isel);
+                        try plain_mat.finish(isel);
+                        break :unused;
+                    }
+
+                    // 3. Shifted-register AND / ORR / EOR fusion.
+                    const shift_match: ?struct { unshifted_ref: Air.Inst.Ref, shifted_ref: Air.Inst.Ref, shift: codegen.aarch64.encoding.Instruction.DataProcessingRegister.Shift } =
+                        if (isel.constShiftOperand(air, bin_op.rhs, int_info.bits)) |s|
+                            .{ .unshifted_ref = bin_op.lhs, .shifted_ref = s.lhs, .shift = s.shift }
+                        else if (isel.constShiftOperand(air, bin_op.lhs, int_info.bits)) |s|
+                            .{ .unshifted_ref = bin_op.rhs, .shifted_ref = s.lhs, .shift = s.shift }
+                        else
+                            null;
+                    if (shift_match) |sm| {
+                        const dst_ra = try dst_vi.defReg(isel) orelse break :unused;
+                        const unshifted_vi = try isel.use(sm.unshifted_ref);
+                        const shifted_vi = try isel.use(sm.shifted_ref);
+                        const unshifted_mat = try unshifted_vi.matReg(isel);
+                        const shifted_mat = try shifted_vi.matReg(isel);
+                        const dst_reg = switch (int_info.bits) {
+                            32 => dst_ra.w(),
+                            64 => dst_ra.x(),
+                            else => unreachable,
+                        };
+                        const unshifted_reg = switch (int_info.bits) {
+                            32 => unshifted_mat.ra.w(),
+                            64 => unshifted_mat.ra.x(),
+                            else => unreachable,
+                        };
+                        const shifted_reg = switch (int_info.bits) {
+                            32 => shifted_mat.ra.w(),
+                            64 => shifted_mat.ra.x(),
+                            else => unreachable,
+                        };
+                        try isel.emit(switch (air_tag) {
+                            .bit_and => .@"and"(dst_reg, unshifted_reg, .{ .shifted_register = .{ .register = shifted_reg, .shift = sm.shift } }),
+                            .bit_or => .orr(dst_reg, unshifted_reg, .{ .shifted_register = .{ .register = shifted_reg, .shift = sm.shift } }),
+                            .xor => .eor(dst_reg, unshifted_reg, .{ .shifted_register = .{ .register = shifted_reg, .shift = sm.shift } }),
+                            else => unreachable,
+                        });
+                        try shifted_mat.finish(isel);
+                        try unshifted_mat.finish(isel);
+                        break :unused;
+                    }
+                }
 
                 const lhs_vi = try isel.use(bin_op.lhs);
                 const rhs_vi = try isel.use(bin_op.rhs);
@@ -9213,24 +9597,75 @@ pub fn body(isel: *Select, air_body: []const Air.Inst.Index) codegen.Error!void 
             try isel.merge(&else_live_registers, .{});
             try isel.ensureFreeIntRegs(&else_live_registers, 1);
 
-            const cond_vi = try isel.use(cond_br.condition);
-            const cond_mat = try cond_vi.matReg(isel);
-            const disp = (isel.instructions.items.len + 1 - else_label) << 2;
-            if (std.math.cast(i16, disp)) |disp16| {
-                try isel.emit(.tbz(
-                    cond_mat.ra.x(),
-                    0,
-                    disp16,
-                ));
-            } else {
-                try isel.emit(.b(@intCast(disp)));
-                try isel.emit(.tbnz(
-                    cond_mat.ra.x(),
-                    0,
-                    2 << 2,
-                ));
+            cond_br_done: {
+                if (isel.isSingleUseInCurrentBlock(&air, cond_br.condition)) |cmp_idx| {
+                    const cmp_tag = air.tag(cmp_idx);
+                    if (cmp_tag == .cmp_eq or cmp_tag == .cmp_neq) {
+                        const zcu = isel.pt.zcu;
+                        const ip = &zcu.intern_pool;
+                        const cmp_op = air.data(cmp_idx).bin_op;
+                        const raw_ty = isel.air.typeOf(cmp_op.lhs, ip);
+                        const cmp_ty = if (raw_ty.zigTypeTag(zcu) == .optional and raw_ty.optionalReprIsPayload(zcu))
+                            raw_ty.optionalChild(zcu)
+                        else
+                            raw_ty;
+                        const maybe_bits: ?u16 = if (!cmp_ty.isVector(zcu) and !cmp_ty.isRuntimeFloat())
+                            if (cmp_ty.isAbiInt(zcu)) switch (cmp_ty.intInfo(zcu).bits) {
+                                32 => 32,
+                                64 => 64,
+                                else => null,
+                            } else if (cmp_ty.isPtrAtRuntime(zcu)) 64 else null
+                        else
+                            null;
+                        if (maybe_bits) |bits| {
+                            const maybe_op_ref: ?Air.Inst.Ref = if (isel.constIntSigned(cmp_op.rhs, bits) == 0)
+                                cmp_op.lhs
+                            else if (isel.constIntSigned(cmp_op.lhs, bits) == 0)
+                                cmp_op.rhs
+                            else
+                                null;
+                            if (maybe_op_ref) |op_ref| {
+                                const disp = (isel.instructions.items.len + 1 - else_label) << 2;
+                                if (std.math.cast(i21, disp)) |disp21| {
+                                    const op_vi = try isel.use(op_ref);
+                                    const op_mat = try op_vi.matReg(isel);
+                                    const op_reg = switch (bits) {
+                                        32 => op_mat.ra.w(),
+                                        64 => op_mat.ra.x(),
+                                        else => unreachable,
+                                    };
+                                    try isel.emit(switch (cmp_tag) {
+                                        .cmp_eq => .cbnz(op_reg, disp21),
+                                        .cmp_neq => .cbz(op_reg, disp21),
+                                        else => unreachable,
+                                    });
+                                    try op_mat.finish(isel);
+                                    break :cond_br_done;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                const cond_vi = try isel.use(cond_br.condition);
+                const cond_mat = try cond_vi.matReg(isel);
+                const disp = (isel.instructions.items.len + 1 - else_label) << 2;
+                if (std.math.cast(i16, disp)) |disp16| {
+                    try isel.emit(.tbz(
+                        cond_mat.ra.x(),
+                        0,
+                        disp16,
+                    ));
+                } else {
+                    try isel.emit(.b(@intCast(disp)));
+                    try isel.emit(.tbnz(
+                        cond_mat.ra.x(),
+                        0,
+                        2 << 2,
+                    ));
+                }
+                try cond_mat.finish(isel);
             }
-            try cond_mat.finish(isel);
 
             opt_air_tag = air.next();
         },
@@ -9926,28 +10361,35 @@ pub fn layout(
         }
 
         // frame record
-        saves_size = std.mem.alignForward(u10, saves_size, 16);
-        const frame_record_offset = saves_size;
-        saves_buf[saves_len] = .{
-            .class = .integer,
-            .needs_restore = true,
-            .register = .fp,
-            .offset = saves_size,
-            .size = 8,
-        };
-        saves_len += 1;
-        saves_size += 8;
+        const need_frame_record = !mod.strip or is_sysv_var_args or
+            isel.saved_registers.contains(.lr) or isel.saved_registers.contains(.fp) or
+            stack_size > 0 or isel.stack_align != .@"16" or incoming.nsaa > 0 or
+            saves_len > 0 or deferred_gr != null or saved_gra_len > 0 or saved_vra_len > 0;
+        const frame_record_offset = if (need_frame_record) blk: {
+            saves_size = std.mem.alignForward(u10, saves_size, 16);
+            const fro = saves_size;
+            saves_buf[saves_len] = .{
+                .class = .integer,
+                .needs_restore = true,
+                .register = .fp,
+                .offset = saves_size,
+                .size = 8,
+            };
+            saves_len += 1;
+            saves_size += 8;
 
-        saves_size = std.mem.alignForward(u10, saves_size, 8);
-        saves_buf[saves_len] = .{
-            .class = .integer,
-            .needs_restore = true,
-            .register = .lr,
-            .offset = saves_size,
-            .size = 8,
-        };
-        saves_len += 1;
-        saves_size += 8;
+            saves_size = std.mem.alignForward(u10, saves_size, 8);
+            saves_buf[saves_len] = .{
+                .class = .integer,
+                .needs_restore = true,
+                .register = .lr,
+                .offset = saves_size,
+                .size = 8,
+            };
+            saves_len += 1;
+            saves_size += 8;
+            break :blk fro;
+        } else 0;
 
         // incoming gr arguments
         if (deferred_gr) |gr| {
@@ -10029,7 +10471,9 @@ pub fn layout(
             save_index += 1;
         };
 
-        try isel.emit(.add(.fp, .sp, .{ .immediate = frame_record_offset }));
+        if (saves.len > 0) {
+            try isel.emit(.add(.fp, .sp, .{ .immediate = frame_record_offset }));
+        }
         const scratch_reg: Register = if (isel.stack_align == .@"16")
             .sp
         else if (stack_size == 0 and frame_record_offset == 0)
@@ -10084,63 +10528,65 @@ pub fn layout(
     const epilogue = isel.instructions.items.len;
     if (isel.returns) {
         try isel.emit(.ret(.lr));
-        var save_index: usize = 0;
-        var first_offset: ?u10 = null;
-        while (save_index < saves.len) {
-            if (save_index + 2 <= saves.len and saves[save_index + 1].needs_restore and
-                saves[save_index + 0].class == saves[save_index + 1].class and
-                saves[save_index + 0].size == saves[save_index + 1].size and
-                saves[save_index + 0].offset + saves[save_index + 0].size == saves[save_index + 1].offset)
-            {
-                try isel.emit(.ldp(
-                    saves[save_index + 0].register,
-                    saves[save_index + 1].register,
-                    if (first_offset) |offset| .{ .signed_offset = .{
-                        .base = .sp,
-                        .offset = @intCast(saves[save_index + 0].offset - offset),
-                    } } else form: {
-                        first_offset = @intCast(saves[save_index + 0].offset);
-                        break :form .{ .post_index = .{
+        if (saves.len > 0) {
+            var save_index: usize = 0;
+            var first_offset: ?u10 = null;
+            while (save_index < saves.len) {
+                if (save_index + 2 <= saves.len and saves[save_index + 1].needs_restore and
+                    saves[save_index + 0].class == saves[save_index + 1].class and
+                    saves[save_index + 0].size == saves[save_index + 1].size and
+                    saves[save_index + 0].offset + saves[save_index + 0].size == saves[save_index + 1].offset)
+                {
+                    try isel.emit(.ldp(
+                        saves[save_index + 0].register,
+                        saves[save_index + 1].register,
+                        if (first_offset) |offset| .{ .signed_offset = .{
                             .base = .sp,
-                            .index = @intCast(saves_size - first_offset.?),
-                        } };
-                    },
-                ));
-                save_index += 2;
-            } else if (saves[save_index].needs_restore) {
-                try isel.emit(.ldr(
-                    saves[save_index].register,
-                    if (first_offset) |offset| .{ .unsigned_offset = .{
-                        .base = .sp,
-                        .offset = saves[save_index + 0].offset - offset,
-                    } } else form: {
-                        const offset = saves[save_index + 0].offset;
-                        first_offset = offset;
-                        break :form .{ .post_index = .{
+                            .offset = @intCast(saves[save_index + 0].offset - offset),
+                        } } else form: {
+                            first_offset = @intCast(saves[save_index + 0].offset);
+                            break :form .{ .post_index = .{
+                                .base = .sp,
+                                .index = @intCast(saves_size - first_offset.?),
+                            } };
+                        },
+                    ));
+                    save_index += 2;
+                } else if (saves[save_index].needs_restore) {
+                    try isel.emit(.ldr(
+                        saves[save_index].register,
+                        if (first_offset) |offset| .{ .unsigned_offset = .{
                             .base = .sp,
-                            .index = @intCast(saves_size - offset),
-                        } };
-                    },
-                ));
-                save_index += 1;
-            } else save_index += 1;
-        }
-        const offset = stack_size + first_offset.?;
-        const offset_lo: u12 = @truncate(offset >> 0);
-        const offset_hi: u12 = @truncate(offset >> 12);
-        if (isel.stack_align != .@"16" or (offset_lo > 0 and offset_hi > 0)) {
-            const fp_offset = @as(i11, first_offset.?) - frame_record_offset;
-            try isel.emit(if (fp_offset >= 0)
-                .add(.sp, .fp, .{ .immediate = @intCast(fp_offset) })
-            else
-                .sub(.sp, .fp, .{ .immediate = @intCast(-fp_offset) }));
-        } else {
-            if (offset_hi > 0) try isel.emit(.add(.sp, .sp, .{
-                .shifted_immediate = .{ .immediate = offset_hi, .lsl = .@"12" },
-            }));
-            if (offset_lo > 0) try isel.emit(.add(.sp, .sp, .{
-                .immediate = offset_lo,
-            }));
+                            .offset = saves[save_index + 0].offset - offset,
+                        } } else form: {
+                            const offset = saves[save_index + 0].offset;
+                            first_offset = offset;
+                            break :form .{ .post_index = .{
+                                .base = .sp,
+                                .index = @intCast(saves_size - offset),
+                            } };
+                        },
+                    ));
+                    save_index += 1;
+                } else save_index += 1;
+            }
+            const offset = stack_size + first_offset.?;
+            const offset_lo: u12 = @truncate(offset >> 0);
+            const offset_hi: u12 = @truncate(offset >> 12);
+            if (isel.stack_align != .@"16" or (offset_lo > 0 and offset_hi > 0)) {
+                const fp_offset = @as(i11, first_offset.?) - frame_record_offset;
+                try isel.emit(if (fp_offset >= 0)
+                    .add(.sp, .fp, .{ .immediate = @intCast(fp_offset) })
+                else
+                    .sub(.sp, .fp, .{ .immediate = @intCast(-fp_offset) }));
+            } else {
+                if (offset_hi > 0) try isel.emit(.add(.sp, .sp, .{
+                    .shifted_immediate = .{ .immediate = offset_hi, .lsl = .@"12" },
+                }));
+                if (offset_lo > 0) try isel.emit(.add(.sp, .sp, .{
+                    .immediate = offset_lo,
+                }));
+            }
         }
         wip_mir_log.debug("{f}<epilogue>:\n", .{nav.fqn.fmt(ip)});
     }
@@ -10643,43 +11089,71 @@ fn cmp(
             const lhs_part_mat = try lhs_part_vi.?.matReg(isel);
             var rhs_part_it = rhs_vi.field(ty, part_offset, part_size);
             const rhs_part_vi = try rhs_part_it.only(isel);
-            const rhs_part_mat = try rhs_part_vi.?.matReg(isel);
-            try isel.emit(switch (part_size) {
-                else => unreachable,
-                1...4 => switch (part_offset) {
-                    0 => .subs(.wzr, lhs_part_mat.ra.w(), .{ .register = rhs_part_mat.ra.w() }),
-                    else => switch (op) {
-                        .lt, .lte, .gte, .gt => .sbcs(
-                            .wzr,
-                            lhs_part_mat.ra.w(),
-                            rhs_part_mat.ra.w(),
-                        ),
-                        .eq, .neq => .ccmp(
-                            lhs_part_mat.ra.w(),
-                            .{ .register = rhs_part_mat.ra.w() },
-                            .{ .n = false, .z = false, .c = false, .v = false },
-                            .eq,
-                        ),
+            cmp_done: {
+                if (part_offset == 0 and (int_info.bits == 32 or int_info.bits == 64)) {
+                    if (try rhs_part_vi.?.constIntSigned(isel, int_info.bits)) |rhs_imm| {
+                        const zr: Register = switch (part_size) {
+                            1...4 => .wzr,
+                            5...8 => .xzr,
+                            else => unreachable,
+                        };
+                        const lhs_reg: Register = switch (part_size) {
+                            1...4 => lhs_part_mat.ra.w(),
+                            5...8 => lhs_part_mat.ra.x(),
+                            else => unreachable,
+                        };
+                        if (rhs_imm >= 0 and rhs_imm <= std.math.maxInt(u12)) {
+                            try isel.emit(.subs(zr, lhs_reg, .{ .immediate = @intCast(rhs_imm) }));
+                            break :cmp_done;
+                        } else if (rhs_imm > 0 and (rhs_imm & 0xfff) == 0 and (rhs_imm >> 12) <= std.math.maxInt(u12)) {
+                            try isel.emit(.subs(zr, lhs_reg, .{
+                                .shifted_immediate = .{ .immediate = @intCast(rhs_imm >> 12), .lsl = .@"12" },
+                            }));
+                            break :cmp_done;
+                        } else if (rhs_imm < 0 and rhs_imm >= -std.math.maxInt(u12) and (op == .eq or op == .neq or int_info.signedness == .signed)) {
+                            try isel.emit(.adds(zr, lhs_reg, .{ .immediate = @intCast(-rhs_imm) }));
+                            break :cmp_done;
+                        }
+                    }
+                }
+                const rhs_part_mat = try rhs_part_vi.?.matReg(isel);
+                try isel.emit(switch (part_size) {
+                    else => unreachable,
+                    1...4 => switch (part_offset) {
+                        0 => .subs(.wzr, lhs_part_mat.ra.w(), .{ .register = rhs_part_mat.ra.w() }),
+                        else => switch (op) {
+                            .lt, .lte, .gte, .gt => .sbcs(
+                                .wzr,
+                                lhs_part_mat.ra.w(),
+                                rhs_part_mat.ra.w(),
+                            ),
+                            .eq, .neq => .ccmp(
+                                lhs_part_mat.ra.w(),
+                                .{ .register = rhs_part_mat.ra.w() },
+                                .{ .n = false, .z = false, .c = false, .v = false },
+                                .eq,
+                            ),
+                        },
                     },
-                },
-                5...8 => switch (part_offset) {
-                    0 => .subs(.xzr, lhs_part_mat.ra.x(), .{ .register = rhs_part_mat.ra.x() }),
-                    else => switch (op) {
-                        .lt, .lte, .gte, .gt => .sbcs(
-                            .xzr,
-                            lhs_part_mat.ra.x(),
-                            rhs_part_mat.ra.x(),
-                        ),
-                        .eq, .neq => .ccmp(
-                            lhs_part_mat.ra.x(),
-                            .{ .register = rhs_part_mat.ra.x() },
-                            .{ .n = false, .z = false, .c = false, .v = false },
-                            .eq,
-                        ),
+                    5...8 => switch (part_offset) {
+                        0 => .subs(.xzr, lhs_part_mat.ra.x(), .{ .register = rhs_part_mat.ra.x() }),
+                        else => switch (op) {
+                            .lt, .lte, .gte, .gt => .sbcs(
+                                .xzr,
+                                lhs_part_mat.ra.x(),
+                                rhs_part_mat.ra.x(),
+                            ),
+                            .eq, .neq => .ccmp(
+                                lhs_part_mat.ra.x(),
+                                .{ .register = rhs_part_mat.ra.x() },
+                                .{ .n = false, .z = false, .c = false, .v = false },
+                                .eq,
+                            ),
+                        },
                     },
-                },
-            });
-            try rhs_part_mat.finish(isel);
+                });
+                try rhs_part_mat.finish(isel);
+            }
             try lhs_part_mat.finish(isel);
         }
         return .{ .cset_label = cset_label };
@@ -11007,6 +11481,10 @@ fn storeReg(
                 .sturh(ra.w(), base_ra.x(), signed_offset));
         },
         3 => {
+            if (ra == .zr) {
+                try isel.storeReg(.zr, 1, base_ra, offset + 2);
+                return isel.storeReg(.zr, 2, base_ra, offset);
+            }
             const hi8_ra = try isel.allocIntReg();
             defer isel.freeReg(hi8_ra);
             try isel.storeReg(hi8_ra, 1, base_ra, offset + 2);
@@ -11032,6 +11510,10 @@ fn storeReg(
             ));
         },
         5 => {
+            if (ra == .zr) {
+                try isel.storeReg(.zr, 1, base_ra, offset + 4);
+                return isel.storeReg(.zr, 4, base_ra, offset);
+            }
             const hi8_ra = try isel.allocIntReg();
             defer isel.freeReg(hi8_ra);
             try isel.storeReg(hi8_ra, 1, base_ra, offset + 4);
@@ -11043,6 +11525,10 @@ fn storeReg(
             }));
         },
         6 => {
+            if (ra == .zr) {
+                try isel.storeReg(.zr, 2, base_ra, offset + 4);
+                return isel.storeReg(.zr, 4, base_ra, offset);
+            }
             const hi16_ra = try isel.allocIntReg();
             defer isel.freeReg(hi16_ra);
             try isel.storeReg(hi16_ra, 2, base_ra, offset + 4);
@@ -11054,6 +11540,11 @@ fn storeReg(
             }));
         },
         7 => {
+            if (ra == .zr) {
+                try isel.storeReg(.zr, 1, base_ra, offset + 6);
+                try isel.storeReg(.zr, 2, base_ra, offset + 4);
+                return isel.storeReg(.zr, 4, base_ra, offset);
+            }
             const hi16_ra = try isel.allocIntReg();
             defer isel.freeReg(hi16_ra);
             const hi8_ra = try isel.allocIntReg();
@@ -11992,6 +12483,9 @@ pub const Value = struct {
                     assert(part_it.only() == null);
                     break :only;
                 }
+                if (!part_is_vector and try part_vi.isConstZero(isel)) {
+                    return isel.storeReg(.zr, part_size, base_ra, opts.offset);
+                }
                 const part_mat = try part_vi.matReg(isel);
                 try isel.storeReg(part_mat.ra, part_size, base_ra, opts.offset);
                 return part_mat.finish(isel);
@@ -12393,6 +12887,48 @@ pub const Value = struct {
                 .offset = opts.offset + part_vi.get(isel).offset_from_parent,
                 .split = opts.split,
             });
+        }
+
+        pub fn isConstZero(vi: Value.Index, isel: *Select) codegen.Error!bool {
+            const root_vi = vi.root(isel);
+            const constant = switch (root_vi.parent(isel)) {
+                .constant => |c| c,
+                else => return false,
+            };
+            const zcu = isel.pt.zcu;
+            if (constant.isUndef(zcu)) return false;
+            var bytes_buf: [8]u8 = @splat(0);
+            const part_size = vi.size(isel);
+            if (part_size == 0 or part_size > 8) return false;
+            const off = vi.get(isel).offset_from_parent;
+            const root_size = root_vi.size(isel);
+            if (root_size <= 8) {
+                if (!try isel.writeToMemory(constant, bytes_buf[0..@intCast(root_size)])) return false;
+                return std.mem.allEqual(u8, bytes_buf[@intCast(off)..][0..@intCast(part_size)], 0);
+            }
+            return false;
+        }
+
+        pub fn constIntSigned(vi: Value.Index, isel: *Select, bits: u16) codegen.Error!?i64 {
+            if (bits == 0 or bits > 64) return null;
+            const root_vi = vi.root(isel);
+            const constant = switch (root_vi.parent(isel)) {
+                .constant => |c| c,
+                else => return null,
+            };
+            const zcu = isel.pt.zcu;
+            if (constant.isUndef(zcu)) return null;
+            var bytes_buf: [8]u8 = @splat(0);
+            const part_size = vi.size(isel);
+            if (part_size == 0 or part_size > 8) return null;
+            const off = vi.get(isel).offset_from_parent;
+            const root_size = root_vi.size(isel);
+            if (root_size > 8) return null;
+            if (!try isel.writeToMemory(constant, bytes_buf[0..@intCast(root_size)])) return null;
+            const raw_u64 = std.mem.readInt(u64, &bytes_buf, isel.target.cpu.arch.endian());
+            const shifted = raw_u64 >> @intCast(off * 8);
+            const sign_shift: u6 = @intCast(64 - bits);
+            return @as(i64, @bitCast(shifted << sign_shift)) >> sign_shift;
         }
 
         pub fn liveIn(
@@ -14802,6 +15338,7 @@ const TryAllocRegResult = union(enum) {
 
 fn tryAllocIntReg(isel: *Select) TryAllocRegResult {
     var failed_result: TryAllocRegResult = .out_of_registers;
+    const start_offset = isel.next_spill_reg;
     var ra: Register.Alias = .r0;
     while (true) : (ra = @fromBackingInt(@intCast(@backingInt(ra) + 1))) {
         if (ra == .r18) continue; // The Platform Register
@@ -14810,7 +15347,13 @@ fn tryAllocIntReg(isel: *Select) TryAllocRegResult {
         switch (live_vi.*) {
             _ => switch (failed_result) {
                 .allocated => unreachable,
-                .fill_candidate => {},
+                .fill_candidate => |prev_ra| {
+                    if (@backingInt(ra) <= @backingInt(Register.Alias.r15) and
+                        (@backingInt(ra) -% start_offset) < (@backingInt(prev_ra) -% start_offset))
+                    {
+                        failed_result = .{ .fill_candidate = ra };
+                    }
+                },
                 .out_of_registers => failed_result = .{ .fill_candidate = ra },
             },
             .allocating => {},
@@ -14820,7 +15363,10 @@ fn tryAllocIntReg(isel: *Select) TryAllocRegResult {
                 return .{ .allocated = ra };
             },
         }
-        if (ra == Register.Alias.lr) return failed_result;
+        if (ra == Register.Alias.lr) {
+            if (failed_result == .fill_candidate) isel.next_spill_reg +%= 1;
+            return failed_result;
+        }
     }
 }
 
