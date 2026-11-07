@@ -1228,3 +1228,288 @@ test "sroa unread fields, bitcast byte-array loads, and readonly by-ref arg alia
     const sp_after = S.readSp();
     try expect(sp_before == sp_after);
 }
+
+test "auto calling convention error union, optional, and slice returns" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.cpu.arch != .wasm32) return error.SkipZigTest;
+
+    const S = struct {
+        const Err = error{ Fail, BadValue };
+
+        noinline fn retErrVoid(fail: bool) Err!void {
+            if (fail) return error.Fail;
+        }
+
+        noinline fn retErrU32(x: u32, fail: bool) Err!u32 {
+            if (fail) return error.BadValue;
+            return x * 3 + 1;
+        }
+
+        noinline fn retErrU32ConstOk() Err!u32 {
+            return 12345;
+        }
+
+        noinline fn retErrU32ConstErr() Err!u32 {
+            return error.Fail;
+        }
+
+        noinline fn retErrPtr(ptr: *const u32, fail: bool) Err!*const u32 {
+            if (fail) return error.Fail;
+            return ptr;
+        }
+
+        noinline fn retOptU32(x: u32, present: bool) ?u32 {
+            if (!present) return null;
+            return x + 7;
+        }
+
+        noinline fn retOptU32ConstSome() ?u32 {
+            return 99;
+        }
+
+        noinline fn retOptU32ConstNull() ?u32 {
+            return null;
+        }
+
+        noinline fn retOptF64(x: f64, present: bool) ?f64 {
+            if (!present) return null;
+            return x * 2.5;
+        }
+
+        noinline fn retOptVoid(present: bool) ?void {
+            if (!present) return null;
+            return {};
+        }
+
+        noinline fn retSlice(bytes: []const u8, start: usize, end: usize) []const u8 {
+            return bytes[start..end];
+        }
+
+        noinline fn retOptSlice(bytes: []const u8, present: bool) ?[]const u8 {
+            if (!present) return null;
+            return bytes[1..4];
+        }
+
+        noinline fn exerciseReturns(target_val: *const u32, bytes: []const u8) !void {
+            try retErrVoid(false);
+            if (retErrVoid(true)) |_| return error.TestUnexpectedResult else |err| {
+                try expect(err == error.Fail);
+            }
+
+            const v1 = try retErrU32(10, false);
+            try expect(v1 == 31);
+            if (retErrU32(10, true)) |_| return error.TestUnexpectedResult else |err| {
+                try expect(err == error.BadValue);
+            }
+            try expect((try retErrU32ConstOk()) == 12345);
+            if (retErrU32ConstErr()) |_| return error.TestUnexpectedResult else |err| {
+                try expect(err == error.Fail);
+            }
+
+            const p1 = try retErrPtr(target_val, false);
+            try expect(p1.* == 777);
+            if (retErrPtr(target_val, true)) |_| return error.TestUnexpectedResult else |err| {
+                try expect(err == error.Fail);
+            }
+
+            try expect(retOptU32(35, true).? == 42);
+            try expect(retOptU32(35, false) == null);
+            try expect(retOptU32ConstSome().? == 99);
+            try expect(retOptU32ConstNull() == null);
+            _ = retOptU32(1, true);
+
+            try expect(retOptF64(4.0, true).? == 10.0);
+            try expect(retOptF64(4.0, false) == null);
+
+            try expect(retOptVoid(true) != null);
+            try expect(retOptVoid(false) == null);
+
+            const sub = retSlice(bytes, 1, 4);
+            try expect(sub.len == 3);
+            try expect(sub[0] == 'b' and sub[2] == 'd');
+
+            const opt_sub = retOptSlice(bytes, true).?;
+            try expect(opt_sub.len == 3 and opt_sub[0] == 'b');
+            try expect(retOptSlice(bytes, false) == null);
+        }
+
+        fn readSp() u32 {
+            return asm (
+                \\ .globaltype __stack_pointer, i32
+                \\ global.get __stack_pointer
+                \\ local.set %[ret]
+                : [ret] "=r" (-> u32),
+            );
+        }
+
+        inline fn fillRedZone(sp: u32) void {
+            const rz: [*]volatile u8 = @ptrFromInt(sp - 64);
+            for (0..64) |i| rz[i] = 0xA5;
+        }
+
+        inline fn checkRedZone(sp: u32) bool {
+            const rz: [*]volatile u8 = @ptrFromInt(sp - 64);
+            for (0..64) |i| {
+                if (rz[i] != 0xA5) return false;
+            }
+            return true;
+        }
+    };
+
+    const target_val: u32 = 777;
+    const sp_before = S.readSp();
+    S.fillRedZone(sp_before);
+    try S.exerciseReturns(&target_val, "abcdef");
+    if (!S.checkRedZone(sp_before)) return error.ReturnTestTouchedRedZone;
+    const sp_after = S.readSp();
+    try expect(sp_before == sp_after);
+}
+
+test "auto calling convention small aggregate parameters by value" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.cpu.arch != .wasm32) return error.SkipZigTest;
+
+    const S = struct {
+        const Err = error{BadParam};
+
+        const Single = struct {
+            x: u32,
+        };
+
+        const Vec2 = struct {
+            x: f32,
+            y: f32,
+        };
+
+        const Vec3 = struct {
+            x: f32,
+            y: f32,
+            z: f32,
+        };
+
+        const Rect = struct {
+            x: f32,
+            y: f32,
+            w: f32,
+            h: f32,
+        };
+
+        const QuadCurve = struct {
+            pts: [4]f32,
+        };
+
+        noinline fn takeSingle(s: Single) u32 {
+            return s.x + 9;
+        }
+
+        noinline fn takeVec2(v: Vec2) f32 {
+            return v.x * 2.0 + v.y;
+        }
+
+        noinline fn takeVec3(v: Vec3) f32 {
+            return v.x + v.y + v.z;
+        }
+
+        noinline fn takeRect(r: Rect) f32 {
+            return (r.x + r.y) * (r.w + r.h);
+        }
+
+        noinline fn takeSlice(s: []const u8) u32 {
+            return @as(u32, @intCast(s.len)) * 100 + s[0] + s[s.len - 1];
+        }
+
+        noinline fn takeArr3(a: [3]u32) u32 {
+            return a[0] + a[1] * 10 + a[2] * 100;
+        }
+
+        noinline fn takeOptU32(opt: ?u32) u32 {
+            return opt orelse 999;
+        }
+
+        noinline fn takeOptVec2(opt: ?Vec2) f32 {
+            const v = opt orelse return -1.0;
+            return v.x - v.y;
+        }
+
+        noinline fn takeErrU32(eu: Err!u32) u32 {
+            return eu catch 555;
+        }
+
+        noinline fn takeErrVec2(eu: Err!Vec2) f32 {
+            const v = eu catch return -2.0;
+            return v.x + v.y;
+        }
+
+        noinline fn quadAtRuntimeIndex(q: QuadCurve, idx: usize) f32 {
+            return q.pts[idx];
+        }
+
+        noinline fn exerciseByValueParams(bytes: []const u8) !void {
+            const s: Single = .{ .x = 33 };
+            try expect(takeSingle(s) == 42);
+
+            const v2: Vec2 = .{ .x = 3.5, .y = 1.25 };
+            try expect(takeVec2(v2) == 8.25);
+
+            const v3: Vec3 = .{ .x = 1.0, .y = 2.5, .z = 4.5 };
+            try expect(takeVec3(v3) == 8.0);
+
+            const rect: Rect = .{ .x = 1.5, .y = 2.5, .w = 3.0, .h = 5.0 };
+            try expect(takeRect(rect) == 32.0);
+
+            const sub = bytes[1..5];
+            try expect(takeSlice(sub) == 400 + 'b' + 'e');
+
+            const arr3 = [3]u32{ 4, 5, 6 };
+            try expect(takeArr3(arr3) == 654);
+
+            try expect(takeOptU32(77) == 77);
+            try expect(takeOptU32(null) == 999);
+
+            try expect(takeOptVec2(.{ .x = 9.0, .y = 2.5 }) == 6.5);
+            try expect(takeOptVec2(null) == -1.0);
+
+            try expect(takeErrU32(88) == 88);
+            try expect(takeErrU32(error.BadParam) == 555);
+
+            try expect(takeErrVec2(.{ .x = 1.25, .y = 2.75 }) == 4.0);
+            try expect(takeErrVec2(error.BadParam) == -2.0);
+        }
+
+        fn readSp() u32 {
+            return asm (
+                \\ .globaltype __stack_pointer, i32
+                \\ global.get __stack_pointer
+                \\ local.set %[ret]
+                : [ret] "=r" (-> u32),
+            );
+        }
+
+        inline fn fillRedZone(sp: u32) void {
+            const rz: [*]volatile u8 = @ptrFromInt(sp - 64);
+            for (0..64) |i| rz[i] = 0xA5;
+        }
+
+        inline fn checkRedZone(sp: u32) bool {
+            const rz: [*]volatile u8 = @ptrFromInt(sp - 64);
+            for (0..64) |i| {
+                if (rz[i] != 0xA5) return false;
+            }
+            return true;
+        }
+    };
+
+    const sp_before = S.readSp();
+    S.fillRedZone(sp_before);
+    try S.exerciseByValueParams("abcdef");
+    if (!S.checkRedZone(sp_before)) return error.ByValueParamTouchedRedZone;
+
+    const q: S.QuadCurve = .{ .pts = .{ 10.5, 20.25, -5.0, 42.0 } };
+    try expect(S.quadAtRuntimeIndex(q, 0) == 10.5);
+    try expect(S.quadAtRuntimeIndex(q, 1) == 20.25);
+    try expect(S.quadAtRuntimeIndex(q, 2) == -5.0);
+    try expect(S.quadAtRuntimeIndex(q, 3) == 42.0);
+
+    const sp_after = S.readSp();
+    try expect(sp_before == sp_after);
+}
