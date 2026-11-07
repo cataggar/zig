@@ -482,6 +482,15 @@ fn invalidateStreams(entry: *FdEntry) void {
     dropWriteStream(entry);
 }
 
+fn invalidateReadStreamsForEntry(target: *FdEntry) void {
+    dropReadStream(target);
+    for (&fd_table) |*entry| {
+        if (entry.in_use and entry.handle == target.handle) {
+            dropReadStream(entry);
+        }
+    }
+}
+
 fn invalidateAllReadStreams() void {
     for (&fd_table) |*entry| {
         if (entry.in_use) {
@@ -990,7 +999,7 @@ pub fn fd_pwrite(
     nwritten.* = 0;
     if (fd >= 0 and fd <= 2) return .SPIPE;
     const entry = getFdEntry(fd) orelse return .BADF;
-    invalidateAllReadStreams();
+    invalidateReadStreamsForEntry(entry);
 
     var stream_ret: [8]u8 align(4) = @splat(0);
     @"[method]descriptor.write-via-stream"(entry.handle, offset, &stream_ret);
@@ -1066,8 +1075,7 @@ pub fn fd_read(
             }
             @"[resource-drop]error"(std.mem.readInt(i32, read_ret[8..12], .little));
             dropReadStream(entry);
-            entry.position += total;
-            nread.* = total;
+            if (total > 0) break;
             return .IO;
         }
 
@@ -1194,12 +1202,13 @@ pub fn fd_seek(
 ) callconv(.c) wasi.errno_t {
     if (fd >= 0 and fd <= 2) return .SPIPE;
     const entry = getFdEntry(fd) orelse return .BADF;
-    invalidateStreams(entry);
 
     const base: i64 = switch (whence) {
         .SET => 0,
         .CUR => @intCast(entry.position),
         .END => blk: {
+            if (builtin.os.tag != .wasip2) return .NOSYS;
+            dropWriteStream(entry);
             var stat_ret: [104]u8 align(8) = @splat(0);
             @"[method]descriptor.stat"(entry.handle, &stat_ret);
             if (stat_ret[0] != 0) return errorCodeToErrno(stat_ret[8]);
@@ -1209,7 +1218,11 @@ pub fn fd_seek(
 
     const target = std.math.add(i64, base, offset) catch return .OVERFLOW;
     if (target < 0) return .INVAL;
-    entry.position = @intCast(target);
+    const new_pos: u64 = @intCast(target);
+    if (new_pos != entry.position) {
+        invalidateStreams(entry);
+        entry.position = new_pos;
+    }
     newoffset.* = entry.position;
     return .SUCCESS;
 }
@@ -1243,7 +1256,7 @@ pub fn fd_write(
     }
 
     const entry = getFdEntry(fd) orelse return .BADF;
-    invalidateAllReadStreams();
+    invalidateReadStreamsForEntry(entry);
     if (entry.append) {
         dropWriteStream(entry);
         var stream_ret: [8]u8 align(4) = @splat(0);
@@ -1276,11 +1289,15 @@ pub fn fd_write(
     }
 
     const err = writeOutputStreamIovs(entry.write_stream, iovs, iovs_len, nwritten);
-    entry.position += nwritten.*;
     if (err == .SUCCESS) {
+        entry.position += nwritten.*;
         entry.write_stream_offset += nwritten.*;
     } else {
         dropWriteStream(entry);
+        if (nwritten.* > 0) {
+            entry.position += nwritten.*;
+            return .SUCCESS;
+        }
     }
     return err;
 }
@@ -1831,6 +1848,8 @@ test "stripPreopenPrefix and resolvePathEntry" {
 }
 
 test "FdEntry stream caching and invalidation" {
+    if (builtin.os.tag.isWasi()) return error.SkipZigTest;
+
     const saved_init = preopens_initialized;
     const saved_fd5 = fd_table[5];
     const saved_fd6 = fd_table[6];
@@ -1858,10 +1877,22 @@ test "FdEntry stream caching and invalidation" {
         .read_stream_offset = 64,
     };
 
-    invalidateAllReadStreams();
+    // Writing to fd 5 invalidates fd 5's read stream, but preserves fd 6's read stream.
+    invalidateReadStreamsForEntry(&fd_table[5]);
     try std.testing.expectEqual(@as(i32, -1), fd_table[5].read_stream);
     try std.testing.expectEqual(@as(u64, 0), fd_table[5].read_stream_offset);
     try std.testing.expectEqual(@as(i32, 102), fd_table[5].write_stream);
+    try std.testing.expectEqual(@as(i32, 201), fd_table[6].read_stream);
+
+    // Seeking to the current position preserves cached streams.
+    var newoffset: wasi.filesize_t = 0;
+    try std.testing.expectEqual(wasi.errno_t.SUCCESS, fd_seek(6, 0, .CUR, &newoffset));
+    try std.testing.expectEqual(@as(wasi.filesize_t, 64), newoffset);
+    try std.testing.expectEqual(@as(i32, 201), fd_table[6].read_stream);
+
+    // Seeking to a different position invalidates cached streams.
+    try std.testing.expectEqual(wasi.errno_t.SUCCESS, fd_seek(6, 16, .CUR, &newoffset));
+    try std.testing.expectEqual(@as(wasi.filesize_t, 80), newoffset);
     try std.testing.expectEqual(@as(i32, -1), fd_table[6].read_stream);
 
     try std.testing.expectEqual(wasi.errno_t.SUCCESS, fd_fdstat_set_flags(5, .{ .APPEND = true }));

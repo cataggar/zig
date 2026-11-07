@@ -571,13 +571,17 @@ fn waitReady(waitable_handle: i32) u32 {
     const ws = acquireWaitableSet();
     waitable.join(waitable_handle, ws);
     var payload: [2]i32 = .{ 0, 0 };
-    if (getActiveTask()) |task| {
-        task.waitable_set = ws;
-        task.suspendTask();
-        defer task.resumeTask();
-        _ = waitable_set.wait(ws, &payload);
-    } else {
-        _ = waitable_set.wait(ws, &payload);
+    while (true) {
+        var event_code: i32 = 0;
+        if (getActiveTask()) |task| {
+            task.waitable_set = ws;
+            task.suspendTask();
+            defer task.resumeTask();
+            event_code = waitable_set.wait(ws, &payload);
+        } else {
+            event_code = waitable_set.wait(ws, &payload);
+        }
+        if (event_code != 0 and payload[0] == waitable_handle) break;
     }
     waitable.join(waitable_handle, 0);
     return @bitCast(payload[1]);
@@ -1065,6 +1069,16 @@ fn dropReadStream(entry: *FdEntry) void {
     entry.read_stream_offset = 0;
 }
 
+fn invalidateReadStreamsForEntry(target: *FdEntry) void {
+    dropReadStream(target);
+    const s = globalState();
+    for (&s.fd_table) |*entry| {
+        if (entry.in_use and entry.handle == target.handle) {
+            dropReadStream(entry);
+        }
+    }
+}
+
 fn invalidateAllReadStreams() void {
     const s = globalState();
     for (&s.fd_table) |*entry| {
@@ -1500,7 +1514,7 @@ pub fn fd_pwrite(
     nwritten.* = 0;
     if (fd >= 0 and fd <= 2) return .SPIPE;
     const entry = getFdEntry(fd) orelse return .BADF;
-    invalidateAllReadStreams();
+    invalidateReadStreamsForEntry(entry);
 
     const pair = stream_u8.new();
     const rx: i32 = @bitCast(@as(u32, @truncate(pair)));
@@ -1738,12 +1752,12 @@ pub fn fd_seek(
 ) callconv(.c) wasi.errno_t {
     if (fd >= 0 and fd <= 2) return .SPIPE;
     const entry = getFdEntry(fd) orelse return .BADF;
-    dropReadStream(entry);
 
     const base: i64 = switch (whence) {
         .SET => 0,
         .CUR => @intCast(entry.position),
         .END => blk: {
+            if (builtin.os.tag != .wasip3) return .NOSYS;
             var stat_ret: [112]u8 align(8) = @splat(0);
             awaitAsyncCall(@"[method]descriptor.stat"(entry.handle, &stat_ret));
             if (stat_ret[0] != 0) return descriptorStatResultToErrno(&stat_ret);
@@ -1754,7 +1768,11 @@ pub fn fd_seek(
 
     const target = std.math.add(i64, base, offset) catch return .OVERFLOW;
     if (target < 0) return .INVAL;
-    entry.position = @intCast(target);
+    const new_pos: u64 = @intCast(target);
+    if (new_pos != entry.position) {
+        dropReadStream(entry);
+        entry.position = new_pos;
+    }
     newoffset.* = entry.position;
     return .SUCCESS;
 }
@@ -1805,7 +1823,7 @@ pub fn fd_write(
     }
 
     const entry = getFdEntry(fd) orelse return .BADF;
-    invalidateAllReadStreams();
+    invalidateReadStreamsForEntry(entry);
     if (entry.append) {
         const pair = stream_u8.new();
         const rx: i32 = @bitCast(@as(u32, @truncate(pair)));
@@ -2638,6 +2656,8 @@ test "TaskContext.run trampoline, status transitions, and nested active_task bin
 }
 
 test "TaskContext waitable_set persistence and FdEntry read stream invalidation" {
+    if (builtin.os.tag.isWasi()) return error.SkipZigTest;
+
     const allocator = std.testing.allocator;
     var pool: ShadowStackPool = .{
         .max_cached = 2,
@@ -2671,9 +2691,11 @@ test "TaskContext waitable_set persistence and FdEntry read stream invalidation"
     const s = globalState();
     const saved_init = s.preopens_initialized;
     const saved_fd5 = s.fd_table[5];
+    const saved_fd6 = s.fd_table[6];
     defer {
         s.preopens_initialized = saved_init;
         s.fd_table[5] = saved_fd5;
+        s.fd_table[6] = saved_fd6;
     }
 
     s.preopens_initialized = true;
@@ -2685,11 +2707,29 @@ test "TaskContext waitable_set persistence and FdEntry read stream invalidation"
         .read_fut = 302,
         .read_stream_offset = 256,
     };
+    s.fd_table[6] = .{
+        .in_use = true,
+        .handle = 60,
+        .position = 128,
+        .read_stream = 401,
+        .read_fut = 402,
+        .read_stream_offset = 128,
+    };
 
-    invalidateAllReadStreams();
+    invalidateReadStreamsForEntry(&s.fd_table[5]);
     try std.testing.expectEqual(@as(i32, -1), s.fd_table[5].read_stream);
     try std.testing.expectEqual(@as(i32, -1), s.fd_table[5].read_fut);
     try std.testing.expectEqual(@as(u64, 0), s.fd_table[5].read_stream_offset);
+    try std.testing.expectEqual(@as(i32, 401), s.fd_table[6].read_stream);
+
+    var newoffset: wasi.filesize_t = 0;
+    try std.testing.expectEqual(wasi.errno_t.SUCCESS, fd_seek(6, 0, .CUR, &newoffset));
+    try std.testing.expectEqual(@as(wasi.filesize_t, 128), newoffset);
+    try std.testing.expectEqual(@as(i32, 401), s.fd_table[6].read_stream);
+
+    try std.testing.expectEqual(wasi.errno_t.SUCCESS, fd_seek(6, 32, .CUR, &newoffset));
+    try std.testing.expectEqual(@as(wasi.filesize_t, 160), newoffset);
+    try std.testing.expectEqual(@as(i32, -1), s.fd_table[6].read_stream);
 }
 
 
