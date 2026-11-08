@@ -1929,6 +1929,56 @@ fn emitMemoryCopy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) !void
     }
 }
 
+fn isAllZeroConstant(val_ip: InternPool.Index, zcu: *const Zcu) bool {
+    const ip = &zcu.intern_pool;
+    const val = Value.fromInterned(val_ip);
+    if (val.isUndef(zcu)) return false;
+    const ty = val.typeOf(zcu);
+    if (!ty.hasRuntimeBits(zcu)) return true;
+    return switch (ip.indexToKey(val_ip)) {
+        .int => |int| switch (int.storage) {
+            .u64 => |x| x == 0,
+            .i64 => |x| x == 0,
+            .big_int => |x| x.eqlZero(),
+        },
+        .float => |float| switch (float.storage) {
+            .f16 => |v| @as(u16, @bitCast(v)) == 0,
+            .f32 => |v| @as(u32, @bitCast(v)) == 0,
+            .f64 => |v| @as(u64, @bitCast(v)) == 0,
+            .f80 => |v| @as(u80, @bitCast(v)) == 0,
+            .f128 => |v| @as(u128, @bitCast(v)) == 0,
+        },
+        .simple_value => |sv| sv == .false,
+        .aggregate => |agg| {
+            if (ty.zigTypeTag(zcu) == .array) {
+                if (ty.sentinel(zcu)) |s| {
+                    if (!isAllZeroConstant(s.toIntern(), zcu)) return false;
+                }
+            }
+            if (ty.zigTypeTag(zcu) == .@"struct") {
+                const layout = ty.containerLayout(zcu);
+                if (layout != .auto and layout != .@"extern") return false;
+            }
+            return switch (agg.storage) {
+                .bytes => |b| {
+                    for (b.toSlice(ty.arrayLenIncludingSentinel(zcu), ip)) |byte| {
+                        if (byte != 0) return false;
+                    }
+                    return true;
+                },
+                .elems => |elems| {
+                    for (elems) |elem_ip| {
+                        if (!isAllZeroConstant(elem_ip, zcu)) return false;
+                    }
+                    return true;
+                },
+                .repeated_elem => |elem_ip| isAllZeroConstant(elem_ip, zcu),
+            };
+        },
+        else => false,
+    };
+}
+
 fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!void {
     if (dst == .promoted or src == .promoted) {
         const copy_len: u32 = switch (raw_len) {
@@ -2032,6 +2082,53 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!vo
             return;
         }
         const max_inline_len: u64 = if (cg.hasSimd()) 128 else 32;
+        if (src == .uav_ref and src.uav_ref.orig_ptr_ty == .none and src.uav_ref.offset == 0 and
+            isAllZeroConstant(src.uav_ref.ip_index, cg.pt.zcu))
+        {
+            if (cg.optimizeMode() != .small and const_len <= max_inline_len) {
+                const owns_dst = dst == .stack;
+                var dst_base = if (owns_dst) try dst.toLocal(cg, .usize) else dst;
+                defer if (owns_dst) dst_base.free(cg);
+                const dst_offset = dst_base.memOffset();
+                var off: u64 = 0;
+                while (cg.hasSimd() and const_len - off >= 16) : (off += 16) {
+                    try cg.emitMemBase(dst_base);
+                    const extra_index: u32 = @intCast(cg.mir_extra.items.len);
+                    try cg.mir_extra.ensureUnusedCapacity(cg.gpa, 5);
+                    cg.mir_extra.appendAssumeCapacity(@backingInt(std.wasm.SimdOpcode.v128_const));
+                    cg.mir_extra.appendSliceAssumeCapacity(&.{ 0, 0, 0, 0 });
+                    try cg.addInst(.{ .tag = .simd_prefix, .data = .{ .payload = extra_index } });
+                    try cg.addSimdMemArg(.v128_store, .{ .offset = dst_offset + off, .alignment = .@"1" });
+                }
+                while (const_len - off >= 8) : (off += 8) {
+                    try cg.emitMemBase(dst_base);
+                    try cg.addImm64(0);
+                    try cg.addMemArg(.i64_store, .{ .offset = dst_offset + off, .alignment = .@"1" });
+                }
+                if (const_len - off >= 4) {
+                    try cg.emitMemBase(dst_base);
+                    try cg.addImm32(0);
+                    try cg.addMemArg(.i32_store, .{ .offset = dst_offset + off, .alignment = .@"1" });
+                    off += 4;
+                }
+                if (const_len - off >= 2) {
+                    try cg.emitMemBase(dst_base);
+                    try cg.addImm32(0);
+                    try cg.addMemArg(.i32_store16, .{ .offset = dst_offset + off, .alignment = .@"1" });
+                    off += 2;
+                }
+                if (const_len - off >= 1) {
+                    try cg.emitMemBase(dst_base);
+                    try cg.addImm32(0);
+                    try cg.addMemArg(.i32_store8, .{ .offset = dst_offset + off, .alignment = .@"1" });
+                    off += 1;
+                }
+                return;
+            }
+            if (cg.target.cpu.has(.wasm, .bulk_memory_opt)) {
+                return cg.memset(.u8, dst, raw_len, .{ .imm32 = 0 });
+            }
+        }
         if (cg.optimizeMode() != .small and const_len <= max_inline_len) {
             const owns_src = src == .stack;
             var src_base = if (owns_src) try src.toLocal(cg, .usize) else src;
@@ -7819,6 +7916,20 @@ fn bitcastClass(cg: *CodeGen, ty: Type) BitcastClass {
     };
 }
 
+fn bitcastNeedsWrapping(cg: *CodeGen, dest_ty: Type, src_ty: Type) bool {
+    if (dest_ty.eql(src_ty)) return false;
+    const src_class = cg.bitcastClass(src_ty);
+    const dest_class = cg.bitcastClass(dest_ty);
+    return switch (dest_class) {
+        .int => |dest_int| dest_int.bits != cg.intBackingBits(dest_int.bits) and
+            switch (src_class) {
+                .int => |src_int| src_int.is_signed != dest_int.is_signed,
+                .float, .aggregate => true,
+            },
+        .float, .aggregate => false,
+    };
+}
+
 fn bitcast(cg: *CodeGen, dest_ty: Type, src_ty: Type, operand: WValue, src_align: Alignment) InnerError!WValue {
     if (dest_ty.eql(src_ty)) return operand;
 
@@ -7827,15 +7938,7 @@ fn bitcast(cg: *CodeGen, dest_ty: Type, src_ty: Type, operand: WValue, src_align
     const dest_class = cg.bitcastClass(dest_ty);
     const src_by_ref = isByRef(src_ty, zcu, cg.target);
     const dest_by_ref = isByRef(dest_ty, zcu, cg.target);
-
-    const needs_wrapping = switch (dest_class) {
-        .int => |dest_int| dest_int.bits != cg.intBackingBits(dest_int.bits) and
-            switch (src_class) {
-                .int => |src_int| src_int.is_signed != dest_int.is_signed,
-                .float, .aggregate => true,
-            },
-        .float, .aggregate => false,
-    };
+    const needs_wrapping = cg.bitcastNeedsWrapping(dest_ty, src_ty);
 
     if (src_by_ref and dest_by_ref) {
         if (needs_wrapping) return try cg.intWrap(dest_class.int, operand);
@@ -13224,25 +13327,33 @@ const SroaAnalysis = struct {
                 const operand_ty = self.cg.typeOf(op);
                 const dest_ty = self.cg.typeOfIndex(inst);
                 if (self.getRef(op)) |ref| {
-                    if (operand_ty.zigTypeTag(zcu) == .pointer and dest_ty.zigTypeTag(zcu) == .pointer and
-                        !operand_ty.isSlice(zcu) and !dest_ty.isSlice(zcu))
-                    {
-                        const src_info = operand_ty.ptrInfo(zcu);
-                        const dst_info = dest_ty.ptrInfo(zcu);
-                        if (ref.kind == .ptr and !src_info.flags.is_volatile and !dst_info.flags.is_volatile and
-                            isNonBitpackedPtr(src_info) and isNonBitpackedPtr(dst_info))
-                        {
-                            const src_elem_ty = operand_ty.childType(zcu);
-                            const dst_elem_ty = dest_ty.childType(zcu);
-                            const src_elem_size: u32 = if (src_elem_ty.hasRuntimeBits(zcu)) @intCast(src_elem_ty.abiSize(zcu)) else 0;
-                            const dst_elem_size: u32 = if (dst_elem_ty.hasRuntimeBits(zcu)) @intCast(dst_elem_ty.abiSize(zcu)) else 0;
-                            const src_vec_off = vectorIndexByteOffset(src_info, src_elem_size);
-                            const dst_vec_off = vectorIndexByteOffset(dst_info, dst_elem_size);
-                            if (src_info.flags.vector_index == .none or
-                                (dst_info.flags.vector_index != .none and src_vec_off == dst_vec_off))
+                    if (operand_ty.zigTypeTag(zcu) == .pointer and dest_ty.zigTypeTag(zcu) == .pointer) {
+                        if (operand_ty.isSlice(zcu) and dest_ty.isSlice(zcu)) {
+                            if (ref.kind == .byref_val and
+                                !operand_ty.isVolatilePtr(zcu) and !dest_ty.isVolatilePtr(zcu) and
+                                (try self.checkSubAggregateAccess(ref.root_id, ref.offset, dest_ty)))
                             {
                                 try self.inst_refs.put(self.cg.gpa, inst, ref);
                                 return;
+                            }
+                        } else if (!operand_ty.isSlice(zcu) and !dest_ty.isSlice(zcu)) {
+                            const src_info = operand_ty.ptrInfo(zcu);
+                            const dst_info = dest_ty.ptrInfo(zcu);
+                            if (ref.kind == .ptr and !src_info.flags.is_volatile and !dst_info.flags.is_volatile and
+                                isNonBitpackedPtr(src_info) and isNonBitpackedPtr(dst_info))
+                            {
+                                const src_elem_ty = operand_ty.childType(zcu);
+                                const dst_elem_ty = dest_ty.childType(zcu);
+                                const src_elem_size: u32 = if (src_elem_ty.hasRuntimeBits(zcu)) @intCast(src_elem_ty.abiSize(zcu)) else 0;
+                                const dst_elem_size: u32 = if (dst_elem_ty.hasRuntimeBits(zcu)) @intCast(dst_elem_ty.abiSize(zcu)) else 0;
+                                const src_vec_off = vectorIndexByteOffset(src_info, src_elem_size);
+                                const dst_vec_off = vectorIndexByteOffset(dst_info, dst_elem_size);
+                                if (src_info.flags.vector_index == .none or
+                                    (dst_info.flags.vector_index != .none and src_vec_off == dst_vec_off))
+                                {
+                                    try self.inst_refs.put(self.cg.gpa, inst, ref);
+                                    return;
+                                }
                             }
                         }
                     }
@@ -14576,6 +14687,22 @@ fn scanBlockForLoadElisions(
                                         (layout == .auto or layout == .@"extern");
                                 },
                                 .get_union_tag => later_data.ty_op.operand == op,
+                                .ptr_cast => blk: {
+                                    const src_ty = self.cg.typeOf(op);
+                                    const dst_ty = self.cg.typeOfIndex(later);
+                                    break :blk later_data.ty_op.operand == op and
+                                        src_ty.isSlice(zcu_inner) and dst_ty.isSlice(zcu_inner) and
+                                        !src_ty.isVolatilePtr(zcu_inner) and !dst_ty.isVolatilePtr(zcu_inner);
+                                },
+                                .bit_cast => blk: {
+                                    const src_ty = self.cg.typeOf(op);
+                                    const dst_ty = self.cg.typeOfIndex(later);
+                                    break :blk later_data.ty_op.operand == op and
+                                        isByRef(src_ty, zcu_inner, self.cg.target) and
+                                        isByRef(dst_ty, zcu_inner, self.cg.target) and
+                                        dst_ty.abiSize(zcu_inner) == src_ty.abiSize(zcu_inner) and
+                                        !self.cg.bitcastNeedsWrapping(dst_ty, src_ty);
+                                },
                                 .array_elem_val => later_data.bin_op.lhs == op and isByRef(self.cg.typeOf(op), zcu_inner, self.cg.target),
                                 .slice_ptr, .slice_len, .optional_payload, .unwrap_errunion_err, .unwrap_errunion_payload => later_data.ty_op.operand == op,
                                 .slice_elem_val => later_data.bin_op.lhs == op,
@@ -14642,7 +14769,7 @@ fn scanBlockForLoadElisions(
                             const later_ty = self.cg.typeOfIndex(later);
                             if (later_ty.hasRuntimeBits(zcu_inner) and isByRef(later_ty, zcu_inner, self.cg.target) and
                                 switch (later_tag) {
-                                    .agg_field_val, .array_elem_val, .optional_payload, .unwrap_errunion_payload => true,
+                                    .agg_field_val, .array_elem_val, .optional_payload, .unwrap_errunion_payload, .ptr_cast, .bit_cast => true,
                                     else => false,
                                 })
                             {
@@ -14840,7 +14967,25 @@ const ReadOnlyAllocAliasAnalysis = struct {
                     if (self.candidates.getPtr(lhs_idx)) |cand| {
                         if (!cand.invalid and cand.init_store == null and cand.defining_body.ptr == body.ptr) {
                             var ok = false;
-                            if (bin_op.rhs.toIndex()) |rhs_idx| {
+                            if (bin_op.rhs.toIndex()) |orig_rhs_idx| {
+                                var rhs_idx = orig_rhs_idx;
+                                while ((tags[@backingInt(rhs_idx)] == .bit_cast or tags[@backingInt(rhs_idx)] == .ptr_cast) and
+                                    self.use_counts[@backingInt(rhs_idx)] == 1)
+                                {
+                                    const bc_op = datas[@backingInt(rhs_idx)].ty_op.operand;
+                                    const bc_src_ty = self.cg.typeOf(bc_op);
+                                    const bc_dst_ty = self.cg.typeOfIndex(rhs_idx);
+                                    const valid_noop = if (tags[@backingInt(rhs_idx)] == .ptr_cast)
+                                        bc_src_ty.isSlice(zcu) and bc_dst_ty.isSlice(zcu) and
+                                            !bc_src_ty.isVolatilePtr(zcu) and !bc_dst_ty.isVolatilePtr(zcu)
+                                    else
+                                        isByRef(bc_src_ty, zcu, self.cg.target) and
+                                            isByRef(bc_dst_ty, zcu, self.cg.target) and
+                                            bc_src_ty.abiSize(zcu) == bc_dst_ty.abiSize(zcu) and
+                                            !self.cg.bitcastNeedsWrapping(bc_dst_ty, bc_src_ty);
+                                    if (!valid_noop) break;
+                                    rhs_idx = bc_op.toIndex() orelse break;
+                                }
                                 const rhs_tag = tags[@backingInt(rhs_idx)];
                                 const alloc_ptr_ty = self.cg.typeOfIndex(lhs_idx);
                                 const ptr_info = alloc_ptr_ty.ptrInfo(zcu);
@@ -14850,11 +14995,12 @@ const ReadOnlyAllocAliasAnalysis = struct {
                                     self.sroa.roots.items[ref.root_id].escaped
                                 else
                                     true;
-                                const rhs_escaped = if (self.sroa.getRef(bin_op.rhs)) |ref|
+                                const rhs_escaped = if (self.sroa.getRef(rhs_idx.toRef())) |ref|
                                     self.sroa.roots.items[ref.root_id].escaped
                                 else
                                     true;
                                 if (isNonBitpackedPtr(ptr_info) and
+                                    self.use_counts[@backingInt(orig_rhs_idx)] == 1 and
                                     self.use_counts[@backingInt(rhs_idx)] == 1 and
                                     isByRef(rhs_ty, zcu, self.cg.target) and
                                     rhs_ty.abiSize(zcu) == elem_ty.abiSize(zcu))
@@ -14969,9 +15115,13 @@ const ReadOnlyAllocAliasAnalysis = struct {
                                 derived_ok = bin.lhs == op and !self.cg.typeOfIndex(inst).isVolatilePtr(zcu);
                             },
                             .ptr_cast => {
+                                const src_ty = self.cg.typeOf(op);
                                 const dst_ty = self.cg.typeOfIndex(inst);
-                                derived_ok = data.ty_op.operand == op and dst_ty.zigTypeTag(zcu) == .pointer and
-                                    !dst_ty.isSlice(zcu) and !dst_ty.isVolatilePtr(zcu);
+                                derived_ok = data.ty_op.operand == op and
+                                    src_ty.zigTypeTag(zcu) == .pointer and
+                                    dst_ty.zigTypeTag(zcu) == .pointer and
+                                    src_ty.isSlice(zcu) == dst_ty.isSlice(zcu) and
+                                    !src_ty.isVolatilePtr(zcu) and !dst_ty.isVolatilePtr(zcu);
                             },
                             .load => {
                                 const res_ty = self.cg.typeOfIndex(inst);
@@ -15017,6 +15167,17 @@ const ReadOnlyAllocAliasAnalysis = struct {
                             .slice_len,
                             => {
                                 read_ok = data.ty_op.operand == op;
+                            },
+                            .bit_cast => {
+                                const src_ty = self.cg.typeOf(op);
+                                const dst_ty = self.cg.typeOfIndex(inst);
+                                if (data.ty_op.operand == op and isByRef(src_ty, zcu, self.cg.target) and
+                                    isByRef(dst_ty, zcu, self.cg.target) and
+                                    dst_ty.abiSize(zcu) == src_ty.abiSize(zcu) and
+                                    !self.cg.bitcastNeedsWrapping(dst_ty, src_ty))
+                                {
+                                    derived_ok = true;
+                                }
                             },
                             .is_null_ptr,
                             .is_non_null_ptr,
