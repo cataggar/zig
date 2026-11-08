@@ -5987,8 +5987,9 @@ fn rewriteExprFuncIndices(
     return out.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
-const max_inline_params = 6;
-const max_inline_locals = 12;
+const max_inline_params = 16;
+const max_inline_locals = 32;
+const max_inline_results = 4;
 const max_inline_total_locals = max_inline_params + max_inline_locals;
 
 const TrivialLeaf = struct {
@@ -5997,7 +5998,7 @@ const TrivialLeaf = struct {
     op_count: u32 = 0,
     param_types: [max_inline_params]types.ValType = undefined,
     param_count: u8 = 0,
-    result_types: [2]types.ValType = undefined,
+    result_types: [max_inline_results]types.ValType = undefined,
     result_count: u8 = 0,
     local_types: [max_inline_locals]types.ValType = undefined,
     local_count: u8 = 0,
@@ -6007,7 +6008,8 @@ const TrivialLeaf = struct {
     needs_result_block: bool = false,
     has_early_return: bool = false,
     uses_global_op: bool = false,
-    inner_callee: ?u32 = null,
+    inner_callees: [4]u32 = @splat(types.invalid_index),
+    inner_calls_count: u8 = 0,
 };
 
 const TrivialKind = union(enum) {
@@ -6159,9 +6161,21 @@ fn classifyTrivialFunc(
     is_externally_used: bool,
 ) TrivialKind {
     if (func.is_import or func.code_bytes.len == 0) return .none;
-    if (func.local_types.items.len > max_inline_locals) return .none;
+    const mode_max_params: usize = switch (optimize_mode) {
+        .small => 6,
+        .fast => max_inline_params,
+    };
+    const mode_max_locals: usize = switch (optimize_mode) {
+        .small => 12,
+        .fast => max_inline_locals,
+    };
+    const mode_max_results: usize = switch (optimize_mode) {
+        .small => 2,
+        .fast => max_inline_results,
+    };
+    if (func.local_types.items.len > mode_max_locals) return .none;
     const sig = getFuncSignature(module, func) orelse return .none;
-    if (sig.params.len > max_inline_params or sig.results.len > 2) return .none;
+    if (sig.params.len > mode_max_params or sig.results.len > mode_max_results) return .none;
 
     for (sig.params, 0..) |p, i| {
         if (!isAllowedValType(p, Mod.FuncSignature.concreteIdxAt(sig.param_type_idxs, i))) return .none;
@@ -6220,9 +6234,16 @@ fn classifyTrivialFunc(
     var has_early_return: bool = false;
     var has_branch_to_func_block: bool = false;
     var uses_global_op: bool = false;
+    var uses_global_set: bool = false;
     var has_loop: bool = false;
     var seen_cond_branch: bool = false;
-    var inner_callee: ?u32 = null;
+    var inner_callees: [4]u32 = @splat(types.invalid_index);
+    var inner_calls_count: u8 = 0;
+
+    const max_scan_ops: u32 = switch (optimize_mode) {
+        .small => 46,
+        .fast => 221,
+    };
 
     while (pos < body_end) {
         const instr_start = pos;
@@ -6256,11 +6277,12 @@ fn classifyTrivialFunc(
         }
 
         op_count += 1;
-        if (op_count > 91) return .none;
+        if (op_count > max_scan_ops) return .none;
 
         if (decoded.prefix == 0) {
             if (decoded.code == 0x23 or decoded.code == 0x24) {
                 uses_global_op = true;
+                if (decoded.code == 0x24) uses_global_set = true;
             }
             switch (decoded.code) {
                 0x11, 0x12, 0x13 => return .none,
@@ -6268,9 +6290,10 @@ fn classifyTrivialFunc(
                     leading_still_matching = false;
                     const callee = readU32(bytes, &pos) catch return .none;
                     const is_cond_call = (depth > 0 or has_early_return) and seen_cond_branch;
+                    const max_inner_calls: u8 = if (call_count == 1 and !is_externally_used) 4 else 2;
                     if (optimize_mode != .fast or
                         has_loop or
-                        inner_callee != null or
+                        inner_calls_count >= max_inner_calls or
                         callee >= module.funcs.items.len or
                         callee == fidx or
                         (!is_cond_call and module.funcs.items[callee].is_import))
@@ -6282,7 +6305,8 @@ fn classifyTrivialFunc(
                         depth0_stack = depth0_stack - @as(i32, @intCast(callee_sig.params.len)) + @as(i32, @intCast(callee_sig.results.len));
                         if (depth0_stack < 0) depth0_stack_exact = false;
                     }
-                    inner_callee = callee;
+                    inner_callees[inner_calls_count] = callee;
+                    inner_calls_count += 1;
                     continue;
                 },
                 0x00 => {
@@ -6294,7 +6318,7 @@ fn classifyTrivialFunc(
                     leading_still_matching = false;
                     if (decoded.code == 0x03) {
                         has_loop = true;
-                        if (inner_callee != null) return .none;
+                        if (inner_calls_count > 0) return .none;
                     } else if (decoded.code == 0x04) {
                         seen_cond_branch = true;
                     }
@@ -6332,7 +6356,7 @@ fn classifyTrivialFunc(
                             needs_result_block = true;
                         }
                     } else if (depth > 0 and pos < body_end and (bytes[pos] == 0x0b or bytes[pos] == 0x05)) {
-                        if (sig.results.len == 2 and (!depth0_stack_exact or depth0_stack != 0)) return .none;
+                        if (sig.results.len > 1 and (!depth0_stack_exact or depth0_stack != 0)) return .none;
                         has_early_return = true;
                         needs_result_block = true;
                     } else {
@@ -6452,9 +6476,9 @@ fn classifyTrivialFunc(
 
     switch (optimize_mode) {
         .small => {
-            if (inner_callee != null) return .none;
+            if (inner_calls_count > 0) return .none;
             if (call_count == 1 and !is_externally_used) {
-                if (op_count > 45 or func.local_types.items.len > 8 or sig.params.len > max_inline_params) return .none;
+                if (op_count > 45 or func.local_types.items.len > 8 or sig.params.len > 6) return .none;
             } else {
                 if (uses_global_op) return .none;
                 const allow_zero_local = func.local_types.items.len == 0 and
@@ -6468,20 +6492,28 @@ fn classifyTrivialFunc(
             }
         },
         .fast => {
-            if (inner_callee != null) {
-                const max_ops: u32 = if (seen_cond_branch) 28 else 24;
-                if (uses_global_op or
-                    has_loop or
-                    (!seen_cond_branch and module.funcs.items[inner_callee.?].is_import) or
-                    op_count > max_ops or
-                    bytes.len > 80 or
-                    func.local_types.items.len > 4 or
-                    sig.params.len > 4)
-                {
-                    return .none;
+            if (uses_global_set and has_early_return) return .none;
+            const single_internal = call_count == 1 and !is_externally_used;
+            if (inner_calls_count == 0) {
+                if (single_internal) {
+                    if (op_count > 220 or bytes.len > 600) return .none;
+                } else {
+                    if (op_count > 135) return .none;
+                }
+            } else if (inner_calls_count == 1) {
+                if (has_loop) return .none;
+                if (single_internal) {
+                    if (op_count > 180 or bytes.len > 500) return .none;
+                } else {
+                    if (uses_global_op or op_count > 85 or bytes.len > 240) return .none;
                 }
             } else {
-                if (op_count > 90 or sig.params.len > max_inline_params or func.local_types.items.len > max_inline_locals) return .none;
+                if (has_loop) return .none;
+                if (single_internal) {
+                    if (inner_calls_count > 4 or uses_global_set or op_count > 180 or bytes.len > 500) return .none;
+                } else {
+                    if (inner_calls_count > 2 or uses_global_op or op_count > 95 or bytes.len > 260) return .none;
+                }
             }
         },
     }
@@ -6499,7 +6531,8 @@ fn classifyTrivialFunc(
         .needs_result_block = needs_result_block,
         .has_early_return = has_early_return,
         .uses_global_op = uses_global_op,
-        .inner_callee = inner_callee,
+        .inner_callees = inner_callees,
+        .inner_calls_count = inner_calls_count,
     };
     @memcpy(leaf.param_types[0..sig.params.len], sig.params);
     @memcpy(leaf.result_types[0..sig.results.len], sig.results);
@@ -6644,7 +6677,7 @@ fn inlineTrivialFunctions(
                         leaf.local_count == 0 and
                         !leaf.needs_result_block and
                         !leaf.has_early_return and
-                        leaf.inner_callee == null)
+                        leaf.inner_calls_count == 0)
                     {
                         resolved = .{ .leaf = leaf };
                     } else {
@@ -6670,9 +6703,10 @@ fn inlineTrivialFunctions(
 
     for (module.num_func_imports..num_funcs) |i| {
         if (trivials[i] == .leaf) {
-            if (trivials[i].leaf.inner_callee) |inner_c| {
+            for (trivials[i].leaf.inner_callees[0..trivials[i].leaf.inner_calls_count]) |inner_c| {
                 if (trivials[inner_c] != .none or orig_forwards[inner_c] != .none) {
                     trivials[i] = .none;
+                    break;
                 }
             }
         }
@@ -6771,7 +6805,7 @@ fn inlineTrivialFunctions(
                 if (callee != i and callee >= module.num_func_imports and callee < num_funcs) {
                     switch (trivials[callee]) {
                         .leaf => |*leaf| {
-                            const extra_result_locals: usize = if (leaf.needs_result_block and leaf.result_count == 2) 2 else 0;
+                            const extra_result_locals: usize = if (leaf.needs_result_block and leaf.result_count > 1) leaf.result_count else 0;
                             const needed_locals: usize = (leaf.param_count - leaf.prefix_params) + leaf.local_count + extra_result_locals;
                             const can_inline_site = switch (optimize_mode) {
                                 .small => func.local_types.items.len + needed_locals <= 4096,
@@ -6799,24 +6833,17 @@ fn inlineTrivialFunctions(
                                     func.local_types.append(module.allocator, leaf.local_types[l]) catch return error.OutOfMemory;
                                     local_map[leaf.param_count + l] = new_idx;
                                 }
-                                var res_local_0: u32 = 0;
-                                var res_local_1: u32 = 0;
-                                if (leaf.needs_result_block and leaf.result_count == 2) {
-                                    res_local_0 = caller_param_count + @as(u32, @intCast(func.local_types.items.len));
-                                    if (func.local_type_idxs.items.len == func.local_types.items.len and func.local_type_idxs.items.len > 0) {
-                                        func.local_type_idxs.append(module.allocator, types.invalid_index) catch return error.OutOfMemory;
-                                    } else {
-                                        func.local_type_idxs.clearRetainingCapacity();
+                                var result_locals: [max_inline_results]u32 = @splat(0);
+                                if (leaf.needs_result_block and leaf.result_count > 1) {
+                                    for (0..leaf.result_count) |r| {
+                                        result_locals[r] = caller_param_count + @as(u32, @intCast(func.local_types.items.len));
+                                        if (func.local_type_idxs.items.len == func.local_types.items.len and func.local_type_idxs.items.len > 0) {
+                                            func.local_type_idxs.append(module.allocator, types.invalid_index) catch return error.OutOfMemory;
+                                        } else {
+                                            func.local_type_idxs.clearRetainingCapacity();
+                                        }
+                                        func.local_types.append(module.allocator, leaf.result_types[r]) catch return error.OutOfMemory;
                                     }
-                                    func.local_types.append(module.allocator, leaf.result_types[0]) catch return error.OutOfMemory;
-
-                                    res_local_1 = caller_param_count + @as(u32, @intCast(func.local_types.items.len));
-                                    if (func.local_type_idxs.items.len == func.local_types.items.len and func.local_type_idxs.items.len > 0) {
-                                        func.local_type_idxs.append(module.allocator, types.invalid_index) catch return error.OutOfMemory;
-                                    } else {
-                                        func.local_type_idxs.clearRetainingCapacity();
-                                    }
-                                    func.local_types.append(module.allocator, leaf.result_types[1]) catch return error.OutOfMemory;
                                 }
 
                                 var p: usize = leaf.param_count;
@@ -6844,7 +6871,7 @@ fn inlineTrivialFunctions(
 
                                 if (leaf.needs_result_block) {
                                     out.append(module.allocator, 0x02) catch return error.OutOfMemory;
-                                    if (leaf.result_count == 0 or leaf.result_count == 2) {
+                                    if (leaf.result_count != 1) {
                                         out.append(module.allocator, 0x40) catch return error.OutOfMemory;
                                     } else {
                                         const vt_byte: u8 = @bitCast(@as(i8, @intCast(@backingInt(leaf.result_types[0]))));
@@ -6881,11 +6908,13 @@ fn inlineTrivialFunctions(
                                                 continue;
                                             },
                                             0x0f => {
-                                                if (leaf.needs_result_block and leaf.result_count == 2) {
-                                                    out.append(module.allocator, 0x21) catch return error.OutOfMemory;
-                                                    try appendU32Leb(module.allocator, &out, res_local_1);
-                                                    out.append(module.allocator, 0x21) catch return error.OutOfMemory;
-                                                    try appendU32Leb(module.allocator, &out, res_local_0);
+                                                if (leaf.needs_result_block and leaf.result_count > 1) {
+                                                    var ri: usize = leaf.result_count;
+                                                    while (ri > 0) {
+                                                        ri -= 1;
+                                                        out.append(module.allocator, 0x21) catch return error.OutOfMemory;
+                                                        try appendU32Leb(module.allocator, &out, result_locals[ri]);
+                                                    }
                                                 }
                                                 out.append(module.allocator, 0x0c) catch return error.OutOfMemory;
                                                 try appendU32Leb(module.allocator, &out, inner_depth);
@@ -6899,18 +6928,20 @@ fn inlineTrivialFunctions(
                                 }
 
                                 if (leaf.needs_result_block) {
-                                    if (leaf.result_count == 2) {
-                                        out.append(module.allocator, 0x21) catch return error.OutOfMemory;
-                                        try appendU32Leb(module.allocator, &out, res_local_1);
-                                        out.append(module.allocator, 0x21) catch return error.OutOfMemory;
-                                        try appendU32Leb(module.allocator, &out, res_local_0);
+                                    if (leaf.result_count > 1) {
+                                        var ri: usize = leaf.result_count;
+                                        while (ri > 0) {
+                                            ri -= 1;
+                                            out.append(module.allocator, 0x21) catch return error.OutOfMemory;
+                                            try appendU32Leb(module.allocator, &out, result_locals[ri]);
+                                        }
                                     }
                                     out.append(module.allocator, 0x0b) catch return error.OutOfMemory;
-                                    if (leaf.result_count == 2) {
-                                        out.append(module.allocator, 0x20) catch return error.OutOfMemory;
-                                        try appendU32Leb(module.allocator, &out, res_local_0);
-                                        out.append(module.allocator, 0x20) catch return error.OutOfMemory;
-                                        try appendU32Leb(module.allocator, &out, res_local_1);
+                                    if (leaf.result_count > 1) {
+                                        for (0..leaf.result_count) |ri| {
+                                            out.append(module.allocator, 0x20) catch return error.OutOfMemory;
+                                            try appendU32Leb(module.allocator, &out, result_locals[ri]);
+                                        }
                                     }
                                 }
                                 if (decoded.code == 0x12) {
@@ -11277,5 +11308,192 @@ test "Optimizer: 2-pass bottom-up inlining, unconditional 1-call wrapper inlinin
         // Both store and load at `[fp + 0]` remain in memory because `fp + 16` escaped to `use_field_ptr`!
         try testing.expectEqual(@as(usize, 1), i32_stores);
         try testing.expectEqual(@as(usize, 1), i32_loads);
+    }
+}
+
+test "Optimizer: .fast mode 8-param 4-result inlining and 2-call wrapper inlining" {
+    const allocator = testing.allocator;
+
+    // 1. 8-parameter, 4-result function with early return (`needs_result_block = true`) is inlined
+    //    in `.fast` mode (and pruned), while remaining out-of-line in `.small` mode (`max_params = 6`, `max_results = 2`):
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        // Type 0: 8 i32 params -> 4 i32 results
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32 }),
+            .results = try allocator.dupe(types.ValType, &.{ .i32, .i32, .i32, .i32 }),
+        } });
+        try mod.type_meta.append(allocator, .{});
+        // Type 1: 8 i32 params -> 1 i32 result (caller)
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32, .i32, .i32, .i32, .i32, .i32, .i32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        // func 0 (`lerp4_early`): if (p0 == 0) return (p4, p5, p6, p7); return (p0+p4, p1+p5, p2+p6, p3+p7)
+        const lerp4_early = [_]u8{
+            0x20, 0x00, // local.get 0
+            0x45, // i32.eqz
+            0x04, 0x40, // if (empty)
+            0x20, 0x04, // local.get 4
+            0x20, 0x05, // local.get 5
+            0x20, 0x06, // local.get 6
+            0x20, 0x07, // local.get 7
+            0x0f, // return (4-result early return!)
+            0x0b, // end if
+            0x20, 0x00, // local.get 0
+            0x20, 0x04, // local.get 4
+            0x6a, // i32.add
+            0x20, 0x01, // local.get 1
+            0x20, 0x05, // local.get 5
+            0x6a, // i32.add
+            0x20, 0x02, // local.get 2
+            0x20, 0x06, // local.get 6
+            0x6a, // i32.add
+            0x20, 0x03, // local.get 3
+            0x20, 0x07, // local.get 7
+            0x6a, // i32.add
+            0x0f, // return
+            0x0b, // end
+        };
+
+        // func 1 (`caller`): calls `lerp4_early` twice and sums the 4 results each time
+        const caller_code = [_]u8{
+            0x20, 0x00, 0x20, 0x01, 0x20, 0x02, 0x20, 0x03,
+            0x20, 0x04, 0x20, 0x05, 0x20, 0x06, 0x20, 0x07,
+            0x10, 0x00, // call $lerp4_early (1)
+            0x6a, 0x6a, 0x6a, // sum 4 results
+            0x20, 0x07, 0x20, 0x06, 0x20, 0x05, 0x20, 0x04,
+            0x20, 0x03, 0x20, 0x02, 0x20, 0x01, 0x20, 0x00,
+            0x10, 0x00, // call $lerp4_early (2)
+            0x6a, 0x6a, 0x6a, // sum 4 results
+            0x6a, // combine
+            0x0b,
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &lerp4_early });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 1 } }, .code_bytes = &caller_code });
+        try mod.exports.append(allocator, .{ .name = "run_lerp4", .kind = .func, .var_ = .{ .index = 1 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+
+        // In `.small` mode, `lerp4_early` (8 params, 4 results) is NOT inlined:
+        const opt_small = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+        defer allocator.free(opt_small);
+        var mod_small = try reader.readModule(allocator, opt_small);
+        defer mod_small.deinit();
+        try testing.expectEqual(@as(usize, 2), mod_small.funcs.items.len);
+
+        // In `.fast` mode, `lerp4_early` IS inlined at both call sites and pruned!
+        const opt_fast = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt_fast);
+        var mod_fast = try reader.readModule(allocator, opt_fast);
+        defer mod_fast.deinit();
+        try testing.expectEqual(@as(usize, 1), mod_fast.funcs.items.len);
+    }
+
+    // 2. 2-call wrapper function (`inner_calls_count == 2`) calling two non-trivial internal functions
+    //    is inlined into its multi-caller in `.fast` mode, while remaining out-of-line in `.small` mode:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        // func 0: imported function `imp`
+        try mod.imports.append(allocator, .{
+            .module_name = "env",
+            .field_name = "imp",
+            .kind = .func,
+            .func = .{ .type_var = .{ .index = 0 } },
+        });
+        try mod.funcs.append(allocator, .{
+            .is_import = true,
+            .decl = .{ .type_var = .{ .index = 0 } },
+        });
+        mod.num_func_imports = 1;
+
+        // func 1 & func 2: non-trivial internal functions (unconditional call to import 0)
+        const callee_a = [_]u8{
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x00, // call $imp (unconditional call to import -> not inlined)
+            0x41, 0x01,
+            0x6a,
+            0x0b,
+        };
+        const callee_b = [_]u8{
+            0x20, 0x01,
+            0x20, 0x00,
+            0x10, 0x00, // call $imp (unconditional call to import -> not inlined)
+            0x41, 0x02,
+            0x6a,
+            0x0b,
+        };
+
+        // func 3 (`two_call_wrapper`): makes 2 direct calls (`call 1` and `call 2`) and combines results
+        const two_call_wrapper = [_]u8{
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x01, // call $callee_a (inner call 1)
+            0x20, 0x01,
+            0x20, 0x00,
+            0x10, 0x02, // call $callee_b (inner call 2)
+            0x6a, // i32.add
+            0x0f, // return
+            0x0b, // end
+        };
+
+        // func 4 (exported caller): calls `two_call_wrapper` twice, and also references 1 & 2 so they are multi-caller
+        const caller_code = [_]u8{
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x03, // call $two_call_wrapper (1)
+            0x20, 0x01,
+            0x20, 0x00,
+            0x10, 0x03, // call $two_call_wrapper (2)
+            0x6a,
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x01, // extra call to 1
+            0x6a,
+            0x20, 0x00,
+            0x20, 0x01,
+            0x10, 0x02, // extra call to 2
+            0x6a,
+            0x0b,
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &callee_a });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &callee_b });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &two_call_wrapper });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &caller_code });
+        try mod.exports.append(allocator, .{ .name = "run_2call", .kind = .func, .var_ = .{ .index = 4 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+
+        // In `.small` mode, `two_call_wrapper` is NOT inlined (all 5 funcs remain):
+        const opt_small = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+        defer allocator.free(opt_small);
+        var mod_small = try reader.readModule(allocator, opt_small);
+        defer mod_small.deinit();
+        try testing.expectEqual(@as(usize, 5), mod_small.funcs.items.len);
+
+        // In `.fast` mode, `two_call_wrapper` IS inlined at both sites and pruned (4 funcs remain):
+        const opt_fast = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt_fast);
+        var mod_fast = try reader.readModule(allocator, opt_fast);
+        defer mod_fast.deinit();
+        try testing.expectEqual(@as(usize, 4), mod_fast.funcs.items.len);
     }
 }
