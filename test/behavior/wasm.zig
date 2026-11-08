@@ -1772,3 +1772,93 @@ test "wasm SROA avoids over-promoting large copy-modify-pass aggregates" {
     S.destroyAndReplace(&buf_b, buf_a, box_a);
     try expect(buf_b[0] == 1234);
 }
+
+test "wasm single-exit block elision, unreachable branch elision, undef memset, and inline activeTag" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+
+    const S = struct {
+        const Err = error{ OutOfMemory, Overflow };
+
+        const Payload = struct {
+            a: u64,
+            b: u64,
+            c: u64,
+            d: u64,
+        };
+
+        const TaggedCmd = union(enum) {
+            rect: Payload,
+            circle: [4]f64,
+            text: struct { x: f32, y: f32, len: u32 },
+            clip: u32,
+        };
+
+        noinline fn makePayload(seed: u64, fail: bool) Err!Payload {
+            if (fail) return error.OutOfMemory;
+            return .{ .a = seed, .b = seed + 1, .c = seed + 2, .d = seed + 3 };
+        }
+
+        noinline fn evalCondUnreachBlock(x: u32, ok: bool) u32 {
+            const doubled: u32 = blk: {
+                const v = x * 2;
+                if (!ok) unreachable else break :blk v + 7;
+            };
+            return doubled + 3;
+        }
+
+        noinline fn evalSingleCaseSwitch(tag: u8, val: u32) u32 {
+            return blk: {
+                switch (tag) {
+                    1 => break :blk val * 5 + 1,
+                    else => unreachable,
+                }
+            };
+        }
+
+        noinline fn evalMultiCaseSwitchUnreachElse(tag: u8, val: u32) u32 {
+            return switch (tag) {
+                0 => val + 10,
+                1 => val + 20,
+                2 => val + 30,
+                else => unreachable,
+            };
+        }
+
+        noinline fn evalCatchUnreach(seed: u64) u64 {
+            const p = makePayload(seed, false) catch unreachable;
+            return p.a + p.d;
+        }
+
+        noinline fn inspectActiveTag(cmd: *const TaggedCmd) u32 {
+            return switch (std.meta.activeTag(cmd.*)) {
+                .rect => @intCast(cmd.rect.a + cmd.rect.b),
+                .circle => @intFromFloat(cmd.circle[0] + cmd.circle[3]),
+                .text => cmd.text.len,
+                .clip => cmd.clip,
+            };
+        }
+
+        noinline fn exerciseUndefMemset(buf: []Payload, first: Payload) u64 {
+            @memset(buf, undefined);
+            buf[0] = first;
+            return buf[0].b + buf[0].c;
+        }
+    };
+
+    try expect(S.evalCondUnreachBlock(10, true) == 30);
+    try expect(S.evalSingleCaseSwitch(1, 8) == 41);
+    try expect(S.evalMultiCaseSwitchUnreachElse(0, 5) == 15);
+    try expect(S.evalMultiCaseSwitchUnreachElse(1, 5) == 25);
+    try expect(S.evalMultiCaseSwitchUnreachElse(2, 5) == 35);
+    try expect(S.evalCatchUnreach(100) == 203);
+    try std.testing.expectError(error.OutOfMemory, S.makePayload(1, true));
+
+    const cmd_rect: S.TaggedCmd = .{ .rect = .{ .a = 12, .b = 30, .c = 0, .d = 0 } };
+    const cmd_text: S.TaggedCmd = .{ .text = .{ .x = 1.0, .y = 2.0, .len = 77 } };
+    try expect(S.inspectActiveTag(&cmd_rect) == 42);
+    try expect(S.inspectActiveTag(&cmd_text) == 77);
+
+    var backing: [4]S.Payload = undefined;
+    try expect(S.exerciseUndefMemset(&backing, .{ .a = 1, .b = 20, .c = 30, .d = 4 }) == 50);
+}
+

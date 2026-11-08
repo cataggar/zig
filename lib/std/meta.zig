@@ -573,7 +573,7 @@ test Tag {
 }
 
 /// Returns the active tag of a tagged union
-pub fn activeTag(u: anytype) Tag(@TypeOf(u)) {
+pub inline fn activeTag(u: anytype) Tag(@TypeOf(u)) {
     const T = @TypeOf(u);
     return @as(Tag(T), u);
 }

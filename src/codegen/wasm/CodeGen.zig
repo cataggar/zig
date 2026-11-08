@@ -218,6 +218,7 @@ values: ValueTable = .empty,
 blocks: std.array_hash_map.Auto(Air.Inst.Index, struct {
     label: u32,
     value: WValue,
+    elided: bool = false,
 }) = .{},
 /// Maps `loop` instructions to their label. `br` to here repeats the loop.
 loops: std.AutoHashMapUnmanaged(Air.Inst.Index, u32) = .empty,
@@ -1031,6 +1032,13 @@ fn storeAfterMemBase(cg: *CodeGen, dst: WValue, rhs: WValue, ty: Type, offset: u
 fn optimizeMode(cg: *const CodeGen) std.builtin.OptimizeMode {
     const zcu = cg.pt.zcu;
     return zcu.navFileScope(cg.owner_nav).mod.?.optimize_mode;
+}
+
+fn wantSafety(cg: *const CodeGen) bool {
+    return switch (cg.optimizeMode()) {
+        .Debug, .ReleaseSafe => true,
+        .ReleaseFast, .ReleaseSmall => false,
+    };
 }
 
 fn appendFreeLocal(cg: *CodeGen, index: u32) void {
@@ -3308,8 +3316,6 @@ fn airStore(cg: *CodeGen, inst: Air.Inst.Index, safety: bool) InnerError!void {
         return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
     }
 
-    const rhs = try cg.resolveInst(bin_op.rhs);
-
     const offset: u64 = switch (ptr_info.flags.vector_index) {
         .none => offset: {
             assert(ptr_info.packed_offset.host_size == 0); // legalize .expand_packed_store
@@ -3323,6 +3329,8 @@ fn airStore(cg: *CodeGen, inst: Air.Inst.Index, safety: bool) InnerError!void {
         try cg.memset(.u8, dst, cg.usizeImm(elem_ty.abiSize(zcu)), .{ .imm32 = 0xaa });
         return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
     }
+
+    const rhs = try cg.resolveInst(bin_op.rhs);
 
     try cg.store(lhs, rhs, elem_ty, .{
         .offset = offset,
@@ -7031,6 +7039,97 @@ fn airBlock(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     try cg.lowerBlock(inst, block.ty, block.body);
 }
 
+fn isBodyTriviallyUnreachable(air: Air, body: []const Air.Inst.Index) bool {
+    const tags = air.instructions.items(.tag);
+    for (body, 0..) |inst, idx| {
+        switch (tags[@backingInt(inst)]) {
+            .dbg_stmt, .dbg_empty_stmt => continue,
+            .unreach => return idx + 1 == body.len,
+            else => return false,
+        }
+    }
+    return false;
+}
+
+fn bodyHasBranchTargeting(cg: *const CodeGen, body: []const Air.Inst.Index, target_block: Air.Inst.Index) bool {
+    for (body) |inst| {
+        if (cg.hasBranchTargeting(inst, target_block)) return true;
+    }
+    return false;
+}
+
+fn hasBranchTargeting(cg: *const CodeGen, inst: Air.Inst.Index, target_block: Air.Inst.Index) bool {
+    const tags = cg.air.instructions.items(.tag);
+    const datas = cg.air.instructions.items(.data);
+    return switch (tags[@backingInt(inst)]) {
+        .br, .switch_dispatch => datas[@backingInt(inst)].br.block_inst == target_block,
+        .block, .loop => cg.bodyHasBranchTargeting(cg.air.unwrapBlock(inst).body, target_block),
+        .dbg_inline_block => cg.bodyHasBranchTargeting(cg.air.unwrapDbgBlock(inst).body, target_block),
+        .cond_br => {
+            const cond_br = cg.air.unwrapCondBr(inst);
+            return cg.bodyHasBranchTargeting(cond_br.then_body, target_block) or
+                cg.bodyHasBranchTargeting(cond_br.else_body, target_block);
+        },
+        .switch_br, .loop_switch_br => {
+            const switch_br = cg.air.unwrapSwitch(inst);
+            var it = switch_br.iterateCases();
+            while (it.next()) |case| {
+                if (cg.bodyHasBranchTargeting(case.body, target_block)) return true;
+            }
+            return cg.bodyHasBranchTargeting(it.elseBody(), target_block);
+        },
+        .@"try", .try_cold => cg.bodyHasBranchTargeting(cg.air.unwrapTry(inst).else_body, target_block),
+        .try_ptr, .try_ptr_cold => cg.bodyHasBranchTargeting(cg.air.unwrapTryPtr(inst).else_body, target_block),
+        else => false,
+    };
+}
+
+fn canElideBlockWrapper(cg: *const CodeGen, block_inst: Air.Inst.Index, body: []const Air.Inst.Index) bool {
+    if (body.len == 0) return false;
+    const zcu = cg.pt.zcu;
+    const tags = cg.air.instructions.items(.tag);
+    const datas = cg.air.instructions.items(.data);
+
+    const last_inst = body[body.len - 1];
+    const tail_matches = switch (tags[@backingInt(last_inst)]) {
+        .br => datas[@backingInt(last_inst)].br.block_inst == block_inst,
+        .cond_br => blk: {
+            if (cg.wantSafety()) break :blk false;
+            const cond_br = cg.air.unwrapCondBr(last_inst);
+            const then_unreach = isBodyTriviallyUnreachable(cg.air, cond_br.then_body);
+            const else_unreach = isBodyTriviallyUnreachable(cg.air, cond_br.else_body);
+            if (then_unreach == else_unreach) break :blk false;
+            const live_body = if (then_unreach) cond_br.else_body else cond_br.then_body;
+            break :blk cg.canElideBlockWrapper(block_inst, live_body);
+        },
+        .switch_br => blk: {
+            if (cg.wantSafety()) break :blk false;
+            const switch_br = cg.air.unwrapSwitch(last_inst);
+            if (switch_br.cases_len == 0) {
+                var it = switch_br.iterateCases();
+                break :blk cg.canElideBlockWrapper(block_inst, it.elseBody());
+            }
+            if (switch_br.cases_len == 1) {
+                var it = switch_br.iterateCases();
+                const only_case = it.next().?;
+                const else_body = it.elseBody();
+                if (switch_br.else_body_len == 0 or isBodyTriviallyUnreachable(cg.air, else_body)) {
+                    break :blk cg.canElideBlockWrapper(block_inst, only_case.body);
+                }
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+    if (!tail_matches) return false;
+
+    for (body[0 .. body.len - 1]) |sub_inst| {
+        if (cg.typeOfIndex(sub_inst).isNoReturn(zcu)) return false;
+        if (cg.hasBranchTargeting(sub_inst, block_inst)) return false;
+    }
+    return true;
+}
+
 fn lowerBlock(cg: *CodeGen, inst: Air.Inst.Index, block_ty: Type, body: []const Air.Inst.Index) InnerError!void {
     const zcu = cg.pt.zcu;
 
@@ -7048,12 +7147,16 @@ fn lowerBlock(cg: *CodeGen, inst: Air.Inst.Index, block_ty: Type, body: []const 
     else
         .none;
 
-    try cg.startBlock(.block, if (promoted_block != null) .empty else genBlockType(block_ty, zcu, cg.target));
+    const elide_block = cg.canElideBlockWrapper(inst, body);
+    if (!elide_block) {
+        try cg.startBlock(.block, if (promoted_block != null) .empty else genBlockType(block_ty, zcu, cg.target));
+    }
     // Here we set the current block idx, so breaks know the depth to jump
     // to when breaking out.
     try cg.blocks.putNoClobber(cg.gpa, inst, .{
         .label = cg.block_depth,
         .value = block_result,
+        .elided = elide_block,
     });
     defer assert(cg.blocks.swapRemove(inst));
 
@@ -7061,7 +7164,9 @@ fn lowerBlock(cg: *CodeGen, inst: Air.Inst.Index, block_ty: Type, body: []const 
         try cg.pushBranch();
         defer cg.popBranch();
         try cg.genBody(body);
-        try cg.endBlock();
+        if (!elide_block) {
+            try cg.endBlock();
+        }
     }
 
     for (cg.liveness.getBlock(inst).deaths) |death| cg.processDeath(death.toRef());
@@ -7103,10 +7208,28 @@ fn airLoop(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
 fn airCondBr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const cond_br = cg.air.unwrapCondBr(inst);
-    const condition = try cg.resolveInst(cond_br.condition);
     const then_body = cond_br.then_body;
     const else_body = cond_br.else_body;
     const branch_liveness = cg.liveness.getCondBr(inst);
+
+    if (!cg.wantSafety()) {
+        const then_unreach = isBodyTriviallyUnreachable(cg.air, then_body);
+        const else_unreach = isBodyTriviallyUnreachable(cg.air, else_body);
+        if (then_unreach != else_unreach) {
+            if (cg.liveness.operandDies(inst, 0)) cg.processDeath(cond_br.condition);
+            const live_body = if (then_unreach) else_body else then_body;
+            const live_deaths = if (then_unreach) branch_liveness.else_deaths else branch_liveness.then_deaths;
+            {
+                try cg.pushBranch();
+                defer cg.popBranch();
+                for (live_deaths) |death| cg.processDeath(death.toRef());
+                try cg.genBody(live_body);
+            }
+            return cg.finishAir(inst, .none, &.{});
+        }
+    }
+
+    const condition = try cg.resolveInst(cond_br.condition);
 
     // result type is always noreturn, so use `block_empty` as type.
     try cg.startBlock(.block, .empty);
@@ -7572,10 +7695,12 @@ fn airBr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         else => unreachable,
     }
 
-    // We map every block to its block index.
-    // We then determine how far we have to jump to it by subtracting it from current block depth
-    const idx: u32 = cg.block_depth - block.label;
-    try cg.addLabel(.br, idx);
+    if (!block.elided) {
+        // We map every block to its block index.
+        // We then determine how far we have to jump to it by subtracting it from current block depth
+        const idx: u32 = cg.block_depth - block.label;
+        try cg.addLabel(.br, idx);
+    }
 
     return cg.finishAir(inst, .none, &.{br.operand});
 }
@@ -7883,14 +8008,17 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
     defer if (is_dispatch_loop) assert(cg.blocks.swapRemove(inst));
 
     const has_else_body = switch_br.else_body_len != 0;
-    const branch_count = switch_br.cases_len + 1; // if else branch is missing, we trap when failing all conditions
+    const else_body = switch_br_else: {
+        var it = switch_br.iterateCases();
+        while (it.next()) |_| {}
+        break :switch_br_else it.elseBody();
+    };
+    const elide_unreachable_else = !cg.wantSafety() and !is_dispatch_loop and
+        (!has_else_body or isBodyTriviallyUnreachable(cg.air, else_body));
     try cg.branches.ensureUnusedCapacity(cg.gpa, switch_br.cases_len + @intFromBool(has_else_body));
 
     if (switch_br.cases_len == 0) {
         assert(has_else_body);
-
-        var it = switch_br.iterateCases();
-        const else_body = it.elseBody();
 
         if (operand_dies) cg.processDeath(switch_br.operand);
         owned_target.free(cg);
@@ -7909,6 +8037,25 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
         return cg.finishAir(inst, .none, &.{});
     }
 
+    if (elide_unreachable_else and switch_br.cases_len == 1) {
+        var it = switch_br.iterateCases();
+        const only_case = it.next().?;
+
+        if (operand_dies) cg.processDeath(switch_br.operand);
+        owned_target.free(cg);
+
+        {
+            try cg.pushBranch();
+            defer cg.popBranch();
+            for (branch_liveness.deaths[0]) |death| cg.processDeath(death.toRef());
+            try cg.genBody(only_case.body);
+        }
+        return cg.finishAir(inst, .none, &.{});
+    }
+
+    const branch_count = switch_br.cases_len + @intFromBool(!elide_unreachable_else); // if else branch is missing in safe modes, we trap when failing all conditions
+    const explicit_case_count = switch_br.cases_len - @intFromBool(elide_unreachable_else);
+
     var min: ?Value = null;
     var max: ?Value = null;
     var branching_size: u32 = 0; // single item +1, range +2
@@ -7916,6 +8063,7 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
     {
         var cases_it = switch_br.iterateCases();
         while (cases_it.next()) |case| {
+            if (case.idx >= explicit_case_count) break;
             for (case.items) |item| {
                 const val = Value.fromInterned(item.toInterned().?);
                 if (min == null or val.compareHetero(.lt, min.?, zcu)) min = val;
@@ -7988,6 +8136,7 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
 
         var cases_it = switch_br.iterateCases();
         while (cases_it.next()) |case| {
+            if (case.idx >= explicit_case_count) break;
             for (case.items) |item| {
                 const val = Value.fromInterned(item.toInterned().?);
                 var val_space: Value.BigIntSpace = undefined;
@@ -8012,6 +8161,7 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
     } else {
         var cases_it = switch_br.iterateCases();
         while (cases_it.next()) |case| {
+            if (case.idx >= explicit_case_count) break;
             for (case.items) |ref| {
                 const val = try cg.resolveInst(ref);
                 _ = try cg.intCmp(int_ty, .eq, target, val);
@@ -8045,18 +8195,18 @@ fn airSwitchBr(cg: *CodeGen, inst: Air.Inst.Index, is_dispatch_loop: bool) Inner
         }
     }
 
-    try cg.endBlock();
-    if (has_else_body) {
-        const else_body = cases_it.elseBody();
-
-        {
-            try cg.pushBranch();
-            defer cg.popBranch();
-            for (branch_liveness.deaths[branch_liveness.deaths.len - 1]) |death| cg.processDeath(death.toRef());
-            try cg.genBody(else_body);
+    if (!elide_unreachable_else) {
+        try cg.endBlock();
+        if (has_else_body) {
+            {
+                try cg.pushBranch();
+                defer cg.popBranch();
+                for (branch_liveness.deaths[branch_liveness.deaths.len - 1]) |death| cg.processDeath(death.toRef());
+                try cg.genBody(else_body);
+            }
+        } else {
+            try cg.addTag(.@"unreachable");
         }
-    } else {
-        try cg.addTag(.@"unreachable");
     }
 
     if (is_dispatch_loop) {
@@ -8220,10 +8370,12 @@ fn airWrapErrUnionErr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         // store error value
         try cg.store(err_union, operand, .anyerror, .{ .offset = errUnionErrorOffset(pl_ty, zcu) });
 
-        // write 'undefined' to the payload
-        const payload_ptr = try cg.offsetPointer(err_union, errUnionPayloadOffset(pl_ty, zcu));
-        const len = @as(u32, @intCast(err_ty.errorUnionPayload(zcu).abiSize(zcu)));
-        try cg.memset(Type.u8, payload_ptr, cg.usizeImm(len), .{ .imm32 = 0xaa });
+        if (cg.wantSafety()) {
+            // write 'undefined' to the payload
+            const payload_ptr = try cg.offsetPointer(err_union, errUnionPayloadOffset(pl_ty, zcu));
+            const len = @as(u32, @intCast(err_ty.errorUnionPayload(zcu).abiSize(zcu)));
+            try cg.memset(Type.u8, payload_ptr, cg.usizeImm(len), .{ .imm32 = 0xaa });
+        }
 
         break :result err_union;
     };
@@ -8585,18 +8737,20 @@ fn airMemset(cg: *CodeGen, inst: Air.Inst.Index, safety: bool) InnerError!void {
     const zcu = cg.pt.zcu;
     const bin_op = cg.air.instructions.items(.data)[@backingInt(inst)].bin_op;
 
+    const rhs_is_undef = bin_op.rhs == .undef or
+        if (bin_op.rhs.toInterned()) |ip_index| Value.fromInterned(ip_index).isUndef(zcu) else false;
+
+    if (!safety and rhs_is_undef) {
+        return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
+    }
+
     const ptr = try cg.resolveInst(bin_op.lhs);
     const ptr_ty = cg.typeOf(bin_op.lhs);
-    const value = try cg.resolveInst(bin_op.rhs);
 
     const elem_ty = if (ptr_ty.ptrSize(zcu) == .one)
         ptr_ty.childType(zcu).childType(zcu)
     else
         ptr_ty.childType(zcu);
-
-    if (!safety and bin_op.rhs == .undef) {
-        return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
-    }
 
     var dst_ptr = try cg.sliceOrArrayPtr(ptr, ptr_ty);
     defer if (ptr_ty.isSlice(zcu)) dst_ptr.free(cg);
@@ -8606,6 +8760,25 @@ fn airMemset(cg: *CodeGen, inst: Air.Inst.Index, safety: bool) InnerError!void {
         .c, .many => unreachable,
     };
     defer len.free(cg);
+
+    if (safety and rhs_is_undef) {
+        const abi_size = elem_ty.abiSize(zcu);
+        if (abi_size == 0) {
+            return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
+        }
+        var byte_len: WValue = if (abi_size == 1)
+            len
+        else switch (len) {
+            .imm32 => |n| cg.usizeImm(n * abi_size),
+            .imm64 => |n| cg.usizeImm(n * abi_size),
+            else => try (try cg.intMul(.fromType(cg, .usize), len, cg.usizeImm(abi_size))).toLocal(cg, .usize),
+        };
+        defer if (abi_size != 1 and byte_len == .local) byte_len.free(cg);
+        try cg.memset(.u8, dst_ptr, byte_len, .{ .imm32 = 0xaa });
+        return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
+    }
+
+    const value = try cg.resolveInst(bin_op.rhs);
     try cg.memset(elem_ty, dst_ptr, len, value);
 
     return cg.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
@@ -10469,7 +10642,9 @@ fn lowerTry(
     const pl_ty = err_union_ty.errorUnionPayload(zcu);
     const pl_has_bits = pl_ty.hasRuntimeBits(zcu);
 
-    if (!err_union_ty.errorUnionSet(zcu).errorSetIsEmpty(zcu)) {
+    if (!err_union_ty.errorUnionSet(zcu).errorSetIsEmpty(zcu) and
+        (cg.wantSafety() or !isBodyTriviallyUnreachable(cg.air, body)))
+    {
         // Block we can jump out of when error is not set
         try cg.startBlock(.block, .empty);
 
