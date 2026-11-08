@@ -209,3 +209,29 @@ test "@memcpy a global array" {
     @memcpy(S.slice_u32, &[1]u32{S.array_u32[0] + 10});
     try expect(S.array_u32[0] == 50);
 }
+
+test "leaf function emitting helper call preserves link register when stripped" {
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+
+    const Inner = struct {
+        a: u64,
+        b: u64,
+        c: u64,
+        d: u64,
+        e: u64,
+    };
+    const Outer = struct {
+        data: Inner,
+    };
+    const S = struct {
+        noinline fn wrapLarge(data: Inner) Outer {
+            return .{ .data = data };
+        }
+    };
+
+    var input: Inner = .{ .a = 11, .b = 22, .c = 33, .d = 44, .e = 55 };
+    _ = &input;
+    const output = S.wrapLarge(input);
+    try expect(output.data.a == 11);
+    try expect(output.data.e == 55);
+}
