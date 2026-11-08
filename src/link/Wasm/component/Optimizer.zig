@@ -799,7 +799,10 @@ fn optimizeFuncBody(
         if (try hoistLoopInvariantCode(arena, module, func, &root_list, optimize_mode)) changed = true;
         if (try simplifyControlFlow(arena, &root_list)) changed = true;
         if (eliminateDeadCode(&root_list)) changed = true;
-        if (!changed) break;
+        if (!changed) {
+            if (try coalesceConstantStores(arena, module, &root_list, is_post_inline)) continue;
+            break;
+        }
     }
 
     const compacted = compactLocals(arena, module, func, &root_list) catch return error.OutOfMemory;
@@ -3316,7 +3319,8 @@ fn forwardAndEliminateMemoryOps(arena: std.mem.Allocator, root_list: *InstrList)
 
         var body_list: InstrList = .empty;
         body_list.appendSlice(arena, body_slice) catch return error.OutOfMemory;
-        const changed = try forwardAndEliminateMemBlock(
+        const self_off_changed = try foldSelfOffsetStores(arena, &body_list, frame.fp, frame.sp_save);
+        const mem_changed = try forwardAndEliminateMemBlock(
             arena,
             &body_list,
             &active,
@@ -3324,7 +3328,7 @@ fn forwardAndEliminateMemoryOps(arena: std.mem.Allocator, root_list: *InstrList)
             skip_exact_fp_store_forward,
             true,
         );
-        if (!changed) return false;
+        if (!self_off_changed and !mem_changed) return false;
 
         if (!sliceUsesLocalOrEarlyExit(body_list.items, frame.fp, frame.sp_save, frame.has_epilogue) and
             (!frame.has_epilogue or !hasBranchToDepth(body_list.items, 0)))
@@ -3345,7 +3349,785 @@ fn forwardAndEliminateMemoryOps(arena: std.mem.Allocator, root_list: *InstrList)
         return true;
     }
 
-    return forwardAndEliminateMemBlock(arena, root_list, &active, null, false, false);
+    const self_off_changed = try foldSelfOffsetStores(arena, root_list, null, null);
+    const mem_changed = try forwardAndEliminateMemBlock(arena, root_list, &active, null, false, false);
+    return self_off_changed or mem_changed;
+}
+
+const SelfOffsetAncestor = struct {
+    kind: enum { block, loop, if_ },
+    after_slice: []const Instr,
+    loop_slice: []const Instr = &.{},
+    continuation_visited: bool = false,
+    loop_visited: bool = false,
+};
+
+fn branchTargetReadsLocal(
+    label: u32,
+    local_idx: u32,
+    ancestors: []SelfOffsetAncestor,
+) bool {
+    if (label >= ancestors.len) return false;
+    const target_idx = ancestors.len - 1 - label;
+    const target = &ancestors[target_idx];
+    switch (target.kind) {
+        .loop => {
+            if (target.loop_visited) return false;
+            target.loop_visited = true;
+            return mayReadLocalBeforeWrite(target.loop_slice, local_idx, ancestors[0 .. target_idx + 1]);
+        },
+        .block, .if_ => {
+            if (target.continuation_visited) return false;
+            target.continuation_visited = true;
+            return mayReadLocalBeforeWrite(target.after_slice, local_idx, ancestors[0..target_idx]);
+        },
+    }
+}
+
+fn mayReadLocalBeforeWrite(
+    slice: []const Instr,
+    local_idx: u32,
+    ancestors: []SelfOffsetAncestor,
+) bool {
+    for (slice, 0..) |inst, idx| {
+        switch (inst) {
+            .local_get => |x| if (x == local_idx) return true,
+            .local_set, .local_tee => |x| if (x == local_idx) return false,
+            .return_, .unreachable_ => return false,
+            .br => |label| return branchTargetReadsLocal(label, local_idx, ancestors),
+            .br_if => |label| {
+                if (branchTargetReadsLocal(label, local_idx, ancestors)) return true;
+            },
+            .br_table => |targets| {
+                for (targets) |t| {
+                    if (branchTargetReadsLocal(t, local_idx, ancestors)) return true;
+                }
+                return false;
+            },
+            .block => |b| {
+                if (ancestors.len >= 64) return true;
+                var next_ancestors: [64]SelfOffsetAncestor = undefined;
+                @memcpy(next_ancestors[0..ancestors.len], ancestors);
+                next_ancestors[ancestors.len] = .{
+                    .kind = .block,
+                    .after_slice = slice[idx + 1 ..],
+                };
+                if (mayReadLocalBeforeWrite(b.body.items, local_idx, next_ancestors[0 .. ancestors.len + 1])) return true;
+                @memcpy(ancestors, next_ancestors[0..ancestors.len]);
+                return false;
+            },
+            .loop => |lp| {
+                if (ancestors.len >= 64) return true;
+                var next_ancestors: [64]SelfOffsetAncestor = undefined;
+                @memcpy(next_ancestors[0..ancestors.len], ancestors);
+                next_ancestors[ancestors.len] = .{
+                    .kind = .loop,
+                    .after_slice = slice[idx + 1 ..],
+                    .loop_slice = lp.body.items,
+                    .loop_visited = true,
+                };
+                if (mayReadLocalBeforeWrite(lp.body.items, local_idx, next_ancestors[0 .. ancestors.len + 1])) return true;
+                @memcpy(ancestors, next_ancestors[0..ancestors.len]);
+                return false;
+            },
+            .if_ => |if_inst| {
+                if (ancestors.len >= 64) return true;
+                var next_ancestors: [64]SelfOffsetAncestor = undefined;
+                @memcpy(next_ancestors[0..ancestors.len], ancestors);
+                next_ancestors[ancestors.len] = .{
+                    .kind = .if_,
+                    .after_slice = slice[idx + 1 ..],
+                };
+                if (mayReadLocalBeforeWrite(if_inst.then_body.items, local_idx, next_ancestors[0 .. ancestors.len + 1])) {
+                    return true;
+                }
+                const else_slice: []const Instr = if (if_inst.has_else) if_inst.else_body.items else &.{};
+                if (mayReadLocalBeforeWrite(else_slice, local_idx, next_ancestors[0 .. ancestors.len + 1])) {
+                    return true;
+                }
+                @memcpy(ancestors, next_ancestors[0..ancestors.len]);
+                return false;
+            },
+            else => {},
+        }
+    }
+    if (ancestors.len == 0) return false;
+    const top_idx = ancestors.len - 1;
+    if (ancestors[top_idx].continuation_visited) return false;
+    ancestors[top_idx].continuation_visited = true;
+    return mayReadLocalBeforeWrite(ancestors[top_idx].after_slice, local_idx, ancestors[0..top_idx]);
+}
+
+fn instrTouchesLocal(inst: Instr, local_idx: u32) bool {
+    return switch (inst) {
+        .local_get, .local_set, .local_tee => |x| x == local_idx,
+        .block => |b| sliceTouchesLocal(b.body.items, local_idx),
+        .loop => |lp| sliceTouchesLocal(lp.body.items, local_idx),
+        .if_ => |if_inst| sliceTouchesLocal(if_inst.then_body.items, local_idx) or
+            (if_inst.has_else and sliceTouchesLocal(if_inst.else_body.items, local_idx)),
+        else => false,
+    };
+}
+
+fn sliceTouchesLocal(slice: []const Instr, local_idx: u32) bool {
+    for (slice) |inst| {
+        if (instrTouchesLocal(inst, local_idx)) return true;
+    }
+    return false;
+}
+
+fn matchSelfOffsetUpdate(items: []const Instr, idx: usize) ?struct { base_local: u32, offset: u64 } {
+    if (idx + 3 >= items.len) return null;
+    if (items[idx + 3] != .local_set) return null;
+    const b = items[idx + 3].local_set;
+    if (items[idx + 2] != .numeric_op) return null;
+    const op = items[idx + 2].numeric_op;
+    if (op == 0x6a) {
+        if (items[idx] == .local_get and items[idx].local_get == b and
+            items[idx + 1] == .i32_const and items[idx + 1].i32_const >= 0 and items[idx + 1].i32_const <= 65536)
+        {
+            return .{ .base_local = b, .offset = @intCast(items[idx + 1].i32_const) };
+        }
+        if (items[idx + 1] == .local_get and items[idx + 1].local_get == b and
+            items[idx] == .i32_const and items[idx].i32_const >= 0 and items[idx].i32_const <= 65536)
+        {
+            return .{ .base_local = b, .offset = @intCast(items[idx].i32_const) };
+        }
+    } else if (op == 0x6b) {
+        if (items[idx] == .local_get and items[idx].local_get == b and
+            items[idx + 1] == .i32_const and items[idx + 1].i32_const <= 0 and items[idx + 1].i32_const >= -65536)
+        {
+            return .{ .base_local = b, .offset = @intCast(-@as(i64, items[idx + 1].i32_const)) };
+        }
+    }
+    return null;
+}
+
+fn foldSelfOffsetStoresInBlock(
+    arena: std.mem.Allocator,
+    list: *InstrList,
+    ancestors: []const SelfOffsetAncestor,
+    protected_fp: ?u32,
+    protected_sp: ?u32,
+) Error!bool {
+    var changed = false;
+    var any_nop = false;
+    const items = list.items;
+    var i: usize = 0;
+    while (i + 3 < items.len) {
+        if (matchSelfOffsetUpdate(items, i)) |upd| {
+            const b = upd.base_local;
+            const k_off = upd.offset;
+            if ((protected_fp == null or b != protected_fp.?) and (protected_sp == null or b != protected_sp.?)) {
+                var total_b_gets: usize = 0;
+                var mem_b_gets: usize = 0;
+                var last_addr_get_idx: usize = i + 3;
+                var mem_indices_buf: [64]usize = undefined;
+                var mem_count: usize = 0;
+                var killed_in_block = false;
+                var abort = false;
+
+                var cur: usize = i + 4;
+                while (cur < items.len) : (cur += 1) {
+                    if (items[cur] == .local_get and items[cur].local_get == b) {
+                        total_b_gets += 1;
+                        continue;
+                    }
+                    if (decodeLoadAccess(items[cur])) |ld| {
+                        if (ld.mem_idx == 0 and (ld.opcode != 0xfd or ld.simd_sub <= 0x0a) and
+                            ld.offset + k_off <= std.math.maxInt(u32) and
+                            cur > i + 4 and cur - 1 > last_addr_get_idx and
+                            items[cur - 1] == .local_get and items[cur - 1].local_get == b)
+                        {
+                            if (mem_count >= mem_indices_buf.len) {
+                                abort = true;
+                                break;
+                            }
+                            mem_indices_buf[mem_count] = cur;
+                            mem_count += 1;
+                            mem_b_gets += 1;
+                            last_addr_get_idx = cur - 1;
+                        }
+                        continue;
+                    }
+                    if (decodeStoreAccess(items[cur])) |st| {
+                        if (st.mem_idx == 0 and (st.opcode != 0xfd or st.simd_sub == 0x0b) and
+                            st.offset + k_off <= std.math.maxInt(u32))
+                        {
+                            if (findPrevSingleValueExprStart(items[i + 4 .. cur + 1], cur - (i + 4))) |rel_vs| {
+                                const val_start = (i + 4) + rel_vs;
+                                if (val_start > i + 4 and val_start - 1 > last_addr_get_idx and
+                                    items[val_start - 1] == .local_get and items[val_start - 1].local_get == b and
+                                    !sliceTouchesLocal(items[val_start..cur], b))
+                                {
+                                    if (mem_count >= mem_indices_buf.len) {
+                                        abort = true;
+                                        break;
+                                    }
+                                    mem_indices_buf[mem_count] = cur;
+                                    mem_count += 1;
+                                    mem_b_gets += 1;
+                                    last_addr_get_idx = val_start - 1;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    switch (items[cur]) {
+                        .local_set, .local_tee => |x| {
+                            if (x == b) {
+                                if (total_b_gets == mem_b_gets) {
+                                    killed_in_block = true;
+                                } else {
+                                    abort = true;
+                                }
+                                break;
+                            }
+                        },
+                        .return_, .unreachable_ => {
+                            if (total_b_gets == mem_b_gets) {
+                                killed_in_block = true;
+                            } else {
+                                abort = true;
+                            }
+                            break;
+                        },
+                        .block, .loop, .if_, .br, .br_if, .br_table => break,
+                        else => {},
+                    }
+                }
+
+                if (!abort and mem_count > 0 and total_b_gets == mem_b_gets) {
+                    var is_dead = killed_in_block;
+                    if (!is_dead and ancestors.len <= 64) {
+                        var anc_copy: [64]SelfOffsetAncestor = undefined;
+                        @memcpy(anc_copy[0..ancestors.len], ancestors);
+                        is_dead = !mayReadLocalBeforeWrite(items[cur..], b, anc_copy[0..ancestors.len]);
+                    }
+                    if (is_dead) {
+                        for (mem_indices_buf[0..mem_count]) |mem_idx| {
+                            if (decodeLoadAccess(items[mem_idx])) |ld| {
+                                items[mem_idx] = try encodeLoadInstr(arena, ld, ld.align_val, ld.offset + k_off);
+                            } else if (decodeStoreAccess(items[mem_idx])) |st| {
+                                items[mem_idx] = try encodeStoreInstr(arena, st, st.align_val, st.offset + k_off);
+                            }
+                        }
+                        items[i] = .nop;
+                        items[i + 1] = .nop;
+                        items[i + 2] = .nop;
+                        items[i + 3] = .nop;
+                        any_nop = true;
+                        changed = true;
+                        i += 4;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    if (any_nop) {
+        var write_idx: usize = 0;
+        for (list.items) |item| {
+            if (item != .nop) {
+                list.items[write_idx] = item;
+                write_idx += 1;
+            }
+        }
+        list.items.len = write_idx;
+    }
+
+    if (ancestors.len < 64) {
+        for (list.items, 0..) |*inst, idx| {
+            switch (inst.*) {
+                .block => |*b| {
+                    var next_anc: [64]SelfOffsetAncestor = undefined;
+                    @memcpy(next_anc[0..ancestors.len], ancestors);
+                    next_anc[ancestors.len] = .{
+                        .kind = .block,
+                        .after_slice = list.items[idx + 1 ..],
+                    };
+                    if (try foldSelfOffsetStoresInBlock(arena, &b.body, next_anc[0 .. ancestors.len + 1], protected_fp, protected_sp)) {
+                        changed = true;
+                    }
+                },
+                .loop => |*lp| {
+                    var next_anc: [64]SelfOffsetAncestor = undefined;
+                    @memcpy(next_anc[0..ancestors.len], ancestors);
+                    next_anc[ancestors.len] = .{
+                        .kind = .loop,
+                        .after_slice = list.items[idx + 1 ..],
+                        .loop_slice = lp.body.items,
+                    };
+                    if (try foldSelfOffsetStoresInBlock(arena, &lp.body, next_anc[0 .. ancestors.len + 1], protected_fp, protected_sp)) {
+                        changed = true;
+                    }
+                },
+                .if_ => |*if_inst| {
+                    var next_anc: [64]SelfOffsetAncestor = undefined;
+                    @memcpy(next_anc[0..ancestors.len], ancestors);
+                    next_anc[ancestors.len] = .{
+                        .kind = .if_,
+                        .after_slice = list.items[idx + 1 ..],
+                    };
+                    if (try foldSelfOffsetStoresInBlock(arena, &if_inst.then_body, next_anc[0 .. ancestors.len + 1], protected_fp, protected_sp)) {
+                        changed = true;
+                    }
+                    if (if_inst.has_else) {
+                        if (try foldSelfOffsetStoresInBlock(arena, &if_inst.else_body, next_anc[0 .. ancestors.len + 1], protected_fp, protected_sp)) {
+                            changed = true;
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
+    return changed;
+}
+
+fn foldSelfOffsetStores(
+    arena: std.mem.Allocator,
+    list: *InstrList,
+    protected_fp: ?u32,
+    protected_sp: ?u32,
+) Error!bool {
+    return foldSelfOffsetStoresInBlock(arena, list, &.{}, protected_fp, protected_sp);
+}
+
+fn moduleUsesSimd(module: *const Mod.Module) bool {
+    for (module.module_types.items) |mt| {
+        if (mt == .func_type) {
+            for (mt.func_type.params) |vt| if (vt == .v128) return true;
+            for (mt.func_type.results) |vt| if (vt == .v128) return true;
+        }
+    }
+    for (module.globals.items) |g| {
+        if (g.type.val_type == .v128) return true;
+    }
+    for (module.funcs.items) |*f| {
+        for (f.local_types.items) |vt| if (vt == .v128) return true;
+    }
+    for (module.funcs.items) |*f| {
+        if (f.is_import or f.code_bytes.len == 0) continue;
+        if (std.mem.indexOfScalar(u8, f.code_bytes, 0xfd) == null) continue;
+        var pos: usize = 0;
+        while (pos < f.code_bytes.len) {
+            const b = f.code_bytes[pos];
+            if (b == 0x0b and pos + 1 == f.code_bytes.len) break;
+            const decoded = instr.decode(f.code_bytes, &pos) catch break;
+            if (decoded.prefix == 0xfd) return true;
+            instr.skipImmediates(decoded.shape, f.code_bytes, &pos) catch break;
+        }
+    }
+    return false;
+}
+
+const ConstScalarStore = struct {
+    base_local: u32,
+    offset: u64,
+    size: u32,
+    align_val: u32,
+    is_const: bool,
+    bytes: [8]u8 = @splat(0),
+    inst_idx: usize,
+};
+
+fn decodeConstOrLocalScalarStore(items: []const Instr, idx: usize) ?ConstScalarStore {
+    if (idx + 2 >= items.len) return null;
+    if (items[idx] != .local_get) return null;
+    const base_local = items[idx].local_get;
+    const st = decodeStoreAccess(items[idx + 2]) orelse return null;
+    if (st.mem_idx != 0 or st.offset > std.math.maxInt(u32) or st.size > 8 or st.opcode == 0xfd) return null;
+
+    var res: ConstScalarStore = .{
+        .base_local = base_local,
+        .offset = st.offset,
+        .size = st.size,
+        .align_val = st.align_val,
+        .is_const = true,
+        .inst_idx = idx,
+    };
+
+    switch (items[idx + 1]) {
+        .i32_const => |v| {
+            const u: u32 = @bitCast(v);
+            switch (st.opcode) {
+                0x3a => res.bytes[0] = @truncate(u),
+                0x3b => @memcpy(res.bytes[0..2], &@as([2]u8, @bitCast(@as(u16, @truncate(u))))),
+                0x36 => @memcpy(res.bytes[0..4], &@as([4]u8, @bitCast(u))),
+                else => return null,
+            }
+        },
+        .i64_const => |v| {
+            const u: u64 = @bitCast(v);
+            switch (st.opcode) {
+                0x3c => res.bytes[0] = @truncate(u),
+                0x3d => @memcpy(res.bytes[0..2], &@as([2]u8, @bitCast(@as(u16, @truncate(u))))),
+                0x3e => @memcpy(res.bytes[0..4], &@as([4]u8, @bitCast(@as(u32, @truncate(u))))),
+                0x37 => @memcpy(res.bytes[0..8], &@as([8]u8, @bitCast(u))),
+                else => return null,
+            }
+        },
+        .raw => |r| {
+            if (r.len == 5 and r[0] == 0x43 and st.opcode == 0x38) {
+                @memcpy(res.bytes[0..4], r[1..5]);
+            } else if (r.len == 9 and r[0] == 0x44 and st.opcode == 0x39) {
+                @memcpy(res.bytes[0..8], r[1..9]);
+            } else {
+                return null;
+            }
+        },
+        .local_get => |val_local| {
+            if (val_local == base_local) return null;
+            switch (st.opcode) {
+                0x36...0x3e => res.is_const = false,
+                else => return null,
+            }
+        },
+        else => return null,
+    }
+    return res;
+}
+
+fn sliceHasDirectCall(slice: []const Instr) bool {
+    for (slice) |inst| {
+        switch (inst) {
+            .call, .return_call => return true,
+            .block => |b| if (sliceHasDirectCall(b.body.items)) return true,
+            .loop => |lp| if (sliceHasDirectCall(lp.body.items)) return true,
+            .if_ => |if_inst| {
+                if (sliceHasDirectCall(if_inst.then_body.items)) return true;
+                if (if_inst.has_else and sliceHasDirectCall(if_inst.else_body.items)) return true;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
+fn coalesceConstantStoresInBlock(
+    arena: std.mem.Allocator,
+    list: *InstrList,
+    module: *const Mod.Module,
+    has_simd_cache: *?bool,
+    skip_local: ?u32,
+) Error!bool {
+    var changed = false;
+    for (list.items) |*inst| {
+        switch (inst.*) {
+            .block => |*b| {
+                if (try coalesceConstantStoresInBlock(arena, &b.body, module, has_simd_cache, skip_local)) changed = true;
+            },
+            .loop => |*lp| {
+                if (try coalesceConstantStoresInBlock(arena, &lp.body, module, has_simd_cache, skip_local)) changed = true;
+            },
+            .if_ => |*if_inst| {
+                if (try coalesceConstantStoresInBlock(arena, &if_inst.then_body, module, has_simd_cache, skip_local)) changed = true;
+                if (if_inst.has_else) {
+                    if (try coalesceConstantStoresInBlock(arena, &if_inst.else_body, module, has_simd_cache, skip_local)) changed = true;
+                }
+            },
+            else => {},
+        }
+    }
+
+    const items = list.items;
+    if (items.len < 6) return changed;
+
+    var out: InstrList = .empty;
+    out.ensureTotalCapacity(arena, items.len) catch return error.OutOfMemory;
+    var block_changed = false;
+
+    var i: usize = 0;
+    while (i < items.len) {
+        const first = decodeConstOrLocalScalarStore(items, i) orelse {
+            out.append(arena, items[i]) catch return error.OutOfMemory;
+            i += 1;
+            continue;
+        };
+        if (!first.is_const or (skip_local != null and first.base_local == skip_local.?)) {
+            out.appendSlice(arena, items[i .. i + 3]) catch return error.OutOfMemory;
+            i += 3;
+            continue;
+        }
+
+        var stores: std.ArrayListUnmanaged(ConstScalarStore) = .empty;
+        stores.append(arena, first) catch return error.OutOfMemory;
+
+        var pos = i + 3;
+        while (pos < items.len) : (pos += 3) {
+            const next = decodeConstOrLocalScalarStore(items, pos) orelse break;
+            if (next.base_local != first.base_local) break;
+            var overlaps = false;
+            for (stores.items) |prev| {
+                if (memRangesOverlap(prev.offset, prev.size, next.offset, next.size)) {
+                    overlaps = true;
+                    break;
+                }
+            }
+            if (overlaps) break;
+            stores.append(arena, next) catch return error.OutOfMemory;
+        }
+
+        while (stores.items.len > 0 and !stores.items[stores.items.len - 1].is_const) {
+            _ = stores.pop();
+        }
+
+        var const_indices: std.ArrayListUnmanaged(usize) = .empty;
+        for (stores.items, 0..) |st, s_idx| {
+            if (st.is_const) {
+                const_indices.append(arena, s_idx) catch return error.OutOfMemory;
+            }
+        }
+
+        if (const_indices.items.len < 2) {
+            out.appendSlice(arena, items[i .. i + 3]) catch return error.OutOfMemory;
+            i += 3;
+            continue;
+        }
+
+        // Sort `const_indices` by ascending offset.
+        const c_idxs = const_indices.items;
+        for (1..c_idxs.len) |m| {
+            const key = c_idxs[m];
+            const key_off = stores.items[key].offset;
+            var n = m;
+            while (n > 0 and stores.items[c_idxs[n - 1]].offset > key_off) : (n -= 1) {
+                c_idxs[n] = c_idxs[n - 1];
+            }
+            c_idxs[n] = key;
+        }
+
+        const consumed = arena.alloc(bool, stores.items.len) catch return error.OutOfMemory;
+        @memset(consumed, false);
+        const leader_group_start = arena.alloc(?usize, stores.items.len) catch return error.OutOfMemory;
+        @memset(leader_group_start, null);
+        const leader_group_end = arena.alloc(usize, stores.items.len) catch return error.OutOfMemory;
+        @memset(leader_group_end, 0);
+
+        var any_group_coalesced = false;
+        var g_start: usize = 0;
+        while (g_start < c_idxs.len) {
+            var g_end = g_start + 1;
+            var total_len: usize = stores.items[c_idxs[g_start]].size;
+            while (g_end < c_idxs.len) {
+                const prev_st = stores.items[c_idxs[g_end - 1]];
+                const cur_st = stores.items[c_idxs[g_end]];
+                if (cur_st.offset != prev_st.offset + prev_st.size) break;
+                total_len += cur_st.size;
+                g_end += 1;
+            }
+
+            const grp = c_idxs[g_start..g_end];
+            if (grp.len >= 2) {
+                const has_simd = if (total_len >= 16) blk: {
+                    if (has_simd_cache.*) |cached| break :blk cached;
+                    const computed = moduleUsesSimd(module);
+                    has_simd_cache.* = computed;
+                    break :blk computed;
+                } else false;
+
+                var new_store_count: usize = 0;
+                var rel: usize = 0;
+                while (rel < total_len) {
+                    const rem = total_len - rel;
+                    const chunk_size: usize = if (rem >= 16 and has_simd)
+                        16
+                    else if (rem >= 8)
+                        8
+                    else if (rem >= 4)
+                        4
+                    else if (rem >= 2)
+                        2
+                    else
+                        1;
+                    new_store_count += 1;
+                    rel += chunk_size;
+                }
+
+                if (new_store_count < grp.len) {
+                    var min_s_idx = grp[0];
+                    for (grp[1..]) |s_idx| {
+                        if (s_idx < min_s_idx) min_s_idx = s_idx;
+                    }
+                    for (grp) |s_idx| {
+                        consumed[s_idx] = true;
+                    }
+                    leader_group_start[min_s_idx] = g_start;
+                    leader_group_end[min_s_idx] = g_end;
+                    any_group_coalesced = true;
+                }
+            }
+            g_start = g_end;
+        }
+
+        if (!any_group_coalesced) {
+            const run_inst_len = stores.items.len * 3;
+            out.appendSlice(arena, items[i .. i + run_inst_len]) catch return error.OutOfMemory;
+            i += run_inst_len;
+            continue;
+        }
+
+        block_changed = true;
+        const has_simd = has_simd_cache.* orelse false;
+        for (stores.items, 0..) |st, s_idx| {
+            if (leader_group_start[s_idx]) |gs| {
+                const ge = leader_group_end[s_idx];
+                const grp = c_idxs[gs..ge];
+                const first_grp_st = stores.items[grp[0]];
+                const start_off = first_grp_st.offset;
+                const a0 = first_grp_st.align_val;
+
+                var total_len: usize = 0;
+                for (grp) |g_idx| total_len += stores.items[g_idx].size;
+                const byte_buf = arena.alloc(u8, total_len) catch return error.OutOfMemory;
+                var write_pos: usize = 0;
+                for (grp) |g_idx| {
+                    const gst = stores.items[g_idx];
+                    @memcpy(byte_buf[write_pos .. write_pos + gst.size], gst.bytes[0..gst.size]);
+                    write_pos += gst.size;
+                }
+
+                var rel: usize = 0;
+                while (rel < total_len) {
+                    const rem = total_len - rel;
+                    const chunk_size: usize = if (rem >= 16 and has_simd)
+                        16
+                    else if (rem >= 8)
+                        8
+                    else if (rem >= 4)
+                        4
+                    else if (rem >= 2)
+                        2
+                    else
+                        1;
+                    const cur_off = start_off + rel;
+
+                    // If `[cur_off, cur_off + chunk_size)` is a single original store, keep it unchanged.
+                    var single_orig_inst_idx: ?usize = null;
+                    var exact_align: ?u32 = null;
+                    for (grp) |g_idx| {
+                        const gst = stores.items[g_idx];
+                        if (gst.offset == cur_off) {
+                            exact_align = gst.align_val;
+                            if (gst.size == chunk_size) {
+                                single_orig_inst_idx = gst.inst_idx;
+                            }
+                            break;
+                        }
+                    }
+
+                    if (single_orig_inst_idx) |orig_idx| {
+                        out.appendSlice(arena, items[orig_idx .. orig_idx + 3]) catch return error.OutOfMemory;
+                        rel += chunk_size;
+                        continue;
+                    }
+
+                    const from_a0: u32 = if (rel == 0) a0 else @min(a0, @as(u32, @ctz(rel)));
+                    const base_align: u32 = if (exact_align) |ea| @max(from_a0, ea) else from_a0;
+
+                    out.append(arena, .{ .local_get = first.base_local }) catch return error.OutOfMemory;
+                    switch (chunk_size) {
+                        16 => {
+                            const eff_align = @min(@as(u32, 4), base_align);
+                            const v128_raw = arena.alloc(u8, 18) catch return error.OutOfMemory;
+                            v128_raw[0] = 0xfd;
+                            v128_raw[1] = 0x0c;
+                            @memcpy(v128_raw[2..18], byte_buf[rel .. rel + 16]);
+                            out.append(arena, .{ .raw = v128_raw }) catch return error.OutOfMemory;
+                            const store_inst = try encodeStoreInstr(
+                                arena,
+                                .{ .opcode = 0xfd, .simd_sub = 0x0b, .align_val = eff_align, .mem_idx = 0, .offset = cur_off, .size = 16 },
+                                eff_align,
+                                cur_off,
+                            );
+                            out.append(arena, store_inst) catch return error.OutOfMemory;
+                        },
+                        8 => {
+                            const eff_align = @min(@as(u32, 3), base_align);
+                            const v64: i64 = @bitCast(byte_buf[rel..][0..8].*);
+                            out.append(arena, .{ .i64_const = v64 }) catch return error.OutOfMemory;
+                            const store_inst = try encodeStoreInstr(
+                                arena,
+                                .{ .opcode = 0x37, .align_val = eff_align, .mem_idx = 0, .offset = cur_off, .size = 8 },
+                                eff_align,
+                                cur_off,
+                            );
+                            out.append(arena, store_inst) catch return error.OutOfMemory;
+                        },
+                        4 => {
+                            const eff_align = @min(@as(u32, 2), base_align);
+                            const v32: i32 = @bitCast(byte_buf[rel..][0..4].*);
+                            out.append(arena, .{ .i32_const = v32 }) catch return error.OutOfMemory;
+                            const store_inst = try encodeStoreInstr(
+                                arena,
+                                .{ .opcode = 0x36, .align_val = eff_align, .mem_idx = 0, .offset = cur_off, .size = 4 },
+                                eff_align,
+                                cur_off,
+                            );
+                            out.append(arena, store_inst) catch return error.OutOfMemory;
+                        },
+                        2 => {
+                            const eff_align = @min(@as(u32, 1), base_align);
+                            const v16: i16 = @bitCast(byte_buf[rel..][0..2].*);
+                            out.append(arena, .{ .i32_const = v16 }) catch return error.OutOfMemory;
+                            const store_inst = try encodeStoreInstr(
+                                arena,
+                                .{ .opcode = 0x3b, .align_val = eff_align, .mem_idx = 0, .offset = cur_off, .size = 2 },
+                                eff_align,
+                                cur_off,
+                            );
+                            out.append(arena, store_inst) catch return error.OutOfMemory;
+                        },
+                        1 => {
+                            const v8: i8 = @bitCast(byte_buf[rel]);
+                            out.append(arena, .{ .i32_const = v8 }) catch return error.OutOfMemory;
+                            const store_inst = try encodeStoreInstr(
+                                arena,
+                                .{ .opcode = 0x3a, .align_val = 0, .mem_idx = 0, .offset = cur_off, .size = 1 },
+                                0,
+                                cur_off,
+                            );
+                            out.append(arena, store_inst) catch return error.OutOfMemory;
+                        },
+                        else => unreachable,
+                    }
+                    rel += chunk_size;
+                }
+            } else if (!consumed[s_idx]) {
+                out.appendSlice(arena, items[st.inst_idx .. st.inst_idx + 3]) catch return error.OutOfMemory;
+            }
+        }
+
+        i += stores.items.len * 3;
+    }
+
+    if (block_changed) {
+        list.* = out;
+        changed = true;
+    }
+    return changed;
+}
+
+fn coalesceConstantStores(
+    arena: std.mem.Allocator,
+    module: *const Mod.Module,
+    root_list: *InstrList,
+    is_post_inline: bool,
+) Error!bool {
+    var skip_local: ?u32 = null;
+    if (!is_post_inline) {
+        if (detectShadowStackFrame(root_list.items)) |frame| {
+            if (sliceHasDirectCall(root_list.items[frame.body_start..frame.body_end])) {
+                skip_local = frame.fp;
+            }
+        }
+    }
+    var has_simd_cache: ?bool = null;
+    return coalesceConstantStoresInBlock(arena, root_list, module, &has_simd_cache, skip_local);
 }
 
 const LoopStoreInfo = struct {
@@ -11495,5 +12277,149 @@ test "Optimizer: .fast mode 8-param 4-result inlining and 2-call wrapper inlinin
         var mod_fast = try reader.readModule(allocator, opt_fast);
         defer mod_fast.deinit();
         try testing.expectEqual(@as(usize, 4), mod_fast.funcs.items.len);
+    }
+}
+
+test "Optimizer: contiguous constant scalar store coalescing and trailing self-offset store folding" {
+    const allocator = testing.allocator;
+
+    // 1. Coalesce 4 `f32.const` stores (`0..16`) into `v128.store`, fold trailing `dst += 72; store(dst, 0)`
+    //    into `store(dst, 72)`, DSE the overwritten store at offset 72, and coalesce `68..76` into `i64.store`:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        // Mark module as SIMD-enabled via a v128 global.
+        try mod.globals.append(allocator, .{
+            .type = .{ .val_type = .v128, .mutability = .immutable },
+            .init_expr_bytes = &([_]u8{ 0xfd, 0x0c } ++ (@as([16]u8, @splat(0)))),
+        });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{ .i32, .f32 }),
+            .results = &.{},
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const slug_init_code = [_]u8{
+            // Offsets 0..16: 4 constant f32 stores (1.0, 2.0, 3.0, 4.0)
+            0x20, 0x00, // local.get 0 (dst)
+            0x43, 0x00, 0x00, 0x80, 0x3f, // f32.const 1.0
+            0x38, 0x02, 0x00, // f32.store align=2 offset=0
+            0x20, 0x00, // local.get 0
+            0x43, 0x00, 0x00, 0x00, 0x40, // f32.const 2.0
+            0x38, 0x02, 0x04, // f32.store align=2 offset=4
+            0x20, 0x00, // local.get 0
+            0x43, 0x00, 0x00, 0x40, 0x40, // f32.const 3.0
+            0x38, 0x02, 0x08, // f32.store align=2 offset=8
+            0x20, 0x00, // local.get 0
+            0x43, 0x00, 0x00, 0x80, 0x40, // f32.const 4.0
+            0x38, 0x02, 0x0c, // f32.store align=2 offset=12
+            // Non-constant store at offset 16:
+            0x20, 0x00, // local.get 0
+            0x20, 0x01, // local.get 1 (dyn)
+            0x38, 0x02, 16, // f32.store align=2 offset=16
+            // Offsets 68..76: 2 constant f32 stores (5.0 at 68, dead 9.0 at 72)
+            0x20, 0x00, // local.get 0
+            0x43, 0x00, 0x00, 0xa0, 0x40, // f32.const 5.0
+            0x38, 0x02, 68, // f32.store align=2 offset=68
+            0x20, 0x00, // local.get 0
+            0x43, 0x00, 0x00, 0x10, 0x41, // f32.const 9.0 (overwritten below!)
+            0x38, 0x02, 72, // f32.store align=2 offset=72
+            // Trailing in-place self-offset store: `dst = dst + 72; *dst = 0.0`
+            0x20, 0x00, // local.get 0
+            0x41, 0xc8, 0x00, // i32.const 72
+            0x6a, // i32.add
+            0x21, 0x00, // local.set 0
+            0x20, 0x00, // local.get 0
+            0x43, 0x00, 0x00, 0x00, 0x00, // f32.const 0.0
+            0x38, 0x02, 0x00, // f32.store align=2 offset=0
+            0x0b, // end
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &slug_init_code });
+        try mod.exports.append(allocator, .{ .name = "slug_init", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        var parse_pos: usize = 0;
+        var parsed: InstrList = .empty;
+        _ = try parseInstrBlock(arena_state.allocator(), opt_mod.funcs.items[0].code_bytes, &parse_pos, false, &parsed);
+
+        var v128_stores: usize = 0;
+        var i64_stores: usize = 0;
+        var f32_stores: usize = 0;
+        var i32_adds: usize = 0;
+        var last_i64_const: ?i64 = null;
+        for (parsed.items) |inst| {
+            if (inst == .i64_const) last_i64_const = inst.i64_const;
+            if (inst == .numeric_op and inst.numeric_op == 0x6a) i32_adds += 1;
+            if (decodeStoreAccess(inst)) |acc| {
+                if (acc.opcode == 0xfd and acc.simd_sub == 0x0b) v128_stores += 1;
+                if (acc.opcode == 0x37) i64_stores += 1;
+                if (acc.opcode == 0x38) f32_stores += 1;
+            }
+        }
+        // 1 `v128.store` (offsets 0..16), 1 dynamic `f32.store` (offset 16), 1 `i64.store` (offsets 68..76), 0 `i32.add`!
+        try testing.expectEqual(@as(usize, 1), v128_stores);
+        try testing.expectEqual(@as(usize, 1), i64_stores);
+        try testing.expectEqual(@as(usize, 1), f32_stores);
+        try testing.expectEqual(@as(usize, 0), i32_adds);
+        // The `i64.store` at offset 68 packs `5.0` (0x40a00000) in the low 32 bits and `0.0` (0x00000000) in the high 32 bits!
+        try testing.expectEqual(@as(?i64, 0x0000_0000_40a0_0000), last_i64_const);
+    }
+
+    // 2. Negative case: when `dst` is read after the store (returned), `dst += 72` must NOT be eliminated:
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{.i32}),
+            .results = try allocator.dupe(types.ValType, &.{.i32}),
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        const live_ptr_code = [_]u8{
+            0x20, 0x00, // local.get 0
+            0x41, 0xc8, 0x00, // i32.const 72
+            0x6a, // i32.add
+            0x21, 0x00, // local.set 0
+            0x20, 0x00, // local.get 0
+            0x43, 0x00, 0x00, 0x00, 0x00, // f32.const 0.0
+            0x38, 0x02, 0x00, // f32.store align=2 offset=0
+            0x20, 0x00, // local.get 0 (returned!)
+            0x0b, // end
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &live_ptr_code });
+        try mod.exports.append(allocator, .{ .name = "live_ptr", .kind = .func, .var_ = .{ .index = 0 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        var parse_pos: usize = 0;
+        var parsed: InstrList = .empty;
+        _ = try parseInstrBlock(arena_state.allocator(), opt_mod.funcs.items[0].code_bytes, &parse_pos, false, &parsed);
+
+        var i32_adds: usize = 0;
+        for (parsed.items) |inst| {
+            if (inst == .numeric_op and inst.numeric_op == 0x6a) i32_adds += 1;
+        }
+        try testing.expectEqual(@as(usize, 1), i32_adds);
     }
 }

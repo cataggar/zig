@@ -12503,7 +12503,19 @@ const SroaAnalysis = struct {
                             _ = self.markRangeRead(rhs_ref.root_id, rhs_ref.offset, elem_size);
                         }
                     } else if (valid_lhs_ref) |lhs_ref| {
-                        if (elem_size > 16 and bin_op.rhs.toInterned() == null) {
+                        const rhs_is_const = blk: {
+                            var cur_ref = bin_op.rhs;
+                            while (cur_ref.toIndex()) |cur_idx| {
+                                const cur_tag = self.cg.air.instructions.items(.tag)[@backingInt(cur_idx)];
+                                if (cur_tag == .bit_cast or cur_tag == .ptr_cast) {
+                                    cur_ref = self.cg.air.instructions.items(.data)[@backingInt(cur_idx)].ty_op.operand;
+                                    continue;
+                                }
+                                break :blk cur_tag == .aggregate_init;
+                            }
+                            break :blk true;
+                        };
+                        if (elem_size > 16 and !rhs_is_const) {
                             self.roots.items[lhs_ref.root_id].has_whole_mem_load = true;
                         }
                     }
@@ -12788,6 +12800,8 @@ const SroaAnalysis = struct {
                             } else {
                                 self.markEscaped(elem);
                             }
+                        } else if (dst_root_opt) |dst_root| {
+                            self.roots.items[dst_root].scalar_access_count +|= 1;
                         }
                     }
                 } else {
