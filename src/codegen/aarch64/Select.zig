@@ -3871,6 +3871,7 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
                         const output_reg = Register.parse(constraint["={".len .. constraint.len - "}".len]) orelse
                             return isel.fail("invalid constraint: '{s}'", .{constraint});
                         const output_ra = output_reg.alias;
+                        isel.saved_registers.insert(output_ra);
                         if (isel.live_values.fetchRemove(air.inst_index)) |output_vi| {
                             defer output_vi.value.deref(isel);
                             try output_vi.value.defLiveIn(isel, output_reg.alias, comptime &.initFill(.free));
@@ -3916,6 +3917,7 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
                 if (std.mem.startsWith(u8, constraint, "{") and std.mem.endsWith(u8, constraint, "}")) {
                     const input_reg = Register.parse(constraint["{".len .. constraint.len - "}".len]) orelse
                         return isel.fail("invalid constraint: '{s}'", .{constraint});
+                    isel.saved_registers.insert(input_reg.alias);
                     input_mats[index] = .{ .vi = try isel.use(input.operand), .ra = input_reg.alias };
                     if (!std.mem.eql(u8, name, "_")) {
                         const operand_gop = try as.operands.getOrPut(gpa, name);
@@ -10729,6 +10731,7 @@ fn emit(isel: *Select, instruction: codegen.aarch64.encoding.Instruction) !void 
 
 fn emitPanic(isel: *Select, panic_id: Zcu.SimplePanicId) !void {
     const zcu = isel.pt.zcu;
+    isel.saved_registers.insert(.lr);
     try isel.nav_relocs.append(zcu.gpa, .{
         .nav = switch (zcu.intern_pool.indexToKey(zcu.std_lang_decl_values.get(panic_id.toStdLangDecl()))) {
             else => unreachable,
@@ -15917,6 +15920,7 @@ const call = struct {
         }
     }
     fn prepareCallee(isel: *Select) !void {
+        isel.saved_registers.insert(.lr);
         var live_reg_it = isel.live_registers.iterator();
         while (live_reg_it.next()) |live_reg_entry| switch (caller_saved_regs.get(live_reg_entry.key)) {
             else => unreachable,
