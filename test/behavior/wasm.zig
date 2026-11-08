@@ -1843,6 +1843,29 @@ test "wasm single-exit block elision, unreachable branch elision, undef memset, 
             buf[0] = first;
             return buf[0].b + buf[0].c;
         }
+
+        inline fn sumConstPairs(pairs: []const [2]f32) f32 {
+            var acc: f32 = 0;
+            for (pairs) |pair| acc += pair[0] + pair[1];
+            return acc;
+        }
+
+        noinline fn exerciseZeroSplatAndSliceCoercion(out_counts: *[16]u16, mut_pairs: [][2]f32) f32 {
+            out_counts.* = @splat(0);
+            var local_pos: [16]usize = @splat(0);
+            for (mut_pairs, 0..) |*pair, i| {
+                pair[0] += 1.0;
+                out_counts[i & 15] += 1;
+                local_pos[i & 15] += i + 1;
+            }
+            return sumConstPairs(mut_pairs) + @as(f32, @floatFromInt(local_pos[0] + local_pos[1]));
+        }
+
+        noinline fn bitcastU100ToI100IsNegative(val: u100) bool {
+            var signed_val: i100 = @bitCast(val);
+            _ = &signed_val;
+            return signed_val < 0;
+        }
     };
 
     try expect(S.evalCondUnreachBlock(10, true) == 30);
@@ -1860,5 +1883,14 @@ test "wasm single-exit block elision, unreachable branch elision, undef memset, 
 
     var backing: [4]S.Payload = undefined;
     try expect(S.exerciseUndefMemset(&backing, .{ .a = 1, .b = 20, .c = 30, .d = 4 }) == 50);
+
+    var counts: [16]u16 = @splat(99);
+    var pairs = [2][2]f32{ .{ 1.5, 2.5 }, .{ 3.0, 4.0 } };
+    const splat_sum = S.exerciseZeroSplatAndSliceCoercion(&counts, &pairs);
+    try expect(counts[0] == 1 and counts[1] == 1 and counts[2] == 0 and counts[15] == 0);
+    try expect(splat_sum == (2.5 + 2.5 + 4.0 + 4.0) + 3.0);
+
+    try expect(S.bitcastU100ToI100IsNegative(@as(u100, 1) << 99));
+    try expect(!S.bitcastU100ToI100IsNegative(@as(u100, 1) << 98));
 }
 
