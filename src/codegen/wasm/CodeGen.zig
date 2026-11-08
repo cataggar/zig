@@ -1446,7 +1446,18 @@ pub const AutoReturn = union(enum) {
     scalar,
     one_field: AutoReturnField,
     two_fields: [2]AutoReturnField,
+    three_fields: [3]AutoReturnField,
+    four_fields: [4]AutoReturnField,
     sret,
+
+    pub fn multiFields(self: *const AutoReturn) []const AutoReturnField {
+        return switch (self.*) {
+            .two_fields => |*f| f,
+            .three_fields => |*f| f,
+            .four_fields => |*f| f,
+            else => unreachable,
+        };
+    }
 };
 
 pub const max_auto_param_fields = 4;
@@ -1584,10 +1595,10 @@ fn collectAutoReturnFields(
     base_offset: u32,
     zcu: *const Zcu,
     target: *const std.Target,
-    fields: *[2]AutoReturnField,
+    fields: *[4]AutoReturnField,
     count: *usize,
 ) bool {
-    return collectAutoScalarFields(2, false, ty, base_offset, zcu, target, fields, count);
+    return collectAutoScalarFields(4, false, ty, base_offset, zcu, target, fields, count);
 }
 
 pub fn classifyAutoParam(
@@ -1642,32 +1653,39 @@ pub fn classifyAutoReturn(
     const ret_size = ret_ty.abiSize(zcu);
     if (ret_size > 16) return .sret;
 
-    var fields: [2]AutoReturnField = undefined;
+    var fields: [4]AutoReturnField = undefined;
     var count: usize = 0;
     if (!collectAutoReturnFields(ret_ty, 0, zcu, target, &fields, &count)) return .sret;
+    if (count == 0 or count > 4) return .sret;
+    if (count > 1 and !target.cpu.has(.wasm, .multivalue)) return .sret;
+
+    std.mem.sort(AutoReturnField, fields[0..count], {}, struct {
+        fn lessThan(_: void, a: AutoReturnField, b: AutoReturnField) bool {
+            return a.offset < b.offset;
+        }
+    }.lessThan);
 
     const ret_align = ret_ty.abiAlignment(zcu);
-    for (fields[0..count]) |f| {
+    for (fields[0..count], 0..) |f, i| {
         const f_align = f.ty.abiAlignment(zcu);
         if (f_align.compareStrict(.gt, ret_align)) return .sret;
         const align_bytes: u32 = @intCast(f_align.toByteUnits() orelse 1);
         if (f.offset % align_bytes != 0) return .sret;
-        if (f.offset + @as(u32, @intCast(f.ty.abiSize(zcu))) > @as(u32, @intCast(ret_size))) return .sret;
+        const f_size: u32 = @intCast(f.ty.abiSize(zcu));
+        if (f.offset + f_size > @as(u32, @intCast(ret_size))) return .sret;
+        if (i > 0) {
+            const prev = fields[i - 1];
+            const prev_size: u32 = @intCast(prev.ty.abiSize(zcu));
+            if (prev.offset + prev_size > f.offset) return .sret;
+        }
     }
 
     return switch (count) {
         1 => .{ .one_field = fields[0] },
-        2 => blk: {
-            if (!target.cpu.has(.wasm, .multivalue)) break :blk .sret;
-            if (fields[0].offset > fields[1].offset) {
-                std.mem.swap(AutoReturnField, &fields[0], &fields[1]);
-            }
-            if (fields[0].offset + @as(u32, @intCast(fields[0].ty.abiSize(zcu))) > fields[1].offset) {
-                break :blk .sret;
-            }
-            break :blk .{ .two_fields = fields };
-        },
-        else => .sret,
+        2 => .{ .two_fields = fields[0..2].* },
+        3 => .{ .three_fields = fields[0..3].* },
+        4 => .{ .four_fields = fields[0..4].* },
+        else => unreachable,
     };
 }
 
@@ -2979,9 +2997,10 @@ fn airRet(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         switch (classifyAutoReturn(ret_ty, zcu, cg.target)) {
             .scalar => try cg.emitWValue(operand),
             .one_field => |f| _ = try cg.load(operand, f.ty, .{ .offset = f.offset }),
-            .two_fields => |fs| {
-                _ = try cg.load(operand, fs[0].ty, .{ .offset = fs[0].offset });
-                _ = try cg.load(operand, fs[1].ty, .{ .offset = fs[1].offset });
+            inline .two_fields, .three_fields, .four_fields => |fs| {
+                for (fs) |f| {
+                    _ = try cg.load(operand, f.ty, .{ .offset = f.offset });
+                }
             },
             .sret => unreachable,
         }
@@ -3044,9 +3063,10 @@ fn airRetLoad(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             switch (classifyAutoReturn(ret_ty, zcu, cg.target)) {
                 .scalar => _ = try cg.load(operand, ret_ty, .{}),
                 .one_field => |f| _ = try cg.load(operand, f.ty, .{ .offset = f.offset }),
-                .two_fields => |fs| {
-                    _ = try cg.load(operand, fs[0].ty, .{ .offset = fs[0].offset });
-                    _ = try cg.load(operand, fs[1].ty, .{ .offset = fs[1].offset });
+                inline .two_fields, .three_fields, .four_fields => |fs| {
+                    for (fs) |f| {
+                        _ = try cg.load(operand, f.ty, .{ .offset = f.offset });
+                    }
                 },
                 .sret => unreachable,
             }
@@ -3236,35 +3256,38 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) 
                     }
                     break :result_value result;
                 },
-                .two_fields => |fs| {
+                inline .two_fields, .three_fields, .four_fields => |fs| {
                     if (cg.liveness.isUnused(inst)) {
-                        try cg.addTag(.drop);
-                        try cg.addTag(.drop);
+                        for (fs) |_| {
+                            try cg.addTag(.drop);
+                        }
                         break :result_value .none;
                     }
                     const result = try cg.allocStack(ret_ty);
                     if (result == .promoted) {
-                        const pf0 = cg.findPromotedField(result.promoted.slot, fs[0].offset, @intCast(fs[0].ty.abiSize(zcu)));
-                        const pf1 = cg.findPromotedField(result.promoted.slot, fs[1].offset, @intCast(fs[1].ty.abiSize(zcu)));
-                        if (pf1.is_read) {
-                            try cg.addLocal(.local_set, pf1.local);
-                        } else {
-                            try cg.addTag(.drop);
-                        }
-                        if (pf0.is_read) {
-                            try cg.addLocal(.local_set, pf0.local);
-                        } else {
-                            try cg.addTag(.drop);
+                        var i: usize = fs.len;
+                        while (i > 0) {
+                            i -= 1;
+                            const f = fs[i];
+                            const pf = cg.findPromotedField(result.promoted.slot, f.offset, @intCast(f.ty.abiSize(zcu)));
+                            if (pf.is_read) {
+                                try cg.addLocal(.local_set, pf.local);
+                            } else {
+                                try cg.addTag(.drop);
+                            }
                         }
                     } else {
-                        var local1 = try cg.allocLocal(fs[1].ty);
-                        defer local1.free(cg);
-                        try cg.addLocal(.local_set, local1.local);
-                        var local0 = try cg.allocLocal(fs[0].ty);
-                        defer local0.free(cg);
-                        try cg.addLocal(.local_set, local0.local);
-                        try cg.store(result, local0, fs[0].ty, .{ .offset = fs[0].offset });
-                        try cg.store(result, local1, fs[1].ty, .{ .offset = fs[1].offset });
+                        var res_locals: [fs.len]WValue = undefined;
+                        var i: usize = fs.len;
+                        while (i > 0) {
+                            i -= 1;
+                            res_locals[i] = try cg.allocLocal(fs[i].ty);
+                            try cg.addLocal(.local_set, res_locals[i].local);
+                        }
+                        defer for (&res_locals) |*loc| loc.free(cg);
+                        for (fs, res_locals) |f, loc| {
+                            try cg.store(result, loc, f.ty, .{ .offset = f.offset });
+                        }
                     }
                     break :result_value result;
                 },
@@ -13159,8 +13182,12 @@ const SroaAnalysis = struct {
                                 .scalar => !isByRef(ret_ty, zcu, self.cg.target) and
                                     self.checkScalarAccess(ref.root_id, ref.offset, ret_ty),
                                 .one_field => |f| self.checkScalarAccess(ref.root_id, ref.offset + f.offset, f.ty),
-                                .two_fields => |fs| self.checkScalarAccess(ref.root_id, ref.offset + fs[0].offset, fs[0].ty) and
-                                    self.checkScalarAccess(ref.root_id, ref.offset + fs[1].offset, fs[1].ty),
+                                inline .two_fields, .three_fields, .four_fields => |fs| blk: {
+                                    for (fs) |f| {
+                                        if (!self.checkScalarAccess(ref.root_id, ref.offset + f.offset, f.ty)) break :blk false;
+                                    }
+                                    break :blk true;
+                                },
                                 .sret => unreachable,
                             };
                             if (ok) {
@@ -13211,8 +13238,12 @@ const SroaAnalysis = struct {
                             const ok = switch (classifyAutoReturn(ret_ty, zcu, self.cg.target)) {
                                 .scalar => false,
                                 .one_field => |f| self.checkScalarAccess(ref.root_id, ref.offset + f.offset, f.ty),
-                                .two_fields => |fs| self.checkScalarAccess(ref.root_id, ref.offset + fs[0].offset, fs[0].ty) and
-                                    self.checkScalarAccess(ref.root_id, ref.offset + fs[1].offset, fs[1].ty),
+                                inline .two_fields, .three_fields, .four_fields => |fs| blk: {
+                                    for (fs) |f| {
+                                        if (!self.checkScalarAccess(ref.root_id, ref.offset + f.offset, f.ty)) break :blk false;
+                                    }
+                                    break :blk true;
+                                },
                                 .sret => unreachable,
                             };
                             if (ok) {
