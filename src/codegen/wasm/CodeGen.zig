@@ -637,8 +637,11 @@ fn feed(cg: *CodeGen, bt: *Air.Liveness.BigTomb, operand: Air.Inst.Ref) void {
 }
 
 fn processDeath(cg: *CodeGen, ref: Air.Inst.Ref) void {
-    if (ref.toIndex() == null) return;
-    const value = cg.values.getPtr(ref) orelse unreachable;
+    const idx = ref.toIndex() orelse return;
+    const value = cg.values.getPtr(ref) orelse {
+        assert(cg.readonly_alloc_aliases.contains(idx));
+        return;
+    };
     if (value.* != .local) return;
     cg.releaseLocal(value.local);
 }
@@ -1446,7 +1449,18 @@ pub const AutoReturn = union(enum) {
     scalar,
     one_field: AutoReturnField,
     two_fields: [2]AutoReturnField,
+    three_fields: [3]AutoReturnField,
+    four_fields: [4]AutoReturnField,
     sret,
+
+    pub fn multiFields(self: *const AutoReturn) []const AutoReturnField {
+        return switch (self.*) {
+            .two_fields => |*f| f,
+            .three_fields => |*f| f,
+            .four_fields => |*f| f,
+            else => unreachable,
+        };
+    }
 };
 
 pub const max_auto_param_fields = 4;
@@ -1584,10 +1598,10 @@ fn collectAutoReturnFields(
     base_offset: u32,
     zcu: *const Zcu,
     target: *const std.Target,
-    fields: *[2]AutoReturnField,
+    fields: *[4]AutoReturnField,
     count: *usize,
 ) bool {
-    return collectAutoScalarFields(2, false, ty, base_offset, zcu, target, fields, count);
+    return collectAutoScalarFields(4, false, ty, base_offset, zcu, target, fields, count);
 }
 
 pub fn classifyAutoParam(
@@ -1642,32 +1656,39 @@ pub fn classifyAutoReturn(
     const ret_size = ret_ty.abiSize(zcu);
     if (ret_size > 16) return .sret;
 
-    var fields: [2]AutoReturnField = undefined;
+    var fields: [4]AutoReturnField = undefined;
     var count: usize = 0;
     if (!collectAutoReturnFields(ret_ty, 0, zcu, target, &fields, &count)) return .sret;
+    if (count == 0 or count > 4) return .sret;
+    if (count > 1 and !target.cpu.has(.wasm, .multivalue)) return .sret;
+
+    std.mem.sort(AutoReturnField, fields[0..count], {}, struct {
+        fn lessThan(_: void, a: AutoReturnField, b: AutoReturnField) bool {
+            return a.offset < b.offset;
+        }
+    }.lessThan);
 
     const ret_align = ret_ty.abiAlignment(zcu);
-    for (fields[0..count]) |f| {
+    for (fields[0..count], 0..) |f, i| {
         const f_align = f.ty.abiAlignment(zcu);
         if (f_align.compareStrict(.gt, ret_align)) return .sret;
         const align_bytes: u32 = @intCast(f_align.toByteUnits() orelse 1);
         if (f.offset % align_bytes != 0) return .sret;
-        if (f.offset + @as(u32, @intCast(f.ty.abiSize(zcu))) > @as(u32, @intCast(ret_size))) return .sret;
+        const f_size: u32 = @intCast(f.ty.abiSize(zcu));
+        if (f.offset + f_size > @as(u32, @intCast(ret_size))) return .sret;
+        if (i > 0) {
+            const prev = fields[i - 1];
+            const prev_size: u32 = @intCast(prev.ty.abiSize(zcu));
+            if (prev.offset + prev_size > f.offset) return .sret;
+        }
     }
 
     return switch (count) {
         1 => .{ .one_field = fields[0] },
-        2 => blk: {
-            if (!target.cpu.has(.wasm, .multivalue)) break :blk .sret;
-            if (fields[0].offset > fields[1].offset) {
-                std.mem.swap(AutoReturnField, &fields[0], &fields[1]);
-            }
-            if (fields[0].offset + @as(u32, @intCast(fields[0].ty.abiSize(zcu))) > fields[1].offset) {
-                break :blk .sret;
-            }
-            break :blk .{ .two_fields = fields };
-        },
-        else => .sret,
+        2 => .{ .two_fields = fields[0..2].* },
+        3 => .{ .three_fields = fields[0..3].* },
+        4 => .{ .four_fields = fields[0..4].* },
+        else => unreachable,
     };
 }
 
@@ -2044,7 +2065,7 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!vo
                 return;
             }
             const owns_src = src == .stack;
-            var src_base = try src.toLocal(cg, .usize);
+            var src_base = if (owns_src) try src.toLocal(cg, .usize) else src;
             defer if (owns_src) src_base.free(cg);
             for (dst_fields) |dst_f| {
                 if (!dst_f.is_read) continue;
@@ -2059,7 +2080,7 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!vo
             const src_fields = cg.promotedSlotFieldsInRange(src.promoted.slot, src.promoted.offset, copy_len);
             if (src_fields.len == 0) return;
             const owns_dst = dst == .stack;
-            var dst_base = try dst.toLocal(cg, .usize);
+            var dst_base = if (owns_dst) try dst.toLocal(cg, .usize) else dst;
             defer if (owns_dst) dst_base.free(cg);
             for (src_fields) |src_f| {
                 assert(src_f.is_read);
@@ -2171,23 +2192,26 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, raw_len: WValue) InnerError!vo
                 try cg.emitMemBase(dst_base);
                 try cg.emitMemBase(src_base);
                 switch (chunk.kind) {
-                    .v128 => try cg.addSimdMemArg(.v128_load, .{ .offset = src_offset + chunk.off, .alignment = .@"1" }),
-                    .i64 => try cg.addMemArg(.i64_load, .{ .offset = src_offset + chunk.off, .alignment = .@"1" }),
-                    .i32 => try cg.addMemArg(.i32_load, .{ .offset = src_offset + chunk.off, .alignment = .@"1" }),
-                    .i16 => try cg.addMemArg(.i32_load16_u, .{ .offset = src_offset + chunk.off, .alignment = .@"1" }),
-                    .i8 => try cg.addMemArg(.i32_load8_u, .{ .offset = src_offset + chunk.off, .alignment = .@"1" }),
-                }
-            }
-            var idx = chunk_count;
-            while (idx > 0) {
-                idx -= 1;
-                const chunk = chunks[idx];
-                switch (chunk.kind) {
-                    .v128 => try cg.addSimdMemArg(.v128_store, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" }),
-                    .i64 => try cg.addMemArg(.i64_store, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" }),
-                    .i32 => try cg.addMemArg(.i32_store, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" }),
-                    .i16 => try cg.addMemArg(.i32_store16, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" }),
-                    .i8 => try cg.addMemArg(.i32_store8, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" }),
+                    .v128 => {
+                        try cg.addSimdMemArg(.v128_load, .{ .offset = src_offset + chunk.off, .alignment = .@"1" });
+                        try cg.addSimdMemArg(.v128_store, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" });
+                    },
+                    .i64 => {
+                        try cg.addMemArg(.i64_load, .{ .offset = src_offset + chunk.off, .alignment = .@"1" });
+                        try cg.addMemArg(.i64_store, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" });
+                    },
+                    .i32 => {
+                        try cg.addMemArg(.i32_load, .{ .offset = src_offset + chunk.off, .alignment = .@"1" });
+                        try cg.addMemArg(.i32_store, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" });
+                    },
+                    .i16 => {
+                        try cg.addMemArg(.i32_load16_u, .{ .offset = src_offset + chunk.off, .alignment = .@"1" });
+                        try cg.addMemArg(.i32_store16, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" });
+                    },
+                    .i8 => {
+                        try cg.addMemArg(.i32_load8_u, .{ .offset = src_offset + chunk.off, .alignment = .@"1" });
+                        try cg.addMemArg(.i32_store8, .{ .offset = dst_offset + chunk.off, .alignment = .@"1" });
+                    },
                 }
             }
             return;
@@ -2979,9 +3003,10 @@ fn airRet(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         switch (classifyAutoReturn(ret_ty, zcu, cg.target)) {
             .scalar => try cg.emitWValue(operand),
             .one_field => |f| _ = try cg.load(operand, f.ty, .{ .offset = f.offset }),
-            .two_fields => |fs| {
-                _ = try cg.load(operand, fs[0].ty, .{ .offset = fs[0].offset });
-                _ = try cg.load(operand, fs[1].ty, .{ .offset = fs[1].offset });
+            inline .two_fields, .three_fields, .four_fields => |fs| {
+                for (fs) |f| {
+                    _ = try cg.load(operand, f.ty, .{ .offset = f.offset });
+                }
             },
             .sret => unreachable,
         }
@@ -3044,9 +3069,10 @@ fn airRetLoad(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             switch (classifyAutoReturn(ret_ty, zcu, cg.target)) {
                 .scalar => _ = try cg.load(operand, ret_ty, .{}),
                 .one_field => |f| _ = try cg.load(operand, f.ty, .{ .offset = f.offset }),
-                .two_fields => |fs| {
-                    _ = try cg.load(operand, fs[0].ty, .{ .offset = fs[0].offset });
-                    _ = try cg.load(operand, fs[1].ty, .{ .offset = fs[1].offset });
+                inline .two_fields, .three_fields, .four_fields => |fs| {
+                    for (fs) |f| {
+                        _ = try cg.load(operand, f.ty, .{ .offset = f.offset });
+                    }
                 },
                 .sret => unreachable,
             }
@@ -3236,35 +3262,38 @@ fn airCall(cg: *CodeGen, inst: Air.Inst.Index, modifier: std.lang.CallModifier) 
                     }
                     break :result_value result;
                 },
-                .two_fields => |fs| {
+                inline .two_fields, .three_fields, .four_fields => |fs| {
                     if (cg.liveness.isUnused(inst)) {
-                        try cg.addTag(.drop);
-                        try cg.addTag(.drop);
+                        for (fs) |_| {
+                            try cg.addTag(.drop);
+                        }
                         break :result_value .none;
                     }
                     const result = try cg.allocStack(ret_ty);
                     if (result == .promoted) {
-                        const pf0 = cg.findPromotedField(result.promoted.slot, fs[0].offset, @intCast(fs[0].ty.abiSize(zcu)));
-                        const pf1 = cg.findPromotedField(result.promoted.slot, fs[1].offset, @intCast(fs[1].ty.abiSize(zcu)));
-                        if (pf1.is_read) {
-                            try cg.addLocal(.local_set, pf1.local);
-                        } else {
-                            try cg.addTag(.drop);
-                        }
-                        if (pf0.is_read) {
-                            try cg.addLocal(.local_set, pf0.local);
-                        } else {
-                            try cg.addTag(.drop);
+                        var i: usize = fs.len;
+                        while (i > 0) {
+                            i -= 1;
+                            const f = fs[i];
+                            const pf = cg.findPromotedField(result.promoted.slot, f.offset, @intCast(f.ty.abiSize(zcu)));
+                            if (pf.is_read) {
+                                try cg.addLocal(.local_set, pf.local);
+                            } else {
+                                try cg.addTag(.drop);
+                            }
                         }
                     } else {
-                        var local1 = try cg.allocLocal(fs[1].ty);
-                        defer local1.free(cg);
-                        try cg.addLocal(.local_set, local1.local);
-                        var local0 = try cg.allocLocal(fs[0].ty);
-                        defer local0.free(cg);
-                        try cg.addLocal(.local_set, local0.local);
-                        try cg.store(result, local0, fs[0].ty, .{ .offset = fs[0].offset });
-                        try cg.store(result, local1, fs[1].ty, .{ .offset = fs[1].offset });
+                        var res_locals: [fs.len]WValue = undefined;
+                        var i: usize = fs.len;
+                        while (i > 0) {
+                            i -= 1;
+                            res_locals[i] = try cg.allocLocal(fs[i].ty);
+                            try cg.addLocal(.local_set, res_locals[i].local);
+                        }
+                        defer for (&res_locals) |*loc| loc.free(cg);
+                        for (fs, res_locals) |f, loc| {
+                            try cg.store(result, loc, f.ty, .{ .offset = f.offset });
+                        }
                     }
                     break :result_value result;
                 },
@@ -3457,6 +3486,53 @@ fn store(cg: *CodeGen, lhs: WValue, rhs: WValue, ty: Type, memarg: MemArg) Inner
 
     if (isByRef(ty, zcu, cg.target)) {
         assert(!(lhs != .stack and rhs == .stack));
+        const ip = &zcu.intern_pool;
+        if (!cg.wantSafety() and lhs != .promoted and lhs != .stack and
+            rhs == .uav_ref and rhs.uav_ref.offset == 0 and
+            ip.typeOf(rhs.uav_ref.ip_index) == ty.toIntern())
+        {
+            switch (ip.indexToKey(rhs.uav_ref.ip_index)) {
+                .un => |un| if (un.tag != .none and ty.containerLayout(zcu) == .auto) {
+                    const union_obj = zcu.typeToUnion(ty).?;
+                    const field_index = zcu.unionTagFieldIndex(union_obj, Value.fromInterned(un.tag)).?;
+                    const field_ty = Type.fromInterned(union_obj.field_types.get(ip)[field_index]);
+                    const layout = ty.unionGetLayout(zcu);
+                    if (field_ty.abiSize(zcu) + layout.tag_size < abi_size and !isByRef(field_ty, zcu, cg.target)) {
+                        const tag_first = layout.tag_align.compare(.gte, layout.payload_align);
+                        const payload_offset: u64 = if (tag_first) layout.tag_size else 0;
+                        const tag_offset: u64 = if (tag_first) 0 else layout.payload_size;
+                        const payload_val = Value.fromInterned(un.val);
+                        if (field_ty.hasRuntimeBits(zcu) and !payload_val.isUndef(zcu)) {
+                            const payload_wval = try cg.lowerConstant(payload_val);
+                            try cg.store(lhs, payload_wval, field_ty, .{
+                                .offset = memarg.offset + payload_offset,
+                                .alignment = alignment,
+                            });
+                        }
+                        if (layout.tag_size > 0) {
+                            const tag_ty: Type = .fromInterned(union_obj.enum_tag_type);
+                            const tag_wval = try cg.lowerConstant(Value.fromInterned(un.tag));
+                            try cg.store(lhs, tag_wval, tag_ty, .{
+                                .offset = memarg.offset + tag_offset,
+                                .alignment = alignment,
+                            });
+                        }
+                        return;
+                    }
+                },
+                .opt => |opt| if (!ty.optionalReprIsPayload(zcu) and !ty.isPtrAtRuntime(zcu)) {
+                    const payload_ty = ty.optionalChild(zcu);
+                    if (opt.val == .none) {
+                        const tag_offset = memarg.offset + payload_ty.abiSize(zcu);
+                        return cg.store(lhs, .{ .imm32 = 0 }, Type.u8, .{
+                            .offset = tag_offset,
+                            .alignment = .@"1",
+                        });
+                    }
+                },
+                else => {},
+            }
+        }
         const offset_ptr = try cg.offsetPointer(lhs, memarg.offset);
         return cg.memcpy(offset_ptr, rhs, cg.usizeImm(abi_size));
     }
@@ -3575,7 +3651,7 @@ fn load(cg: *CodeGen, operand: WValue, ty: Type, memarg: MemArg) InnerError!WVal
     if (isByRef(ty, zcu, cg.target)) {
         var src_ptr = try cg.offsetPointer(operand, memarg.offset);
         const owns_src_ptr = src_ptr == .stack;
-        src_ptr = try src_ptr.toLocal(cg, .usize);
+        if (owns_src_ptr) src_ptr = try src_ptr.toLocal(cg, .usize);
         defer if (owns_src_ptr) src_ptr.free(cg);
 
         const new_ptr = try cg.allocStack(ty);
@@ -8612,6 +8688,48 @@ fn airOptionalPayloadPtrSet(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void 
     return cg.finishAir(inst, operand, &.{ty_op.operand});
 }
 
+fn isOwnedRvalueStackSlot(cg: *const CodeGen, ref: Air.Inst.Ref) bool {
+    const idx = ref.toIndex() orelse return false;
+    if (cg.promoted_insts.contains(idx)) return false;
+    return switch (cg.air.instructions.items(.tag)[@backingInt(idx)]) {
+        .aggregate_init,
+        .call,
+        .call_always_tail,
+        .call_never_tail,
+        .call_never_inline,
+        => true,
+        .load => !cg.elided_readonly_loads.contains(idx),
+        .union_init => blk: {
+            const ty_pl = cg.air.instructions.items(.data)[@backingInt(idx)].ty_pl;
+            const extra = cg.air.extraData(Air.UnionInit, ty_pl.payload).data;
+            if (cg.values.get(ref)) |union_wv| {
+                if (cg.values.get(extra.init)) |init_wv| {
+                    if (union_wv == .stack_offset and init_wv == .stack_offset and
+                        union_wv.stack_offset.value == init_wv.stack_offset.value)
+                    {
+                        break :blk cg.isOwnedRvalueStackSlot(extra.init);
+                    }
+                }
+            }
+            break :blk true;
+        },
+        .wrap_optional, .wrap_errunion_payload => blk: {
+            const operand = cg.air.instructions.items(.data)[@backingInt(idx)].ty_op.operand;
+            if (cg.values.get(ref)) |wrap_wv| {
+                if (cg.values.get(operand)) |op_wv| {
+                    if (wrap_wv == .stack_offset and op_wv == .stack_offset and
+                        wrap_wv.stack_offset.value == op_wv.stack_offset.value)
+                    {
+                        break :blk cg.isOwnedRvalueStackSlot(operand);
+                    }
+                }
+            }
+            break :blk true;
+        },
+        else => false,
+    };
+}
+
 fn airWrapOptional(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const ty_op = cg.air.instructions.items(.data)[@backingInt(inst)].ty_op;
     const payload_ty = cg.typeOf(ty_op.operand);
@@ -8631,6 +8749,43 @@ fn airWrapOptional(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         const offset = std.math.cast(u32, payload_ty.abiSize(zcu)) orelse {
             return cg.fail("Optional type {f} too big to fit into stack frame", .{op_ty.fmt(zcu)});
         };
+
+        if (!cg.promoted_insts.contains(inst) and isByRef(payload_ty, zcu, cg.target) and operand != .promoted) {
+            if (ty_op.operand.toIndex()) |op_idx| {
+                const tags = cg.air.instructions.items(.tag);
+                const datas = cg.air.instructions.items(.data);
+                if (tags[@backingInt(op_idx)] == .optional_payload) {
+                    const src_opt_ref = datas[@backingInt(op_idx)].ty_op.operand;
+                    const src_opt_ty = cg.typeOf(src_opt_ref);
+                    if (!src_opt_ty.optionalReprIsPayload(zcu) and
+                        src_opt_ty.abiSize(zcu) == op_ty.abiSize(zcu) and
+                        src_opt_ty.abiAlignment(zcu).compare(.gte, op_ty.abiAlignment(zcu)))
+                    {
+                        const can_alias = if (src_opt_ref.toIndex()) |src_opt_idx|
+                            cg.elided_readonly_loads.contains(src_opt_idx) or
+                                (operand == .stack_offset and cg.liveness.operandDies(inst, 0) and
+                                    cg.isOwnedRvalueStackSlot(src_opt_ref))
+                        else
+                            false;
+                        if (can_alias) {
+                            break :result operand;
+                        }
+                    }
+                }
+            }
+            if (operand == .stack_offset and
+                cg.liveness.operandDies(inst, 0) and
+                cg.isOwnedRvalueStackSlot(ty_op.operand) and
+                operand.stack_offset.value + offset == cg.stack_size and
+                op_ty.abiAlignment(zcu).check(operand.stack_offset.value))
+            {
+                const total_size: u32 = @intCast(op_ty.abiSize(zcu));
+                cg.stack_alignment = cg.stack_alignment.max(op_ty.abiAlignment(zcu));
+                cg.stack_size = @intCast(operand.stack_offset.value + total_size);
+                try cg.store(operand, .{ .imm32 = 1 }, .u8, .{ .offset = offset, .alignment = .@"1" });
+                break :result operand;
+            }
+        }
 
         // Create optional type, set the non-null bit, and store the operand inside the optional type
         const result_ptr = try cg.allocStack(op_ty);
@@ -10396,16 +10551,34 @@ fn airUnionInit(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         }
 
         if (isByRef(union_ty, zcu, cg.target)) {
-            const result_ptr = try cg.allocStack(union_ty);
-            const payload = try cg.resolveInst(extra.init);
             if (layout.tag_align.compare(.gte, layout.payload_align)) {
+                const result_ptr = try cg.allocStack(union_ty);
+                const payload = try cg.resolveInst(extra.init);
                 try cg.store(result_ptr, payload, field_ty, .{ .offset = layout.tag_size });
 
                 if (layout.tag_size > 0) {
                     try cg.store(result_ptr, tag_int, .fromInterned(union_obj.enum_tag_type), .{});
                 }
+                break :result result_ptr;
             } else {
-                try cg.store(result_ptr, payload, field_ty, .{});
+                const payload = try cg.resolveInst(extra.init);
+                const field_size = field_ty.abiSize(zcu);
+                const union_size = union_ty.abiSize(zcu);
+                const result_ptr: WValue = if (!cg.promoted_insts.contains(inst) and
+                    payload == .stack_offset and
+                    cg.liveness.operandDies(inst, 0) and
+                    cg.isOwnedRvalueStackSlot(extra.init) and
+                    payload.stack_offset.value + field_size == cg.stack_size and
+                    union_ty.abiAlignment(zcu).check(payload.stack_offset.value))
+                blk: {
+                    cg.stack_alignment = cg.stack_alignment.max(union_ty.abiAlignment(zcu));
+                    cg.stack_size = @intCast(payload.stack_offset.value + union_size);
+                    break :blk payload;
+                } else blk: {
+                    const ptr = try cg.allocStack(union_ty);
+                    try cg.store(ptr, payload, field_ty, .{});
+                    break :blk ptr;
+                };
                 if (layout.tag_size > 0) {
                     try cg.store(
                         result_ptr,
@@ -10414,8 +10587,8 @@ fn airUnionInit(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
                         .{ .offset = layout.payload_size },
                     );
                 }
+                break :result result_ptr;
             }
-            break :result result_ptr;
         } else {
             unreachable;
         }
@@ -12480,7 +12653,19 @@ const SroaAnalysis = struct {
                             _ = self.markRangeRead(rhs_ref.root_id, rhs_ref.offset, elem_size);
                         }
                     } else if (valid_lhs_ref) |lhs_ref| {
-                        if (elem_size > 16 and bin_op.rhs.toInterned() == null) {
+                        const rhs_is_const = blk: {
+                            var cur_ref = bin_op.rhs;
+                            while (cur_ref.toIndex()) |cur_idx| {
+                                const cur_tag = self.cg.air.instructions.items(.tag)[@backingInt(cur_idx)];
+                                if (cur_tag == .bit_cast or cur_tag == .ptr_cast) {
+                                    cur_ref = self.cg.air.instructions.items(.data)[@backingInt(cur_idx)].ty_op.operand;
+                                    continue;
+                                }
+                                break :blk cur_tag == .aggregate_init;
+                            }
+                            break :blk true;
+                        };
+                        if (elem_size > 16 and !rhs_is_const) {
                             self.roots.items[lhs_ref.root_id].has_whole_mem_load = true;
                         }
                     }
@@ -12765,6 +12950,8 @@ const SroaAnalysis = struct {
                             } else {
                                 self.markEscaped(elem);
                             }
+                        } else if (dst_root_opt) |dst_root| {
+                            self.roots.items[dst_root].scalar_access_count +|= 1;
                         }
                     }
                 } else {
@@ -13159,8 +13346,12 @@ const SroaAnalysis = struct {
                                 .scalar => !isByRef(ret_ty, zcu, self.cg.target) and
                                     self.checkScalarAccess(ref.root_id, ref.offset, ret_ty),
                                 .one_field => |f| self.checkScalarAccess(ref.root_id, ref.offset + f.offset, f.ty),
-                                .two_fields => |fs| self.checkScalarAccess(ref.root_id, ref.offset + fs[0].offset, fs[0].ty) and
-                                    self.checkScalarAccess(ref.root_id, ref.offset + fs[1].offset, fs[1].ty),
+                                inline .two_fields, .three_fields, .four_fields => |fs| blk: {
+                                    for (fs) |f| {
+                                        if (!self.checkScalarAccess(ref.root_id, ref.offset + f.offset, f.ty)) break :blk false;
+                                    }
+                                    break :blk true;
+                                },
                                 .sret => unreachable,
                             };
                             if (ok) {
@@ -13211,8 +13402,12 @@ const SroaAnalysis = struct {
                             const ok = switch (classifyAutoReturn(ret_ty, zcu, self.cg.target)) {
                                 .scalar => false,
                                 .one_field => |f| self.checkScalarAccess(ref.root_id, ref.offset + f.offset, f.ty),
-                                .two_fields => |fs| self.checkScalarAccess(ref.root_id, ref.offset + fs[0].offset, fs[0].ty) and
-                                    self.checkScalarAccess(ref.root_id, ref.offset + fs[1].offset, fs[1].ty),
+                                inline .two_fields, .three_fields, .four_fields => |fs| blk: {
+                                    for (fs) |f| {
+                                        if (!self.checkScalarAccess(ref.root_id, ref.offset + f.offset, f.ty)) break :blk false;
+                                    }
+                                    break :blk true;
+                                },
                                 .sret => unreachable,
                             };
                             if (ok) {
@@ -14524,11 +14719,59 @@ fn baseAllocInst(cg: *const CodeGen, start_op: Air.Inst.Ref) ?Air.Inst.Index {
     return null;
 }
 
+fn hasFreshRvalueAliasRoot(cg: *const CodeGen, alloc_inst: Air.Inst.Index) bool {
+    const tags = cg.air.instructions.items(.tag);
+    const datas = cg.air.instructions.items(.data);
+    var cur = alloc_inst;
+    var depth: u32 = 0;
+    while (depth < 16) : (depth += 1) {
+        const src_ref = cg.readonly_alloc_aliases.get(cur) orelse return false;
+        var src_idx = src_ref.toIndex() orelse return false;
+        while (tags[@backingInt(src_idx)] == .bit_cast or tags[@backingInt(src_idx)] == .ptr_cast) {
+            src_idx = datas[@backingInt(src_idx)].ty_op.operand.toIndex() orelse return false;
+        }
+        switch (tags[@backingInt(src_idx)]) {
+            .call,
+            .call_always_tail,
+            .call_never_tail,
+            .call_never_inline,
+            => return true,
+            .@"try", .try_cold => {
+                const unwrapped = cg.air.unwrapTry(src_idx);
+                const eu_idx = unwrapped.error_union.toIndex() orelse return false;
+                return switch (tags[@backingInt(eu_idx)]) {
+                    .call, .call_always_tail, .call_never_tail, .call_never_inline => true,
+                    else => false,
+                };
+            },
+            .optional_payload, .unwrap_errunion_payload => {
+                const op_idx = datas[@backingInt(src_idx)].ty_op.operand.toIndex() orelse return false;
+                cur = baseAllocInst(cg, op_idx.toRef()) orelse return false;
+                continue;
+            },
+            .agg_field_val => {
+                const sf = cg.air.extraData(Air.StructField, datas[@backingInt(src_idx)].ty_pl.payload).data;
+                cur = baseAllocInst(cg, sf.struct_operand) orelse return false;
+                continue;
+            },
+            else => return false,
+        }
+    }
+    return false;
+}
+
+const BlockCont = struct {
+    block_inst: Air.Inst.Index,
+    tail: []const Air.Inst.Index,
+    parent: ?*const BlockCont,
+};
+
 fn scanBlockForLoadElisions(
     cg: *CodeGen,
     analysis: *const SroaAnalysis,
     use_counts: []const u32,
     body: []const Air.Inst.Index,
+    cont: ?*const BlockCont,
 ) InnerError!void {
     const zcu = cg.pt.zcu;
     const tags = cg.air.instructions.items(.tag);
@@ -14539,21 +14782,36 @@ fn scanBlockForLoadElisions(
 
     for (body, 0..) |inst, i| {
         switch (tags[@backingInt(inst)]) {
-            .block, .loop => try scanBlockForLoadElisions(cg, analysis, use_counts, cg.air.unwrapBlock(inst).body),
-            .dbg_inline_block => try scanBlockForLoadElisions(cg, analysis, use_counts, cg.air.unwrapDbgBlock(inst).body),
+            .block => {
+                const sub_cont: BlockCont = .{ .block_inst = inst, .tail = body[i + 1 ..], .parent = cont };
+                const next_cont: ?*const BlockCont = if (cg.promoted_insts.contains(inst)) null else &sub_cont;
+                try scanBlockForLoadElisions(cg, analysis, use_counts, cg.air.unwrapBlock(inst).body, next_cont);
+            },
+            .dbg_inline_block => {
+                const sub_cont: BlockCont = .{ .block_inst = inst, .tail = body[i + 1 ..], .parent = cont };
+                const next_cont: ?*const BlockCont = if (cg.promoted_insts.contains(inst)) null else &sub_cont;
+                try scanBlockForLoadElisions(cg, analysis, use_counts, cg.air.unwrapDbgBlock(inst).body, next_cont);
+            },
+            .loop => try scanBlockForLoadElisions(cg, analysis, use_counts, cg.air.unwrapBlock(inst).body, null),
             .cond_br => {
                 const branch = cg.air.unwrapCondBr(inst);
-                try scanBlockForLoadElisions(cg, analysis, use_counts, branch.then_body);
-                try scanBlockForLoadElisions(cg, analysis, use_counts, branch.else_body);
+                try scanBlockForLoadElisions(cg, analysis, use_counts, branch.then_body, cont);
+                try scanBlockForLoadElisions(cg, analysis, use_counts, branch.else_body, cont);
             },
-            .switch_br, .loop_switch_br => {
+            .switch_br => {
                 const switch_br = cg.air.unwrapSwitch(inst);
                 var it = switch_br.iterateCases();
-                while (it.next()) |case| try scanBlockForLoadElisions(cg, analysis, use_counts, case.body);
-                try scanBlockForLoadElisions(cg, analysis, use_counts, it.elseBody());
+                while (it.next()) |case| try scanBlockForLoadElisions(cg, analysis, use_counts, case.body, cont);
+                try scanBlockForLoadElisions(cg, analysis, use_counts, it.elseBody(), cont);
             },
-            .@"try", .try_cold => try scanBlockForLoadElisions(cg, analysis, use_counts, cg.air.unwrapTry(inst).else_body),
-            .try_ptr, .try_ptr_cold => try scanBlockForLoadElisions(cg, analysis, use_counts, cg.air.unwrapTryPtr(inst).else_body),
+            .loop_switch_br => {
+                const switch_br = cg.air.unwrapSwitch(inst);
+                var it = switch_br.iterateCases();
+                while (it.next()) |case| try scanBlockForLoadElisions(cg, analysis, use_counts, case.body, null);
+                try scanBlockForLoadElisions(cg, analysis, use_counts, it.elseBody(), null);
+            },
+            .@"try", .try_cold => try scanBlockForLoadElisions(cg, analysis, use_counts, cg.air.unwrapTry(inst).else_body, null),
+            .try_ptr, .try_ptr_cold => try scanBlockForLoadElisions(cg, analysis, use_counts, cg.air.unwrapTryPtr(inst).else_body, null),
             .load, .slice_elem_val, .ptr_elem_val => |tag| {
                 if (cg.promoted_insts.contains(inst) or cg.elided_readonly_loads.contains(inst)) continue;
                 const total_uses = use_counts[@backingInt(inst)];
@@ -14646,8 +14904,9 @@ fn scanBlockForLoadElisions(
                     ptr_op: Air.Inst.Ref,
                     elem_ty: Type,
                     total_uses: u32,
+                    cont: ?*const BlockCont,
 
-                    fn checkInst(self: *@This(), later: Air.Inst.Index, in_subblock: bool) InnerError!void {
+                    fn checkInst(self: *@This(), later: Air.Inst.Index, saw_write: *bool) InnerError!void {
                         if (!self.readonly_ok.* or self.seen_uses.* == self.needed_uses.*) return;
                         const zcu_inner = self.cg.pt.zcu;
                         const tags_inner = self.cg.air.instructions.items(.tag);
@@ -14669,7 +14928,7 @@ fn scanBlockForLoadElisions(
                         var sctx: SetCtx = .{ .set = self.derived_byref };
                         forEachRuntimeOperand(self.cg, later, &sctx, SetCtx.cb);
                         if (sctx.count > 0) {
-                            if (sctx.count != 1) {
+                            if (sctx.count != 1 or saw_write.*) {
                                 self.readonly_ok.* = false;
                                 return;
                             }
@@ -14687,12 +14946,36 @@ fn scanBlockForLoadElisions(
                                         (layout == .auto or layout == .@"extern");
                                 },
                                 .get_union_tag => later_data.ty_op.operand == op,
+                                .struct_field_ptr => blk: {
+                                    const extra = self.cg.air.extraData(Air.StructField, later_data.ty_pl.payload).data;
+                                    break :blk extra.struct_operand == op and !self.cg.typeOfIndex(later).isVolatilePtr(zcu_inner);
+                                },
+                                .struct_field_ptr_index_0,
+                                .struct_field_ptr_index_1,
+                                .struct_field_ptr_index_2,
+                                .struct_field_ptr_index_3,
+                                .optional_payload_ptr,
+                                .unwrap_errunion_payload_ptr,
+                                .unwrap_errunion_err_ptr,
+                                .ptr_slice_ptr_ptr,
+                                .ptr_slice_len_ptr,
+                                => later_data.ty_op.operand == op and !self.cg.typeOfIndex(later).isVolatilePtr(zcu_inner),
+                                .ptr_elem_ptr => blk: {
+                                    const bin = self.cg.air.extraData(Air.Bin, later_data.ty_pl.payload).data;
+                                    break :blk bin.lhs == op and !self.cg.typeOf(op).isSlice(zcu_inner) and !self.cg.typeOfIndex(later).isVolatilePtr(zcu_inner);
+                                },
+                                .ptr_add, .ptr_sub => blk: {
+                                    const bin = self.cg.air.extraData(Air.Bin, later_data.ty_pl.payload).data;
+                                    break :blk bin.lhs == op and !self.cg.typeOfIndex(later).isVolatilePtr(zcu_inner);
+                                },
                                 .ptr_cast => blk: {
                                     const src_ty = self.cg.typeOf(op);
                                     const dst_ty = self.cg.typeOfIndex(later);
-                                    break :blk later_data.ty_op.operand == op and
-                                        src_ty.isSlice(zcu_inner) and dst_ty.isSlice(zcu_inner) and
-                                        !src_ty.isVolatilePtr(zcu_inner) and !dst_ty.isVolatilePtr(zcu_inner);
+                                    if (later_data.ty_op.operand != op or src_ty.isVolatilePtr(zcu_inner) or dst_ty.isVolatilePtr(zcu_inner)) break :blk false;
+                                    if (src_ty.isSlice(zcu_inner) and dst_ty.isSlice(zcu_inner)) break :blk true;
+                                    break :blk src_ty.zigTypeTag(zcu_inner) == .pointer and
+                                        dst_ty.zigTypeTag(zcu_inner) == .pointer and
+                                        !src_ty.isSlice(zcu_inner) and !dst_ty.isSlice(zcu_inner);
                                 },
                                 .bit_cast => blk: {
                                     const src_ty = self.cg.typeOf(op);
@@ -14703,12 +14986,45 @@ fn scanBlockForLoadElisions(
                                         dst_ty.abiSize(zcu_inner) == src_ty.abiSize(zcu_inner) and
                                         !self.cg.bitcastNeedsWrapping(dst_ty, src_ty);
                                 },
+                                .load => later_data.ty_op.operand == op and !self.cg.typeOf(op).isVolatilePtr(zcu_inner),
+                                .ptr_elem_val => later_data.bin_op.lhs == op and !self.cg.typeOf(op).isVolatilePtr(zcu_inner) and !self.cg.typeOf(op).isSlice(zcu_inner),
+                                .is_null_ptr, .is_non_null_ptr, .is_err_ptr, .is_non_err_ptr => later_data.un_op == op and !self.cg.typeOf(op).isVolatilePtr(zcu_inner),
+                                .wrap_optional => blk: {
+                                    if (later_data.ty_op.operand != op) break :blk false;
+                                    const op_idx = op.toIndex() orelse break :blk false;
+                                    if (tags_inner[@backingInt(op_idx)] != .optional_payload) break :blk false;
+                                    const src_opt_ref = datas_inner[@backingInt(op_idx)].ty_op.operand;
+                                    const src_opt_idx = src_opt_ref.toIndex() orelse break :blk false;
+                                    if (!self.derived_byref.contains(src_opt_idx)) break :blk false;
+                                    const src_opt_ty = self.cg.typeOf(src_opt_ref);
+                                    const dst_opt_ty = self.cg.typeOfIndex(later);
+                                    break :blk !src_opt_ty.optionalReprIsPayload(zcu_inner) and
+                                        src_opt_ty.abiSize(zcu_inner) == dst_opt_ty.abiSize(zcu_inner) and
+                                        src_opt_ty.abiAlignment(zcu_inner).compare(.gte, dst_opt_ty.abiAlignment(zcu_inner));
+                                },
+                                .union_init => blk: {
+                                    const extra = self.cg.air.extraData(Air.UnionInit, later_data.ty_pl.payload).data;
+                                    break :blk extra.init == op;
+                                },
+                                .br => blk: {
+                                    const br = later_data.br;
+                                    if (br.operand != op) break :blk false;
+                                    if (self.cg.promoted_insts.contains(br.block_inst)) break :blk true;
+                                    var c = self.cont;
+                                    while (c) |cur| : (c = cur.parent) {
+                                        if (cur.block_inst == br.block_inst) break :blk true;
+                                    }
+                                    break :blk false;
+                                },
                                 .array_elem_val => later_data.bin_op.lhs == op and isByRef(self.cg.typeOf(op), zcu_inner, self.cg.target),
                                 .slice_ptr, .slice_len, .optional_payload, .unwrap_errunion_err, .unwrap_errunion_payload => later_data.ty_op.operand == op,
                                 .slice_elem_val => later_data.bin_op.lhs == op,
                                 .is_null, .is_non_null, .is_err, .is_non_err => later_data.un_op == op,
                                 .store, .store_safe => blk: {
                                     if (later_data.bin_op.rhs != op or later_data.bin_op.lhs == op) break :blk false;
+                                    if (self.cg.elided_init_stores.contains(later)) {
+                                        break :blk later_data.bin_op.lhs.toIndex() != null;
+                                    }
                                     const lhs_ptr_info = self.cg.typeOf(later_data.bin_op.lhs).ptrInfo(zcu_inner);
                                     if (lhs_ptr_info.flags.is_volatile or lhs_ptr_info.flags.vector_index != .none or lhs_ptr_info.packed_offset.host_size != 0) break :blk false;
                                     if (self.analysis.getRef(later_data.bin_op.lhs)) |lhs_ref| {
@@ -14719,22 +15035,15 @@ fn scanBlockForLoadElisions(
                                             break :blk true;
                                         }
                                     }
-                                    if (in_subblock or self.total_uses != 1 or op != self.inst.toRef()) break :blk false;
-                                    if (self.cg.elided_init_stores.contains(later)) break :blk false;
                                     const lhs_alloc = baseAllocInst(self.cg, later_data.bin_op.lhs);
                                     const src_alloc = if (self.tag == .load) baseAllocInst(self.cg, self.ptr_op) else null;
                                     break :blk (lhs_alloc != null or src_alloc != null) and
                                         (lhs_alloc == null or src_alloc == null or lhs_alloc.? != src_alloc.?);
                                 },
                                 .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
-                                    if (in_subblock or self.total_uses != 1 or op != self.inst.toRef() or self.tag != .load) break :blk false;
-                                    const src_idx = self.ptr_op.toIndex() orelse break :blk false;
-                                    if (tags_inner[@backingInt(src_idx)] != .alloc) break :blk false;
-                                    const src_ref = self.analysis.getRef(self.ptr_op) orelse break :blk false;
-                                    if (src_ref.kind != .ptr or src_ref.offset != 0 or !self.analysis.roots.items[src_ref.root_id].demoted) break :blk false;
+                                    if (self.seen_uses.* + 1 != self.needed_uses.* or self.tag != .load) break :blk false;
                                     const call = self.cg.air.unwrapCall(later);
                                     if (call.callee == op) break :blk false;
-                                    if (baseAllocInst(self.cg, call.callee) == src_idx) break :blk false;
                                     const callee_ty = self.cg.typeOf(call.callee);
                                     const fn_ty = switch (callee_ty.zigTypeTag(zcu_inner)) {
                                         .@"fn" => callee_ty,
@@ -14743,7 +15052,22 @@ fn scanBlockForLoadElisions(
                                     };
                                     const fn_info = zcu_inner.typeToFunc(fn_ty) orelse break :blk false;
                                     if (fn_info.cc != .auto) break :blk false;
-                                    if (classifyAutoParam(self.elem_ty, zcu_inner, self.cg.target) != .by_ref) break :blk false;
+                                    const src_alloc = baseAllocInst(self.cg, self.ptr_op);
+                                    const op_ty = self.cg.typeOf(op);
+                                    const is_scalar_param = classifyAutoParam(op_ty, zcu_inner, self.cg.target) == .scalars;
+                                    if (!is_scalar_param) {
+                                        const sa = src_alloc orelse break :blk false;
+                                        const is_unescaped_sroa = if (self.analysis.getRef(self.ptr_op)) |root_ref|
+                                            root_ref.kind == .ptr and !self.analysis.roots.items[root_ref.root_id].escaped
+                                        else
+                                            false;
+                                        const is_safe_root = if (self.cg.readonly_alloc_aliases.contains(sa))
+                                            self.cg.hasFreshRvalueAliasRoot(sa)
+                                        else
+                                            is_unescaped_sroa;
+                                        if (!is_safe_root) break :blk false;
+                                        if (baseAllocInst(self.cg, call.callee) == sa) break :blk false;
+                                    }
                                     var match_count: u32 = 0;
                                     for (call.args, 0..) |arg, arg_i| {
                                         if (arg == op) {
@@ -14752,9 +15076,13 @@ fn scanBlockForLoadElisions(
                                                 break;
                                             }
                                             match_count += 1;
-                                        } else if (baseAllocInst(self.cg, arg) == src_idx) {
-                                            match_count = 0;
-                                            break;
+                                        } else if (!is_scalar_param) {
+                                            if (src_alloc) |sa| {
+                                                if (baseAllocInst(self.cg, arg) == sa) {
+                                                    match_count = 0;
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                     break :blk match_count == 1;
@@ -14766,24 +15094,67 @@ fn scanBlockForLoadElisions(
                                 return;
                             }
                             self.seen_uses.* += 1;
+                            if (later_tag == .br) {
+                                const br = later_data.br;
+                                if (!self.cg.promoted_insts.contains(br.block_inst)) {
+                                    if ((try self.derived_byref.fetchPut(self.cg.gpa, br.block_inst, {})) == null) {
+                                        self.needed_uses.* += self.use_counts[@backingInt(br.block_inst)];
+                                    }
+                                }
+                                return;
+                            }
+                            if ((later_tag == .store or later_tag == .store_safe) and self.cg.elided_init_stores.contains(later)) {
+                                const lhs_idx = later_data.bin_op.lhs.toIndex().?;
+                                if ((try self.derived_byref.fetchPut(self.cg.gpa, lhs_idx, {})) == null) {
+                                    self.needed_uses.* += self.use_counts[@backingInt(lhs_idx)] - 1;
+                                }
+                                return;
+                            }
                             const later_ty = self.cg.typeOfIndex(later);
-                            if (later_ty.hasRuntimeBits(zcu_inner) and isByRef(later_ty, zcu_inner, self.cg.target) and
-                                switch (later_tag) {
-                                    .agg_field_val, .array_elem_val, .optional_payload, .unwrap_errunion_payload, .ptr_cast, .bit_cast => true,
-                                    else => false,
-                                })
-                            {
+                            const is_derived_ptr = switch (later_tag) {
+                                .struct_field_ptr,
+                                .struct_field_ptr_index_0,
+                                .struct_field_ptr_index_1,
+                                .struct_field_ptr_index_2,
+                                .struct_field_ptr_index_3,
+                                .optional_payload_ptr,
+                                .unwrap_errunion_payload_ptr,
+                                .unwrap_errunion_err_ptr,
+                                .ptr_slice_ptr_ptr,
+                                .ptr_slice_len_ptr,
+                                .ptr_elem_ptr,
+                                .ptr_add,
+                                .ptr_sub,
+                                .ptr_cast,
+                                => true,
+                                else => false,
+                            };
+                            const is_derived_val = isByRef(later_ty, zcu_inner, self.cg.target) and switch (later_tag) {
+                                .agg_field_val,
+                                .array_elem_val,
+                                .optional_payload,
+                                .unwrap_errunion_payload,
+                                .bit_cast,
+                                .wrap_optional,
+                                => true,
+                                .load,
+                                .ptr_elem_val,
+                                .slice_elem_val,
+                                => self.cg.elided_readonly_loads.contains(later),
+                                else => false,
+                            };
+                            if (later_ty.hasRuntimeBits(zcu_inner) and (is_derived_ptr or is_derived_val)) {
                                 try self.derived_byref.put(self.cg.gpa, later, {});
                                 self.needed_uses.* += self.use_counts[@backingInt(later)];
                             }
-                            if (self.seen_uses.* == self.needed_uses.*) return;
+                            return;
                         }
 
                         switch (tags_inner[@backingInt(later)]) {
                             .block => {
                                 const block = self.cg.air.unwrapBlock(later);
                                 for (block.body) |sub_inst| {
-                                    try self.checkInst(sub_inst, true);
+                                    try self.checkInst(sub_inst, saw_write);
                                     if (!self.readonly_ok.* or self.seen_uses.* == self.needed_uses.*) return;
                                 }
                                 return;
@@ -14791,40 +15162,51 @@ fn scanBlockForLoadElisions(
                             .dbg_inline_block => {
                                 const block = self.cg.air.unwrapDbgBlock(later);
                                 for (block.body) |sub_inst| {
-                                    try self.checkInst(sub_inst, true);
+                                    try self.checkInst(sub_inst, saw_write);
                                     if (!self.readonly_ok.* or self.seen_uses.* == self.needed_uses.*) return;
                                 }
                                 return;
                             },
                             .cond_br => {
                                 const branch = self.cg.air.unwrapCondBr(later);
+                                var then_write = saw_write.*;
                                 for (branch.then_body) |sub_inst| {
-                                    try self.checkInst(sub_inst, true);
+                                    try self.checkInst(sub_inst, &then_write);
                                     if (!self.readonly_ok.*) return;
                                 }
+                                var else_write = saw_write.*;
                                 for (branch.else_body) |sub_inst| {
-                                    try self.checkInst(sub_inst, true);
+                                    try self.checkInst(sub_inst, &else_write);
                                     if (!self.readonly_ok.*) return;
                                 }
-                                if (self.seen_uses.* < self.needed_uses.* and instMayWriteOrCall(self.cg, later, self.analysis)) {
+                                saw_write.* = then_write or else_write;
+                                if (self.seen_uses.* < self.needed_uses.* and saw_write.*) {
                                     self.readonly_ok.* = false;
                                 }
                                 return;
                             },
                             .switch_br => {
                                 const switch_br = self.cg.air.unwrapSwitch(later);
+                                var any_case_write = saw_write.*;
                                 var it = switch_br.iterateCases();
                                 while (it.next()) |case| {
+                                    var case_write = saw_write.*;
                                     for (case.body) |sub_inst| {
-                                        try self.checkInst(sub_inst, true);
+                                        try self.checkInst(sub_inst, &case_write);
                                         if (!self.readonly_ok.*) return;
                                     }
+                                    any_case_write = any_case_write or case_write;
                                 }
-                                for (it.elseBody()) |sub_inst| {
-                                    try self.checkInst(sub_inst, true);
-                                    if (!self.readonly_ok.*) return;
+                                {
+                                    var else_write = saw_write.*;
+                                    for (it.elseBody()) |sub_inst| {
+                                        try self.checkInst(sub_inst, &else_write);
+                                        if (!self.readonly_ok.*) return;
+                                    }
+                                    any_case_write = any_case_write or else_write;
                                 }
-                                if (self.seen_uses.* < self.needed_uses.* and instMayWriteOrCall(self.cg, later, self.analysis)) {
+                                saw_write.* = any_case_write;
+                                if (self.seen_uses.* < self.needed_uses.* and saw_write.*) {
                                     self.readonly_ok.* = false;
                                 }
                                 return;
@@ -14833,7 +15215,7 @@ fn scanBlockForLoadElisions(
                         }
 
                         if (instMayWriteOrCall(self.cg, later, self.analysis)) {
-                            self.readonly_ok.* = false;
+                            saw_write.* = true;
                         }
                     }
                 };
@@ -14851,10 +15233,21 @@ fn scanBlockForLoadElisions(
                     .ptr_op = ptr_op,
                     .elem_ty = elem_ty,
                     .total_uses = total_uses,
+                    .cont = cont,
                 };
+                var saw_write = false;
                 for (body[i + 1 ..]) |later| {
-                    try checker.checkInst(later, false);
+                    try checker.checkInst(later, &saw_write);
                     if (!readonly_ok or seen_uses == needed_uses) break;
+                }
+                var cur_cont = cont;
+                while (cur_cont) |c| : (cur_cont = c.parent) {
+                    if (!readonly_ok or seen_uses == needed_uses) break;
+                    if (!derived_byref.contains(c.block_inst)) continue;
+                    for (c.tail) |later| {
+                        try checker.checkInst(later, &saw_write);
+                        if (!readonly_ok or seen_uses == needed_uses) break;
+                    }
                 }
                 if (readonly_ok and seen_uses == needed_uses) {
                     try cg.elided_readonly_loads.put(cg.gpa, inst, {});
@@ -14873,6 +15266,7 @@ const ReadOnlyAllocAliasAnalysis = struct {
         active_body_idx: ?usize = null,
         init_store: ?Air.Inst.Index = null,
         src_inst: ?Air.Inst.Index = null,
+        parent_alloc: ?Air.Inst.Index = null,
         src_is_load: bool = false,
         src_load_body_idx: usize = 0,
         last_use_body_idx: usize = 0,
@@ -14904,6 +15298,47 @@ const ReadOnlyAllocAliasAnalysis = struct {
             if (self.candidates.getPtr(alloc_inst)) |cand| {
                 cand.invalid = true;
             }
+        }
+    }
+
+    fn hasSrcLoad(self: *const ReadOnlyAllocAliasAnalysis, alloc_inst: Air.Inst.Index) bool {
+        var cur_opt: ?Air.Inst.Index = alloc_inst;
+        while (cur_opt) |cur| {
+            const c = self.candidates.get(cur) orelse return true;
+            if (c.src_is_load) return true;
+            cur_opt = c.parent_alloc;
+        }
+        return false;
+    }
+
+    fn hasFreshRvalueRoot(self: *const ReadOnlyAllocAliasAnalysis, alloc_inst: Air.Inst.Index) bool {
+        const tags = self.cg.air.instructions.items(.tag);
+        var cur = alloc_inst;
+        while (true) {
+            const c = self.candidates.get(cur) orelse return false;
+            if (c.src_is_load) return false;
+            if (c.parent_alloc) |pa| {
+                cur = pa;
+                continue;
+            }
+            const src_inst = c.src_inst orelse return false;
+            const src_tag = tags[@backingInt(src_inst)];
+            return switch (src_tag) {
+                .call,
+                .call_always_tail,
+                .call_never_tail,
+                .call_never_inline,
+                => true,
+                .@"try", .try_cold => blk: {
+                    const unwrapped = self.cg.air.unwrapTry(src_inst);
+                    const eu_idx = unwrapped.error_union.toIndex() orelse break :blk false;
+                    break :blk switch (tags[@backingInt(eu_idx)]) {
+                        .call, .call_always_tail, .call_never_tail, .call_never_inline => true,
+                        else => false,
+                    };
+                },
+                else => false,
+            };
         }
     }
 
@@ -15000,12 +15435,35 @@ const ReadOnlyAllocAliasAnalysis = struct {
                                 else
                                     true;
                                 if (isNonBitpackedPtr(ptr_info) and
-                                    self.use_counts[@backingInt(orig_rhs_idx)] == 1 and
-                                    self.use_counts[@backingInt(rhs_idx)] == 1 and
                                     isByRef(rhs_ty, zcu, self.cg.target) and
                                     rhs_ty.abiSize(zcu) == elem_ty.abiSize(zcu))
                                 {
-                                    if (rhs_tag == .arg and (alloc_escaped or rhs_escaped) and
+                                    if (self.derived_to_alloc.get(orig_rhs_idx)) |parent_alloc| {
+                                        if (parent_alloc != lhs_idx) {
+                                            const parent_cand = self.candidates.getPtr(parent_alloc).?;
+                                            if (!parent_cand.invalid and parent_cand.init_store != null and
+                                                parent_cand.active_body_idx != null and
+                                                alloc_ptr_ty.ptrAlignment(zcu).compare(.lte, rhs_ty.abiAlignment(zcu)))
+                                            {
+                                                var pa_opt: ?Air.Inst.Index = parent_alloc;
+                                                while (pa_opt) |pa| {
+                                                    const pa_cand = self.candidates.getPtr(pa).?;
+                                                    if (pa_cand.active_body_idx) |pa_idx| {
+                                                        if (pa_idx > pa_cand.last_use_body_idx) {
+                                                            pa_cand.last_use_body_idx = pa_idx;
+                                                        }
+                                                    }
+                                                    pa_opt = pa_cand.parent_alloc;
+                                                }
+                                                cand.init_store = inst;
+                                                cand.src_inst = orig_rhs_idx;
+                                                cand.parent_alloc = parent_alloc;
+                                                cand.src_is_load = false;
+                                                try self.derived_to_alloc.put(self.cg.gpa, lhs_idx, parent_alloc);
+                                                ok = true;
+                                            }
+                                        }
+                                    } else if (rhs_tag == .arg and (alloc_escaped or rhs_escaped) and
                                         self.seen_insts.contains(rhs_idx) and
                                         alloc_ptr_ty.ptrAlignment(zcu).compare(.lte, rhs_ty.abiAlignment(zcu)))
                                     {
@@ -15013,7 +15471,107 @@ const ReadOnlyAllocAliasAnalysis = struct {
                                         cand.src_inst = rhs_idx;
                                         cand.src_is_load = false;
                                         ok = true;
-                                    } else if (rhs_tag == .load or rhs_tag == .slice_elem_val or rhs_tag == .ptr_elem_val) {
+                                    } else if ((rhs_tag == .call or rhs_tag == .call_always_tail or
+                                        rhs_tag == .call_never_tail or rhs_tag == .call_never_inline) and
+                                        self.use_counts[@backingInt(rhs_idx)] == 1 and
+                                        (alloc_escaped or rhs_escaped) and
+                                        self.seen_insts.contains(rhs_idx) and
+                                        alloc_ptr_ty.ptrAlignment(zcu).compare(.lte, rhs_ty.abiAlignment(zcu)))
+                                    {
+                                        cand.init_store = inst;
+                                        cand.src_inst = rhs_idx;
+                                        cand.src_is_load = false;
+                                        ok = true;
+                                    } else if ((rhs_tag == .@"try" or rhs_tag == .try_cold) and
+                                        self.use_counts[@backingInt(rhs_idx)] == 1 and
+                                        (alloc_escaped or rhs_escaped) and
+                                        self.seen_insts.contains(rhs_idx) and
+                                        alloc_ptr_ty.ptrAlignment(zcu).compare(.lte, rhs_ty.abiAlignment(zcu)))
+                                    {
+                                        const unwrapped_try = self.cg.air.unwrapTry(rhs_idx);
+                                        if (unwrapped_try.error_union.toIndex()) |eu_idx| {
+                                            const eu_tag = tags[@backingInt(eu_idx)];
+                                            const CountOp = struct {
+                                                target: Air.Inst.Index,
+                                                count: u32 = 0,
+                                                fn cb(ctx: *@This(), op: Air.Inst.Ref) void {
+                                                    if (op.toIndex()) |idx| {
+                                                        if (idx == ctx.target) ctx.count += 1;
+                                                    }
+                                                }
+                                                fn scan(ctx: *@This(), cg_inner: *CodeGen, b: []const Air.Inst.Index) void {
+                                                    const t = cg_inner.air.instructions.items(.tag);
+                                                    for (b) |sub| {
+                                                        forEachRuntimeOperand(cg_inner, sub, ctx, cb);
+                                                        switch (t[@backingInt(sub)]) {
+                                                            .block => ctx.scan(cg_inner, cg_inner.air.unwrapBlock(sub).body),
+                                                            .dbg_inline_block => ctx.scan(cg_inner, cg_inner.air.unwrapDbgBlock(sub).body),
+                                                            .loop => ctx.scan(cg_inner, cg_inner.air.unwrapBlock(sub).body),
+                                                            .cond_br => {
+                                                                const br = cg_inner.air.unwrapCondBr(sub);
+                                                                ctx.scan(cg_inner, br.then_body);
+                                                                ctx.scan(cg_inner, br.else_body);
+                                                            },
+                                                            .switch_br, .loop_switch_br => {
+                                                                const sw = cg_inner.air.unwrapSwitch(sub);
+                                                                var it = sw.iterateCases();
+                                                                while (it.next()) |c| ctx.scan(cg_inner, c.body);
+                                                                ctx.scan(cg_inner, it.elseBody());
+                                                            },
+                                                            .@"try", .try_cold => ctx.scan(cg_inner, cg_inner.air.unwrapTry(sub).else_body),
+                                                            .try_ptr, .try_ptr_cold => ctx.scan(cg_inner, cg_inner.air.unwrapTryPtr(sub).else_body),
+                                                            else => {},
+                                                        }
+                                                    }
+                                                }
+                                            };
+                                            var else_uses: CountOp = .{ .target = eu_idx };
+                                            else_uses.scan(self.cg, unwrapped_try.else_body);
+                                            if (self.use_counts[@backingInt(eu_idx)] == 1 + else_uses.count and
+                                                (eu_tag == .call or eu_tag == .call_always_tail or
+                                                    eu_tag == .call_never_tail or eu_tag == .call_never_inline or
+                                                    eu_tag == .arg))
+                                            {
+                                                cand.init_store = inst;
+                                                cand.src_inst = rhs_idx;
+                                                cand.src_is_load = false;
+                                                ok = true;
+                                            }
+                                        }
+                                    } else if ((rhs_tag == .optional_payload or rhs_tag == .unwrap_errunion_payload or
+                                        rhs_tag == .agg_field_val or rhs_tag == .block or rhs_tag == .dbg_inline_block) and
+                                        self.use_counts[@backingInt(rhs_idx)] == 1 and
+                                        (alloc_escaped or rhs_escaped) and
+                                        self.seen_insts.contains(rhs_idx) and
+                                        alloc_ptr_ty.ptrAlignment(zcu).compare(.lte, rhs_ty.abiAlignment(zcu)))
+                                    {
+                                        const src_align_ok = switch (rhs_tag) {
+                                            .optional_payload, .unwrap_errunion_payload => alloc_ptr_ty.ptrAlignment(zcu).compare(
+                                                .lte,
+                                                self.cg.typeOf(datas[@backingInt(rhs_idx)].ty_op.operand).abiAlignment(zcu),
+                                            ),
+                                            .agg_field_val => blk: {
+                                                const sf = self.cg.air.extraData(Air.StructField, datas[@backingInt(rhs_idx)].ty_pl.payload).data;
+                                                const st_ty = self.cg.typeOf(sf.struct_operand);
+                                                const off = st_ty.structFieldOffset(sf.field_index, zcu);
+                                                const eff_align = if (off == 0)
+                                                    st_ty.abiAlignment(zcu)
+                                                else
+                                                    st_ty.abiAlignment(zcu).min(Alignment.fromByteUnits(@as(usize, 1) << @min(@ctz(off), 16)));
+                                                break :blk alloc_ptr_ty.ptrAlignment(zcu).compare(.lte, eff_align);
+                                            },
+                                            .block, .dbg_inline_block => true,
+                                            else => unreachable,
+                                        };
+                                        if (src_align_ok) {
+                                            cand.init_store = inst;
+                                            cand.src_inst = rhs_idx;
+                                            cand.src_is_load = false;
+                                            ok = true;
+                                        }
+                                    } else if ((rhs_tag == .load or rhs_tag == .slice_elem_val or rhs_tag == .ptr_elem_val) and
+                                        self.use_counts[@backingInt(rhs_idx)] == 1)
+                                    {
                                         if (self.seen_insts.get(rhs_idx)) |seen_load| {
                                             if (seen_load.body_ptr == body.ptr) {
                                                 const load_ptr_op = switch (rhs_tag) {
@@ -15023,8 +15581,14 @@ const ReadOnlyAllocAliasAnalysis = struct {
                                                 };
                                                 const load_ptr_ty = self.cg.typeOf(load_ptr_op);
                                                 const load_ptr_info = load_ptr_ty.ptrInfo(zcu);
+                                                const load_parent_alloc = if (load_ptr_op.toIndex()) |lp_idx|
+                                                    self.derived_to_alloc.get(lp_idx)
+                                                else
+                                                    null;
                                                 const src_escaped = if (rhs_tag == .slice_elem_val or load_ptr_ty.isSlice(zcu))
                                                     true
+                                                else if (load_parent_alloc) |pa|
+                                                    !self.candidates.get(pa).?.invalid
                                                 else if (self.sroa.getRef(load_ptr_op)) |ref|
                                                     self.sroa.roots.items[ref.root_id].escaped
                                                 else
@@ -15036,6 +15600,7 @@ const ReadOnlyAllocAliasAnalysis = struct {
                                                 {
                                                     cand.init_store = inst;
                                                     cand.src_inst = rhs_idx;
+                                                    cand.parent_alloc = load_parent_alloc;
                                                     cand.src_is_load = true;
                                                     cand.src_load_body_idx = seen_load.body_idx;
                                                     cand.last_use_body_idx = body_idx;
@@ -15046,8 +15611,10 @@ const ReadOnlyAllocAliasAnalysis = struct {
                                     }
                                 }
                             }
-                            if (!ok) cand.invalid = true;
-                            self.invalidateOp(bin_op.rhs);
+                            if (!ok) {
+                                cand.invalid = true;
+                                self.invalidateOp(bin_op.rhs);
+                            }
                             continue;
                         }
                     }
@@ -15087,6 +15654,19 @@ const ReadOnlyAllocAliasAnalysis = struct {
                         if (active_idx > cand.last_use_body_idx) {
                             cand.last_use_body_idx = active_idx;
                         }
+                        var pa_opt = cand.parent_alloc;
+                        while (pa_opt) |pa| {
+                            const pa_cand = self.candidates.getPtr(pa).?;
+                            if (pa_cand.active_body_idx) |pa_idx| {
+                                if (pa_idx > pa_cand.last_use_body_idx) {
+                                    pa_cand.last_use_body_idx = pa_idx;
+                                }
+                            }
+                            pa_opt = pa_cand.parent_alloc;
+                        }
+                        const op_ty = self.cg.typeOf(op);
+                        const op_is_ptr = op == alloc_inst.toRef() or
+                            (op_ty.zigTypeTag(zcu) == .pointer and !op_ty.isSlice(zcu));
                         var derived_ok = false;
                         var read_ok = false;
                         switch (tag) {
@@ -15126,7 +15706,7 @@ const ReadOnlyAllocAliasAnalysis = struct {
                             .load => {
                                 const res_ty = self.cg.typeOfIndex(inst);
                                 if (data.ty_op.operand == op and !self.cg.typeOf(op).isVolatilePtr(zcu)) {
-                                    if (!cand.src_is_load or !isByRef(res_ty, zcu, self.cg.target)) {
+                                    if (!isByRef(res_ty, zcu, self.cg.target)) {
                                         read_ok = true;
                                     } else {
                                         derived_ok = true;
@@ -15138,7 +15718,7 @@ const ReadOnlyAllocAliasAnalysis = struct {
                                 if (data.bin_op.lhs == op and !self.cg.typeOf(op).isVolatilePtr(zcu) and
                                     !self.cg.typeOf(op).isSlice(zcu))
                                 {
-                                    if (!cand.src_is_load or !isByRef(res_ty, zcu, self.cg.target)) {
+                                    if (!isByRef(res_ty, zcu, self.cg.target)) {
                                         read_ok = true;
                                     } else {
                                         derived_ok = true;
@@ -15183,9 +15763,103 @@ const ReadOnlyAllocAliasAnalysis = struct {
                             .is_non_null_ptr,
                             .is_err_ptr,
                             .is_non_err_ptr,
+                            .is_null,
+                            .is_non_null,
+                            .is_err,
+                            .is_non_err,
                             .ret_load,
                             => {
                                 read_ok = data.un_op == op;
+                            },
+                            .optional_payload,
+                            .unwrap_errunion_payload,
+                            .unwrap_errunion_err,
+                            => {
+                                if (data.ty_op.operand == op) {
+                                    const res_ty = self.cg.typeOfIndex(inst);
+                                    if (res_ty.hasRuntimeBits(zcu) and isByRef(res_ty, zcu, self.cg.target)) {
+                                        derived_ok = true;
+                                    } else {
+                                        read_ok = true;
+                                    }
+                                }
+                            },
+                            .union_init => {
+                                const extra = self.cg.air.extraData(Air.UnionInit, data.ty_pl.payload).data;
+                                read_ok = !op_is_ptr and extra.init == op;
+                            },
+                            .wrap_optional,
+                            .wrap_errunion_payload,
+                            => {
+                                read_ok = !op_is_ptr and data.ty_op.operand == op;
+                            },
+                            .aggregate_init => {
+                                read_ok = !op_is_ptr;
+                            },
+                            .store,
+                            .store_safe,
+                            => {
+                                if (!op_is_ptr and data.bin_op.rhs == op and data.bin_op.lhs != op) {
+                                    if (!self.hasSrcLoad(alloc_inst)) {
+                                        read_ok = true;
+                                    } else if (self.sroa.getRef(data.bin_op.lhs)) |lhs_ref| {
+                                        const lhs_root = self.sroa.roots.items[lhs_ref.root_id];
+                                        if (lhs_ref.kind == .ptr and !lhs_root.escaped and
+                                            !self.sroa.hasSublaneOnlyVectorRead(lhs_ref.root_id))
+                                        {
+                                            read_ok = true;
+                                        }
+                                    }
+                                    if (!read_ok) {
+                                        if (baseAllocInst(self.cg, data.bin_op.lhs)) |lhs_alloc| {
+                                            if (lhs_alloc != alloc_inst) {
+                                                read_ok = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            .ret,
+                            .ret_safe,
+                            => {
+                                read_ok = !op_is_ptr and !self.hasSrcLoad(alloc_inst) and data.un_op == op;
+                            },
+                            .call,
+                            .call_always_tail,
+                            .call_never_tail,
+                            .call_never_inline,
+                            => {
+                                const call = self.cg.air.unwrapCall(inst);
+                                if (call.callee != op) {
+                                    const callee_ty = self.cg.typeOf(call.callee);
+                                    const fn_ty: ?Type = switch (callee_ty.zigTypeTag(zcu)) {
+                                        .@"fn" => callee_ty,
+                                        .pointer => callee_ty.childType(zcu),
+                                        else => null,
+                                    };
+                                    if (fn_ty) |ft| {
+                                        if (zcu.typeToFunc(ft)) |fn_info| {
+                                            if (fn_info.cc == .auto) {
+                                                const is_scalar_arg = !op_is_ptr and
+                                                    classifyAutoParam(op_ty, zcu, self.cg.target) == .scalars;
+                                                const ptr_ok = !op_is_ptr or op_ty.isConstPtr(zcu);
+                                                if (ptr_ok and (is_scalar_arg or (!self.hasSrcLoad(alloc_inst) and self.hasFreshRvalueRoot(alloc_inst)))) {
+                                                    var match_count: u32 = 0;
+                                                    for (call.args, 0..) |arg, arg_i| {
+                                                        if (arg == op) {
+                                                            if (fn_info.is_var_args and arg_i >= fn_info.param_types.len) {
+                                                                match_count = 0;
+                                                                break;
+                                                            }
+                                                            match_count += 1;
+                                                        }
+                                                    }
+                                                    read_ok = match_count == 1;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             },
                             else => {},
                         }
@@ -15387,6 +16061,54 @@ fn analyzeSroa(cg: *CodeGen, main_body: []const Air.Inst.Index) InnerError!void 
 
     for (alloc_alias.candidates.values()) |cand| {
         if (cand.invalid) continue;
+        if (cand.parent_alloc) |pa| {
+            if (!cg.readonly_alloc_aliases.contains(pa)) continue;
+        }
+        const init_store = cand.init_store orelse continue;
+        const src_inst = cand.src_inst orelse continue;
+        if (analysis.getRef(src_inst.toRef())) |ref| {
+            analysis.roots.items[ref.root_id].escaped = true;
+        }
+        const src_tag = cg.air.instructions.items(.tag)[@backingInt(src_inst)];
+        switch (src_tag) {
+            .@"try", .try_cold => {
+                if (analysis.getRef(cg.air.unwrapTry(src_inst).error_union)) |ref| {
+                    analysis.roots.items[ref.root_id].escaped = true;
+                }
+            },
+            .optional_payload, .unwrap_errunion_payload => {
+                if (analysis.getRef(cg.air.instructions.items(.data)[@backingInt(src_inst)].ty_op.operand)) |ref| {
+                    analysis.roots.items[ref.root_id].escaped = true;
+                }
+            },
+            .agg_field_val => {
+                const sf = cg.air.extraData(Air.StructField, cg.air.instructions.items(.data)[@backingInt(src_inst)].ty_pl.payload).data;
+                if (analysis.getRef(sf.struct_operand)) |ref| {
+                    analysis.roots.items[ref.root_id].escaped = true;
+                }
+            },
+            else => {},
+        }
+        if (analysis.getRef(cand.alloc_inst.toRef())) |ref| {
+            analysis.roots.items[ref.root_id].escaped = true;
+        }
+        try cg.readonly_alloc_aliases.put(cg.gpa, cand.alloc_inst, src_inst.toRef());
+        try cg.elided_init_stores.put(cg.gpa, init_store, {});
+    }
+
+    changed = true;
+    while (changed) {
+        changed = false;
+        for (analysis.escape_edges.items) |edge| {
+            if (analysis.roots.items[edge.from_root].escaped and !analysis.roots.items[edge.to_root].escaped) {
+                analysis.roots.items[edge.to_root].escaped = true;
+                changed = true;
+            }
+        }
+    }
+
+    for (alloc_alias.candidates.values()) |cand| {
+        if (!cg.readonly_alloc_aliases.contains(cand.alloc_inst)) continue;
         const init_store = cand.init_store orelse continue;
         const src_inst = cand.src_inst orelse continue;
         if (cand.src_is_load) {
@@ -15398,8 +16120,9 @@ fn analyzeSroa(cg: *CodeGen, main_body: []const Air.Inst.Index) InnerError!void 
                     break;
                 }
             }
-            if (write_between) continue;
-            try cg.elided_readonly_loads.put(cg.gpa, src_inst, {});
+            if (!write_between) {
+                try cg.elided_readonly_loads.put(cg.gpa, src_inst, {});
+            }
         }
         var iter = alloc_alias.derived_to_alloc.iterator();
         while (iter.next()) |entry| {
@@ -15411,14 +16134,6 @@ fn analyzeSroa(cg: *CodeGen, main_body: []const Air.Inst.Index) InnerError!void 
                 }
             }
         }
-        if (analysis.getRef(src_inst.toRef())) |ref| {
-            analysis.roots.items[ref.root_id].escaped = true;
-        }
-        if (analysis.getRef(cand.alloc_inst.toRef())) |ref| {
-            analysis.roots.items[ref.root_id].escaped = true;
-        }
-        try cg.readonly_alloc_aliases.put(cg.gpa, cand.alloc_inst, src_inst.toRef());
-        try cg.elided_init_stores.put(cg.gpa, init_store, {});
     }
 
     for (analysis.copy_edges.items) |edge| {
@@ -15473,7 +16188,7 @@ fn analyzeSroa(cg: *CodeGen, main_body: []const Air.Inst.Index) InnerError!void 
         try cg.promoted_insts.putNoClobber(cg.gpa, root.inst, slot_idx);
     }
 
-    try scanBlockForLoadElisions(cg, &analysis, use_counts, main_body);
+    try scanBlockForLoadElisions(cg, &analysis, use_counts, main_body, null);
 }
 
 test {
