@@ -104,10 +104,12 @@ pub fn optimizeModule(allocator: std.mem.Allocator, module: *Mod.Module, options
     defer allocator.free(locals_compacted);
     @memset(locals_compacted, false);
 
+    var has_simd_cache: ?bool = null;
+
     for (module.num_func_imports..module.funcs.items.len) |i| {
         const func = &module.funcs.items[i];
         if (func.is_import or func.code_bytes.len == 0) continue;
-        if (try optimizeFuncBody(allocator, module, func, options.optimize_mode, false)) {
+        if (try optimizeFuncBody(allocator, module, func, options.optimize_mode, false, &has_simd_cache)) {
             locals_compacted[i] = true;
         }
     }
@@ -126,7 +128,7 @@ pub fn optimizeModule(allocator: std.mem.Allocator, module: *Mod.Module, options
             if (!any_inlined) break;
             for (module.num_func_imports..module.funcs.items.len) |i| {
                 if (modified_funcs[i]) {
-                    if (try optimizeFuncBody(allocator, module, &module.funcs.items[i], options.optimize_mode, true)) {
+                    if (try optimizeFuncBody(allocator, module, &module.funcs.items[i], options.optimize_mode, true, &has_simd_cache)) {
                         locals_compacted[i] = true;
                     }
                 }
@@ -776,6 +778,7 @@ fn optimizeFuncBody(
     func: *Mod.Func,
     optimize_mode: OptimizeMode,
     is_post_inline: bool,
+    has_simd_cache: *?bool,
 ) Error!bool {
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
@@ -787,6 +790,7 @@ fn optimizeFuncBody(
     if (end_kind != .end or pos != func.code_bytes.len) return error.InvalidInput;
 
     var had_offset_fold = false;
+    var coalesced_once = false;
     for (0..max_pass_rounds) |_| {
         var changed = false;
         if (eliminateLeafStackCopy(&root_list)) changed = true;
@@ -802,8 +806,13 @@ fn optimizeFuncBody(
         if (try hoistLoopInvariantCode(arena, module, func, &root_list, optimize_mode)) changed = true;
         if (try simplifyControlFlow(arena, &root_list)) changed = true;
         if (eliminateDeadCode(&root_list)) changed = true;
-        if (!changed) {
-            if (try coalesceConstantStores(arena, module, &root_list, is_post_inline)) continue;
+        if (changed) {
+            coalesced_once = false;
+        } else {
+            if (!coalesced_once) {
+                coalesced_once = true;
+                if (try coalesceConstantStores(arena, module, &root_list, is_post_inline, has_simd_cache)) continue;
+            }
             break;
         }
     }
@@ -4512,6 +4521,7 @@ fn coalesceConstantStores(
     module: *const Mod.Module,
     root_list: *InstrList,
     is_post_inline: bool,
+    has_simd_cache: *?bool,
 ) Error!bool {
     var skip_local: ?u32 = null;
     if (!is_post_inline) {
@@ -4521,8 +4531,7 @@ fn coalesceConstantStores(
             }
         }
     }
-    var has_simd_cache: ?bool = null;
-    return coalesceConstantStoresInBlock(arena, root_list, module, &has_simd_cache, skip_local);
+    return coalesceConstantStoresInBlock(arena, root_list, module, has_simd_cache, skip_local);
 }
 
 const LoopStoreInfo = struct {
@@ -12816,6 +12825,96 @@ test "Optimizer: contiguous constant scalar store coalescing and trailing self-o
             if (inst == .numeric_op and inst.numeric_op == 0x6a) i32_adds += 1;
         }
         try testing.expectEqual(@as(usize, 1), i32_adds);
+    }
+
+    // 3. Non-SIMD module with multiple functions containing >= 16B contiguous constant stores and `0xfd`
+    //    immediate bytes (`i32.const 125` encoded as `0x41, 0xfd, 0x00`): coalesces into `2 x i64.store`
+    //    (0 `v128.store`s) in all functions while reusing `has_simd_cache` (`has_simd_cache.* == false`):
+    {
+        var mod = Mod.Module.init(allocator);
+        defer mod.deinit();
+
+        try mod.memories.append(allocator, .{ .type = .{ .limits = .{ .initial = 1 } } });
+        try mod.module_types.append(allocator, .{ .func_type = .{
+            .params = try allocator.dupe(types.ValType, &.{.i32}),
+            .results = &.{},
+        } });
+        try mod.type_meta.append(allocator, .{});
+
+        // 4 contiguous i32 stores (16 bytes total) with `0xfd` in the `i32.const 125` LEB128 immediate:
+        const non_simd_store_code = [_]u8{
+            0x20, 0x00, // local.get 0
+            0x41, 0xfd, 0x00, // i32.const 125 (contains 0xfd immediate byte)
+            0x36, 0x02, 0x00, // i32.store align=2 offset=0
+            0x20, 0x00, // local.get 0
+            0x41, 0xfd, 0x00, // i32.const 125
+            0x36, 0x02, 0x04, // i32.store align=2 offset=4
+            0x20, 0x00, // local.get 0
+            0x41, 0xfd, 0x00, // i32.const 125
+            0x36, 0x02, 0x08, // i32.store align=2 offset=8
+            0x20, 0x00, // local.get 0
+            0x41, 0xfd, 0x00, // i32.const 125
+            0x36, 0x02, 0x0c, // i32.store align=2 offset=12
+            0x0b, // end
+        };
+
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &non_simd_store_code });
+        try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &non_simd_store_code });
+        try mod.exports.append(allocator, .{ .name = "fill_a", .kind = .func, .var_ = .{ .index = 0 } });
+        try mod.exports.append(allocator, .{ .name = "fill_b", .kind = .func, .var_ = .{ .index = 1 } });
+
+        const wasm = try writer.writeModule(allocator, &mod);
+        defer allocator.free(wasm);
+
+        var has_simd_cache: ?bool = null;
+        _ = try optimizeFuncBody(allocator, &mod, &mod.funcs.items[0], .fast, false, &has_simd_cache);
+        try testing.expectEqual(@as(?bool, false), has_simd_cache);
+        // Verify `has_simd_cache` is reused directly without rescanning `mod`:
+        has_simd_cache = true;
+        _ = try optimizeFuncBody(allocator, &mod, &mod.funcs.items[1], .fast, false, &has_simd_cache);
+        try testing.expectEqual(@as(?bool, true), has_simd_cache);
+        {
+            var arena_state = std.heap.ArenaAllocator.init(allocator);
+            defer arena_state.deinit();
+            var parse_pos: usize = 0;
+            var parsed: InstrList = .empty;
+            _ = try parseInstrBlock(arena_state.allocator(), mod.funcs.items[1].code_bytes, &parse_pos, false, &parsed);
+            var cached_v128_stores: usize = 0;
+            for (parsed.items) |inst| {
+                if (decodeStoreAccess(inst)) |acc| {
+                    if (acc.opcode == 0xfd and acc.simd_sub == 0x0b) cached_v128_stores += 1;
+                }
+            }
+            try testing.expectEqual(@as(usize, 1), cached_v128_stores);
+        }
+
+        const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+        defer allocator.free(opt);
+        var opt_mod = try reader.readModule(allocator, opt);
+        defer opt_mod.deinit();
+
+        try testing.expectEqual(@as(usize, 2), opt_mod.funcs.items.len);
+        for (opt_mod.funcs.items) |f| {
+            var arena_state = std.heap.ArenaAllocator.init(allocator);
+            defer arena_state.deinit();
+            var parse_pos: usize = 0;
+            var parsed: InstrList = .empty;
+            _ = try parseInstrBlock(arena_state.allocator(), f.code_bytes, &parse_pos, false, &parsed);
+
+            var v128_stores: usize = 0;
+            var i64_stores: usize = 0;
+            var i32_stores: usize = 0;
+            for (parsed.items) |inst| {
+                if (decodeStoreAccess(inst)) |acc| {
+                    if (acc.opcode == 0xfd and acc.simd_sub == 0x0b) v128_stores += 1;
+                    if (acc.opcode == 0x37) i64_stores += 1;
+                    if (acc.opcode == 0x36) i32_stores += 1;
+                }
+            }
+            try testing.expectEqual(@as(usize, 0), v128_stores);
+            try testing.expectEqual(@as(usize, 2), i64_stores);
+            try testing.expectEqual(@as(usize, 0), i32_stores);
+        }
     }
 }
 
