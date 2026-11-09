@@ -1894,3 +1894,323 @@ test "wasm single-exit block elision, unreachable branch elision, undef memset, 
     try expect(!S.bitcastU100ToI100IsNegative(@as(u100, 1) << 98));
 }
 
+test "3-scalar and 4-scalar multivalue auto returns and contiguous constant store coalescing" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.cpu.arch != .wasm32) return error.SkipZigTest;
+
+    const S = struct {
+        const Error = error{Invalid};
+
+        const Mixed3 = struct {
+            a: u32,
+            b: u64,
+            c: f32,
+        };
+
+        const QuadF32 = struct {
+            x: f32,
+            y: f32,
+            z: f32,
+            w: f32,
+        };
+
+        const Mixed4 = struct {
+            a: u16,
+            b: u16,
+            c: f32,
+            d: f64,
+        };
+
+        const SlugLike = extern struct {
+            p0: [4]f32 = .{ 1.0, 2.0, 3.0, 4.0 },
+            dyn: f32 = 0.0,
+            tail_a: f32 = 5.0,
+            clip_node: u32 = 99,
+        };
+
+        fn readSp() u32 {
+            return asm (
+                \\ .globaltype __stack_pointer, i32
+                \\ global.get __stack_pointer
+                \\ local.set %[ret]
+                : [ret] "=r" (-> u32),
+            );
+        }
+
+        noinline fn makeMixed3(x: u32, early: bool) Mixed3 {
+            if (early) return .{ .a = x + 1, .b = @as(u64, x) * 10, .c = 1.5 };
+            var m: Mixed3 = .{ .a = x * 2, .b = @as(u64, x) + 100, .c = @as(f32, @floatFromInt(x)) + 0.25 };
+            m.a += 3;
+            return m;
+        }
+
+        noinline fn lerpQuad(a: QuadF32, b: QuadF32, t: f32) QuadF32 {
+            if (t <= 0.0) return a;
+            if (t >= 1.0) return b;
+            return .{
+                .x = a.x + (b.x - a.x) * t,
+                .y = a.y + (b.y - a.y) * t,
+                .z = a.z + (b.z - a.z) * t,
+                .w = a.w + (b.w - a.w) * t,
+            };
+        }
+
+        noinline fn makeMixed4(seed: u16) Mixed4 {
+            return .{
+                .a = seed + 1,
+                .b = seed * 3,
+                .c = @as(f32, @floatFromInt(seed)) * 0.5,
+                .d = @as(f64, @floatFromInt(seed)) * 2.25,
+            };
+        }
+
+        noinline fn makeU16Triple(x: u16) [3]u16 {
+            return .{ x, x + 10, x + 20 };
+        }
+
+        noinline fn makeErrorSlice(s: []const u8, fail: bool) Error![]const u8 {
+            if (fail) return error.Invalid;
+            return s[1..];
+        }
+
+        noinline fn makeOptPair(x: u32, present: bool) ?struct { u32, f32 } {
+            if (!present) return null;
+            return .{ x + 7, @as(f32, @floatFromInt(x)) * 1.5 };
+        }
+
+        noinline fn inspectEscapedQuad(q: *const QuadF32) f32 {
+            return q.x + q.y * 2.0 + q.z * 3.0 + q.w * 4.0;
+        }
+
+        noinline fn writeSlugEntry(out: []SlugLike, idx: usize, dyn: f32, clip: u32) void {
+            var inst: SlugLike = .{ .dyn = dyn };
+            out[idx] = inst;
+            out[idx].clip_node = clip;
+            _ = &inst;
+        }
+    };
+
+    const sp_before = S.readSp();
+
+    const m3_early = S.makeMixed3(5, true);
+    try expect(m3_early.a == 6 and m3_early.b == 50 and m3_early.c == 1.5);
+    const m3_late = S.makeMixed3(5, false);
+    try expect(m3_late.a == 13 and m3_late.b == 105 and m3_late.c == 5.25);
+
+    const q = S.lerpQuad(
+        .{ .x = 1.0, .y = 2.0, .z = 3.0, .w = 4.0 },
+        .{ .x = 5.0, .y = 10.0, .z = 15.0, .w = 20.0 },
+        0.5,
+    );
+    try expect(q.x == 3.0 and q.y == 6.0 and q.z == 9.0 and q.w == 12.0);
+
+    // Function pointer call returning 4 scalars
+    var fn_ptr: *const fn (S.QuadF32, S.QuadF32, f32) S.QuadF32 = &S.lerpQuad;
+    _ = &fn_ptr;
+    const q_indirect = fn_ptr(q, .{ .x = 0, .y = 0, .z = 0, .w = 0 }, 0.0);
+    try expect(q_indirect.x == 3.0 and q_indirect.w == 12.0);
+
+    // Escaped destination in memory for 4-scalar return
+    const q_escaped = S.lerpQuad(
+        .{ .x = 2.0, .y = 4.0, .z = 6.0, .w = 8.0 },
+        .{ .x = 6.0, .y = 8.0, .z = 10.0, .w = 12.0 },
+        0.5,
+    );
+    try expect(S.inspectEscapedQuad(&q_escaped) == 4.0 + 12.0 + 24.0 + 40.0);
+
+    const m4 = S.makeMixed4(4);
+    try expect(m4.a == 5 and m4.b == 12 and m4.c == 2.0 and m4.d == 9.0);
+
+    const u16s = S.makeU16Triple(7);
+    try expect(u16s[0] == 7 and u16s[1] == 17 and u16s[2] == 27);
+
+    const ok_slice = try S.makeErrorSlice("hello", false);
+    try std.testing.expectEqualStrings("ello", ok_slice);
+    try std.testing.expectError(error.Invalid, S.makeErrorSlice("hello", true));
+
+    const opt_some = S.makeOptPair(4, true) orelse return error.TestUnexpectedResult;
+    try expect(opt_some[0] == 11 and opt_some[1] == 6.0);
+    try expect(S.makeOptPair(4, false) == null);
+
+    var slugs: [2]S.SlugLike = undefined;
+    S.writeSlugEntry(&slugs, 0, 12.5, 42);
+    S.writeSlugEntry(&slugs, 1, -3.25, 7);
+    try expect(slugs[0].p0[0] == 1.0 and slugs[0].p0[3] == 4.0);
+    try expect(slugs[0].dyn == 12.5 and slugs[0].tail_a == 5.0 and slugs[0].clip_node == 42);
+    try expect(slugs[1].dyn == -3.25 and slugs[1].tail_a == 5.0 and slugs[1].clip_node == 7);
+
+    const sp_after = S.readSp();
+    try expect(sp_before == sp_after);
+}
+
+test "optional/union copy elision, rvalue method calls, and try read-only alloc aliasing" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+
+    const S = struct {
+        const Error = error{Fail};
+
+        const Payload = struct {
+            vals: [8]u32,
+
+            noinline fn sumWith(self: Payload, bias: u32) u32 {
+                var acc: u32 = bias;
+                for (self.vals) |v| acc += v;
+                return acc;
+            }
+        };
+
+        const CmdPayload = union(enum) {
+            range: struct { offset: u32, count: u32 },
+            heavy: Payload,
+            tag_only: u32,
+        };
+
+        const Cmd = struct {
+            id: u32,
+            payload: CmdPayload,
+        };
+
+        const Packet = struct {
+            cmds: []const Cmd,
+            bias: u32,
+            extra: [6]u32,
+
+            fn commands(self: *const Packet) []const Cmd {
+                return self.cmds;
+            }
+        };
+
+        noinline fn buildPacket(cmds: []const Cmd, bias: u32, fail: bool) Error!Packet {
+            if (fail) return error.Fail;
+            return .{
+                .cmds = cmds,
+                .bias = bias,
+                .extra = .{ 1, 2, 3, 4, 5, 6 },
+            };
+        }
+
+        noinline fn cascadeOptional(a: *const ?Payload, b: *const ?Payload) ?Payload {
+            return if (a.*) |v| v else b.*;
+        }
+
+        noinline fn processPacket(cmds: []const Cmd, opt_a: *const ?Payload, opt_b: *const ?Payload, fail: bool) Error!u32 {
+            const pkt = try buildPacket(cmds, 10, fail);
+            var total: u32 = pkt.bias + pkt.extra[5];
+            if (cascadeOptional(opt_a, opt_b)) |p| {
+                total += p.sumWith(3);
+            }
+            for (pkt.commands()) |cmd| {
+                switch (cmd.payload) {
+                    .range => |r| total += r.offset + r.count,
+                    .heavy => |h| total += h.sumWith(cmd.id),
+                    .tag_only => |t| total += t,
+                }
+            }
+            return total;
+        }
+    };
+
+    const cmds = [_]S.Cmd{
+        .{ .id = 2, .payload = .{ .range = .{ .offset = 10, .count = 5 } } },
+        .{ .id = 4, .payload = .{ .heavy = .{ .vals = .{ 1, 2, 3, 4, 5, 6, 7, 8 } } } },
+        .{ .id = 6, .payload = .{ .tag_only = 9 } },
+    };
+    var opt_none: ?S.Payload = null;
+    var opt_some: ?S.Payload = .{ .vals = .{ 10, 20, 30, 40, 50, 60, 70, 80 } };
+    _ = &opt_none;
+    _ = &opt_some;
+
+    const total = try S.processPacket(&cmds, &opt_none, &opt_some, false);
+    // 10 + 6 + (360 + 3) + 15 + (36 + 4) + 9 = 443
+    try expect(total == 443);
+    try std.testing.expectError(error.Fail, S.processPacket(&cmds, &opt_none, &opt_some, true));
+
+    const AliasSafety = struct {
+        const Big = struct { a: u64, b: u64, c: u64, d: u64, e: u64, f: [3]u32 };
+        const U = union(enum) { big: Big, small: u8 };
+        var escaped_ptr: *Big = undefined;
+        var dyn_idx: usize = 1;
+
+        noinline fn escape(p: *Big) void {
+            escaped_ptr = p;
+        }
+
+        noinline fn mutateEscapedAndReadByValue(v: Big) u64 {
+            escaped_ptr.f[1] = 77;
+            escaped_ptr.a = 7;
+            const copy = v;
+            return v.f[dyn_idx] + copy.a * 1000;
+        }
+
+        noinline fn passEscapedLocalByValue(x: u64) u64 {
+            var a: Big = .{ .a = x, .b = x, .c = x, .d = x, .e = x, .f = .{ 1, 2, 3 } };
+            escape(&a);
+            const v = a;
+            return mutateEscapedAndReadByValue(v);
+        }
+
+        noinline fn passPtrTargetByValue(p: *const Big) u64 {
+            const v = p.*;
+            return mutateEscapedAndReadByValue(v);
+        }
+
+        noinline fn consumeUnionAndMutateSource(u: U, p: *Big) u64 {
+            p.a = 99;
+            return u.big.a;
+        }
+
+        noinline fn wrapEscapedLocalInUnion(x: u64) u64 {
+            var a: Big = .{ .a = x, .b = x, .c = x, .d = x, .e = x, .f = .{ 1, 2, 3 } };
+            escape(&a);
+            return consumeUnionAndMutateSource(.{ .big = a }, &a);
+        }
+
+        noinline fn mutatePtr(p: *Big) void {
+            p.a = 99;
+        }
+
+        noinline fn copyAndMutateArg(v: Big) u64 {
+            var x = v;
+            mutatePtr(&x);
+            return x.a;
+        }
+
+        noinline fn readArgA(v: Big) u64 {
+            return v.a;
+        }
+
+        noinline fn copyViaSelectedFramePtr(cond: bool, idx: usize, o: *const Big) u64 {
+            var b: Big = undefined;
+            var a: Big = .{ .a = 1, .b = 2, .c = 3, .d = 4, .e = 5, .f = .{ 10, 11, 12 } };
+            var c: Big = .{ .a = 6, .b = 7, .c = 8, .d = 9, .e = 10, .f = .{ 20, 21, 22 } };
+            a.f[idx] +%= @intCast(idx);
+            c.f[idx] +%= @intCast(idx);
+            const p: *const Big = if (cond) &a else &c;
+            b = p.*;
+            a = o.*;
+            c = o.*;
+            return b.a * 1000 + b.f[idx] + a.f[idx] + c.f[idx];
+        }
+    };
+
+    try expect(AliasSafety.passEscapedLocalByValue(42) == 42002);
+    var b_esc: AliasSafety.Big = .{ .a = 5, .b = 5, .c = 5, .d = 5, .e = 5, .f = .{ 1, 2, 3 } };
+    AliasSafety.escaped_ptr = &b_esc;
+    try expect(AliasSafety.passPtrTargetByValue(&b_esc) == 5002);
+    try expect(AliasSafety.wrapEscapedLocalInUnion(42) == 42);
+
+    const const_big: AliasSafety.Big = .{ .a = 42, .b = 5, .c = 5, .d = 5, .e = 5, .f = .{ 1, 2, 3 } };
+    try expect(AliasSafety.copyAndMutateArg(const_big) == 99);
+    try expect(AliasSafety.readArgA(const_big) == 42);
+    var local_big: AliasSafety.Big = const_big;
+    local_big.b = 6;
+    try expect(AliasSafety.copyAndMutateArg(local_big) == 99);
+    try expect(AliasSafety.readArgA(local_big) == 42);
+
+    const overwrite_big: AliasSafety.Big = .{ .a = 100, .b = 100, .c = 100, .d = 100, .e = 100, .f = .{ 500, 500, 500 } };
+    try expect(AliasSafety.copyViaSelectedFramePtr(true, 1, &overwrite_big) == 2012);
+    try expect(AliasSafety.copyViaSelectedFramePtr(false, 1, &overwrite_big) == 7022);
+}
+
+
+
