@@ -13,7 +13,6 @@ const link = @import("link.zig");
 // Implementations
 pub const ErrorTracesContext = @import("src/ErrorTrace.zig");
 pub const StackTracesContext = @import("src/StackTrace.zig");
-pub const DebuggerContext = @import("src/Debugger.zig");
 pub const LlvmIrContext = @import("src/LlvmIr.zig");
 pub const LibcContext = @import("src/Libc.zig");
 pub const LinkContext = @import("src/Link.zig");
@@ -2207,17 +2206,20 @@ const link_targets = blk: {
     };
 };
 
-const IncrementalTarget = struct {
-    target: std.Target.Query,
-    backend: enum { selfhosted, llvm, cbe },
-};
-
-/// These are passed to `incr-check` as `<target>-<backend>` strings.
+/// These are passed to `src/Runner.zig` as `<target>-<cache_mode>-<backend>-<linker>-<pic>` strings.
 ///
 /// If only one specific test is failing on a target, instead of entirely disabling the target here, you
 /// can skip the target for that specific test only by adding a line like this to top of the manifest:
 ///   #skip x86_64-linux-selfhosted
-const incremental_targets = &[_]IncrementalTarget{
+const RunnerTarget = struct {
+    target: std.Target.Query,
+    cache_mode: enum { whole, incremental },
+    backend: enum { selfhosted, llvm, cbe },
+    linker: enum { lld, old, new },
+    pic: enum { nopic, pic, pie },
+};
+
+pub const incremental_matrix: []const RunnerTarget = &.{
     // Avoid adding more CBE or LLVM targets without good reason: they're a lot slower than others
     // to run due to the output (C source code or LLVM IR) being built non-incrementally (by Clang
     // or LLVM). We just have a couple here to make sure that it works.
@@ -2225,49 +2227,71 @@ const incremental_targets = &[_]IncrementalTarget{
         .target = .{
             .cpu_arch = .x86_64,
             .os_tag = .linux,
+            .abi = .musl,
         },
+        .cache_mode = .incremental,
         .backend = .cbe,
+        .linker = .old,
+        .pic = .nopic,
     },
     .{
         .target = .{
             .cpu_arch = .x86_64,
             .os_tag = .linux,
+            .abi = .none,
         },
+        .cache_mode = .incremental,
         .backend = .llvm,
+        .linker = .lld,
+        .pic = .nopic,
     },
 
     .{
         .target = .{
             .cpu_arch = .x86_64,
             .os_tag = .linux,
+            .abi = .none,
         },
+        .cache_mode = .incremental,
         .backend = .selfhosted,
+        .linker = .new,
+        .pic = .nopic,
     },
     .{
         .target = .{
             .cpu_arch = .x86_64,
             .os_tag = .windows,
+            .abi = .none,
         },
+        .cache_mode = .incremental,
         .backend = .selfhosted,
+        .linker = .old,
+        .pic = .pic,
     },
     .{
         .target = .{
             .cpu_arch = .wasm32,
             .os_tag = .wasi,
+            .abi = .none,
         },
+        .cache_mode = .incremental,
         .backend = .selfhosted,
+        .linker = .old,
+        .pic = .nopic,
     },
 };
 
-const debugger_matrix: []const DebuggerContext.TestTarget = &.{
+pub const debugger_matrix: []const RunnerTarget = &.{
     .{
         .target = .{
             .cpu_arch = .x86_64,
             .os_tag = .linux,
             .abi = .none,
         },
-        .pic = false,
+        .cache_mode = .whole,
+        .backend = .selfhosted,
         .linker = .old,
+        .pic = .nopic,
     },
     .{
         .target = .{
@@ -2275,8 +2299,10 @@ const debugger_matrix: []const DebuggerContext.TestTarget = &.{
             .os_tag = .linux,
             .abi = .none,
         },
-        .pic = true,
+        .cache_mode = .whole,
+        .backend = .selfhosted,
         .linker = .old,
+        .pic = .pic,
     },
     .{
         .target = .{
@@ -2284,8 +2310,10 @@ const debugger_matrix: []const DebuggerContext.TestTarget = &.{
             .os_tag = .linux,
             .abi = .none,
         },
-        .pic = false,
+        .cache_mode = .whole,
+        .backend = .selfhosted,
         .linker = .new,
+        .pic = .nopic,
     },
     .{
         .target = .{
@@ -2293,43 +2321,68 @@ const debugger_matrix: []const DebuggerContext.TestTarget = &.{
             .os_tag = .linux,
             .abi = .none,
         },
-        .pic = true,
+        .cache_mode = .whole,
+        .backend = .selfhosted,
         .linker = .new,
+        .pic = .pic,
+    },
+    .{
+        .target = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .linux,
+            .abi = .none,
+        },
+        .cache_mode = .incremental,
+        .backend = .selfhosted,
+        .linker = .new,
+        .pic = .nopic,
+    },
+    .{
+        .target = .{
+            .cpu_arch = .x86_64,
+            .os_tag = .linux,
+            .abi = .none,
+        },
+        .cache_mode = .incremental,
+        .backend = .selfhosted,
+        .linker = .new,
+        .pic = .pic,
     },
 };
 
-fn compatible32bitArch(host: *const std.Target) ?std.Target.Cpu.Arch {
+fn supportedCompatArch(host: *const std.Target, arch: std.Target.Cpu.Arch) bool {
+    // aarch64-freebsd and aarch64-linux can technically run 32-bit ARM binaries, but that depends
+    // on AArch32 support in the CPU. Since modern AArch64 CPUs have largely dropped this support,
+    // avoid reporting compatibility for 32-bit here since we'd just build a bunch of test binaries
+    // that never get run anyway. This added almost an hour's worth of useless work to aarch64-linux
+    // CI, for example.
+    //
+    // riscv64-linux and riscv64-netbsd similarly support 32-bit binaries. However, this requires a
+    // very recent kernel and for the kernel feature to be enabled. Additionally, contemporary
+    // RISC-V hardware is just too slow to justify building the 32-bit binaries.
     return switch (host.os.tag) {
-        .freebsd => switch (host.cpu.arch) {
-            .aarch64 => .arm,
-            .powerpc64 => .powerpc,
-            else => null,
-        },
         .illumos => switch (host.cpu.arch) {
-            .x86_64 => .x86,
-            else => null,
+            .x86_64 => arch == .x86,
+            else => false,
         },
         .linux => switch (host.cpu.arch) {
-            .aarch64 => .arm,
-            .aarch64_be => .armeb,
-            .mips64 => .mips,
-            .mips64el => .mipsel,
-            .powerpc64 => .powerpc,
-            .sparc64 => .sparc,
-            .x86_64 => .x86,
-            else => null,
+            .mips64 => arch == .mips,
+            .mips64el => arch == .mipsel,
+            .powerpc64 => arch == .powerpc,
+            .sparc64 => arch == .sparc,
+            .x86_64 => arch == .x86,
+            else => false,
         },
         .netbsd => switch (host.cpu.arch) {
-            .riscv64 => .riscv32,
-            .sparc64 => .sparc,
-            .x86_64 => .x86,
-            else => null,
+            .sparc64 => arch == .sparc,
+            .x86_64 => arch == .x86,
+            else => false,
         },
         .windows => switch (host.cpu.arch) {
-            .x86_64 => .x86,
-            else => null,
+            .x86_64 => arch == .x86,
+            else => false,
         },
-        else => null,
+        else => false,
     };
 }
 
@@ -2337,14 +2390,21 @@ pub fn isNative(actual_target: *const std.Build.ResolvedTarget, host: *const std
     if (actual_target.query.isNative()) return true;
     const actual = &actual_target.result;
 
-    if (actual.cpu.arch != host.cpu.arch and
-        actual.cpu.arch != compatible32bitArch(host))
-    {
+    if (actual.cpu.arch != host.cpu.arch and !supportedCompatArch(host, actual.cpu.arch))
         return false;
-    }
 
     if (actual.os.tag != host.os.tag)
         return false;
+
+    // This check is really only necessary for the case where `host.cpu.arch.isAarch64()` and
+    // `actual.cpu.arch.isArm()`. As they are wholly separate `std.Target` families with their own
+    // feature bits, the logic below would produce complete nonsense.
+    //
+    // This does mean that we aren't actually checking feature compatibility between these two
+    // families even though we should. That's not a problem currently, but in the future, we may
+    // need to add a special code path just for this specific case...
+    if (actual.cpu.arch.family() != host.cpu.arch.family())
+        return true;
 
     // Remove features that don't actually affect compatibility.
     const irrelevant: std.Target.Cpu.Feature.Set = switch (host.cpu.arch) {
@@ -2719,6 +2779,51 @@ pub fn addCliTests(b: *std.Build) *Step {
         step.dependOn(&run_test.step);
     }
 
+    {
+        // Test (cross-)compiling for Linux using `-l` syntax. The build system only uses `-l` for
+        // system libraries (and therefore only for native builds), but it is possible and legal to
+        // use it when cross-compiling.
+        const tmp_path = b.tmpPath();
+
+        const build_libfoo = b.addSystemCommand(&.{
+            b.graph.zig_exe,
+            "build-lib",
+            "-target",
+            "x86_64-linux",
+            "-dynamic",
+        });
+        const libfoo = build_libfoo.addOutputFileArg2("libfoo.so", .{ .prefix = "-femit-bin=" });
+
+        build_libfoo.setCwd(tmp_path);
+        build_libfoo.setName("zig build-lib libfoo.so");
+        build_libfoo.expectStdOutEqual("");
+        build_libfoo.expectStdErrEqual("");
+
+        const build_libbar = b.addSystemCommand(&.{
+            b.graph.zig_exe,
+            "build-lib",
+            "-target",
+            "x86_64-linux",
+            "-dynamic",
+        });
+        build_libbar.addDirectoryArg2(libfoo.dirname(), .{ .prefix = "-L" });
+        build_libbar.addArg("-lfoo");
+        const libbar = build_libbar.addOutputFileArg2("libbar.so", .{ .prefix = "-femit-bin=" });
+
+        build_libbar.setCwd(tmp_path);
+        build_libbar.setName("zig build-lib libbar.so");
+        build_libbar.expectStdOutEqual("");
+        build_libbar.expectStdErrEqual("");
+
+        // We mainly just want to make sure the build commands complete successfully, but we may as
+        // well double-check that the output is a valid ELF file.
+        const check_libbar = b.addCheckFile(libbar, .{
+            .expected_matches = &.{"\x7fELF"},
+        });
+
+        step.dependOn(&check_libbar.step);
+    }
+
     return step;
 }
 
@@ -2855,15 +2960,6 @@ fn addOneModuleTest(
     const libc_suffix = if (test_target.link_libc == true) "-libc" else "";
     const model_txt = target.cpu.model.name;
 
-    // These emulated targets need a lot more RAM for unknown reasons.
-    const max_rss = if (mem.eql(u8, options.name, "std") and
-        (target.cpu.arch == .hexagon or
-            (target.cpu.arch.isRISCV() and !resolved_target.query.isNative()) or
-            target.cpu.arch.isWasm()))
-        options.max_rss * 2
-    else
-        options.max_rss;
-
     const these_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path(options.root_src),
@@ -2875,7 +2971,7 @@ fn addOneModuleTest(
             .sanitize_thread = options.sanitize_thread,
             .single_threaded = test_target.single_threaded,
         }),
-        .max_rss = max_rss,
+        .max_rss = options.max_rss,
         .filters = options.test_filters,
         .use_llvm = test_target.use_llvm,
         .use_lld = test_target.use_lld,
@@ -3311,24 +3407,7 @@ pub fn addCases(
     );
 }
 
-pub fn addDebuggerTests(b: *std.Build, options: DebuggerContext.Options) ?*Step {
-    const step = b.step("test-debugger", "Run the debugger tests");
-    if (options.gdb == null and options.lldb == null) {
-        step.dependOn(&b.addFail("test-debugger requires -Dgdb and/or -Dlldb").step);
-        return null;
-    }
-
-    var context: DebuggerContext = .{
-        .b = b,
-        .options = options,
-        .root_step = step,
-        .test_matrix = debugger_matrix,
-    };
-    context.addTests();
-    return step;
-}
-
-const IncrementalTestOptions = struct {
+pub const RunnerOptions = struct {
     test_filters: []const []const u8,
     test_target_filters: []const []const u8,
     skip_non_native: bool,
@@ -3340,19 +3419,22 @@ const IncrementalTestOptions = struct {
     skip_darwin: bool,
     skip_linux: bool,
     skip_llvm: bool,
+    gdb: ?[]const u8,
+    lldb: ?[]const u8,
 };
 
-pub fn addIncrementalTests(
+pub fn addRunnerTests(
     b: *std.Build,
     runner: *std.Build.Step.Compile,
-    options: IncrementalTestOptions,
-) !*Step {
-    const tests_step = b.step("test-incremental", "Run the new incremental compilation test cases");
-
-    const tests_path = b.path("test/incremental");
+    tests_step: *Step,
+    tests: []const u8,
+    matrix: []const RunnerTarget,
+    options: RunnerOptions,
+) !void {
+    const tests_path = b.path(tests);
     b.dependOnDirectoryContents(tests_path);
 
-    var tests_dir = try b.root.openDir(b.graph.io, "test/incremental", .{ .iterate = true });
+    var tests_dir = try b.root.openDir(b.graph.io, tests, .{ .iterate = true });
     defer tests_dir.close(b.graph.io);
     var test_it = tests_dir.iterate();
     while (try test_it.next(b.graph.io)) |@"test"| {
@@ -3380,7 +3462,7 @@ pub fn addIncrementalTests(
         run.addPrefixedDirectoryArg("--lib=", .zig_lib);
         _ = run.addPrefixedOutputDirectoryArg("--src=", "src");
 
-        for (incremental_targets) |test_target| {
+        for (matrix) |test_target| {
             const resolved_target = b.resolveTargetQuery(test_target.target);
 
             if (options.skip_non_native and !isNative(&resolved_target, &b.graph.host.result))
@@ -3399,9 +3481,12 @@ pub fn addIncrementalTests(
 
             if (options.skip_llvm and test_target.backend == .llvm) continue;
 
-            const target_str = b.fmt("{s}-incremental-{t}", .{
+            const target_str = b.fmt("{s}-{t}-{t}-{t}-{t}", .{
                 resolved_target.query.zigTriple(b.allocator) catch @panic("OOM"),
+                test_target.cache_mode,
                 test_target.backend,
+                test_target.linker,
+                test_target.pic,
             });
 
             for (options.test_target_filters) |filter| {
@@ -3418,12 +3503,13 @@ pub fn addIncrementalTests(
         run.addThirdPartyEnabledArgWasmtime(.{ .enabled = "-fwasmtime" });
         run.addThirdPartyEnabledArgWine(.{ .enabled = "-fwine" });
 
+        if (options.gdb) |gdb| run.addPrefixedFileArg("--gdb=", b.graph.cwdRelativePath(gdb));
+        if (options.lldb) |lldb| run.addPrefixedFileArg("--lldb=", b.graph.cwdRelativePath(lldb));
+
         run.addArg("--quiet"); // don't fill stderr telling us about skipped tests etc
 
         tests_step.dependOn(&run.step);
     }
-
-    return tests_step;
 }
 
 fn isEditorFileName(name: []const u8) bool {

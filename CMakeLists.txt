@@ -39,7 +39,7 @@ project(zig
 
 set(ZIG_VERSION_MAJOR 0)
 set(ZIG_VERSION_MINOR 17)
-set(ZIG_VERSION_PATCH 0)
+set(ZIG_VERSION_PATCH 1)
 set(ZIG_VERSION "" CACHE STRING "Override Zig version string. Default is to find out with git.")
 
 if("${ZIG_VERSION}" STREQUAL "")
@@ -602,6 +602,17 @@ elseif(ZIG_HOST_TARGET_IS_ANDROID)
   else()
     set(ZIG_HOST_TARGET_ABI "-android")
   endif()
+else()
+  check_symbol_exists(__GLIBC__ "features.h" ZIG_HOST_TARGET_IS_GLIBC)
+  if(ZIG_HOST_TARGET_IS_GLIBC)
+    if(ZIG_HOST_TARGET_ARCH MATCHES "^arm(eb)?$" OR ZIG_HOST_TARGET_ARCH MATCHES "^thumb(eb)?$" OR ZIG_HOST_TARGET_ARCH MATCHES "^powerpc(le)?$")
+      set(ZIG_HOST_TARGET_ABI "-gnueabihf")
+    elseif(ZIG_HOST_TARGET_ARCH MATCHES "^mips(el)?$")
+      set(ZIG_HOST_TARGET_ABI "-gnueabi")
+    else()
+      set(ZIG_HOST_TARGET_ABI "-gnu")
+    endif()
+  endif()
 endif()
 
 set(ZIG_HOST_TARGET_TRIPLE "${ZIG_HOST_TARGET_ARCH}-${ZIG_HOST_TARGET_OS}${ZIG_HOST_TARGET_ABI}" CACHE STRING "Host zig target triple.")
@@ -691,7 +702,7 @@ add_custom_command(
 
 set(BUILD_COMPILER_RT_ARGS
   "${PROJECT_SOURCE_DIR}/lib"
-  build-obj -ofmt=c -OReleaseSmall
+  build-obj -ofmt=c -lc -OReleaseSmall
   --name compiler_rt
   -femit-bin="${ZIG_COMPILER_RT_C_SOURCE}"
   -target "${ZIG_HOST_TARGET_TRIPLE}"

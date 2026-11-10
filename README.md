@@ -31,7 +31,7 @@ Stable Zig releases are mirrored automatically from
 <https://ziglang.org/download/>:
 
 ```sh
-ghr install cataggar/zig@v0.17.0
+ghr install cataggar/zig@v0.17.1
 ```
 
 #### WebAssembly (`wasm64-wasip3`) Releases (`wazig` and `wazigl`)
@@ -61,7 +61,7 @@ wazig --help
 ## Documentation
 
 * [`doc/installation.md`](doc/installation.md) — Installing `wazig`, `wazigl`, and native Zig releases with `ghr`, minisign verification keys, and running directly with `wasmtime`.
-* [`doc/wazig-changes.md`](doc/wazig-changes.md) — Summary of all compiler, linker, standard library, and `lib/c` changes in `wazig` since Zig 0.17.0.
+* [`doc/wazig-changes.md`](doc/wazig-changes.md) — Summary of all compiler, linker, standard library, and `lib/c` changes in `wazig` (based on Zig 0.17.1).
 * [`doc/building.md`](doc/building.md) — Building `wazig`/`wazigl`, Zig, and LLVM/Clang/LLD from source across POSIX and Windows.
 * [`doc/debugging-and-testing.md`](doc/debugging-and-testing.md) — Editing source code, running the test suite (native, QEMU, Wine, Wasmtime), Autodoc, `translate-c`, and debugging with LLDB.
 * [`doc/build.zig.zon.md`](doc/build.zig.zon.md) — `build.zig.zon` package manifest specification.
@@ -70,4 +70,3 @@ For official Zig documentation, refer to the **Release Notes**, **Language
 Reference**, or **Standard Library Documentation** on the
 [Zig download page](https://ziglang.org/download), or run `zig std` from a
 release installation.
-

@@ -3851,7 +3851,7 @@ pub fn loadEnumType(ip: *const InternPool, index: Index) LoadedEnumType {
         .generated_union_tag => info: {
             const owner_union: Index = @fromBackingInt(@intCast(extra_items[extra_index]));
             extra_index += 1;
-            break :info .{ .none, .empty, owner_union };
+            break :info .{ .none, ip.loadUnionType(owner_union).captures, owner_union };
         },
         _ => |n| info: {
             const zir_index: TrackedInst.Index = @fromBackingInt(@intCast(extra_items[extra_index]));
@@ -5386,7 +5386,7 @@ pub const Tag = enum(u8) {
             },
             .config = .{
                 .@"trailing.inferred_error_set.?" = .@"payload.analysis.inferred_error_set",
-                .@"trailing.param_values.len" = .@"@syntheticField(payload.ty, \"unwrapped\").payload.params_len",
+                .@"trailing.param_values.len" = .@"@syntheticField(@syntheticField(payload.ty, \"unwrapped\"), \"payload\").params_len",
             },
         },
         .func_coerced = .{
@@ -5400,7 +5400,7 @@ pub const Tag = enum(u8) {
             .summary = .@"@as({.payload.ty%summary}, .{...})",
             .payload = Aggregate,
             .trailing = struct { elements: []Index },
-            .config = .{ .@"trailing.elements.len" = .@"@syntheticField(payload.ty, \"unwrapped\").payload.fields_len" },
+            .config = .{ .@"trailing.elements.len" = .@"@syntheticField(@syntheticField(payload.ty, \"unwrapped\"), \"payload\").fields_len" },
         },
         .repeated = .{ .summary = .@"@as({.payload.ty%summary}, @splat({.payload.elem_val%summary}))", .payload = Repeated },
         .bitpack = .{ .summary = .@"@as({.payload.ty%summary}, {})", .payload = Key.Bitpack },
@@ -7899,9 +7899,9 @@ pub fn get(ip: *InternPool, gpa: Allocator, io: Io, tid: Zcu.PerThread.Id, key: 
 
             repeated: {
                 switch (aggregate.storage) {
-                    .bytes => |bytes| for (bytes.toSlice(len, ip)[1..]) |byte|
+                    .bytes => |bytes| for (bytes.toSlice(len_including_sentinel, ip)[1..]) |byte|
                         if (byte != bytes.at(0, ip)) break :repeated,
-                    .elems => |elems| for (elems[1..@intCast(len)]) |elem|
+                    .elems => |elems| for (elems[1..@intCast(len_including_sentinel)]) |elem|
                         if (elem != elems[0]) break :repeated,
                     .repeated_elem => {},
                 }

@@ -1151,7 +1151,10 @@ pub fn abiSize(ty: Type, zcu: *const Zcu) u64 {
                     std.zig.target.compilerRtFloatAbi(target, elem_ty.floatBits(target))
                 else
                     .hard) {
-                    .hard => @divCeil(vec.len * elem_ty.bitSize(zcu), 8),
+                    .hard => switch (vec.len * elem_ty.bitSize(zcu)) {
+                        0 => return 0,
+                        else => |bits| std.math.ceilPowerOfTwoAssert(u32, @intCast(@divCeil(bits, 8))),
+                    },
                     .soft => vec.len * elem_ty.abiSize(zcu),
                 },
                 .stage2_c, .stage2_wasm => vec.len * elem_ty.abiSize(zcu),
@@ -1299,10 +1302,7 @@ pub fn abiSize(ty: Type, zcu: *const Zcu) u64 {
 }
 
 pub fn ptrAbiAlignment(target: *const Target) Alignment {
-    // The eZ80 has 24-bit pointers, which aren't exact powers of two, tripping
-    // the assert. The alignment of eZ80 pointers is 1, so we bypass the check.
-    if (target.cpu.arch == .ez80) return .@"1";
-    return .fromNonzeroByteUnits(@divExact(target.ptrBitWidth(), 8));
+    return .fromNonzeroByteUnits(std.zig.target.intAlignment(target, target.ptrBitWidth()));
 }
 pub fn ptrAbiSize(target: *const Target) u64 {
     return @divExact(target.ptrBitWidth(), 8);

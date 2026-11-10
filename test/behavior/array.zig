@@ -591,6 +591,24 @@ test "tuple to array handles sentinel" {
         var b: [3:0]u8 = a;
     };
     try expect(S.b[0] == 1);
+    try expect(S.b[1] == 2);
+    try expect(S.b[2] == 3);
+    try expect(S.b[3] == 0);
+}
+
+test "array-like to array handles sentinel" {
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        const a: @Vector(3, u8) = .{ 1, 2, 3 };
+        var b: [3:0]u8 = a;
+    };
+    try expect(S.b[0] == 1);
+    try expect(S.b[1] == 2);
+    try expect(S.b[2] == 3);
+    try expect(S.b[3] == 0);
 }
 
 test "array init of container level array variable" {
@@ -836,8 +854,6 @@ test "pointer to sentinel-terminated array initialized through reference to anon
 }
 
 test "tuple initialized through reference to anonymous array init provides result types" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     const Tuple = struct { u64, *const u32 };
     const foo: *const Tuple = &.{
         @intCast(12345),
@@ -978,15 +994,11 @@ test "runtime index of array of zero-bit values" {
 }
 
 test "initialize slice with reference to empty array initializer" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     const a: []const u8 = &.{};
     comptime assert(a.len == 0);
 }
 
 test "initialize many-pointer with reference to empty array initializer" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     const a: [*]const u8 = &.{};
     _ = a; // nothing meaningful to test; points to zero bits
 }
@@ -1012,8 +1024,6 @@ test "pass pointer to empty array initializer to anytype parameter" {
 }
 
 test "initialize pointer to anyopaque with reference to empty array initializer" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     const ptr: *const anyopaque = &.{};
     // The above acts like an untyped initializer, since the `.{}` has no result type.
     // So, `ptr` points in memory to an empty tuple (`@TypeOf(.{})`).

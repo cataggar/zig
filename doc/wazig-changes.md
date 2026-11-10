@@ -1,6 +1,6 @@
-# Summary of Code Changes Since Zig 0.17.0
+# Summary of Code Changes Since Zig 0.17.0 (Updated for Zig 0.17.1)
 
-This document catalogs the compiler, linker, standard library, and C library (`lib/c`) changes on the `wazig` branch relative to the Zig 0.17.0 release ([`7647adab80`](https://github.com/cataggar/zig/commit/7647adab80dd088f4de3610fd245915a912eb6ad)). Changes are grouped into self-contained functional areas with their commits, pull requests, and affected files.
+This document catalogs the compiler, linker, standard library, and C library (`lib/c`) changes on the `wazig` branch, originally branched from the Zig 0.17.0 release ([`7647adab80`](https://github.com/cataggar/zig/commit/7647adab80dd088f4de3610fd245915a912eb6ad)) and updated to the Zig 0.17.1 release ([`be248cc1fd`](https://codeberg.org/ziglang/zig/commit/be248cc1fdc3cc654f9ec8ba68514bcb93b204fe)). Changes are grouped into self-contained functional areas with their commits, pull requests, and affected files.
 
 ---
 
@@ -215,6 +215,7 @@ Migrates C standard library translation units from bundled musl C and `wasi-libc
 ### Key Changes
 - **Linux/musl C-to-Zig Migration (`lib/c/*.zig`, `src/libs/musl.zig`)**:
   - Ports 681 musl `.c` units (1,646+ exported symbols) to `lib/c/`: `stdio` (including variadic `vfprintf`/`vfscanf`/`vsnprintf`/`vswprintf` family), `math` (all `f32`/`f64`/`f80`/`f128` routines with IEEE-754 exception parity), `locale` (including full `iconv` character tables and `strfmon`), `regex` (`fnmatch`, `glob`, `regcomp`, `regexec`), `thread`, `time`, `process`, `signal` (including `KernelSigaction` padding for RISC-V), `unistd`, `ldso`, `sys/mman`, `conf`, `env`, `fenv`, `setjmp`, `search`, `crypt`, `ctype`, `multibyte`, `network`, `passwd`, `spawn`, `stat`, `stdlib`, `string`, `aio`, `complex`, `dirent`, `errno`, `exit`, `fcntl`, `fts`, `ipc`, `legacy`, `linux`, `misc`, `mq`, `sched`, `sys/select`, `temp`, and `termios`.
+  - Ports Rich Felker's CVE-2026-107891 regex integer-overflow patch ([`af6c78e344`](https://codeberg.org/ziglang/zig/commit/af6c78e34498d63ad35a95d97d9e2c735638cbe8)) from Zig 0.17.1 to `lib/c/regex.zig`.
 - **Pure-Zig WASI `libc` (`lib/c/wasi_*.zig`, `src/libs/wasi_libc.zig`, `src/Compilation.zig`, `src/link/Lld.zig`)**:
   - Migrates all 337 `wasi-libc` C source files and CRT startup files (`wasi_crt1_command.zig`, `wasi_crt1_reactor.zig`, `wasi_cloudlibc.zig`, `wasi_sources.zig`, `wasi_thread_stub.zig`) to `buildOutputFromZig`, eliminating C compilation when building `-lc` for `wasm32-wasi`, `wasm32-wasip2`, `wasm32-wasip3`, and `wasm64-wasip3`.
   - Caches `lib/c` as `libzigc.a` (`zigc_strat = .lib`) on WASI instead of compiling 2,157 `@export`s into every user ZCU, shares `std.os.wasi.p3.State` (`__zig_wasip3_state`) and `std.heap.BrkAllocator.State` (`__zig_wasm_brk_allocator`) across `libzigc.a`, `crt1-*.o`, and the user ZCU when linking libc, places `libzigc.a` after user and C++ objects in `Lld.wasmLink`, declares `__main_argc_argv` with weak linkage in `mainVoidImpl`, and hides internal globals (`__progname*`, `optarg`) on WebAssembly so `-rdynamic` reactor builds do not fail or leak libc globals.

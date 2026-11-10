@@ -9,8 +9,6 @@ const maxInt = std.math.maxInt;
 const native_endian = builtin.target.cpu.arch.endian();
 
 test "int to ptr cast" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     const x = @as(usize, 13);
     const y = @as(*u8, @ptrFromInt(x));
     const z = @intFromPtr(y);
@@ -18,8 +16,6 @@ test "int to ptr cast" {
 }
 
 test "integer literal to pointer cast" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     const vga_mem = @as(*u16, @ptrFromInt(0xB8000));
     try expect(@intFromPtr(vga_mem) == 0xB8000);
 }
@@ -71,8 +67,6 @@ test "implicit cast comptime_int to comptime_float" {
 }
 
 test "comptime_int @floatFromInt" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     {
         const result = @as(f16, @floatFromInt(1234));
         try expect(@TypeOf(result) == f16);
@@ -538,8 +532,6 @@ test "return u8 coercing into ?u32 return type" {
 }
 
 test "cast from ?[*]T to ??[*]T" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     const a: ??[*]u8 = @as(?[*]u8, null);
     try expect(a != null and a.? == null);
 }
@@ -974,6 +966,34 @@ test "@intCast on vector" {
                     }));
                 }
             }
+        }
+    };
+
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}
+
+test "@intCast signed vector to narrower unsigned vector" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .hexagon) return error.SkipZigTest;
+
+    const S = struct {
+        fn doTheTest() !void {
+            var x16: @Vector(4, i16) = .{ 0x00, 0x7f, 0x80, 0xff };
+            var x32: @Vector(4, i32) = .{ 0x00, 0x7f, 0x80, 0xff };
+            var x64: @Vector(4, i64) = .{ 0x00, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff };
+
+            const y16: @Vector(4, u8) = @intCast(@as(*volatile @Vector(4, i16), &x16).*);
+            const y32: @Vector(4, u8) = @intCast(@as(*volatile @Vector(4, i32), &x32).*);
+            const y64: @Vector(4, u32) = @intCast(@as(*volatile @Vector(4, i64), &x64).*);
+
+            try expect(mem.eql(u8, &@as([4]u8, y16), &[4]u8{ 0x00, 0x7f, 0x80, 0xff }));
+            try expect(mem.eql(u8, &@as([4]u8, y32), &[4]u8{ 0x00, 0x7f, 0x80, 0xff }));
+            try expect(mem.eql(u32, &@as([4]u32, y64), &[4]u32{ 0x00, 0x7fff_ffff, 0x8000_0000, 0xffff_ffff }));
         }
     };
 
@@ -1423,7 +1443,6 @@ test "comptime float casts" {
 }
 
 test "pointer reinterpret const float to int" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     // The hex representation is 0x3fe3333333333303.
@@ -1843,8 +1862,6 @@ test "coerce between pointers of compatible differently-named floats" {
 }
 
 test "peer type resolution of const and non-const pointer to array" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     const a = @as(*[1024]u8, @ptrFromInt(42));
     const b = @as(*const [1024]u8, @ptrFromInt(42));
     try std.testing.expect(@TypeOf(a, b) == *const [1024]u8);
@@ -1909,8 +1926,6 @@ test "optional pointer coerced to optional allowzero pointer" {
 }
 
 test "optional slice coerced to allowzero many pointer" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     const a: ?[]const u32 = null;
     const b: [*]allowzero const u8 = @ptrCast(a);
     const c = @intFromPtr(b);
@@ -2932,6 +2947,36 @@ test "@intFromFloat on vector" {
     try comptime S.doTheTest();
 }
 
+test "@floatFromInt and @intFromFloat on vectors of any length" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+
+    const S = struct {
+        fn doTheTest(comptime len: comptime_int) !void {
+            var signed: @Vector(len, i32) = std.simd.iota(i32, len) - @as(@Vector(len, i32), @splat(4));
+            _ = &signed;
+            const from_signed: @Vector(len, f32) = @floatFromInt(signed);
+            inline for (0..len) |i| try expect(from_signed[i] == @as(f32, @floatFromInt(@as(i32, i) - 4)));
+            const to_signed: @Vector(len, i32) = @intFromFloat(from_signed);
+            inline for (0..len) |i| try expect(to_signed[i] == @as(i32, i) - 4);
+
+            var unsigned: @Vector(len, u32) = std.simd.iota(u32, len) * @as(@Vector(len, u32), @splat(3));
+            _ = &unsigned;
+            const from_unsigned: @Vector(len, f32) = @floatFromInt(unsigned);
+            inline for (0..len) |i| try expect(from_unsigned[i] == @as(f32, @floatFromInt(i * 3)));
+            const to_unsigned: @Vector(len, u32) = @intFromFloat(from_unsigned);
+            inline for (0..len) |i| try expect(to_unsigned[i] == i * 3);
+        }
+    };
+
+    inline for (.{ 1, 2, 3, 4, 8 }) |len| {
+        try S.doTheTest(len);
+        try comptime S.doTheTest(len);
+    }
+}
+
 test "@intFromBool on vector" {
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
@@ -3146,4 +3191,24 @@ test "coercing a coerced function" {
         }
     };
     try S.doTheTest();
+}
+
+test "pointer to empty tuple coerces to any slice" {
+    const tuple_ptr = &.{};
+
+    const const_slice_0: []const u8 = tuple_ptr;
+    const const_slice_1: []const struct {} = tuple_ptr;
+    const const_slice_2: []align(64) const struct { x: u8 } = tuple_ptr;
+
+    const mut_slice_0: []const u8 = tuple_ptr;
+    const mut_slice_1: []const struct {} = tuple_ptr;
+    const mut_slice_2: []align(64) const struct { x: u8 } = tuple_ptr;
+
+    comptime assert(const_slice_0.len == 0);
+    comptime assert(const_slice_1.len == 0);
+    comptime assert(const_slice_2.len == 0);
+
+    comptime assert(mut_slice_0.len == 0);
+    comptime assert(mut_slice_1.len == 0);
+    comptime assert(mut_slice_2.len == 0);
 }

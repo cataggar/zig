@@ -904,7 +904,7 @@ fn legalizeBody(l: *Legalize, body_start: usize, body_len: usize) Error!void {
             .splat => {
                 const ty_op = l.air_instructions.items(.data)[@backingInt(inst)].ty_op;
                 switch (ty_op.ty.zigTypeTag(zcu)) {
-                    .vector => switch (ty_op.ty.vectorLen(zcu)) {
+                    .vector => if (l.features.has(.splat_one_elem_to_bit_cast)) switch (ty_op.ty.vectorLen(zcu)) {
                         0 => unreachable,
                         1 => continue :inst l.replaceInst(inst, .bit_cast, .{ .ty_op = .{
                             .ty = ty_op.ty,
@@ -2049,9 +2049,12 @@ fn scalarizeReduceBlockPayload(l: *Legalize, orig_inst: Air.Inst.Index, optimize
             .bool => .false,
             else => unreachable,
         },
-        // identity for multiplication is 1
+        // identity for multiplication is 1, or -1 for an i1
         .Mul => switch (scalar_ty.zigTypeTag(zcu)) {
-            .int => try pt.intValue(scalar_ty, 1),
+            .int => if (scalar_ty.isSignedInt(zcu) and scalar_ty.intInfo(zcu).bits == 1)
+                try pt.intValue(scalar_ty, -1)
+            else
+                try pt.intValue(scalar_ty, 1),
             .float => try pt.floatValue(scalar_ty, 1.0),
             else => unreachable,
         },

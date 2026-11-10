@@ -1278,6 +1278,7 @@ pub const cache_helpers = struct {
         hh.add(mod.strip);
         hh.add(mod.omit_frame_pointer);
         hh.add(mod.stack_check);
+        hh.add(mod.stack_protector);
         hh.add(mod.red_zone);
         hh.add(mod.sanitize_c);
         hh.add(mod.sanitize_thread);
@@ -6497,9 +6498,9 @@ fn addCommonCCArgs(
             switch (target.os.tag) {
                 // LLVM doesn't distinguish between Solaris and illumos, but the illumos GCC fork
                 // defines this macro.
-                .illumos => try argv.append("__illumos__"),
+                .illumos => try argv.append("-D__illumos__"),
                 // This macro has not yet been upstreamed by SerenityOS to Clang.
-                .serenity => try argv.append("__serenity__"),
+                .serenity => try argv.append("-D__serenity__"),
                 // Homebrew targets without LLVM support; use communities's preferred macros.
                 .@"3ds" => try argv.append("-D__3DS__"),
                 .wiiu => try argv.append("-D__WIIU__"),
@@ -6688,6 +6689,9 @@ fn addCommonCCArgs(
                         .off => {},
                         .trap => {
                             try argv.append("-fsanitize-trap=undefined");
+
+                            // Same reasoning as below.
+                            try argv.append("-fno-sanitize=function");
                         },
                         .full => {
                             // This check requires implementing the Itanium C++ ABI.

@@ -2,7 +2,7 @@
 
 ## Building `wazig` and `wazigl` (`wasm64-wasip3`)
 
-To build the self-hosted WebAssembly compiler (`wazig.wasm`) using a host Zig 0.17.0 binary (`$HOST_ZIG`):
+To build the self-hosted WebAssembly compiler (`wazig.wasm`) using a host Zig 0.17.1 binary (`$HOST_ZIG`):
 
 ```sh
 # 1. Build stage3-host compiler
@@ -142,7 +142,7 @@ directory `out/zig-$target-$cpu` and `out/$target-$cpu`, to be used as
 "$ZIG_PREFIX/zig" build \
   -p stage3 \
   --search-prefix "$LLVM_PREFIX" \
-  --zig-lib-dir "lib" \
+  --zig-lib lib \
   -Dstatic-llvm
 ```
 
@@ -213,7 +213,7 @@ You now have the `zig.exe` binary at `stage3\bin\zig.exe`.
 Unzip the dev kit and then in cmd.exe in your Zig source checkout:
 
 ```bat
-$DEVKIT\bin\zig.exe build -p stage3 --search-prefix $DEVKIT --zig-lib-dir lib -Dstatic-llvm -Duse-zig-libcxx -Dtarget=x86_64-windows-gnu
+$DEVKIT\bin\zig.exe build -p stage3 --search-prefix $DEVKIT --zig-lib lib -Dstatic-llvm -Duse-zig-libcxx -Dtarget=x86_64-windows-gnu
 ```
 
 Replace `$DEVKIT` with the path to the folder that you unzipped after

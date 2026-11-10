@@ -8,16 +8,16 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to build and upload assets to (e.g. v0.17.0-wazig.1 or v0.17.0-wazigl.1)'
+        description: 'Release tag to build and upload assets to (e.g. v0.17.1-wazig.1 or v0.17.1-wazigl.1)'
         required: true
-        default: 'v0.17.0-wazig.1'
+        default: 'v0.17.1-wazig.1'
         type: string
 
 permissions:
   contents: write
 
 env:
-  ZIG_VERSION: "0.17.0"
+  ZIG_VERSION: "0.17.1"
   LLVM_VERSION: "22.1.8-p1"
   # Requires ghr with cataggar/ghr#251 (.tar.zst.ghr archive sidecar + ${GHR_TOOL_DIR} expansion)
   GHR_VERSION: "v0.10.2"
