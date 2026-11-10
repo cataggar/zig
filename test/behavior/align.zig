@@ -312,7 +312,7 @@ test "function alignment" {
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
 
-    // function alignment is a compile error on wasm
+    // function alignment greater than 1 is a compile error on wasm
     if (native_arch.isWasm()) return error.SkipZigTest;
 
     const S = struct {
@@ -341,7 +341,7 @@ test "implicitly decreasing fn alignment" {
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
 
-    // function alignment is a compile error on wasm
+    // function alignment greater than 1 is a compile error on wasm
     if (native_arch.isWasm()) return error.SkipZigTest;
 
     try testImplicitlyDecreaseFnAlign(alignedSmall, 1234);
@@ -364,7 +364,7 @@ test "@alignCast functions" {
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
 
-    // function alignment is a compile error on wasm
+    // function alignment greater than 1 is a compile error on wasm
     if (native_arch.isWasm()) return error.SkipZigTest;
 
     try expect(fnExpectsOnly1(simple4) == 0x19);
@@ -495,6 +495,42 @@ test "struct field explicit alignment" {
     try expect(@intFromPtr(&node.massive_byte) % 64 == 0);
 }
 
+test "nested struct field alignment" {
+    const S = struct {
+        fn doTheTest() !void {
+            const T = struct {
+                a: u8,
+                b: struct { c: u16 align(1) },
+            };
+            const init: T = .{ .a = 0, .b = .{ .c = ~@as(u16, 0) } };
+            var t: T = init; // copy constant aggregate
+            _ = &t;
+            try expect(t.b.c == ~@as(u16, 0));
+        }
+    };
+
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}
+
+test "nested union field alignment" {
+    const S = struct {
+        fn doTheTest() !void {
+            const T = struct {
+                a: u8,
+                b: union { c: u16 align(1) },
+            };
+            const init: T = .{ .a = 0, .b = .{ .c = ~@as(u16, 0) } };
+            var t: T = init; // copy constant aggregate
+            _ = &t;
+            try expect(t.b.c == ~@as(u16, 0));
+        }
+    };
+
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}
+
 test "align(N) on functions" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
@@ -510,7 +546,7 @@ test "align(N) on functions" {
         return error.SkipZigTest;
     }
 
-    // function alignment is a compile error on wasm
+    // function alignment greater than 1 is a compile error on wasm
     if (native_arch.isWasm()) return error.SkipZigTest;
     if (native_arch.isThumb()) return error.SkipZigTest;
 
@@ -639,8 +675,6 @@ test "function pointer @intFromPtr/@ptrFromInt roundtrip" {
 }
 
 test "function pointer align mask" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     const int = if (builtin.cpu.arch.isArm() or builtin.cpu.arch.isMIPS()) 0x20202021 else 0x20202020;
     const unaligned: *const fn () callconv(.c) void = @ptrFromInt(int);
     const aligned: *align(16) const fn () callconv(.c) void = @alignCast(unaligned);

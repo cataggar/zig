@@ -2552,6 +2552,13 @@ pub fn genDeclFwd(dg: *DeclGen, w: *Writer) Error!void {
                     .{ .@"const" = nav.resolved.?.@"const" },
                     nav.resolved.?.@"align",
                 );
+                const extern_name = nav.name.toSlice(ip);
+                const is_mangled = isMangledIdent(extern_name, true);
+                if (is_mangled) {
+                    try w.print(" zig_mangled({f}, {f})", .{
+                        fmtIdentSolo(extern_name), fmtStringLiteral(extern_name, null),
+                    });
+                }
                 try w.writeAll(";\n");
                 return;
             },
@@ -6868,6 +6875,7 @@ fn airReduce(f: *Function, inst: Air.Inst.Index) !CValue {
         },
         .big => .{ false, true },
     } else .{ false, false };
+    const operator_wraps = use_operator and scalar_ty.intInfo(zcu).bits == 8 * scalar_ty.abiSize(zcu);
     const op: union(enum) {
         const Func = struct { operation: []const u8, info: BuiltinInfo = .none };
         builtin: Func,
@@ -6888,12 +6896,12 @@ fn airReduce(f: *Function, inst: Air.Inst.Index) !CValue {
             else => unreachable,
         },
         .Add => switch (scalar_ty.zigTypeTag(zcu)) {
-            .int => if (use_operator) .{ .infix = " += " } else .{ .builtin = .{ .operation = "addw", .info = .bits } },
+            .int => if (operator_wraps) .{ .infix = " += " } else .{ .builtin = .{ .operation = "addw", .info = .bits } },
             .float => .{ .builtin = .{ .operation = "add" } },
             else => unreachable,
         },
         .Mul => switch (scalar_ty.zigTypeTag(zcu)) {
-            .int => if (use_operator) .{ .infix = " *= " } else .{ .builtin = .{ .operation = "mulw", .info = .bits } },
+            .int => if (operator_wraps) .{ .infix = " *= " } else .{ .builtin = .{ .operation = "mulw", .info = .bits } },
             .float => .{ .builtin = .{ .operation = "mul" } },
             else => unreachable,
         },
@@ -6935,7 +6943,10 @@ fn airReduce(f: *Function, inst: Air.Inst.Index) !CValue {
             else => unreachable,
         },
         .Mul => switch (scalar_ty.zigTypeTag(zcu)) {
-            .int => try pt.intValue(scalar_ty, 1),
+            .int => if (scalar_ty.isSignedInt(zcu) and scalar_ty.intInfo(zcu).bits == 1)
+                try pt.intValue(scalar_ty, -1)
+            else
+                try pt.intValue(scalar_ty, 1),
             .float => try pt.floatValue(scalar_ty, 1.0),
             else => unreachable,
         },

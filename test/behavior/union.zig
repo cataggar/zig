@@ -1109,8 +1109,6 @@ test "union with a large struct field" {
 }
 
 test "comptime equality of extern unions with same tag" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     const S = struct {
         const U = extern union {
             a: i32,
@@ -1162,6 +1160,22 @@ test "extern union most-aligned field is smaller" {
     var a: ?U = .{ .un = @splat(0) };
     _ = &a;
     try expect(a != null);
+}
+
+test "union constant trailing padding" {
+    const S = struct {
+        fn doTheTest() !void {
+            const U = extern union { x: u32, y: [5]u8 };
+            var u = [2]U{ .{ .x = 0 }, .{ .y = @splat(0xff) } };
+            _ = &u;
+            try expect(u[0].x == 0);
+            try expect(u[1].y[0] == 0xff);
+            try expect(u[1].y[4] == 0xff);
+        }
+    };
+
+    try S.doTheTest();
+    try comptime S.doTheTest();
 }
 
 test "return an extern union from C calling convention" {
@@ -1845,8 +1859,6 @@ test "inner struct initializer uses packed union layout" {
 }
 
 test "extern union initialized via reintepreted struct field initializer" {
-    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
-
     const bytes = [_]u8{ 0xaa, 0xbb, 0xcc, 0xdd };
 
     const U = extern union {
@@ -2176,6 +2188,23 @@ test "matching captures causes union equivalence" {
     const b: S.SignedUnsigned(i8) = .{ .u = 10 };
     comptime assert(@TypeOf(a) == @TypeOf(b));
     try expect(a.u == b.u);
+}
+
+test "capture used as explicit field value" {
+    const S = struct {
+        fn Union(n: u8) type {
+            return union(enum(u8)) {
+                a: u32 = n,
+                b,
+            };
+        }
+    };
+
+    comptime assert(@typeInfo(S.Union(0)).@"union".tag_type.? != @typeInfo(S.Union(1)).@"union".tag_type.?);
+
+    const s: S.Union(1) = .{ .a = 0 };
+    try expect(@backingInt(s) == 1);
+    try expect(@backingInt(@as(@typeInfo(S.Union(1)).@"union".tag_type.?, s)) == 1);
 }
 
 test "signed enum tag with negative value" {

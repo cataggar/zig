@@ -1706,6 +1706,11 @@ fn treAddTags(mem_opt: ?TreMem, stack: *TreStack, tree: *TreAstNode, tnfa: *Tnfa
 // AST copying and expansion
 // ============================================================
 
+// check if a+b overflows for a,b in [0,INT_MAX]
+fn checkAdd(a: c_uint, b: c_uint) bool {
+    return a +% b > std.math.maxInt(c_int);
+}
+
 fn treCopyAst(
     mem: TreMem,
     stack: *TreStack,
@@ -1743,6 +1748,7 @@ fn treCopyAst(
                         var min_c = lit.code_min;
                         var max_c = lit.code_max;
                         if (!isSpecial(lit) or isBackref(lit)) {
+                            if (checkAdd(@intCast(pos), @intCast(pos_add.*))) return REG_ESPACE;
                             pos += pos_add.*;
                             num_copied += 1;
                         } else if (isTag(lit) and (flags & COPY_REMOVE_TAGS != 0)) {
@@ -1829,6 +1835,7 @@ fn treCopyAst(
             else => {},
         }
     }
+    if (checkAdd(@intCast(pos_add.*), @intCast(num_copied))) return REG_ESPACE;
     pos_add.* += num_copied;
     return status;
 }
@@ -1863,6 +1870,7 @@ fn treExpandAst(
                     LITERAL => {
                         const lit: *TreLiteral = @ptrCast(@alignCast(nd.obj.?));
                         if (!isSpecial(lit) or isBackref(lit)) {
+                            if (checkAdd(@intCast(lit.position), @intCast(pos_add))) return REG_ESPACE;
                             lit.position += pos_add;
                             if (lit.position > max_pos) max_pos = @intCast(lit.position);
                         }
@@ -1896,8 +1904,8 @@ fn treExpandAst(
             },
             EXPAND_AFTER_ITER => {
                 const iter: *TreIteration = @ptrCast(@alignCast(nd.obj.?));
-                const pos_add_last = pos_add;
                 pos_add = treStackPopInt(stack);
+                const pos_add_last = pos_add;
                 if (iter.min > 1 or iter.max > 1) {
                     var seq1: ?*TreAstNode = null;
                     var seq2: ?*TreAstNode = null;
@@ -1955,6 +1963,7 @@ fn treExpandAst(
                     nd.node_type = seq1.?.node_type;
                 }
                 iter_depth -= 1;
+                if (checkAdd(@intCast(pos_add_total), @intCast(pos_add - pos_add_last))) return REG_ESPACE;
                 pos_add_total += pos_add - pos_add_last;
                 if (iter_depth == 0) pos_add = pos_add_total;
             },
@@ -1962,6 +1971,7 @@ fn treExpandAst(
         }
     }
 
+    if (checkAdd(@intCast(position.*), @intCast(pos_add_total))) return REG_ESPACE;
     position.* += pos_add_total;
     if (max_pos > position.*) position.* = max_pos;
     return status;
@@ -2408,7 +2418,14 @@ fn regcompImpl(preg: *regex_t, regex_pat: [*:0]const u8, cflags: c_int) callconv
     var errcode: reg_errcode_t = REG_OK;
 
     error_block: {
-        stack = treStackNew(512, 1024000, 128) orelse {
+        const input_limit = 1024000;
+        const stack_limit = 8 * input_limit;
+        if (strnlen(regex_pat, input_limit) >= input_limit) {
+            errcode = REG_ESPACE;
+            break :error_block;
+        }
+
+        stack = treStackNew(512, stack_limit, 128) orelse {
             errcode = REG_ESPACE;
             break :error_block;
         };
@@ -2495,6 +2512,10 @@ fn regcompImpl(preg: *regex_t, regex_pat: [*:0]const u8, cflags: c_int) callconv
             errcode = REG_ESPACE;
             break :error_block;
         };
+        if (checkAdd(@intCast(parse_ctx.position), 1)) {
+            errcode = REG_ESPACE;
+            break :error_block;
+        }
         parse_ctx.position += 1;
 
         const full_tree = treAstNewCatenation(mem.?, tmp_ast_l, tmp_ast_r) orelse {
@@ -2506,27 +2527,30 @@ fn regcompImpl(preg: *regex_t, regex_pat: [*:0]const u8, cflags: c_int) callconv
         if (errcode != REG_OK) break :error_block;
 
         const pos_count: usize = @intCast(parse_ctx.position);
-        counts = @ptrCast(@alignCast(std.c.malloc(@sizeOf(c_int) * pos_count) orelse {
+        counts = @ptrCast(@alignCast(std.c.calloc(pos_count, @sizeOf(c_int)) orelse {
             errcode = REG_ESPACE;
             break :error_block;
         }));
-        offs = @ptrCast(@alignCast(std.c.malloc(@sizeOf(c_int) * pos_count) orelse {
+        offs = @ptrCast(@alignCast(std.c.calloc(pos_count, @sizeOf(c_int)) orelse {
             errcode = REG_ESPACE;
             break :error_block;
         }));
 
-        for (0..pos_count) |i| counts.?[i] = 0;
         _ = treAstToTnfa(full_tree, null, counts.?, null);
 
         var add: c_int = 0;
         for (0..pos_count) |i| {
             offs.?[i] = add;
+            if (checkAdd(@intCast(add), @as(c_uint, @intCast(counts.?[i])) +% 1)) {
+                errcode = REG_ESPACE;
+                break :error_block;
+            }
             add += counts.?[i] + 1;
             counts.?[i] = 0;
         }
 
         const transitions: [*]TnfaTransition = @ptrCast(@alignCast(std.c.calloc(
-            @intCast(add + 1),
+            @as(usize, @intCast(add)) + 1,
             @sizeOf(TnfaTransition),
         ) orelse {
             errcode = REG_ESPACE;

@@ -11,7 +11,7 @@ Stable Zig releases are mirrored automatically and unchanged from <https://zigla
 Install without specifying a key:
 
 ```sh
-ghr install cataggar/zig@v0.17.0
+ghr install cataggar/zig@v0.17.1
 ```
 
 Or verify the download against the official Zig [minisign](https://jedisct1.github.io/minisign/) public key:
@@ -19,7 +19,7 @@ Or verify the download against the official Zig [minisign](https://jedisct1.gith
 ```sh
 MINISIGN_PUB=RWSGOq2NVecA2UPNdBUZykf1CCb147pkmdtYxgb3Ti+JO/wCYvhbAb/U
 ghr install cataggar/zig@v0.16.0 $MINISIGN_PUB
-ghr install cataggar/zig@v0.17.0 $MINISIGN_PUB
+ghr install cataggar/zig@v0.17.1 $MINISIGN_PUB
 ```
 
 ---
@@ -80,7 +80,7 @@ wasmtime run \
 
 ## Development Releases
 
-Custom native development builds (such as the `libzigc` musl-libc-in-Zig releases, [#17](https://github.com/cataggar/zig/issues/17)) are published manually via the `build-release` workflow using stable Zig 0.17.0 as the host compiler and signed with the repository owner's minisign public key:
+Custom native development builds (such as the `libzigc` musl-libc-in-Zig releases, [#17](https://github.com/cataggar/zig/issues/17)) are published manually via the `build-release` workflow using stable Zig 0.17.1 as the host compiler and signed with the repository owner's minisign public key:
 
 ```sh
 MINISIGN_PUB=RWQhfv+qEYWFiUiUqTeTGnyN3KQlTSVNpqhCST5HbBKZRi6SfCJhnVF4
