@@ -393,6 +393,9 @@ pub const CallingConvention = union(enum(u8)) {
     // [snake2p example program](https://github.com/benanderman/spork-8/blob/1bce10a2c3a3888a3f4ca8208112afbc5973fda4/Code/programs/snake2p.asm)
     spork8,
 
+    /// The multivalue `wasm32` and `wasm64` calling convention, as specified in the WebAssembly Tool Conventions.
+    wasm_multivalue: CommonOptions,
+
     /// Options shared across most calling conventions.
     pub const CommonOptions = struct {
         /// The boundary the stack is aligned to when the function is called.

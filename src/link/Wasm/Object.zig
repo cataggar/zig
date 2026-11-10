@@ -929,7 +929,7 @@ pub fn parse(
             return diags.failParse(path, "object has TLS segment but target CPU feature bulk_memory is disabled", .{});
     }
 
-    const features = opt_features orelse return error.MissingFeatures;
+    const features: Wasm.Feature.Set = opt_features orelse .fromString(try wasm.internString(""));
     for (features.slice(wasm)) |feat| {
         log.debug("feature: {s}{s}", .{ @tagName(feat.prefix), @tagName(feat.tag) });
         switch (feat.prefix) {

@@ -3655,8 +3655,6 @@ fn parseObject(wasm: *Wasm, obj: link.Input.Object) !void {
     const io = wasm.base.comp.io;
     const gc_sections = wasm.base.gc_sections;
 
-    defer obj.file.close(io);
-
     var file_reader = obj.file.reader(io, &.{});
 
     try wasm.objects.ensureUnusedCapacity(gpa, 1);
@@ -3672,6 +3670,7 @@ fn parseObject(wasm: *Wasm, obj: link.Input.Object) !void {
 
     if (wasm.base.isStaticLib()) {
         try wasm.archive_builder.append(gpa, std.fs.path.basename(obj.path.sub_path), file_contents);
+        obj.file.close(io);
         return;
     }
 
@@ -3680,6 +3679,7 @@ fn parseObject(wasm: *Wasm, obj: link.Input.Object) !void {
 
     const object = try Object.parse(wasm, file_contents, obj.path, null, wasm.object_host_name, &ss, obj.must_link, gc_sections);
     wasm.objects.appendAssumeCapacity(object);
+    obj.file.close(io);
 }
 
 fn parseArchive(wasm: *Wasm, obj: link.Input.Object) !void {
@@ -3687,8 +3687,6 @@ fn parseArchive(wasm: *Wasm, obj: link.Input.Object) !void {
     const gpa = wasm.base.comp.gpa;
     const io = wasm.base.comp.io;
     const gc_sections = wasm.base.gc_sections;
-
-    defer obj.file.close(io);
 
     var file_reader = obj.file.reader(io, &.{});
 
@@ -3724,6 +3722,7 @@ fn parseArchive(wasm: *Wasm, obj: link.Input.Object) !void {
         const object = try archive.parseObject(wasm, file_contents, file_offset, obj.path, wasm.object_host_name, &ss, obj.must_link, gc_sections);
         wasm.objects.appendAssumeCapacity(object);
     }
+    obj.file.close(io);
 }
 
 pub fn deinit(wasm: *Wasm) void {
@@ -5235,6 +5234,22 @@ fn convertZcuFnType(
                     try returns_buffer.append(gpa, CodeGen.typeToValtype(vector.elem_type, zcu, target));
                 },
             }
+        } else if (cc == .wasm_multivalue) {
+            switch (abi.classifyReturnMultiValue(return_type, zcu, target)) {
+                .direct => |scalar_type| {
+                    try returns_buffer.append(gpa, CodeGen.typeToValtype(scalar_type, zcu, target));
+                },
+                .fields => |fields| {
+                    for (fields.items[0..fields.len]) |field| {
+                        try returns_buffer.append(gpa, CodeGen.typeToValtype(field.ty, zcu, target));
+                    }
+                },
+                .indirect => unreachable,
+                .unrolled => |vector| {
+                    assert(vector.len == 1);
+                    try returns_buffer.append(gpa, CodeGen.typeToValtype(vector.elem_type, zcu, target));
+                },
+            }
         } else if (cc == .auto) {
             switch (CodeGen.classifyAutoReturn(return_type, zcu, target)) {
                 .scalar => try returns_buffer.append(gpa, CodeGen.typeToValtype(return_type, zcu, target)),
@@ -5267,6 +5282,30 @@ fn convertZcuFnType(
                     .double_i64 => {
                         try params_buffer.append(gpa, .i64);
                         try params_buffer.append(gpa, .i64);
+                    },
+                    .indirect => {
+                        try params_buffer.append(gpa, CodeGen.typeToValtype(param_type, zcu, target));
+                    },
+                    .unrolled => |vector| {
+                        for (0..vector.len) |_| {
+                            try params_buffer.append(gpa, CodeGen.typeToValtype(vector.elem_type, zcu, target));
+                        }
+                    },
+                }
+            },
+            .wasm_multivalue => {
+                switch (abi.classifyParamMultiValue(param_type, zcu, target)) {
+                    .direct => |scalar_type| {
+                        try params_buffer.append(gpa, CodeGen.typeToValtype(scalar_type, zcu, target));
+                    },
+                    .double_i64 => {
+                        try params_buffer.append(gpa, .i64);
+                        try params_buffer.append(gpa, .i64);
+                    },
+                    .fields => |fields| {
+                        for (fields.items[0..fields.len]) |f| {
+                            try params_buffer.append(gpa, CodeGen.typeToValtype(f.ty, zcu, target));
+                        }
                     },
                     .indirect => {
                         try params_buffer.append(gpa, CodeGen.typeToValtype(param_type, zcu, target));

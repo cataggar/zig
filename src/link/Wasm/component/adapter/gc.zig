@@ -464,7 +464,7 @@ fn walkConstExprs(bytes: []const u8, count: u32, sink: anytype) Error!void {
 fn walkPrefixed0xFC(bytes: []const u8, pos: *usize, sink: anytype) Error!void {
     const sub = try readU32At(bytes, pos);
     switch (sub) {
-        0...7 => {}, // saturating float-to-int: no operands
+        0...7, 0x13...0x16 => {}, // saturating float-to-int, wide arithmetic: no operands
         8 => { // memory.init dataidx u32 + memidx u32
             const dat = pos.*;
             const di = try readU32At(bytes, pos);
@@ -1067,6 +1067,76 @@ test "gc.run: preserves custom sections verbatim" {
         }
     }
     try testing.expect(saw_custom);
+}
+
+test "gc.run: supports wide_arithmetic (0xfc 0x13..0x16) and return_call (0x12)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ar = arena.allocator();
+
+    var b = std.ArrayList(u8).empty;
+    defer b.deinit(ar);
+    try b.appendSlice(ar, &.{ 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00 });
+
+    // Type section: 1 type = (func)
+    try emitSection(ar, &b, 1, &.{ 0x01, 0x60, 0x00, 0x00 });
+
+    // Import section: 2 func imports (0 = dead, 1 = live via return_call)
+    var imp_body = std.ArrayList(u8).empty;
+    defer imp_body.deinit(ar);
+    try imp_body.append(ar, 2);
+    try writeName(ar, &imp_body, "wasi:filesystem/types");
+    try writeName(ar, &imp_body, "advise");
+    try imp_body.appendSlice(ar, &.{ 0x00, 0x00 });
+    try writeName(ar, &imp_body, "wasi:cli/stdout");
+    try writeName(ar, &imp_body, "ping");
+    try imp_body.appendSlice(ar, &.{ 0x00, 0x00 });
+    try emitSection(ar, &b, 2, imp_body.items);
+
+    // Function section: 1 defined func (index 2), type 0
+    try emitSection(ar, &b, 3, &.{ 0x01, 0x00 });
+
+    // Export section: "fd_write" -> func 2
+    var exp_body = std.ArrayList(u8).empty;
+    defer exp_body.deinit(ar);
+    try exp_body.append(ar, 1);
+    try writeName(ar, &exp_body, "fd_write");
+    try exp_body.appendSlice(ar, &.{ 0x00, 0x02 });
+    try emitSection(ar, &b, 7, exp_body.items);
+
+    // Code section: wide arithmetic ops + return_call 1 (stdout.ping)
+    var code_body = std.ArrayList(u8).empty;
+    defer code_body.deinit(ar);
+    try code_body.append(ar, 1);
+    {
+        var body = std.ArrayList(u8).empty;
+        defer body.deinit(ar);
+        try body.append(ar, 0); // 0 locals
+        try body.appendSlice(ar, &.{
+            0x42, 0x01, 0x42, 0x02, 0xfc, 0x15, // i64.mul_wide_s
+            0x42, 0x03, 0x42, 0x04, 0xfc, 0x16, // i64.mul_wide_u
+            0xfc, 0x13, // i64.add128
+            0x42, 0x05, 0x42, 0x06, 0xfc, 0x14, // i64.sub128
+            0x1a, 0x1a, // drop, drop
+            0x12, 0x01, // return_call 1 (renumbered to 0)
+            0x0b,
+        });
+        try code_body.append(ar, @intCast(body.items.len));
+        try code_body.appendSlice(ar, body.items);
+    }
+    try emitSection(ar, &b, 10, code_body.items);
+
+    const out = try run(testing.allocator, b.items, &[_][]const u8{"fd_write"});
+    defer testing.allocator.free(out);
+
+    var out_mod = try reader.readModule(testing.allocator, out);
+    defer out_mod.deinit();
+
+    try testing.expectEqual(@as(usize, 1), out_mod.imports.items.len);
+    try testing.expectEqualStrings("wasi:cli/stdout", out_mod.imports.items[0].module_name);
+    // Verify return_call target was renumbered from 1 to 0
+    const code = out_mod.funcs.items[1].code_bytes;
+    try testing.expectEqualSlices(u8, &.{ 0x12, 0x00, 0x0b }, code[code.len - 3 ..]);
 }
 
 test "emitLive gives table initializer bytes independent ownership" {

@@ -47,6 +47,9 @@ pub fn assemble(
         } else if (mem.eql(u8, inst, "call")) {
             const nav_index = try parseCallArg(cg, inst, &word_it, operand_map);
             try cg.addInst(.{ .tag = .call_nav, .data = .{ .nav_index = nav_index } });
+        } else if (mem.eql(u8, inst, "return_call")) {
+            const nav_index = try parseCallArg(cg, inst, &word_it, operand_map);
+            try cg.addInst(.{ .tag = .return_call_nav, .data = .{ .nav_index = nav_index } });
         } else if (mem.eql(u8, inst, "drop")) {
             try cg.addTag(.drop);
         } else if (mem.eql(u8, inst, "select")) {
@@ -251,6 +254,10 @@ pub fn assemble(
             try cg.addTag(.i32_shr_s);
         } else if (mem.eql(u8, inst, "i32.shr_u")) {
             try cg.addTag(.i32_shr_u);
+        } else if (mem.eql(u8, inst, "i32.rotl")) {
+            try cg.addTag(.i32_rotl);
+        } else if (mem.eql(u8, inst, "i32.rotr")) {
+            try cg.addTag(.i32_rotr);
         } else if (mem.eql(u8, inst, "i64.clz")) {
             try cg.addTag(.i64_clz);
         } else if (mem.eql(u8, inst, "i64.ctz")) {
@@ -283,6 +290,10 @@ pub fn assemble(
             try cg.addTag(.i64_shr_s);
         } else if (mem.eql(u8, inst, "i64.shr_u")) {
             try cg.addTag(.i64_shr_u);
+        } else if (mem.eql(u8, inst, "i64.rotl")) {
+            try cg.addTag(.i64_rotl);
+        } else if (mem.eql(u8, inst, "i64.rotr")) {
+            try cg.addTag(.i64_rotr);
         } else if (mem.eql(u8, inst, "f32.abs")) {
             try cg.addTag(.f32_abs);
         } else if (mem.eql(u8, inst, "f32.neg")) {

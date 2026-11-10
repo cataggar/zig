@@ -4727,6 +4727,7 @@ pub fn callconvSupported(zcu: *Zcu, cc: std.lang.CallingConvention) union(enum) 
             dev.check(.wasm_backend);
             break :ok switch (cc) {
                 .wasm_mvp => |opts| opts.incoming_stack_alignment == null,
+                .wasm_multivalue => |opts| opts.incoming_stack_alignment == null and target.cpu.has(.wasm, .multivalue),
                 .naked => true,
                 else => false,
             };

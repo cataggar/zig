@@ -270,7 +270,7 @@ test "arguments to comptime parameters generated in comptime blocks" {
 test "forced tail call" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm and comptime !builtin.cpu.has(.wasm, .tail_call)) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
@@ -305,7 +305,7 @@ test "forced tail call" {
 test "inline call preserves tail call" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm and comptime !builtin.cpu.has(.wasm, .tail_call)) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
@@ -639,6 +639,7 @@ test "arguments pointed to on stack into tailcall" {
     switch (builtin.cpu.arch) {
         .wasm32,
         .wasm64,
+        => if (builtin.zig_backend != .stage2_wasm or comptime !builtin.cpu.has(.wasm, .tail_call)) return error.SkipZigTest,
         .mips,
         .mipsel,
         .mips64,
@@ -704,7 +705,7 @@ test "arguments pointed to on stack into tailcall" {
 test "tail call function pointer" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm and comptime !builtin.cpu.has(.wasm, .tail_call)) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
@@ -735,7 +736,7 @@ test "tail call function pointer" {
 }
 
 test "tail call with potentially extended types" {
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm and comptime !builtin.cpu.has(.wasm, .tail_call)) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
 

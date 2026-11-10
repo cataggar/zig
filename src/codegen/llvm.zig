@@ -4368,6 +4368,7 @@ pub fn toLlvmCallConvTag(cc_tag: std.lang.CallingConvention.Tag, target: *const 
         .powerpc_aix,
         .powerpc_aix_altivec,
         .wasm_mvp,
+        .wasm_multivalue,
         .arc_sysv,
         .arc_interrupt,
         .avr_gnu,

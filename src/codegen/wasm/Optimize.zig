@@ -49,7 +49,7 @@ pub fn simplifyLocals(
     out: anytype,
 ) Allocator.Error!bool {
     const Inst = std.meta.Elem(@TypeOf(insts));
-    return Pass(Inst).simplifyLocals(gpa, insts, out);
+    return Pass(Inst).simplifyLocals(gpa, insts, out, &.{});
 }
 
 pub fn hoistLoopInvariantLocalSets(
@@ -207,7 +207,7 @@ fn Pass(comptime Inst: type) type {
                     round_changed = true;
                 }
 
-                if (try Self.simplifyLocals(gpa, current.items, &next)) {
+                if (try Self.simplifyLocals(gpa, current.items, &next, mir_extra.items)) {
                     std.mem.swap(std.ArrayList(Inst), &current, &next);
                     round_changed = true;
                 }
@@ -281,6 +281,180 @@ fn Pass(comptime Inst: type) type {
         fn makeI64Const(gpa: Allocator, mir_extra: *std.ArrayList(u32), val: u64) Allocator.Error!Inst {
             const payload = try appendImm64(gpa, mir_extra, val);
             return .{ .tag = .i64_const, .data = .{ .payload = payload } };
+        }
+
+        fn makeSimdInst(gpa: Allocator, mir_extra: *std.ArrayList(u32), op: std.wasm.SimdOpcode) Allocator.Error!Inst {
+            const payload: u32 = @intCast(mir_extra.items.len);
+            try mir_extra.append(gpa, @backingInt(op));
+            return .{ .tag = .simd_prefix, .data = .{ .payload = payload } };
+        }
+
+        fn isSimdOp(inst: Inst, mir_extra: []const u32, op: std.wasm.SimdOpcode) bool {
+            return inst.tag == .simd_prefix and
+                inst.data.payload < mir_extra.len and
+                mir_extra[inst.data.payload] == @backingInt(op);
+        }
+
+        fn isPureZeroPopOrSimdConst(inst: Inst, mir_extra: []const u32) bool {
+            return isPureZeroPopTag(inst.tag) or isSimdOp(inst, mir_extra, .v128_const);
+        }
+
+        fn pureScalarIntrinsicPops(intrinsic: anytype) ?i32 {
+            return switch (intrinsic) {
+                .__extendhfsf2,
+                .__truncsfhf2,
+                .__bitreversesi2,
+                .__bitreversedi2,
+                .__bswapsi2,
+                .__bswapdi2,
+                .__floatsihf,
+                .__floatunsihf,
+                .__floatdihf,
+                .__floatundihf,
+                .__ceilh,
+                .__floorh,
+                .__trunch,
+                .__roundh,
+                .__fabsh,
+                .__sqrth,
+                .__sinh,
+                .__cosh,
+                .__tanh,
+                .__exph,
+                .__exp2h,
+                .__logh,
+                .__log2h,
+                .__log10h,
+                .sinf,
+                .cosf,
+                .tanf,
+                .expf,
+                .exp2f,
+                .logf,
+                .log2f,
+                .log10f,
+                .sin,
+                .cos,
+                .tan,
+                .exp,
+                .exp2,
+                .log,
+                .log2,
+                .log10,
+                => 1,
+
+                .__addhf3,
+                .__subhf3,
+                .__mulhf3,
+                .__divhf3,
+                .__fmodh,
+                .__fmaxh,
+                .__fminh,
+                .fmodf,
+                .fmod,
+                .__fmax,
+                .__truncxfhf2,
+                .__trunctfhf2,
+                .__truncxfsf2,
+                .__trunctfsf2,
+                .__truncxfdf2,
+                .__trunctfdf2,
+                .__fixxfsi,
+                .__fixunsxfsi,
+                .__fixtfsi,
+                .__fixunstfsi,
+                .__fixxfdi,
+                .__fixunsxfdi,
+                .__fixtfdi,
+                .__fixunstfdi,
+                .__floattihf,
+                .__floatuntihf,
+                .__floattisf,
+                .__floatuntisf,
+                .__floattidf,
+                .__floatuntidf,
+                => 2,
+
+                .__fmah,
+                .fmaf,
+                .fma,
+                => 3,
+
+                .__eqtf2,
+                .__netf2,
+                .__lttf2,
+                .__letf2,
+                .__gttf2,
+                .__getf2,
+                .__eqxf2,
+                .__nexf2,
+                .__ltxf2,
+                .__lexf2,
+                .__gtxf2,
+                .__gexf2,
+                => 4,
+
+                else => null,
+            };
+        }
+
+        fn isExtendHfSf2(inst: Inst) bool {
+            return inst.tag == .call_intrinsic and inst.data.intrinsic == .__extendhfsf2;
+        }
+
+        fn isTruncSfHf2(inst: Inst) bool {
+            return inst.tag == .call_intrinsic and inst.data.intrinsic == .__truncsfhf2;
+        }
+
+        fn pureNonTrappingInstPops(inst: Inst, mir_extra: []const u32) ?i32 {
+            if (pureNonTrappingPops(inst.tag)) |pops| return pops;
+            return switch (inst.tag) {
+                .call_intrinsic => pureScalarIntrinsicPops(inst.data.intrinsic),
+                .simd_prefix => if (inst.data.payload < mir_extra.len) blk: {
+                    const simd_op: std.wasm.SimdOpcode = @fromBackingInt(mir_extra[inst.data.payload]);
+                    break :blk switch (simd_op) {
+                        .v128_load,
+                        .v128_load8x8_s,
+                        .v128_load8x8_u,
+                        .v128_load16x4_s,
+                        .v128_load16x4_u,
+                        .v128_load32x2_s,
+                        .v128_load32x2_u,
+                        .v128_load8_splat,
+                        .v128_load16_splat,
+                        .v128_load32_splat,
+                        .v128_load64_splat,
+                        .v128_load32_zero,
+                        .v128_load64_zero,
+                        .v128_load8_lane,
+                        .v128_load16_lane,
+                        .v128_load32_lane,
+                        .v128_load64_lane,
+                        .v128_store,
+                        .v128_store8_lane,
+                        .v128_store16_lane,
+                        .v128_store32_lane,
+                        .v128_store64_lane,
+                        => null,
+                        else => singlePushInstPops(inst, mir_extra),
+                    };
+                } else null,
+                else => null,
+            };
+        }
+
+        fn findPureValStartIndex(insts: []const Inst, mir_extra: []const u32) ?usize {
+            var needed: i32 = 1;
+            var idx: usize = insts.len;
+            while (idx > 0) {
+                idx -= 1;
+                const prev = insts[idx];
+                if (prev.tag == .dbg_line) continue;
+                const pops: i32 = pureNonTrappingInstPops(prev, mir_extra) orelse return null;
+                needed = needed - 1 + pops;
+                if (needed == 0) return idx;
+            }
+            return null;
         }
 
         fn isPtrRefTag(tag: Inst.Tag) bool {
@@ -434,7 +608,7 @@ fn Pass(comptime Inst: type) type {
                     .local_set, .local_tee => {
                         if (insts[j].data.local == local) return false;
                     },
-                    .@"return", .@"unreachable" => return false,
+                    .@"return", .return_call_nav, .return_call_indirect, .@"unreachable" => return false,
                     .block, .loop, .end, .br, .br_if, .br_table => {
                         for (insts, 0..) |other, k| {
                             if (ignore_get_idx != null and k == ignore_get_idx.?) continue;
@@ -446,6 +620,48 @@ fn Pass(comptime Inst: type) type {
                 }
             }
             return false;
+        }
+
+        fn isF16ExtReadBeforeOverwriteOrExit(
+            insts: []const Inst,
+            start_idx: usize,
+            local: u32,
+        ) bool {
+            var j: usize = start_idx;
+            while (j + 1 < insts.len) : (j += 1) {
+                switch (insts[j].tag) {
+                    .local_get => {
+                        if (insts[j].data.local == local and isExtendHfSf2(insts[j + 1])) return true;
+                    },
+                    .local_set, .local_tee => {
+                        if (insts[j].data.local == local) return false;
+                    },
+                    .@"return",
+                    .return_call_nav,
+                    .return_call_indirect,
+                    .@"unreachable",
+                    .block,
+                    .loop,
+                    .end,
+                    .br,
+                    .br_if,
+                    .br_table,
+                    => return false,
+                    else => {},
+                }
+            }
+            return false;
+        }
+
+        fn invalidateF16ExtLocal(f16_ext_locals: *std.AutoArrayHashMapUnmanaged(u32, u32), local: u32) void {
+            _ = f16_ext_locals.swapRemove(local);
+            var idx: usize = f16_ext_locals.count();
+            while (idx > 0) {
+                idx -= 1;
+                if (f16_ext_locals.values()[idx] == local) {
+                    f16_ext_locals.swapRemoveAt(idx);
+                }
+            }
         }
 
         fn invalidateLocal(known_locals: *std.AutoArrayHashMapUnmanaged(u32, Inst), local: u32) void {
@@ -512,12 +728,16 @@ fn Pass(comptime Inst: type) type {
             gpa: Allocator,
             insts: []const Inst,
             out: *std.ArrayList(Inst),
+            mir_extra: []const u32,
         ) Allocator.Error!bool {
             out.clearRetainingCapacity();
             try out.ensureTotalCapacity(gpa, insts.len);
 
             var known_locals: std.AutoArrayHashMapUnmanaged(u32, Inst) = .empty;
             defer known_locals.deinit(gpa);
+
+            var f16_ext_locals: std.AutoArrayHashMapUnmanaged(u32, u32) = .empty;
+            defer f16_ext_locals.deinit(gpa);
 
             var scope_stack: std.ArrayList(ScopeFrame) = .empty;
             defer {
@@ -533,6 +753,7 @@ fn Pass(comptime Inst: type) type {
                 const inst = insts[i];
                 switch (inst.tag) {
                     .loop => {
+                        f16_ext_locals.clearRetainingCapacity();
                         if (findMatchingEnd(insts, i)) |end_idx| {
                             invalidateModifiedLocalsInSpan(&known_locals, insts[i + 1 .. end_idx]);
                             const cloned = try known_locals.clone(gpa);
@@ -549,6 +770,7 @@ fn Pass(comptime Inst: type) type {
                         }
                     },
                     .block => {
+                        f16_ext_locals.clearRetainingCapacity();
                         if (findMatchingEnd(insts, i) != null) {
                             const cloned = try known_locals.clone(gpa);
                             errdefer {
@@ -567,11 +789,15 @@ fn Pass(comptime Inst: type) type {
                     .br,
                     .br_table,
                     .@"return",
+                    .return_call_nav,
+                    .return_call_indirect,
                     .@"unreachable",
                     => {
                         known_locals.clearRetainingCapacity();
+                        f16_ext_locals.clearRetainingCapacity();
                     },
                     .end => {
+                        f16_ext_locals.clearRetainingCapacity();
                         if (scope_stack.pop()) |frame_val| {
                             var frame = frame_val;
                             defer frame.entry_known.deinit(gpa);
@@ -590,6 +816,20 @@ fn Pass(comptime Inst: type) type {
                     else => {},
                 }
                 if (inst.tag == .local_get) {
+                    if (i + 1 < insts.len and isExtendHfSf2(insts[i + 1])) {
+                        const resolved_local = blk: {
+                            if (known_locals.get(inst.data.local)) |rep| {
+                                if (rep.tag == .local_get) break :blk rep.data.local;
+                            }
+                            break :blk inst.data.local;
+                        };
+                        if (f16_ext_locals.get(resolved_local)) |ext_local| {
+                            out.appendAssumeCapacity(.{ .tag = .local_get, .data = .{ .local = ext_local } });
+                            changed = true;
+                            i += 2;
+                            continue;
+                        }
+                    }
                     if (!(i + 1 < insts.len and insts[i + 1].tag == .local_set and insts[i + 1].data.local == inst.data.local)) {
                         if (known_locals.get(inst.data.local)) |replacement| {
                             out.appendAssumeCapacity(replacement);
@@ -600,6 +840,14 @@ fn Pass(comptime Inst: type) type {
                     }
                 }
                 if (inst.tag == .local_set) {
+                    const prev_is_ext_of_src: ?u32 = if (out.items.len >= 2 and
+                        out.items[out.items.len - 2].tag == .local_get and
+                        isExtendHfSf2(out.items[out.items.len - 1]) and
+                        out.items[out.items.len - 2].data.local != inst.data.local)
+                        out.items[out.items.len - 2].data.local
+                    else
+                        null;
+                    invalidateF16ExtLocal(&f16_ext_locals, inst.data.local);
                     if (out.items.len >= 1 and
                         out.items[out.items.len - 1].tag == .local_get and
                         out.items[out.items.len - 1].data.local == inst.data.local)
@@ -628,7 +876,8 @@ fn Pass(comptime Inst: type) type {
                         inst.data.local == insts[k].data.local)
                     {
                         const local = inst.data.local;
-                        const keep_set = isLocalReadBeforeOverwriteOrExit(insts, k + 1, local, k);
+                        const keep_set = isLocalReadBeforeOverwriteOrExit(insts, k + 1, local, k) or
+                            (prev_is_ext_of_src != null and isF16ExtReadBeforeOverwriteOrExit(insts, k + 1, prev_is_ext_of_src.?));
                         if (crossed_block) {
                             const const_inst = out.pop().?;
                             if (keep_set) {
@@ -664,6 +913,9 @@ fn Pass(comptime Inst: type) type {
                             if (keep_set) {
                                 out.appendAssumeCapacity(.{ .tag = .local_tee, .data = .{ .local = local } });
                                 try recordLocalSet(gpa, &known_locals, local, val_inst);
+                                if (prev_is_ext_of_src) |src_l| {
+                                    try f16_ext_locals.put(gpa, src_l, local);
+                                }
                             } else {
                                 invalidateLocal(&known_locals, local);
                             }
@@ -674,6 +926,71 @@ fn Pass(comptime Inst: type) type {
                         changed = true;
                         i = k + 1;
                         continue;
+                    }
+                    if (!crossed_block and k < insts.len and
+                        isPureZeroPopOrSimdConst(insts[k], mir_extra) and
+                        !(insts[k].tag == .local_get and insts[k].data.local == inst.data.local))
+                    {
+                        var k2 = k + 1;
+                        while (k2 < insts.len and insts[k2].tag == .dbg_line) : (k2 += 1) {}
+                        var unary_idx: ?usize = null;
+                        if (k2 < insts.len and pureNonTrappingInstPops(insts[k2], mir_extra) == 1) {
+                            unary_idx = k2;
+                            k2 += 1;
+                            while (k2 < insts.len and insts[k2].tag == .dbg_line) : (k2 += 1) {}
+                        }
+                        if (k2 < insts.len and
+                            insts[k2].tag == .local_get and
+                            insts[k2].data.local == inst.data.local and
+                            !isLocalReadBeforeOverwriteOrExit(insts, k2 + 1, inst.data.local, k2))
+                        {
+                            if (findPureValStartIndex(out.items, mir_extra)) |rhs_start| {
+                                const raw_x = insts[k];
+                                const x_inst: Inst = if (raw_x.tag == .local_get)
+                                    known_locals.get(raw_x.data.local) orelse raw_x
+                                else
+                                    raw_x;
+                                const can_move = switch (x_inst.tag) {
+                                    .local_get => x_inst.data.local != inst.data.local and
+                                        !isLocalModifiedInSpan(out.items[rhs_start..], x_inst.data.local),
+                                    else => true,
+                                };
+                                if (can_move) {
+                                    if (unary_idx) |u_idx| {
+                                        if (x_inst.tag == .local_get and isExtendHfSf2(insts[u_idx])) {
+                                            if (f16_ext_locals.get(x_inst.data.local)) |ext_local| {
+                                                if (ext_local != inst.data.local and
+                                                    !isLocalModifiedInSpan(out.items[rhs_start..], ext_local))
+                                                {
+                                                    try out.insert(gpa, rhs_start, .{ .tag = .local_get, .data = .{ .local = ext_local } });
+                                                    invalidateLocal(&known_locals, inst.data.local);
+                                                    for (insts[i + 1 .. k2]) |inter_inst| {
+                                                        if (inter_inst.tag == .dbg_line) {
+                                                            out.appendAssumeCapacity(inter_inst);
+                                                        }
+                                                    }
+                                                    changed = true;
+                                                    i = k2 + 1;
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                        try out.insertSlice(gpa, rhs_start, &.{ x_inst, insts[u_idx] });
+                                    } else {
+                                        try out.insert(gpa, rhs_start, x_inst);
+                                    }
+                                    invalidateLocal(&known_locals, inst.data.local);
+                                    for (insts[i + 1 .. k2]) |inter_inst| {
+                                        if (inter_inst.tag == .dbg_line) {
+                                            out.appendAssumeCapacity(inter_inst);
+                                        }
+                                    }
+                                    changed = true;
+                                    i = k2 + 1;
+                                    continue;
+                                }
+                            }
+                        }
                     }
                     if (out.items.len >= 1 and
                         isPureZeroPopTag(out.items[out.items.len - 1].tag) and
@@ -687,10 +1004,23 @@ fn Pass(comptime Inst: type) type {
                     }
                     const prev_inst: ?Inst = if (out.items.len >= 1) out.items[out.items.len - 1] else null;
                     try recordLocalSet(gpa, &known_locals, inst.data.local, prev_inst);
+                    if (prev_is_ext_of_src) |src_l| {
+                        try f16_ext_locals.put(gpa, src_l, inst.data.local);
+                    }
                 }
                 if (inst.tag == .local_tee) {
                     const local = inst.data.local;
-                    if (!isLocalReadBeforeOverwriteOrExit(insts, i + 1, local, null)) {
+                    const prev_is_ext_of_src: ?u32 = if (out.items.len >= 2 and
+                        out.items[out.items.len - 2].tag == .local_get and
+                        isExtendHfSf2(out.items[out.items.len - 1]) and
+                        out.items[out.items.len - 2].data.local != local)
+                        out.items[out.items.len - 2].data.local
+                    else
+                        null;
+                    invalidateF16ExtLocal(&f16_ext_locals, local);
+                    const keep_tee = isLocalReadBeforeOverwriteOrExit(insts, i + 1, local, null) or
+                        (prev_is_ext_of_src != null and isF16ExtReadBeforeOverwriteOrExit(insts, i + 1, prev_is_ext_of_src.?));
+                    if (!keep_tee) {
                         invalidateLocal(&known_locals, local);
                         changed = true;
                         i += 1;
@@ -698,6 +1028,9 @@ fn Pass(comptime Inst: type) type {
                     }
                     const prev_inst: ?Inst = if (out.items.len >= 1) out.items[out.items.len - 1] else null;
                     try recordLocalSet(gpa, &known_locals, local, prev_inst);
+                    if (prev_is_ext_of_src) |src_l| {
+                        try f16_ext_locals.put(gpa, src_l, local);
+                    }
                 }
                 out.appendAssumeCapacity(inst);
                 i += 1;
@@ -810,6 +1143,8 @@ fn Pass(comptime Inst: type) type {
                 .i32_shl,
                 .i32_shr_s,
                 .i32_shr_u,
+                .i32_rotl,
+                .i32_rotr,
                 .i64_add,
                 .i64_sub,
                 .i64_mul,
@@ -819,6 +1154,8 @@ fn Pass(comptime Inst: type) type {
                 .i64_shl,
                 .i64_shr_s,
                 .i64_shr_u,
+                .i64_rotl,
+                .i64_rotr,
                 .f32_add,
                 .f32_sub,
                 .f32_mul,
@@ -898,7 +1235,8 @@ fn Pass(comptime Inst: type) type {
                                     found_set = true;
                                     break;
                                 }
-                                const pops = pureNonTrappingPops(cur.tag) orelse break;
+                                const pops = pureNonTrappingPops(cur.tag) orelse
+                                    (if (cur.tag == .call_intrinsic) pureScalarIntrinsicPops(cur.data.intrinsic) else null) orelse break;
                                 if (stack_height < pops) break;
                                 stack_height = stack_height - pops + 1;
                                 k += 1;
@@ -1079,6 +1417,13 @@ fn Pass(comptime Inst: type) type {
                     const op2_ones = possibleOnesI32(expr[op2_start..cond_start], mir_extra);
                     break :blk op1_ones | op2_ones;
                 },
+                .call_intrinsic => switch (last.data.intrinsic) {
+                    .__truncsfhf2,
+                    .__trunctfhf2,
+                    .__truncxfhf2,
+                    => 0xFFFF,
+                    else => std.math.maxInt(u32),
+                },
                 else => if (isBoolProducerTag(last.tag)) 1 else std.math.maxInt(u32),
             };
         }
@@ -1231,6 +1576,16 @@ fn Pass(comptime Inst: type) type {
                 // Constant drop: `<const>, .drop` -> remove both
                 if (inst.tag == .drop and len >= 1 and isConstTag(out.items[len - 1].tag)) {
                     _ = out.pop();
+                    changed = true;
+                    continue;
+                }
+                // Dead pure 1-pop scalar intrinsic drop: `<pure_0pop>; call_intrinsic <1pop_pure>; drop` -> remove all 3
+                if (inst.tag == .drop and len >= 2 and
+                    out.items[len - 1].tag == .call_intrinsic and
+                    pureScalarIntrinsicPops(out.items[len - 1].data.intrinsic) == 1 and
+                    isPureZeroPopTag(out.items[len - 2].tag))
+                {
+                    out.items.len = len - 2;
                     changed = true;
                     continue;
                 }
@@ -1398,7 +1753,123 @@ fn Pass(comptime Inst: type) type {
                                 continue;
                             }
                         },
+                        .f32_demote_f64 => {
+                            if (prev.tag == .f64_promote_f32) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                        },
+                        .call_intrinsic => {
+                            if (isTruncSfHf2(inst) and isExtendHfSf2(prev)) {
+                                _ = out.pop();
+                                changed = true;
+                                continue;
+                            }
+                            if (isExtendHfSf2(inst) and prev.tag == .i32_const) {
+                                const h_bits: u16 = @truncate(@as(u32, @bitCast(prev.data.imm32)));
+                                const h: f16 = @bitCast(h_bits);
+                                if (!std.math.isNan(h)) {
+                                    const f: f32 = @floatCast(h);
+                                    out.items[len - 1] = .{ .tag = .f32_const, .data = .{ .float32 = f } };
+                                    changed = true;
+                                    continue;
+                                }
+                            }
+                            if (isTruncSfHf2(inst) and prev.tag == .f32_const) {
+                                const f: f32 = prev.data.float32;
+                                if (!std.math.isNan(f)) {
+                                    const h: f16 = @floatCast(f);
+                                    const h_bits: u16 = @bitCast(h);
+                                    out.items[len - 1] = makeI32Const(@intCast(h_bits));
+                                    changed = true;
+                                    continue;
+                                }
+                            }
+                        },
                         else => {},
+                    }
+                }
+
+                // f32 unary ops preceded by `f32_const`
+                if (len >= 1 and out.items[len - 1].tag == .f32_const) {
+                    const v: f32 = out.items[len - 1].data.float32;
+                    switch (inst.tag) {
+                        .f32_abs => {
+                            out.items[len - 1] = .{ .tag = .f32_const, .data = .{ .float32 = @abs(v) } };
+                            changed = true;
+                            continue;
+                        },
+                        .f32_neg => {
+                            out.items[len - 1] = .{ .tag = .f32_const, .data = .{ .float32 = -v } };
+                            changed = true;
+                            continue;
+                        },
+                        .f32_ceil => if (!std.math.isNan(v)) {
+                            out.items[len - 1] = .{ .tag = .f32_const, .data = .{ .float32 = @ceil(v) } };
+                            changed = true;
+                            continue;
+                        },
+                        .f32_floor => if (!std.math.isNan(v)) {
+                            out.items[len - 1] = .{ .tag = .f32_const, .data = .{ .float32 = @floor(v) } };
+                            changed = true;
+                            continue;
+                        },
+                        .f32_trunc => if (!std.math.isNan(v)) {
+                            out.items[len - 1] = .{ .tag = .f32_const, .data = .{ .float32 = @trunc(v) } };
+                            changed = true;
+                            continue;
+                        },
+                        .f32_sqrt => if (!std.math.isNan(v) and v >= 0.0) {
+                            out.items[len - 1] = .{ .tag = .f32_const, .data = .{ .float32 = @sqrt(v) } };
+                            changed = true;
+                            continue;
+                        },
+                        .i32_reinterpret_f32 => {
+                            out.items[len - 1] = makeI32Const(@bitCast(v));
+                            changed = true;
+                            continue;
+                        },
+                        else => {},
+                    }
+                }
+
+                // f32 binary ops preceded by two `f32_const`
+                if (len >= 2 and out.items[len - 2].tag == .f32_const and out.items[len - 1].tag == .f32_const) {
+                    const lhs: f32 = out.items[len - 2].data.float32;
+                    const rhs: f32 = out.items[len - 1].data.float32;
+                    if (!std.math.isNan(lhs) and !std.math.isNan(rhs)) {
+                        const folded_f32: ?f32 = switch (inst.tag) {
+                            .f32_add => lhs + rhs,
+                            .f32_sub => lhs - rhs,
+                            .f32_mul => lhs * rhs,
+                            .f32_div => lhs / rhs,
+                            .f32_copysign => std.math.copysign(lhs, rhs),
+                            else => null,
+                        };
+                        if (folded_f32) |res| {
+                            if (!std.math.isNan(res)) {
+                                out.items.len = len - 1;
+                                out.items[len - 2] = .{ .tag = .f32_const, .data = .{ .float32 = res } };
+                                changed = true;
+                                continue;
+                            }
+                        }
+                        const folded_cmp: ?i32 = switch (inst.tag) {
+                            .f32_eq => if (lhs == rhs) 1 else 0,
+                            .f32_ne => if (lhs != rhs) 1 else 0,
+                            .f32_lt => if (lhs < rhs) 1 else 0,
+                            .f32_gt => if (lhs > rhs) 1 else 0,
+                            .f32_le => if (lhs <= rhs) 1 else 0,
+                            .f32_ge => if (lhs >= rhs) 1 else 0,
+                            else => null,
+                        };
+                        if (folded_cmp) |res_cmp| {
+                            out.items.len = len - 1;
+                            out.items[len - 2] = makeI32Const(res_cmp);
+                            changed = true;
+                            continue;
+                        }
                     }
                 }
 
@@ -1517,6 +1988,8 @@ fn Pass(comptime Inst: type) type {
                         .i32_shl => @bitCast(lhs_u << shift_amt),
                         .i32_shr_s => lhs >> shift_amt,
                         .i32_shr_u => @bitCast(lhs_u >> shift_amt),
+                        .i32_rotl => @bitCast(std.math.rotl(u32, lhs_u, shift_amt)),
+                        .i32_rotr => @bitCast(std.math.rotr(u32, lhs_u, shift_amt)),
                         .i32_eq => if (lhs == rhs) 1 else 0,
                         .i32_ne => if (lhs != rhs) 1 else 0,
                         .i32_lt_s => if (lhs < rhs) 1 else 0,
@@ -1625,7 +2098,7 @@ fn Pass(comptime Inst: type) type {
                                 continue;
                             }
                         },
-                        .i32_shl, .i32_shr_s, .i32_shr_u => {
+                        .i32_shl, .i32_shr_s, .i32_shr_u, .i32_rotl, .i32_rotr => {
                             if (shift_amt == 0) {
                                 _ = out.pop();
                                 changed = true;
@@ -1891,6 +2364,8 @@ fn Pass(comptime Inst: type) type {
                         .i64_shl => lhs_u << shift_amt,
                         .i64_shr_s => @bitCast(lhs_s >> shift_amt),
                         .i64_shr_u => lhs_u >> shift_amt,
+                        .i64_rotl => std.math.rotl(u64, lhs_u, shift_amt),
+                        .i64_rotr => std.math.rotr(u64, lhs_u, shift_amt),
                         else => null,
                     };
 
@@ -1998,7 +2473,7 @@ fn Pass(comptime Inst: type) type {
                                 continue;
                             }
                         },
-                        .i64_shl, .i64_shr_s, .i64_shr_u => {
+                        .i64_shl, .i64_shr_s, .i64_shr_u, .i64_rotl, .i64_rotr => {
                             if (shift_amt == 0) {
                                 _ = out.pop();
                                 changed = true;
@@ -2127,6 +2602,237 @@ fn Pass(comptime Inst: type) type {
                         },
                         else => {},
                     }
+                }
+
+                // Shift and rotate bitmask elision:
+                // WebAssembly shift and rotate instructions inherently mask the shift count modulo the bit-width (32 or 64).
+                switch (inst.tag) {
+                    .i32_shl, .i32_shr_s, .i32_shr_u, .i32_rotl, .i32_rotr => {
+                        if (len >= 2 and out.items[len - 1].tag == .i32_and and out.items[len - 2].tag == .i32_const and
+                            (@as(u32, @bitCast(out.items[len - 2].data.imm32)) & 31) == 31)
+                        {
+                            out.items.len = len - 2;
+                            out.appendAssumeCapacity(inst);
+                            changed = true;
+                            continue;
+                        }
+                        if (len >= 3 and out.items[len - 1].tag == .i32_and and isPureZeroPopTag(out.items[len - 2].tag) and
+                            out.items[len - 3].tag == .i32_const and (@as(u32, @bitCast(out.items[len - 3].data.imm32)) & 31) == 31)
+                        {
+                            out.items[len - 3] = out.items[len - 2];
+                            out.items.len = len - 2;
+                            out.appendAssumeCapacity(inst);
+                            changed = true;
+                            continue;
+                        }
+                    },
+                    .i64_shl, .i64_shr_s, .i64_shr_u, .i64_rotl, .i64_rotr => {
+                        if (len >= 2 and out.items[len - 1].tag == .i64_and and out.items[len - 2].tag == .i64_const and
+                            (readImm64(mir_extra.items, out.items[len - 2].data.payload) & 63) == 63)
+                        {
+                            out.items.len = len - 2;
+                            out.appendAssumeCapacity(inst);
+                            changed = true;
+                            continue;
+                        }
+                        if (len >= 3 and out.items[len - 1].tag == .i64_and and isPureZeroPopTag(out.items[len - 2].tag) and
+                            out.items[len - 3].tag == .i64_const and (readImm64(mir_extra.items, out.items[len - 3].data.payload) & 63) == 63)
+                        {
+                            out.items[len - 3] = out.items[len - 2];
+                            out.items.len = len - 2;
+                            out.appendAssumeCapacity(inst);
+                            changed = true;
+                            continue;
+                        }
+                        if (len >= 3 and
+                            (out.items[len - 1].tag == .i64_extend_i32_u or out.items[len - 1].tag == .i64_extend_i32_s) and
+                            out.items[len - 2].tag == .i32_and and out.items[len - 3].tag == .i32_const and
+                            (@as(u32, @bitCast(out.items[len - 3].data.imm32)) & 63) == 63)
+                        {
+                            out.items[len - 3] = out.items[len - 1];
+                            out.items.len = len - 2;
+                            out.appendAssumeCapacity(inst);
+                            changed = true;
+                            continue;
+                        }
+                        if (len >= 4 and
+                            (out.items[len - 1].tag == .i64_extend_i32_u or out.items[len - 1].tag == .i64_extend_i32_s) and
+                            out.items[len - 2].tag == .i32_and and isPureZeroPopTag(out.items[len - 3].tag) and
+                            out.items[len - 4].tag == .i32_const and (@as(u32, @bitCast(out.items[len - 4].data.imm32)) & 63) == 63)
+                        {
+                            out.items[len - 4] = out.items[len - 3];
+                            out.items[len - 3] = out.items[len - 1];
+                            out.items.len = len - 2;
+                            out.appendAssumeCapacity(inst);
+                            changed = true;
+                            continue;
+                        }
+                    },
+                    .i32_or, .i32_add, .i32_xor => {
+                        // Constant 32-bit rotate synthesis:
+                        // `local_get X; i32_const C1; <sh1>; local_get X; i32_const C2; <sh2>; i32_or/add/xor`
+                        if (len >= 6 and
+                            out.items[len - 6].tag == .local_get and
+                            out.items[len - 5].tag == .i32_const and
+                            out.items[len - 3].tag == .local_get and
+                            out.items[len - 6].data.local == out.items[len - 3].data.local and
+                            out.items[len - 2].tag == .i32_const)
+                        {
+                            const sh1 = out.items[len - 4].tag;
+                            const sh2 = out.items[len - 1].tag;
+                            if ((sh1 == .i32_shl and sh2 == .i32_shr_u) or (sh1 == .i32_shr_u and sh2 == .i32_shl)) {
+                                const c1: u5 = @truncate(@as(u32, @bitCast(out.items[len - 5].data.imm32)));
+                                const c2: u5 = @truncate(@as(u32, @bitCast(out.items[len - 2].data.imm32)));
+                                if (c1 != 0 and (c1 +% c2) == 0) {
+                                    out.items[len - 5] = makeI32Const(c1);
+                                    out.items[len - 4] = .{
+                                        .tag = if (sh1 == .i32_shl) .i32_rotl else .i32_rotr,
+                                        .data = .{ .tag = {} },
+                                    };
+                                    out.items.len = len - 3;
+                                    changed = true;
+                                    continue;
+                                }
+                            }
+                        }
+                        // Variable 32-bit rotate synthesis:
+                        // `local_get X; local_get S; <sh1>; local_get X; i32_const C; local_get S; i32_sub; <sh2>; i32_or`
+                        if (inst.tag == .i32_or and len >= 8 and
+                            out.items[len - 8].tag == .local_get and
+                            out.items[len - 7].tag == .local_get and
+                            out.items[len - 5].tag == .local_get and
+                            out.items[len - 8].data.local == out.items[len - 5].data.local and
+                            out.items[len - 4].tag == .i32_const and
+                            (@as(u32, @bitCast(out.items[len - 4].data.imm32)) & 31) == 0 and
+                            out.items[len - 3].tag == .local_get and
+                            out.items[len - 7].data.local == out.items[len - 3].data.local and
+                            out.items[len - 2].tag == .i32_sub)
+                        {
+                            const sh1 = out.items[len - 6].tag;
+                            const sh2 = out.items[len - 1].tag;
+                            if ((sh1 == .i32_shl and sh2 == .i32_shr_u) or (sh1 == .i32_shr_u and sh2 == .i32_shl)) {
+                                out.items[len - 6] = .{
+                                    .tag = if (sh1 == .i32_shl) .i32_rotl else .i32_rotr,
+                                    .data = .{ .tag = {} },
+                                };
+                                out.items.len = len - 5;
+                                changed = true;
+                                continue;
+                            }
+                        }
+                    },
+                    .i64_or, .i64_add, .i64_xor => {
+                        // Constant 64-bit rotate synthesis:
+                        // `local_get X; i64_const C1; <sh1>; local_get X; i64_const C2; <sh2>; i64_or/add/xor`
+                        if (len >= 6 and
+                            out.items[len - 6].tag == .local_get and
+                            out.items[len - 5].tag == .i64_const and
+                            out.items[len - 3].tag == .local_get and
+                            out.items[len - 6].data.local == out.items[len - 3].data.local and
+                            out.items[len - 2].tag == .i64_const)
+                        {
+                            const sh1 = out.items[len - 4].tag;
+                            const sh2 = out.items[len - 1].tag;
+                            if ((sh1 == .i64_shl and sh2 == .i64_shr_u) or (sh1 == .i64_shr_u and sh2 == .i64_shl)) {
+                                const c1: u6 = @truncate(readImm64(mir_extra.items, out.items[len - 5].data.payload));
+                                const c2: u6 = @truncate(readImm64(mir_extra.items, out.items[len - 2].data.payload));
+                                if (c1 != 0 and (c1 +% c2) == 0) {
+                                    out.items[len - 5] = try makeI64Const(gpa, mir_extra, c1);
+                                    out.items[len - 4] = .{
+                                        .tag = if (sh1 == .i64_shl) .i64_rotl else .i64_rotr,
+                                        .data = .{ .tag = {} },
+                                    };
+                                    out.items.len = len - 3;
+                                    changed = true;
+                                    continue;
+                                }
+                            }
+                        }
+                        // Variable 64-bit rotate synthesis:
+                        // `local_get X; local_get S; i64_extend_i32_u; <sh1>; local_get X; i32_const C; local_get S; i32_sub; i64_extend_i32_u; <sh2>; i64_or`
+                        if (inst.tag == .i64_or and len >= 10 and
+                            out.items[len - 10].tag == .local_get and
+                            out.items[len - 9].tag == .local_get and
+                            out.items[len - 8].tag == .i64_extend_i32_u and
+                            out.items[len - 6].tag == .local_get and
+                            out.items[len - 10].data.local == out.items[len - 6].data.local and
+                            out.items[len - 5].tag == .i32_const and
+                            (@as(u32, @bitCast(out.items[len - 5].data.imm32)) & 63) == 0 and
+                            out.items[len - 4].tag == .local_get and
+                            out.items[len - 9].data.local == out.items[len - 4].data.local and
+                            out.items[len - 3].tag == .i32_sub and
+                            out.items[len - 2].tag == .i64_extend_i32_u)
+                        {
+                            const sh1 = out.items[len - 7].tag;
+                            const sh2 = out.items[len - 1].tag;
+                            if ((sh1 == .i64_shl and sh2 == .i64_shr_u) or (sh1 == .i64_shr_u and sh2 == .i64_shl)) {
+                                out.items[len - 7] = .{
+                                    .tag = if (sh1 == .i64_shl) .i64_rotl else .i64_rotr,
+                                    .data = .{ .tag = {} },
+                                };
+                                out.items.len = len - 6;
+                                changed = true;
+                                continue;
+                            }
+                        }
+                    },
+                    .simd_prefix => if (inst.data.payload < mir_extra.items.len) {
+                        const simd_op: std.wasm.SimdOpcode = @fromBackingInt(mir_extra.items[inst.data.payload]);
+                        switch (simd_op) {
+                            .v128_not => {
+                                if (len >= 1 and isSimdOp(out.items[len - 1], mir_extra.items, .v128_not)) {
+                                    _ = out.pop();
+                                    changed = true;
+                                    continue;
+                                }
+                            },
+                            .v128_and => {
+                                // `a; b; v128_not; v128_and -> a; b; v128_andnot`
+                                if (len >= 1 and isSimdOp(out.items[len - 1], mir_extra.items, .v128_not)) {
+                                    out.items[len - 1] = try makeSimdInst(gpa, mir_extra, .v128_andnot);
+                                    changed = true;
+                                    continue;
+                                }
+                                // `<pure_0pop_v128 b>; v128_not; <pure_0pop_v128 a>; v128_and -> <pure_0pop_v128 a>; <pure_0pop_v128 b>; v128_andnot`
+                                if (len >= 3 and
+                                    isPureZeroPopOrSimdConst(out.items[len - 1], mir_extra.items) and
+                                    isSimdOp(out.items[len - 2], mir_extra.items, .v128_not) and
+                                    isPureZeroPopOrSimdConst(out.items[len - 3], mir_extra.items))
+                                {
+                                    const a_inst = out.items[len - 1];
+                                    const b_inst = out.items[len - 3];
+                                    out.items[len - 3] = a_inst;
+                                    out.items[len - 2] = b_inst;
+                                    out.items[len - 1] = try makeSimdInst(gpa, mir_extra, .v128_andnot);
+                                    changed = true;
+                                    continue;
+                                }
+                            },
+                            .i8x16_shl, .i8x16_shr_s, .i8x16_shr_u,
+                            .i16x8_shl, .i16x8_shr_s, .i16x8_shr_u,
+                            .i32x4_shl, .i32x4_shr_s, .i32x4_shr_u,
+                            .i64x2_shl, .i64x2_shr_s, .i64x2_shr_u,
+                            => {
+                                const mask: u32 = switch (simd_op) {
+                                    .i8x16_shl, .i8x16_shr_s, .i8x16_shr_u => 7,
+                                    .i16x8_shl, .i16x8_shr_s, .i16x8_shr_u => 15,
+                                    .i32x4_shl, .i32x4_shr_s, .i32x4_shr_u => 31,
+                                    .i64x2_shl, .i64x2_shr_s, .i64x2_shr_u => 63,
+                                    else => unreachable,
+                                };
+                                if (len >= 2 and out.items[len - 1].tag == .i32_and and out.items[len - 2].tag == .i32_const and
+                                    (@as(u32, @bitCast(out.items[len - 2].data.imm32)) & mask) == mask)
+                                {
+                                    out.items.len = len - 2;
+                                    out.appendAssumeCapacity(inst);
+                                    changed = true;
+                                    continue;
+                                }
+                            },
+                            else => {},
+                        }
+                    },
+                    else => {},
                 }
 
                 if (try foldMemArgOffset(gpa, inst, out, mir_extra)) |folded_mem_inst| {
@@ -2430,6 +3136,8 @@ fn Pass(comptime Inst: type) type {
                 .i32_shl,
                 .i32_shr_s,
                 .i32_shr_u,
+                .i32_rotl,
+                .i32_rotr,
                 .i64_add,
                 .i64_sub,
                 .i64_mul,
@@ -2443,6 +3151,8 @@ fn Pass(comptime Inst: type) type {
                 .i64_shl,
                 .i64_shr_s,
                 .i64_shr_u,
+                .i64_rotl,
+                .i64_rotr,
                 .f32_add,
                 .f32_sub,
                 .f32_mul,
@@ -2735,6 +3445,8 @@ fn Pass(comptime Inst: type) type {
                     }
                     break :blk null;
                 },
+
+                .call_intrinsic => pureScalarIntrinsicPops(inst.data.intrinsic),
 
                 else => null,
             };
@@ -3201,7 +3913,7 @@ fn Pass(comptime Inst: type) type {
 
                             var val_is_pure = true;
                             for (out.items[val_start..]) |v_inst| {
-                                if (v_inst.tag != .dbg_line and pureNonTrappingPops(v_inst.tag) == null) {
+                                if (v_inst.tag != .dbg_line and pureNonTrappingInstPops(v_inst, mir_extra.items) == null) {
                                     val_is_pure = false;
                                     break;
                                 }
@@ -3320,17 +4032,23 @@ fn Pass(comptime Inst: type) type {
                             entry.store_out_end = null;
                         }
                     },
+                    .call_intrinsic => {
+                        if (pureScalarIntrinsicPops(inst.data.intrinsic) == null) {
+                            tracked_entries.clearRetainingCapacity();
+                        }
+                    },
                     .block,
                     .loop,
                     .end,
                     .br,
                     .br_table,
                     .@"return",
+                    .return_call_nav,
+                    .return_call_indirect,
                     .@"unreachable",
                     .call_nav,
                     .call_indirect,
                     .call_tag_index,
-                    .call_intrinsic,
                     .memory_grow,
                     .atomics_prefix,
                     .misc_prefix,
@@ -3616,7 +4334,7 @@ fn Pass(comptime Inst: type) type {
         fn hasUnconditionalControlTransfer(body: []const Inst) bool {
             for (body) |inst| {
                 switch (inst.tag) {
-                    .@"unreachable", .br, .br_table, .@"return" => return true,
+                    .@"unreachable", .br, .br_table, .@"return", .return_call_nav, .return_call_indirect => return true,
                     else => {},
                 }
             }
@@ -3717,7 +4435,7 @@ fn Pass(comptime Inst: type) type {
                         if (depth > 0) depth -= 1;
                         out.appendAssumeCapacity(inst);
                     },
-                    .@"unreachable", .br, .br_table, .@"return" => {
+                    .@"unreachable", .br, .br_table, .@"return", .return_call_nav, .return_call_indirect => {
                         out.appendAssumeCapacity(inst);
                         dead_until_depth = depth;
                     },
@@ -3869,6 +4587,8 @@ const StandaloneMir = struct {
             error_name_table_ref,
             call_nav,
             call_indirect,
+            return_call_nav,
+            return_call_indirect,
             call_tag_index,
             enum_tag_name_table_ref,
             call_intrinsic,
@@ -3960,6 +4680,8 @@ const StandaloneMir = struct {
             i32_shl = 0x74,
             i32_shr_s = 0x75,
             i32_shr_u = 0x76,
+            i32_rotl = 0x77,
+            i32_rotr = 0x78,
             i64_clz = 0x79,
             i64_ctz = 0x7A,
             i64_popcnt = 0x7B,
@@ -3976,6 +4698,8 @@ const StandaloneMir = struct {
             i64_shl = 0x86,
             i64_shr_s = 0x87,
             i64_shr_u = 0x88,
+            i64_rotl = 0x89,
+            i64_rotr = 0x8A,
             f32_abs = 0x8B,
             f32_neg = 0x8C,
             f32_ceil = 0x8D,
@@ -4054,7 +4778,238 @@ const StandaloneMir = struct {
             imm32: i32,
             float32: f32,
             payload: u32,
+            intrinsic: Intrinsic,
         };
+    };
+
+    pub const Intrinsic = enum(u32) {
+        __addhf3,
+        __addtf3,
+        __addxf3,
+        __bitreversedi2,
+        __bitreversesi2,
+        __bswapdi2,
+        __bswapsi2,
+        __ceilh,
+        __ceilx,
+        __cosh,
+        __cosx,
+        __divei5,
+        __divhf3,
+        __divtf3,
+        __divti3,
+        __divxf3,
+        __eqtf2,
+        __eqxf2,
+        __exp2h,
+        __exp2x,
+        __exph,
+        __expx,
+        __extenddftf2,
+        __extenddfxf2,
+        __extendhfsf2,
+        __extendhftf2,
+        __extendhfxf2,
+        __extendsftf2,
+        __extendsfxf2,
+        __extendxftf2,
+        __fabsh,
+        __fabsx,
+        __fixdfdi,
+        __fixdfei,
+        __fixdfsi,
+        __fixdfti,
+        __fixhfdi,
+        __fixhfei,
+        __fixhfsi,
+        __fixhfti,
+        __fixsfdi,
+        __fixsfei,
+        __fixsfsi,
+        __fixsfti,
+        __fixtfdi,
+        __fixtfei,
+        __fixtfsi,
+        __fixtfti,
+        __fixunsdfdi,
+        __fixunsdfei,
+        __fixunsdfsi,
+        __fixunsdfti,
+        __fixunshfdi,
+        __fixunshfei,
+        __fixunshfsi,
+        __fixunshfti,
+        __fixunssfdi,
+        __fixunssfei,
+        __fixunssfsi,
+        __fixunssfti,
+        __fixunstfdi,
+        __fixunstfei,
+        __fixunstfsi,
+        __fixunstfti,
+        __fixunsxfdi,
+        __fixunsxfei,
+        __fixunsxfsi,
+        __fixunsxfti,
+        __fixxfdi,
+        __fixxfei,
+        __fixxfsi,
+        __fixxfti,
+        __floatdidf,
+        __floatdihf,
+        __floatdisf,
+        __floatditf,
+        __floatdixf,
+        __floateidf,
+        __floateihf,
+        __floateisf,
+        __floateitf,
+        __floateixf,
+        __floatsidf,
+        __floatsihf,
+        __floatsisf,
+        __floatsitf,
+        __floatsixf,
+        __floattidf,
+        __floattihf,
+        __floattisf,
+        __floattitf,
+        __floattixf,
+        __floatundidf,
+        __floatundihf,
+        __floatundisf,
+        __floatunditf,
+        __floatundixf,
+        __floatuneidf,
+        __floatuneihf,
+        __floatuneisf,
+        __floatuneitf,
+        __floatuneixf,
+        __floatunsidf,
+        __floatunsihf,
+        __floatunsisf,
+        __floatunsitf,
+        __floatunsixf,
+        __floatuntidf,
+        __floatuntihf,
+        __floatuntisf,
+        __floatuntitf,
+        __floatuntixf,
+        __floorh,
+        __floorx,
+        __fmah,
+        __fmax,
+        __fmaxh,
+        __fmaxx,
+        __fminh,
+        __fminx,
+        __fmodh,
+        __fmodx,
+        __getf2,
+        __gexf2,
+        __gttf2,
+        __gtxf2,
+        __letf2,
+        __lexf2,
+        __log10h,
+        __log10x,
+        __log2h,
+        __log2x,
+        __logh,
+        __logx,
+        __lttf2,
+        __ltxf2,
+        __modei5,
+        __modti3,
+        __mulhf3,
+        __mulodi4,
+        __muloti4,
+        __multf3,
+        __mulxf3,
+        __netf2,
+        __nexf2,
+        __roundh,
+        __roundx,
+        __sinh,
+        __sinx,
+        __sqrth,
+        __sqrtx,
+        __subhf3,
+        __subtf3,
+        __subxf3,
+        __tanh,
+        __tanx,
+        __trunch,
+        __truncsfhf2,
+        __trunctfdf2,
+        __trunctfhf2,
+        __trunctfsf2,
+        __trunctfxf2,
+        __truncx,
+        __truncxfdf2,
+        __truncxfhf2,
+        __truncxfsf2,
+        __udivei5,
+        __udivti3,
+        __umodei5,
+        __umodti3,
+        ceilf128,
+        cos,
+        cosf,
+        cosf128,
+        exp,
+        exp2,
+        exp2f,
+        exp2f128,
+        expf,
+        expf128,
+        fabsf128,
+        floorf128,
+        fma,
+        fmaf,
+        fmaf128,
+        fmaxf128,
+        fminf128,
+        fmod,
+        fmodf,
+        fmodf128,
+        log,
+        log10,
+        log10f,
+        log10f128,
+        log2,
+        log2f,
+        log2f128,
+        logf,
+        logf128,
+        roundf128,
+        sin,
+        sinf,
+        sinf128,
+        sqrtf128,
+        tan,
+        tanf,
+        tanf128,
+        truncf128,
+        memcpy,
+        memmove,
+        memset,
+        __addo_limb64,
+        __subo_limb64,
+        __cmp_limb64,
+        __and_limb64,
+        __or_limb64,
+        __xor_limb64,
+        __not_limb64,
+        __shlo_limb64,
+        __shr_limb64,
+        __clz_limb64,
+        __ctz_limb64,
+        __popcount_limb64,
+        __bitreverse_limb64,
+        __byteswap_limb64,
+        __mulo_limb64,
+        __abs_limb64,
     };
 
     pub const JumpTable = struct {
@@ -4130,6 +5085,10 @@ const TestMir = struct {
 
     fn addLocal(self: *TestMir, tag: Mir.Inst.Tag, local: u32) !void {
         try self.instructions.append(testing.allocator, .{ .tag = tag, .data = .{ .local = local } });
+    }
+
+    fn addIntrinsic(self: *TestMir, intrinsic: Mir.Intrinsic) !void {
+        try self.instructions.append(testing.allocator, .{ .tag = .call_intrinsic, .data = .{ .intrinsic = intrinsic } });
     }
 
     fn addPayload(self: *TestMir, tag: Mir.Inst.Tag, payload: u32) !void {
@@ -6772,5 +7731,298 @@ test "peepholes: mul by 2^k +- 1, magic div/rem strength reduction, possibleOnes
         }
     }
 }
+
+test "peepholes: v128.andnot, shift/rotate bitmask elision, and rotate synthesis (#233, #234)" {
+    // 1. v128.and(a, v128.not(b)), v128.and(v128.not(b), a), and v128.not(v128.not(a)) (#233)
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Direct: local_get 0; local_get 1; v128_not; v128_and -> local_get 0; local_get 1; v128_andnot
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 1);
+        try m.simdOp(.v128_not);
+        try m.simdOp(.v128_and);
+
+        // CodeGen pattern with temporary local:
+        // local_get 1; v128_not; local_set 2; local_get 0; local_get 2; v128_and
+        // -> reordered by simplifyLocals and folded to local_get 0; local_get 1; v128_andnot
+        try m.addLocal(.local_get, 1);
+        try m.simdOp(.v128_not);
+        try m.addLocal(.local_set, 2);
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 2);
+        try m.simdOp(.v128_and);
+
+        // Commuted: local_get 1; v128_not; local_get 0; v128_and -> local_get 0; local_get 1; v128_andnot
+        try m.addLocal(.local_get, 1);
+        try m.simdOp(.v128_not);
+        try m.addLocal(.local_get, 0);
+        try m.simdOp(.v128_and);
+
+        // Double negation: local_get 0; v128_not; v128_not -> local_get 0
+        try m.addLocal(.local_get, 0);
+        try m.simdOp(.v128_not);
+        try m.simdOp(.v128_not);
+
+        try m.simdOp(.v128_xor);
+        try m.simdOp(.v128_xor);
+        try m.simdOp(.v128_xor);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        var andnot_count: usize = 0;
+        var not_count: usize = 0;
+        var and_count: usize = 0;
+        for (m.instructions.items(.tag), m.instructions.items(.data)) |t, d| {
+            if (t == .simd_prefix) {
+                const op = m.extra.items[d.payload];
+                if (op == @intFromEnum(std.wasm.SimdOpcode.v128_andnot)) andnot_count += 1;
+                if (op == @intFromEnum(std.wasm.SimdOpcode.v128_not)) not_count += 1;
+                if (op == @intFromEnum(std.wasm.SimdOpcode.v128_and)) and_count += 1;
+            }
+        }
+        try testing.expectEqual(@as(usize, 3), andnot_count);
+        try testing.expectEqual(@as(usize, 0), not_count);
+        try testing.expectEqual(@as(usize, 0), and_count);
+    }
+
+    // 2. Shift/rotate bitmask elision: 32-bit (& 31), 64-bit (& 63 and i32 & 63 + extend), and SIMD shifts (#234)
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // 32-bit shift with & 31
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 1);
+        try m.addI32(31);
+        try m.addTag(.i32_and);
+        try m.addTag(.i32_shl);
+
+        // 64-bit shift with CodeGen's i32 & 63; i64_extend_i32_u
+        try m.addLocal(.local_get, 2);
+        try m.addLocal(.local_get, 1);
+        try m.addI32(63);
+        try m.addTag(.i32_and);
+        try m.addTag(.i64_extend_i32_u);
+        try m.addTag(.i64_shr_u);
+        try m.addTag(.i32_wrap_i64);
+        try m.addTag(.i32_add);
+
+        // SIMD i8x16_shl with & 7 and i16x8_shr_u with & 15
+        try m.addLocal(.local_get, 3);
+        try m.addLocal(.local_get, 1);
+        try m.addI32(7);
+        try m.addTag(.i32_and);
+        try m.simdOp(.i8x16_shl);
+        try m.addLocal(.local_get, 1);
+        try m.addI32(15);
+        try m.addTag(.i32_and);
+        try m.simdOp(.i16x8_shr_u);
+        try m.addTag(.drop);
+
+        try m.addTag(.@"return");
+        try m.finishFunc();
+        try m.run();
+
+        for (m.instructions.items(.tag)) |t| {
+            try testing.expect(t != .i32_and and t != .i64_and);
+        }
+    }
+
+    // 3. 32-bit and 64-bit constant and variable rotate synthesis (#234)
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Constant 32-bit rotate: (x << 5) | (x >> 27) -> x rotl 5
+        try m.addLocal(.local_get, 0);
+        try m.addI32(5);
+        try m.addTag(.i32_shl);
+        try m.addLocal(.local_get, 0);
+        try m.addI32(27);
+        try m.addTag(.i32_shr_u);
+        try m.addTag(.i32_or);
+
+        // Variable 32-bit rotate: (x << k) | (x >> ((0 - k) & 31)) -> x rotl k
+        try m.addLocal(.local_get, 0);
+        try m.addLocal(.local_get, 1);
+        try m.addTag(.i32_shl);
+        try m.addLocal(.local_get, 0);
+        try m.addI32(0);
+        try m.addLocal(.local_get, 1);
+        try m.addTag(.i32_sub);
+        try m.addI32(31);
+        try m.addTag(.i32_and);
+        try m.addTag(.i32_shr_u);
+        try m.addTag(.i32_or);
+        try m.addTag(.i32_add);
+
+        // Constant 64-bit rotate: (y >> 13) | (y << 51) -> y rotr 13
+        try m.addLocal(.local_get, 2);
+        try m.addI64(13);
+        try m.addTag(.i64_shr_u);
+        try m.addLocal(.local_get, 2);
+        try m.addI64(51);
+        try m.addTag(.i64_shl);
+        try m.addTag(.i64_or);
+        try m.addTag(.i32_wrap_i64);
+        try m.addTag(.i32_add);
+
+        try m.addTag(.@"return");
+        try m.finishFunc();
+        try m.run();
+
+        var rotl32_count: usize = 0;
+        var rotr64_count: usize = 0;
+        for (m.instructions.items(.tag)) |t| {
+            try testing.expect(t != .i32_shl and t != .i32_shr_u and t != .i32_or);
+            try testing.expect(t != .i64_shl and t != .i64_shr_u and t != .i64_or);
+            if (t == .i32_rotl) rotl32_count += 1;
+            if (t == .i64_rotr) rotr64_count += 1;
+        }
+        try testing.expectEqual(@as(usize, 2), rotl32_count);
+        try testing.expectEqual(@as(usize, 1), rotr64_count);
+    }
+}
+
+test "f16 soft-promotion optimizations: constant folding, redundant extend CSE, and memory forwarding (#231)" {
+    // 1. Constant folding: `i32_const (f16 bits) + __extendhfsf2 -> f32_const`,
+    //    `f32_const + f32_add -> f32_const`, `f32_const + __truncsfhf2 -> i32_const`,
+    //    and `call_intrinsic .__extendhfsf2; call_intrinsic .__truncsfhf2` identity elimination
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        const h_1_5: u16 = @bitCast(@as(f16, 1.5));
+        const h_2_25: u16 = @bitCast(@as(f16, 2.25));
+        const h_3_75: u16 = @bitCast(@as(f16, 3.75));
+
+        // Constant f16 addition: @as(f16, 1.5) + @as(f16, 2.25) -> @as(f16, 3.75)
+        try m.addI32(@intCast(h_1_5));
+        try m.addIntrinsic(.__extendhfsf2);
+        try m.addI32(@intCast(h_2_25));
+        try m.addIntrinsic(.__extendhfsf2);
+        try m.addTag(.f32_add);
+        try m.addIntrinsic(.__truncsfhf2);
+
+        // Redundant extend + trunc round-trip: `local_get 0; __extendhfsf2; __truncsfhf2` -> `local_get 0`
+        try m.addLocal(.local_get, 0);
+        try m.addIntrinsic(.__extendhfsf2);
+        try m.addIntrinsic(.__truncsfhf2);
+
+        try m.addTag(.i32_add);
+        try m.addTag(.@"return");
+        try m.finishFunc();
+        try m.run();
+
+        for (m.instructions.items(.tag)) |t| {
+            try testing.expect(t != .call_intrinsic and t != .f32_const and t != .f32_add);
+        }
+        try testing.expectEqual(Mir.Inst.Tag.i32_const, m.instructions.items(.tag)[0]);
+        try testing.expectEqual(@as(i32, @intCast(h_3_75)), m.instructions.items(.data)[0].imm32);
+    }
+
+    // 2. Temporary local reordering across `call_intrinsic .__extendhfsf2` and redundant
+    //    `local_get X; call_intrinsic .__extendhfsf2` CSE when an extended f32 local is live
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        // Extended f16 stored in local 2: `local_get 0; __extendhfsf2; local_set 2`
+        // Followed by two uses of `local_get 0; __extendhfsf2`:
+        // `local_get 2` is turned into `local_tee 2` and the second `local_get 0; __extendhfsf2`
+        // is replaced with `local_get 2`, leaving only 1 call to `.__extendhfsf2` for local 0.
+        try m.addLocal(.local_get, 0);
+        try m.addIntrinsic(.__extendhfsf2);
+        try m.addLocal(.local_set, 2);
+        try m.addLocal(.local_get, 2);
+        try m.addLocal(.local_get, 0);
+        try m.addIntrinsic(.__extendhfsf2);
+        try m.addTag(.f32_mul);
+        try m.addIntrinsic(.__truncsfhf2);
+
+        // CodeGen binary f16 rhs spill pattern (`lhs + (b - c)`):
+        // `<pure rhs_expr>; local_set 3; local_get 0; __extendhfsf2; local_get 3; __extendhfsf2; f32_add`
+        // -> reordered to eliminate temporary local 3, and `local_get 0; __extendhfsf2` is also CSE'd to `local_get 2`!
+        try m.addLocal(.local_get, 1);
+        try m.addIntrinsic(.__extendhfsf2);
+        try m.addLocal(.local_get, 4);
+        try m.addIntrinsic(.__extendhfsf2);
+        try m.addTag(.f32_sub);
+        try m.addIntrinsic(.__truncsfhf2);
+        try m.addLocal(.local_set, 3);
+        try m.addLocal(.local_get, 0);
+        try m.addIntrinsic(.__extendhfsf2);
+        try m.addLocal(.local_get, 3);
+        try m.addIntrinsic(.__extendhfsf2);
+        try m.addTag(.f32_add);
+        try m.addIntrinsic(.__truncsfhf2);
+        try m.addTag(.i32_add);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        var extend_count: usize = 0;
+        var local0_get_count: usize = 0;
+        for (m.instructions.items(.tag), m.instructions.items(.data)) |t, d| {
+            if (t == .call_intrinsic and d.intrinsic == .__extendhfsf2) extend_count += 1;
+            if (t == .local_get and d.local == 0) local0_get_count += 1;
+            if (t == .local_set or t == .local_get or t == .local_tee) {
+                try testing.expect(d.local != 3);
+            }
+        }
+        try testing.expectEqual(@as(usize, 4), extend_count);
+        try testing.expectEqual(@as(usize, 1), local0_get_count);
+    }
+
+    // 3. Store-to-load memory forwarding preserved across pure scalar conversion intrinsics
+    //    (`__extendhfsf2`, `__truncsfhf2`, `__trunctfdf2`, etc.)
+    {
+        var m: TestMir = .{};
+        defer m.deinit();
+
+        const h_2_0: u16 = @bitCast(@as(f16, 2.0));
+        const h_4_0: u16 = @bitCast(@as(f16, 4.0));
+
+        // Store `f16(2.0)` at `[local 0 + 8]`, call `.__extendhfsf2` and `.__truncsfhf2` on
+        // stack values, then reload `i32_load16_u [local 0 + 8]` and add to itself:
+        // the reload is forwarded from the store and constant-folded to `f16(4.0)`!
+        try m.addLocal(.local_get, 0);
+        try m.addI32(@intCast(h_2_0));
+        try m.memOp(.i32_store16, 8, 1);
+
+        try m.addLocal(.local_get, 0);
+        try m.memOp(.i32_load16_u, 8, 1);
+        try m.addIntrinsic(.__extendhfsf2);
+
+        try m.addLocal(.local_get, 0);
+        try m.memOp(.i32_load16_u, 8, 1);
+        try m.addIntrinsic(.__extendhfsf2);
+
+        try m.addTag(.f32_add);
+        try m.addIntrinsic(.__truncsfhf2);
+        try m.addTag(.@"return");
+
+        try m.finishFunc();
+        try m.run();
+
+        for (m.instructions.items(.tag)) |t| {
+            try testing.expect(t != .i32_load16_u and t != .call_intrinsic);
+        }
+        var found_const_4 = false;
+        for (m.instructions.items(.tag), m.instructions.items(.data)) |t, d| {
+            if (t == .i32_const and d.imm32 == @as(i32, @intCast(h_4_0))) {
+                found_const_4 = true;
+            }
+        }
+        try testing.expect(found_const_4);
+    }
+}
+
+
 
 

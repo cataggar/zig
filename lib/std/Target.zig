@@ -1953,6 +1953,7 @@ pub const Cpu = struct {
                 => &.{ .powerpc, .powerpcle },
 
                 .wasm_mvp,
+                .wasm_multivalue,
                 => &.{ .wasm64, .wasm32 },
 
                 .arc_sysv,

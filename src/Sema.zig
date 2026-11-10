@@ -8574,6 +8574,7 @@ const calling_conventions_supporting_var_args = [_]std.lang.CallingConvention.Ta
     .powerpc_aix,
     .powerpc_aix_altivec,
     .wasm_mvp,
+    .wasm_multivalue,
     .arc_sysv,
     .avr_gnu,
     .bpf_std,

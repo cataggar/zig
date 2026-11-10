@@ -876,6 +876,7 @@ pub fn supportsTailCall(target: *const std.Target, backend: std.lang.CompilerBac
             return @import("codegen/llvm.zig").supportsTailCall(target);
         },
         .stage2_c => return true,
+        .stage2_wasm => return target.cpu.has(.wasm, .tail_call),
         else => return false,
     }
 }

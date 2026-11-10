@@ -164,6 +164,13 @@ pub const Inst = struct {
         ///
         /// Uses `ip_index`; the `InternPool.Index` is the function type.
         call_indirect,
+        /// Tail-calls a function using `nav_index`.
+        return_call_nav,
+        /// Tail-calls a function pointer by its function signature
+        /// and index into the function table.
+        ///
+        /// Uses `ip_index`; the `InternPool.Index` is the function type.
+        return_call_indirect,
         /// Calls a function by its index.
         ///
         /// The function is the auto-generated tag index function for the type
@@ -465,6 +472,10 @@ pub const Inst = struct {
         /// Uses `tag`
         i32_shr_u = 0x76,
         /// Uses `tag`
+        i32_rotl = 0x77,
+        /// Uses `tag`
+        i32_rotr = 0x78,
+        /// Uses `tag`
         i64_clz = 0x79,
         /// Uses `tag`
         i64_ctz = 0x7A,
@@ -496,6 +507,10 @@ pub const Inst = struct {
         i64_shr_s = 0x87,
         /// Uses `tag`
         i64_shr_u = 0x88,
+        /// Uses `tag`
+        i64_rotl = 0x89,
+        /// Uses `tag`
+        i64_rotr = 0x8A,
         /// Uses `tag`
         f32_abs = 0x8B,
         /// Uses `tag`
