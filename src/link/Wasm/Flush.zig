@@ -518,7 +518,7 @@ pub fn finish(f: *Flush, wasm: *Wasm) !void {
                         }
                     }
                 },
-                .call_indirect => {
+                .call_indirect, .return_call_indirect => {
                     const fn_info = zcu.typeToFunc(.fromInterned(data.ip_index)).?;
                     const type_index = wasm.getExistingFunctionType(
                         fn_info.cc,

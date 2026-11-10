@@ -2212,5 +2212,491 @@ test "optional/union copy elision, rvalue method calls, and try read-only alloc 
     try expect(AliasSafety.copyViaSelectedFramePtr(false, 1, &overwrite_big) == 7022);
 }
 
+test "wasm_multivalue calling convention (#229)" {
+    if (comptime !std.Target.wasm.featureSetHas(builtin.cpu.features, .multivalue)) return error.SkipZigTest;
+
+    const S = struct {
+        const Pair = extern struct {
+            a: u32,
+            b: u64,
+        };
+
+        const WrappedPair = extern struct {
+            inner: Pair,
+        };
+
+        const SingleU32 = extern struct {
+            a: u32,
+        };
+
+        const SingleF32 = extern struct {
+            b: f32,
+        };
+
+        const PairOfSingleWrappers = extern struct {
+            x: SingleU32,
+            y: SingleF32,
+        };
+
+        const WidePair = extern struct {
+            lo: u128,
+            hi: f64,
+        };
+
+        const DoubleWidePair = extern struct {
+            a: u128,
+            b: u128,
+        };
+
+        const Triple = extern struct {
+            x: u32,
+            y: u32,
+            z: u32,
+        };
+
+        const FiveFields = extern struct {
+            a: u32,
+            b: u64,
+            c: f32,
+            d: f64,
+            e: u32,
+        };
+
+        // 2-scalar-field struct parameter expanded into (i32, i64); 3-field struct returned by multivalue
+        noinline fn pairToTriple(p: Pair, extra: u32) callconv(.{ .wasm_multivalue = .{} }) Triple {
+            return .{
+                .x = p.a + extra,
+                .y = @as(u32, @truncate(p.b)),
+                .z = @as(u32, @truncate(p.b >> 32)) + extra,
+            };
+        }
+
+        // Nested multi-field struct inside 1-field struct (Foo9 in Clang wasm-multivalue-abi.c) passed/returned indirectly
+        noinline fn wrappedPairRoundtrip(w: WrappedPair) callconv(.{ .wasm_multivalue = .{} }) WrappedPair {
+            return .{ .inner = .{ .a = w.inner.a + 3, .b = w.inner.b + 7 } };
+        }
+
+        // 2 fields that are each single-element structs (Foo7 in Clang wasm-multivalue-abi.c) expanded into (i32, f32)
+        noinline fn pairOfSingleWrappersCombine(p: PairOfSingleWrappers) callconv(.{ .wasm_multivalue = .{} }) PairOfSingleWrappers {
+            return .{
+                .x = .{ .a = p.x.a * 2 },
+                .y = .{ .b = p.y.b + 1.5 },
+            };
+        }
+
+        // 2-field struct containing u128 (split into 2 i64s) and f64 -> 3 Wasm params
+        noinline fn widePairCombine(wp: WidePair) callconv(.{ .wasm_multivalue = .{} }) u128 {
+            return wp.lo + @as(u128, @intFromFloat(wp.hi));
+        }
+
+        // 2-field struct containing two u128s -> 4 Wasm i64 params and 4 Wasm i64 return values
+        noinline fn doubleWidePairSwap(dwp: DoubleWidePair) callconv(.{ .wasm_multivalue = .{} }) DoubleWidePair {
+            return .{ .a = dwp.b + 1, .b = dwp.a + 2 };
+        }
+
+        // 3-field struct parameter passed indirectly by pointer; 5-field struct returned by multivalue
+        noinline fn tripleToFive(t: Triple) callconv(.{ .wasm_multivalue = .{} }) FiveFields {
+            return .{
+                .a = t.x + 1,
+                .b = @as(u64, t.y) * 10,
+                .c = @as(f32, @floatFromInt(t.z)) + 0.5,
+                .d = @as(f64, @floatFromInt(t.x + t.y)) * 1.25,
+                .e = t.x ^ t.z,
+            };
+        }
+    };
+
+    const t = S.pairToTriple(.{ .a = 10, .b = (20 << 32) | 30 }, 5);
+    try expect(t.x == 15);
+    try expect(t.y == 30);
+    try expect(t.z == 25);
+
+    const wp_rt = S.wrappedPairRoundtrip(.{ .inner = .{ .a = 7, .b = 93 } });
+    try expect(wp_rt.inner.a == 10 and wp_rt.inner.b == 100);
+
+    const foo7 = S.pairOfSingleWrappersCombine(.{ .x = .{ .a = 11 }, .y = .{ .b = 2.5 } });
+    try expect(foo7.x.a == 22 and foo7.y.b == 4.0);
+
+    const wp_res = S.widePairCombine(.{ .lo = (@as(u128, 3) << 64) | 100, .hi = 25.0 });
+    try expect(wp_res == ((@as(u128, 3) << 64) | 125));
+
+    const dwp = S.doubleWidePairSwap(.{
+        .a = (@as(u128, 10) << 64) | 20,
+        .b = (@as(u128, 30) << 64) | 40,
+    });
+    try expect(dwp.a == ((@as(u128, 30) << 64) | 41));
+    try expect(dwp.b == ((@as(u128, 10) << 64) | 22));
+
+    var fn_ptr: *const fn (S.Triple) callconv(.{ .wasm_multivalue = .{} }) S.FiveFields = &S.tripleToFive;
+    _ = &fn_ptr;
+    const five = fn_ptr(.{ .x = 4, .y = 6, .z = 9 });
+    try expect(five.a == 5);
+    try expect(five.b == 60);
+    try expect(five.c == 9.5);
+    try expect(five.d == 12.5);
+    try expect(five.e == (4 ^ 9));
+}
+
+test "wasm tail calls: return_call and return_call_indirect (#230)" {
+    if (comptime !std.Target.wasm.featureSetHas(builtin.cpu.features, .tail_call)) return error.SkipZigTest;
+
+    const S = struct {
+        const BigRet = extern struct {
+            a: u64,
+            b: u64,
+            c: u64,
+            d: u64,
+            e: u64,
+        };
+
+        fn readSp() u32 {
+            return asm (
+                \\ .globaltype __stack_pointer, i32
+                \\ global.get __stack_pointer
+                \\ local.set %[ret]
+                : [ret] "=r" (-> u32),
+            );
+        }
+
+        noinline fn sumTailWithFrame(n: u32, acc: u64) u64 {
+            var local_frame: [8]u32 = .{ n, n + 1, n + 2, n + 3, n + 4, n + 5, n + 6, n + 7 };
+            _ = &local_frame;
+            if (n == 0) return acc + local_frame[0];
+            return @call(.always_tail, sumTailWithFrame, .{ n - 1, acc + local_frame[0] });
+        }
+
+        const StepFn = *const fn (u32, u32) u32;
+
+        fn stepA(n: u32, acc: u32) u32 {
+            if (n == 0) return acc;
+            var next: StepFn = &stepB;
+            _ = &next;
+            return @call(.always_tail, next, .{ n - 1, acc + 2 });
+        }
+
+        fn stepB(n: u32, acc: u32) u32 {
+            if (n == 0) return acc;
+            var next: StepFn = &stepA;
+            _ = &next;
+            return @call(.always_tail, next, .{ n - 1, acc + 3 });
+        }
+
+        noinline fn sretTailCallee(v: BigRet, delta: u64) callconv(.c) BigRet {
+            var callee_frame: [8]u64 = .{ delta, delta + 1, delta + 2, delta + 3, delta + 4, delta + 5, delta + 6, delta + 7 };
+            _ = &callee_frame;
+            return .{
+                .a = v.a + callee_frame[0],
+                .b = v.b + callee_frame[1],
+                .c = v.c + callee_frame[2],
+                .d = v.d + callee_frame[3],
+                .e = v.e + callee_frame[4],
+            };
+        }
+
+        noinline fn sretTailCaller(v: BigRet, delta: u64) callconv(.c) BigRet {
+            const updated: BigRet = .{
+                .a = v.a + 1,
+                .b = v.b + 2,
+                .c = v.c + 3,
+                .d = v.d + 4,
+                .e = v.e + 5,
+            };
+            return @call(.always_tail, sretTailCallee, .{ updated, delta });
+        }
+
+        noinline fn readEscapedLocal(ptr: *const [4]u64, extra: u64) u64 {
+            var clobber: [8]u64 = .{ 0xdead, 0xbeef, 0xcafe, 0xbabe, 0x1111, 0x2222, 0x3333, 0x4444 };
+            _ = &clobber;
+            return ptr[0] + ptr[1] + ptr[2] + ptr[3] + extra + (clobber[0] - 0xdead);
+        }
+
+        noinline fn tailCallWithEscapedLocalPtr(unused_ptr: *const [4]u64, seed: u64) u64 {
+            _ = unused_ptr;
+            var local_arr: [4]u64 = .{ seed, seed + 10, seed + 20, seed + 30 };
+            return @call(.always_tail, readEscapedLocal, .{ &local_arr, 0 });
+        }
+
+        noinline fn readEscapedLocalVoid(ptr: *const [4]u64, out: *u64) void {
+            var clobber: [8]u64 = .{ 0xdead, 0xbeef, 0xcafe, 0xbabe, 0x1111, 0x2222, 0x3333, 0x4444 };
+            _ = &clobber;
+            out.* = ptr[0] + ptr[1] + ptr[2] + ptr[3] + (clobber[0] - 0xdead);
+        }
+
+        noinline fn tailCallWithEscapedLocalPtrVoid(unused_ptr: *const [4]u64, out: *u64) void {
+            _ = unused_ptr;
+            var local_arr: [4]u64 = .{ 10, 20, 30, 40 };
+            return @call(.always_tail, readEscapedLocalVoid, .{ &local_arr, out });
+        }
+    };
+
+    const sp_before = S.readSp();
+    const sum = S.sumTailWithFrame(2000, 0);
+    const sp_after = S.readSp();
+    try expect(sp_before == sp_after);
+    try expect(sum == @as(u64, 2000) * 2001 / 2);
+
+    const indirect_res = S.stepA(100, 0);
+    try expect(indirect_res == 50 * 2 + 50 * 3);
+    try expect(S.readSp() == sp_before);
+
+    const big_res = S.sretTailCaller(.{ .a = 10, .b = 20, .c = 30, .d = 40, .e = 50 }, 100);
+    try expect(big_res.a == 111 and big_res.b == 123 and big_res.c == 135 and big_res.d == 147 and big_res.e == 159);
+    try expect(S.readSp() == sp_before);
+
+    const dummy_arr: [4]u64 = .{ 0, 0, 0, 0 };
+    try expect(S.tailCallWithEscapedLocalPtr(&dummy_arr, 5) == 5 + 15 + 25 + 35);
+    try expect(S.readSp() == sp_before);
+
+    var void_out: u64 = 0;
+    S.tailCallWithEscapedLocalPtrVoid(&dummy_arr, &void_out);
+    try expect(void_out == 100);
+    try expect(S.readSp() == sp_before);
+}
+
+test "wasm f16 soft-promotion to native f32 (#231)" {
+    const S = struct {
+        noinline fn f16Ops(a: f16, b: f16) struct {
+            add: f16,
+            sub: f16,
+            mul: f16,
+            fma: f16,
+            reuse_expr: f16,
+            div: f16,
+            sqrt_a: f16,
+            floor_a: f16,
+            ceil_a: f16,
+            trunc_a: f16,
+            min_ab: f16,
+            max_ab: f16,
+            to_i32: i32,
+            to_u64: u64,
+            from_i16: f16,
+            from_u32: f16,
+        } {
+            return .{
+                .add = a + b,
+                .sub = a - b,
+                .mul = a * b,
+                .fma = @mulAdd(f16, a, b, 0.5),
+                .reuse_expr = (a * b) + (a - b) + (a + 1.25),
+                .div = a / b,
+                .sqrt_a = @sqrt(a),
+                .floor_a = @floor(a),
+                .ceil_a = @ceil(a),
+                .trunc_a = @trunc(-a),
+                .min_ab = @min(a, b),
+                .max_ab = @max(a, b),
+                .to_i32 = @intFromFloat(a),
+                .to_u64 = @intFromFloat(b),
+                .from_i16 = @floatFromInt(@as(i16, -42)),
+                .from_u32 = @floatFromInt(@as(u32, 128)),
+            };
+        }
+
+        noinline fn preserveBitCast(bits: u16) u16 {
+            const f: f16 = @bitCast(bits);
+            return @bitCast(f);
+        }
+    };
+
+    const r = S.f16Ops(2.25, 1.5);
+    try expect(r.add == 3.75);
+    try expect(r.sub == 0.75);
+    try expect(r.mul == 3.375);
+    try expect(r.fma == 3.875);
+    try expect(r.reuse_expr == 3.375 + 0.75 + 3.5);
+    try expect(r.div == 1.5);
+    try expect(r.sqrt_a == 1.5);
+    try expect(r.floor_a == 2.0);
+    try expect(r.ceil_a == 3.0);
+    try expect(r.trunc_a == -2.0);
+    try expect(r.min_ab == 1.5);
+    try expect(r.max_ab == 2.25);
+    try expect(r.to_i32 == 2);
+    try expect(r.to_u64 == 1);
+    try expect(r.from_i16 == -42.0);
+    try expect(r.from_u32 == 128.0);
+
+    // Signaling/custom NaN bit-patterns must survive @bitCast without lossy canonicalization
+    try expect(S.preserveBitCast(0x7c01) == 0x7c01);
+    try expect(S.preserveBitCast(0xfe55) == 0xfe55);
+}
+
+test "wasm 128-bit integer add, sub, mul, and 64-bit mulWithOverflow (#232)" {
+    const S = struct {
+        noinline fn add128(a: u128, b: u128) u128 {
+            return a +% b;
+        }
+
+        noinline fn sub128(a: u128, b: u128) u128 {
+            return a -% b;
+        }
+
+        noinline fn mul128Full(a: u128, b: u128) u128 {
+            return a *% b;
+        }
+
+        noinline fn mulWideU64(a: u64, b: u64) u128 {
+            return @as(u128, a) * @as(u128, b);
+        }
+
+        noinline fn mulOverflowU64(a: u64, b: u64) struct { u64, u1 } {
+            return @mulWithOverflow(a, b);
+        }
+
+        noinline fn mulOverflowI64(a: i64, b: i64) struct { i64, u1 } {
+            return @mulWithOverflow(a, b);
+        }
+
+        noinline fn mulOverflowU39(a: u39, b: u39) struct { u39, u1 } {
+            return @mulWithOverflow(a, b);
+        }
+
+        noinline fn mulOverflowI39(a: i39, b: i39) struct { i39, u1 } {
+            return @mulWithOverflow(a, b);
+        }
+    };
+
+    const a: u128 = (@as(u128, 0x1234_5678_9abc_def0) << 64) | 0xfedc_ba98_7654_3210;
+    const b: u128 = (@as(u128, 0x0111_2222_3333_4444) << 64) | 0x1111_1111_1111_1111;
+    const sum = S.add128(a, b);
+    try expect(S.sub128(sum, b) == a);
+
+    const wide = S.mulWideU64(0x1_0000_0000, 0x2_0000_0003);
+    try expect(wide == (@as(u128, 2) << 64) | 0x3_0000_0000);
+
+    const full = S.mul128Full((@as(u128, 5) << 64) | 7, (@as(u128, 11) << 64) | 13);
+    try expect(full == ((@as(u128, 5 * 13 + 7 * 11) << 64) | 91));
+
+    const ov_u0 = S.mulOverflowU64(1_000_000, 2_000_000);
+    try expect(ov_u0[0] == 2_000_000_000_000 and ov_u0[1] == 0);
+    const ov_u1 = S.mulOverflowU64(0x8000_0000_0000_0000, 2);
+    try expect(ov_u1[0] == 0 and ov_u1[1] == 1);
+
+    const ov_s0 = S.mulOverflowI64(-1000, 2000);
+    try expect(ov_s0[0] == -2_000_000 and ov_s0[1] == 0);
+    const ov_s1 = S.mulOverflowI64(std.math.maxInt(i64), 2);
+    try expect(ov_s1[1] == 1);
+
+    const ov_u39_0 = S.mulOverflowU39(@as(u39, 1) << 32, 64);
+    try expect(ov_u39_0[0] == (@as(u39, 1) << 38) and ov_u39_0[1] == 0);
+    const ov_u39_1 = S.mulOverflowU39(@as(u39, 1) << 33, 64);
+    try expect(ov_u39_1[0] == 0 and ov_u39_1[1] == 1);
+    const ov_i39_0 = S.mulOverflowI39(-(@as(i39, 1) << 30), 64);
+    try expect(ov_i39_0[0] == -(@as(i39, 1) << 36) and ov_i39_0[1] == 0);
+    const ov_i39_1 = S.mulOverflowI39(std.math.maxInt(i39), 2);
+    try expect(ov_i39_1[1] == 1);
+}
+
+test "wasm .optimized float mode, vector @mulAdd, vector @popCount, and v128.andnot (#233)" {
+    const S = struct {
+        noinline fn scalarOptimized(a: f32, b: f32, c: f32) f32 {
+            @setFloatMode(.optimized);
+            const x = (a + b) * c - (a / b);
+            const neg = -x;
+            return if (x > neg) x else neg;
+        }
+
+        noinline fn vectorOptimized(a: @Vector(4, f32), b: @Vector(4, f32), c: @Vector(4, f32)) f32 {
+            @setFloatMode(.optimized);
+            const prod = @mulAdd(@Vector(4, f32), a, b, c);
+            const diff = prod - (a / b);
+            const mask = diff > @as(@Vector(4, f32), @splat(0.0));
+            const selected = @select(f32, mask, diff, -diff);
+            return @reduce(.Add, selected) + @reduce(.Max, prod) + @reduce(.Min, prod);
+        }
+
+        noinline fn vectorMulAddF64(a: @Vector(2, f64), b: @Vector(2, f64), c: @Vector(2, f64)) @Vector(2, f64) {
+            return @mulAdd(@Vector(2, f64), a, b, c);
+        }
+
+        noinline fn vectorMulAddF16(a: @Vector(8, f16), b: @Vector(8, f16), c: @Vector(8, f16)) @Vector(8, f16) {
+            return @mulAdd(@Vector(8, f16), a, b, c);
+        }
+
+        noinline fn vectorPopCounts(
+            v8: @Vector(16, u8),
+            v16: @Vector(8, u16),
+            v32: @Vector(4, u32),
+            v64: @Vector(2, u64),
+        ) u64 {
+            const p8 = @popCount(v8);
+            const p16 = @popCount(v16);
+            const p32 = @popCount(v32);
+            const p64 = @popCount(v64);
+            return @as(u64, p8[0] + p8[15]) +
+                @as(u64, p16[0] + p16[7]) +
+                @as(u64, p32[0] + p32[3]) +
+                @as(u64, p64[0] + p64[1]);
+        }
+
+        noinline fn vectorAndNot(a: @Vector(4, u32), b: @Vector(4, u32)) @Vector(4, u32) {
+            return (a & ~b) ^ (~a & b);
+        }
+    };
+
+    try expect(S.scalarOptimized(4.0, 2.0, 3.0) == 16.0);
+
+    const va: @Vector(4, f32) = .{ 2.0, 4.0, 6.0, 8.0 };
+    const vb: @Vector(4, f32) = .{ 1.0, 2.0, 3.0, 4.0 };
+    const vc: @Vector(4, f32) = .{ 0.5, 1.0, 1.5, 2.0 };
+    // prod = { 2.5, 9.0, 19.5, 34.0 }, a/b = { 2.0, 2.0, 2.0, 2.0 }
+    // diff = { 0.5, 7.0, 17.5, 32.0 } -> sum = 57.0, max(prod) = 34.0, min(prod) = 2.5 -> 93.5
+    try expect(S.vectorOptimized(va, vb, vc) == 93.5);
+
+    const mf64 = S.vectorMulAddF64(.{ 1.5, 2.5 }, .{ 4.0, 2.0 }, .{ 0.5, -1.0 });
+    try expect(mf64[0] == 6.5 and mf64[1] == 4.0);
+
+    const mf16 = S.vectorMulAddF16(
+        .{ 1.5, 2.0, 3.0, 4.0, 0.5, 1.0, 2.5, -1.0 },
+        .{ 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 2.0, 3.0 },
+        .{ 0.5, 1.0, -2.0, 0.0, 1.0, -3.0, 0.5, 5.0 },
+    );
+    try expect(mf16[0] == 3.5 and mf16[1] == 7.0 and mf16[2] == 10.0 and mf16[7] == 2.0);
+
+    const pop_sum = S.vectorPopCounts(
+        .{ 0x00, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0xFF },
+        .{ 0x0001, 2, 3, 4, 5, 6, 7, 0xFFFF },
+        .{ 0x0000_0001, 2, 3, 0xFFFF_FFFF },
+        .{ 0x0101_0101_0101_0101, 0xFFFF_FFFF_FFFF_FFFF },
+    );
+    // p8[0]=0, p8[15]=8; p16[0]=1, p16[7]=16; p32[0]=1, p32[3]=32; p64[0]=8, p64[1]=64 -> 130
+    try expect(pop_sum == 130);
+
+    const x: @Vector(4, u32) = .{ 0xF0F0_F0F0, 0x1234_5678, 0xAAAA_5555, 0xFFFF_0000 };
+    const y: @Vector(4, u32) = .{ 0xFF00_FF00, 0x8765_4321, 0x5555_AAAA, 0x00FF_00FF };
+    const an = S.vectorAndNot(x, y);
+    try expect(@reduce(.And, an == (x ^ y)));
+}
+
+test "wasm shift mask elision and rotate synthesis (#234)" {
+    const S = struct {
+        noinline fn maskedShifts(x: u32, y: u64, k: u32) u64 {
+            const s32 = (x << @intCast(k & 31)) ^ (x >> @intCast(k & 31));
+            const s64 = (y << @intCast(k & 63)) ^ (y >> @intCast(k & 63));
+            return @as(u64, s32) ^ s64;
+        }
+
+        noinline fn rotates(x: u32, y: u64, k: u32) u64 {
+            const r32_const = (x << 7) | (x >> 25);
+            const r32_var = std.math.rotl(u32, x, k);
+            const r64_const = (y >> 19) | (y << 45);
+            const r64_var = std.math.rotr(u64, y, k);
+            return @as(u64, r32_const ^ r32_var) ^ r64_const ^ r64_var;
+        }
+    };
+
+    try expect(S.maskedShifts(0x1234_5678, 0x1234_5678_9abc_def0, 37) ==
+        (@as(u64, (@as(u32, 0x1234_5678) << 5) ^ (@as(u32, 0x1234_5678) >> 5)) ^
+            ((@as(u64, 0x1234_5678_9abc_def0) << 37) ^ (@as(u64, 0x1234_5678_9abc_def0) >> 37))));
+
+    const x: u32 = 0x89ab_cdef;
+    const y: u64 = 0x0123_4567_89ab_cdef;
+    try expect(S.rotates(x, y, 11) ==
+        (@as(u64, std.math.rotl(u32, x, 7) ^ std.math.rotl(u32, x, 11)) ^
+            std.math.rotr(u64, y, 19) ^ std.math.rotr(u64, y, 11)));
+}
+
+
 
 

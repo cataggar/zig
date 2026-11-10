@@ -22,6 +22,8 @@ pub const Opcode = enum(u8) {
     @"return" = 0x0F,
     call = 0x10,
     call_indirect = 0x11,
+    return_call = 0x12,
+    return_call_indirect = 0x13,
     drop = 0x1A,
     select = 0x1B,
     local_get = 0x20,
@@ -223,6 +225,10 @@ pub const MiscOpcode = enum(u32) {
     table_grow = 0x0F,
     table_size = 0x10,
     table_fill = 0x11,
+    i64_add128 = 0x13,
+    i64_sub128 = 0x14,
+    i64_mul_wide_s = 0x15,
+    i64_mul_wide_u = 0x16,
     _,
 };
 

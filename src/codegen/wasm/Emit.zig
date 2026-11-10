@@ -250,9 +250,10 @@ pub fn lower(emit: *Emit) Error!void {
             continue :loop tags[inst];
         },
 
-        .call_nav => {
+        .call_nav, .return_call_nav => {
             try code.ensureUnusedCapacity(gpa, 6);
-            code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.call));
+            const op: std.wasm.Opcode = if (tags[inst] == .return_call_nav) .return_call else .call;
+            code.appendAssumeCapacity(@backingInt(op));
             if (is_obj) {
                 try wasm.zcu_relocations.append(gpa, .{
                     .offset = @intCast(code.items.len),
@@ -269,8 +270,9 @@ pub fn lower(emit: *Emit) Error!void {
             continue :loop tags[inst];
         },
 
-        .call_indirect => {
+        .call_indirect, .return_call_indirect => {
             try code.ensureUnusedCapacity(gpa, 11);
+            const op: std.wasm.Opcode = if (tags[inst] == .return_call_indirect) .return_call_indirect else .call_indirect;
             const fn_info = comp.zcu.?.typeToFunc(.fromInterned(datas[inst].ip_index)).?;
             const func_ty_index = wasm.getExistingFunctionType(
                 fn_info.cc,
@@ -280,7 +282,7 @@ pub fn lower(emit: *Emit) Error!void {
                 target,
             ).?;
             if (is_obj) {
-                code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.call_indirect));
+                code.appendAssumeCapacity(@backingInt(op));
                 try wasm.zcu_relocations.append(gpa, .{
                     .offset = @intCast(code.items.len),
                     .pointee = .{ .type_index = func_ty_index },
@@ -301,7 +303,7 @@ pub fn lower(emit: *Emit) Error!void {
                     inst += 1;
                     continue :loop tags[inst];
                 }));
-                code.appendAssumeCapacity(@backingInt(std.wasm.Opcode.call_indirect));
+                code.appendAssumeCapacity(@backingInt(op));
                 writeUleb128(code, @backingInt(index));
             }
             writeUleb128(code, @as(u32, 0)); // table index
@@ -520,6 +522,8 @@ pub fn lower(emit: *Emit) Error!void {
         .i32_shl,
         .i32_shr_s,
         .i32_shr_u,
+        .i32_rotl,
+        .i32_rotr,
         .i64_add,
         .i64_sub,
         .i64_mul,
@@ -531,6 +535,8 @@ pub fn lower(emit: *Emit) Error!void {
         .i64_shl,
         .i64_shr_s,
         .i64_shr_u,
+        .i64_rotl,
+        .i64_rotr,
         .f32_abs,
         .f32_neg,
         .f32_ceil,
@@ -651,6 +657,11 @@ pub fn lower(emit: *Emit) Error!void {
                 .i64_trunc_sat_f32_u,
                 .i64_trunc_sat_f64_s,
                 .i64_trunc_sat_f64_u,
+                // wide-arithmetic opcodes
+                .i64_add128,
+                .i64_sub128,
+                .i64_mul_wide_s,
+                .i64_mul_wide_u,
                 => {
                     inst += 1;
                     continue :loop tags[inst];

@@ -326,7 +326,7 @@ fn preflightInstrBytes(module: *const Mod.Module, bytes: []const u8) Error!void 
             0xfc => {
                 const sub = readU32(bytes, &pos) catch return error.InvalidInput;
                 switch (sub) {
-                    0x00...0x07 => {},
+                    0x00...0x07, 0x13...0x16 => {},
                     0x08, 0x0a, 0x0c, 0x0e => {
                         _ = readU32(bytes, &pos) catch return error.InvalidInput;
                         _ = readU32(bytes, &pos) catch return error.InvalidInput;
@@ -999,7 +999,7 @@ fn canEliminateLeafStackCopyInSlice(
                     0xfc => {
                         var p: usize = 1;
                         const sub = readU32(r, &p) catch return false;
-                        if (sub > 0x07) return false;
+                        if (sub > 0x07 and !(sub >= 0x13 and sub <= 0x16)) return false;
                     },
                     0xfd => {
                         var p: usize = 1;
@@ -1672,7 +1672,7 @@ fn tryForwardDeadStackCopyInSlice(
                         0xfc => sub_blk: {
                             var p: usize = 1;
                             const sub = readU32(r, &p) catch break :sub_blk true;
-                            break :sub_blk sub > 0x07;
+                            break :sub_blk sub > 0x07 and !(sub >= 0x13 and sub <= 0x16);
                         },
                         0xfd => sub_blk: {
                             var p: usize = 1;
@@ -1918,7 +1918,7 @@ fn isCleanValSubtree(slice: []const Instr, forbidden_local: ?u32) bool {
                     0xfc => {
                         var p: usize = 1;
                         const sub = readU32(r, &p) catch return false;
-                        if (sub > 0x07) return false;
+                        if (sub > 0x07 and !(sub >= 0x13 and sub <= 0x16)) return false;
                     },
                     0xfd => {
                         if (decodeStoreAccess(inst) != null) return false;
@@ -6128,6 +6128,43 @@ fn foldConstants(arena: std.mem.Allocator, list: *InstrList, optimize_mode: Opti
                     changed = true;
                     continue;
                 }
+                // Elide redundant bitmasks on shift/rotate counts (Wasm shifts/rotates mask mod 32/64 in hardware)
+                switch (op) {
+                    0x74...0x78 => {
+                        if (out.items.len >= 2 and
+                            out.items[out.items.len - 2] == .i32_const and
+                            (@as(u32, @bitCast(out.items[out.items.len - 2].i32_const)) & 31) == 31 and
+                            out.items[out.items.len - 1] == .numeric_op and
+                            out.items[out.items.len - 1].numeric_op == 0x71)
+                        {
+                            out.items.len -= 2;
+                            changed = true;
+                        }
+                    },
+                    0x86...0x8a => {
+                        if (out.items.len >= 2 and
+                            out.items[out.items.len - 2] == .i64_const and
+                            (@as(u64, @bitCast(out.items[out.items.len - 2].i64_const)) & 63) == 63 and
+                            out.items[out.items.len - 1] == .numeric_op and
+                            out.items[out.items.len - 1].numeric_op == 0x83)
+                        {
+                            out.items.len -= 2;
+                            changed = true;
+                        } else if (out.items.len >= 3 and
+                            out.items[out.items.len - 3] == .i32_const and
+                            (@as(u32, @bitCast(out.items[out.items.len - 3].i32_const)) & 63) == 63 and
+                            out.items[out.items.len - 2] == .numeric_op and
+                            out.items[out.items.len - 2].numeric_op == 0x71 and
+                            out.items[out.items.len - 1] == .numeric_op and
+                            (out.items[out.items.len - 1].numeric_op == 0xac or out.items[out.items.len - 1].numeric_op == 0xad))
+                        {
+                            out.items[out.items.len - 3] = out.items[out.items.len - 1];
+                            out.items.len -= 2;
+                            changed = true;
+                        }
+                    },
+                    else => {},
+                }
                 if (out.items.len >= 1) {
                     switch (out.items[out.items.len - 1]) {
                         .i32_const => |a| {
@@ -6885,6 +6922,16 @@ fn sliceStackDelta(instrs: []const Instr) ?isize {
                     0x36...0x3e => .{ .pops = 2, .pushes = 0 },
                     0x23, 0x3f, 0x43, 0x44, 0xd0 => .{ .pops = 0, .pushes = 1 },
                     0x28...0x35, 0x40, 0xd1 => .{ .pops = 1, .pushes = 1 },
+                    0xfc => {
+                        var p: usize = 1;
+                        const sub = readU32(r, &p) catch return null;
+                        break :blk switch (sub) {
+                            0x00...0x07 => .{ .pops = 1, .pushes = 1 },
+                            0x13, 0x14 => .{ .pops = 4, .pushes = 2 },
+                            0x15, 0x16 => .{ .pops = 2, .pushes = 2 },
+                            else => return null,
+                        };
+                    },
                     else => return null,
                 };
             },
@@ -7244,8 +7291,9 @@ fn depth0StackDelta(code: u8) ?i32 {
 
 fn depth0MiscStackDelta(misc_op: u32) ?i32 {
     return switch (misc_op) {
-        0x00...0x07, 0x09, 0x0d => 0,
+        0x00...0x07, 0x09, 0x0d, 0x15, 0x16 => 0,
         0x08, 0x0a, 0x0b, 0x0c, 0x0e, 0x11 => -3,
+        0x13, 0x14 => -2,
         0x0f => -1,
         0x10 => 1,
         else => null,
@@ -13024,4 +13072,135 @@ test "Optimizer: unrolled SIMD stack-copy forwarding with derived pointer and in
     try testing.expectEqual(@as(usize, 0), v128_ops);
     try testing.expectEqual(@as(usize, 1), i32_loads);
 }
+
+test "Optimizer: shift and rotate redundant bitmask elision and wide_arithmetic (0xfc 0x13..0x16)" {
+    const allocator = testing.allocator;
+
+    var mod = Mod.Module.init(allocator);
+    defer mod.deinit();
+
+    // Type 0: (param i32 x, i32 s) -> (result i32)
+    try mod.module_types.append(allocator, .{ .func_type = .{
+        .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+        .results = try allocator.dupe(types.ValType, &.{.i32}),
+    } });
+    try mod.type_meta.append(allocator, .{});
+
+    // Type 1: (param i64 x, i64 s64, i32 s32) -> (result i64)
+    try mod.module_types.append(allocator, .{ .func_type = .{
+        .params = try allocator.dupe(types.ValType, &.{ .i64, .i64, .i32 }),
+        .results = try allocator.dupe(types.ValType, &.{.i64}),
+    } });
+    try mod.type_meta.append(allocator, .{});
+
+    // Func 0: 32-bit shift/rotate `& 31` elided, non-redundant `& 15` preserved:
+    //   ((x << (s & 31)) >>> (s & 0xff)) ^ rotl(x, s & 15)
+    const f0_code = [_]u8{
+        0x20, 0x00, // local.get 0 (x)
+        0x20, 0x01, // local.get 1 (s)
+        0x41, 0x1f, // i32.const 31
+        0x71, // i32.and (elided)
+        0x74, // i32.shl
+        0x20, 0x01, // local.get 1 (s)
+        0x41, 0xff, 0x01, // i32.const 255
+        0x71, // i32.and (elided: 255 & 31 == 31)
+        0x76, // i32.shr_u
+        0x20, 0x00, // local.get 0 (x)
+        0x20, 0x01, // local.get 1 (s)
+        0x41, 0x0f, // i32.const 15
+        0x71, // i32.and (NOT elided: 15 & 31 != 31)
+        0x77, // i32.rotl
+        0x73, // i32.xor
+        0x0b, // end
+    };
+    try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &f0_code });
+    try mod.exports.append(allocator, .{ .name = "shift32", .kind = .func, .var_ = .{ .index = 0 } });
+
+    // Func 1: 64-bit shift/rotate `i64.const 63; i64.and` and `i32.const 63; i32.and; i64.extend_i32_u` elided,
+    // plus non-redundant `i32.const 31; i32.and; i64.extend_i32_u` preserved:
+    const f1_code = [_]u8{
+        0x20, 0x00, // local.get 0 (x)
+        0x20, 0x01, // local.get 1 (s64)
+        0x42, 0x3f, // i64.const 63
+        0x83, // i64.and (elided)
+        0x86, // i64.shl
+        0x20, 0x02, // local.get 2 (s32)
+        0x41, 0x3f, // i32.const 63
+        0x71, // i32.and (elided)
+        0xad, // i64.extend_i32_u (kept!)
+        0x88, // i64.shr_u
+        0x20, 0x02, // local.get 2 (s32)
+        0x41, 0x1f, // i32.const 31
+        0x71, // i32.and (NOT elided: 31 & 63 != 63)
+        0xad, // i64.extend_i32_u
+        0x8a, // i64.rotr
+        0x0b, // end
+    };
+    try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 1 } }, .code_bytes = &f1_code });
+    try mod.exports.append(allocator, .{ .name = "shift64", .kind = .func, .var_ = .{ .index = 1 } });
+
+    // Func 2: wide_arithmetic (`0xfc 0x13..0x16`: `i64.add128`, `i64.sub128`, `i64.mul_wide_s`, `i64.mul_wide_u`)
+    const f2_code = [_]u8{
+        0x20, 0x00, // local.get 0
+        0x20, 0x01, // local.get 1
+        0xfc, 0x15, // i64.mul_wide_s -> pushes 2 i64s
+        0x20, 0x00, // local.get 0
+        0x20, 0x01, // local.get 1
+        0xfc, 0x16, // i64.mul_wide_u -> pushes 2 i64s (total 4 i64s on stack)
+        0xfc, 0x13, // i64.add128 -> pops 4, pushes 2 i64s
+        0x20, 0x00, // local.get 0
+        0x20, 0x01, // local.get 1
+        0xfc, 0x14, // i64.sub128 -> pops 4, pushes 2 i64s
+        0x7c, // i64.add -> pops 2, pushes 1 i64
+        0x0b, // end
+    };
+    try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 1 } }, .code_bytes = &f2_code });
+    try mod.exports.append(allocator, .{ .name = "wide128", .kind = .func, .var_ = .{ .index = 2 } });
+
+    const wasm = try writer.writeModule(allocator, &mod);
+    defer allocator.free(wasm);
+    const opt = try optimize(allocator, wasm, .{ .optimize_mode = .fast });
+    defer allocator.free(opt);
+    var opt_mod = try reader.readModule(allocator, opt);
+    defer opt_mod.deinit();
+
+    // Expected f0: `& 31` and `& 255` removed, only `& 15` before `i32.rotl` remains.
+    const expected_f0 = [_]u8{
+        0x20, 0x00,
+        0x20, 0x01,
+        0x74, // i32.shl
+        0x20, 0x01,
+        0x76, // i32.shr_u
+        0x20, 0x00,
+        0x20, 0x01,
+        0x41, 0x0f,
+        0x71, // i32.and 15
+        0x77, // i32.rotl
+        0x73, // i32.xor
+        0x0b,
+    };
+    try testing.expectEqualSlices(u8, &expected_f0, opt_mod.funcs.items[0].code_bytes);
+
+    // Expected f1: `i64.const 63; i64.and` and `i32.const 63; i32.and` removed (`i64.extend_i32_u` kept),
+    // while `i32.const 31; i32.and; i64.extend_i32_u` before `i64.rotr` is preserved.
+    const expected_f1 = [_]u8{
+        0x20, 0x00,
+        0x20, 0x01,
+        0x86, // i64.shl
+        0x20, 0x02,
+        0xad, // i64.extend_i32_u
+        0x88, // i64.shr_u
+        0x20, 0x02,
+        0x41, 0x1f,
+        0x71, // i32.and 31
+        0xad, // i64.extend_i32_u
+        0x8a, // i64.rotr
+        0x0b,
+    };
+    try testing.expectEqualSlices(u8, &expected_f1, opt_mod.funcs.items[1].code_bytes);
+
+    // Expected f2: wide arithmetic instructions preserved intact.
+    try testing.expectEqualSlices(u8, &f2_code, opt_mod.funcs.items[2].code_bytes);
+}
+
 
