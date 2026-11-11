@@ -1,0 +1,350 @@
+name: build-zigc-release
+
+on:
+  push:
+    tags:
+      - 'v*-zigc.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build and upload assets to (e.g. v0.17.1-zigc.1)'
+        required: true
+        default: 'v0.17.1-zigc.1'
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  ZIG_VERSION: "0.17.1"
+  GHR_VERSION: "v0.10.2"
+
+jobs:
+  build-and-release:
+    name: "Build and release ${{ inputs.tag || github.ref_name }}"
+    runs-on: ${{ vars.USE_SELF_HOSTED == 'true' && fromJSON('["self-hosted","Linux","X64","ubuntu2604"]') || 'ubuntu-latest' }}
+    steps:
+      - name: Determine release metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          case "$TAG" in
+            v*-zigc.*)
+              ;;
+            *)
+              echo "ERROR: Tag '$TAG' must match v*-zigc.*" >&2
+              exit 1
+              ;;
+          esac
+          VERSION_STRING="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version_string=${VERSION_STRING}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install ghr
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/cataggar/ghr/main/install.sh \
+            | GHR_VERSION="${{ env.GHR_VERSION }}" GHR_NO_PATH_ADD=1 sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          ghr version
+
+      - name: Download host Zig
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64)
+              HOST_ARCH="x86_64"
+              ;;
+            aarch64|arm64)
+              HOST_ARCH="aarch64"
+              ;;
+            *)
+              echo "ERROR: Unsupported Linux runner architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          URL="https://github.com/cataggar/zig/releases/download/v${ZIG_VERSION}/zig-${HOST_ARCH}-linux-${ZIG_VERSION}.tar.xz"
+          curl -sSfL "$URL" | tar -xJ -C "$RUNNER_TEMP"
+          echo "HOST_ARCH=${HOST_ARCH}" >> "$GITHUB_ENV"
+          echo "HOST_ZIG=$RUNNER_TEMP/zig-${HOST_ARCH}-linux-${ZIG_VERSION}/zig" >> "$GITHUB_ENV"
+
+      - name: Build stage3-host and Linux zigc bundles (native backend, without LLVM)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          VERSION_STRING="${{ steps.meta.outputs.version_string }}"
+
+          ZIG_LIB_DIR="$PWD/lib" "$HOST_ZIG" build \
+            --prefix "$RUNNER_TEMP/stage3-host" \
+            -Denable-llvm=false \
+            -Duse-llvm=true \
+            -Doptimize=ReleaseFast \
+            -Dno-langref \
+            -Dversion-string="${ZIG_VERSION}"
+
+          for TARGET in x86_64-linux aarch64-linux; do
+            ZIG_LIB_DIR="$PWD/lib" "$RUNNER_TEMP/stage3-host/bin/zig" build \
+              --prefix "$RUNNER_TEMP/stage3-${TARGET}" \
+              -Dtarget="${TARGET}" \
+              -Dcpu=baseline \
+              -Dflat \
+              -Denable-llvm=false \
+              -Duse-llvm=false \
+              -Doptimize=ReleaseSafe \
+              -Dstrip \
+              -Dno-langref \
+              -Dversion-string="${VERSION_STRING}"
+          done
+
+      - name: Package .tar.zst bundles and smoke-test native zigc
+        shell: bash
+        run: |
+          set -euxo pipefail
+          VERSION_STRING="${{ steps.meta.outputs.version_string }}"
+          rm -rf dist
+
+          for TARGET in x86_64-linux aarch64-linux; do
+            python3 scripts/package_zigc_bundle.py \
+              --target "${TARGET}" \
+              --version "${VERSION_STRING}" \
+              --stage-prefix "$RUNNER_TEMP/stage3-${TARGET}" \
+              --out-dir dist
+          done
+          ls -lh "dist/zigc-x86_64-linux-${VERSION_STRING}.tar.zst" "dist/zigc-aarch64-linux-${VERSION_STRING}.tar.zst"
+
+          NATIVE_TARGET="${HOST_ARCH}-linux"
+          if [ "${HOST_ARCH}" = "x86_64" ]; then
+            CROSS_TARGET="aarch64-linux"
+          else
+            CROSS_TARGET="x86_64-linux"
+          fi
+
+          EXTRACT_DIR="$RUNNER_TEMP/extracted zigc"
+          SMOKE_DIR="$RUNNER_TEMP/smoke-zigc"
+          rm -rf "$EXTRACT_DIR" "$SMOKE_DIR"
+          mkdir -p "$EXTRACT_DIR" "$SMOKE_DIR"
+
+          zstd -dc "dist/zigc-${NATIVE_TARGET}-${VERSION_STRING}.tar.zst" | tar -C "$EXTRACT_DIR" -xf -
+          ZIGC_BIN="$EXTRACT_DIR/zigc-${NATIVE_TARGET}-${VERSION_STRING}/zigc"
+
+          (
+            cd "$SMOKE_DIR"
+            unset ZIG_LIB_DIR ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR
+            export ZIG_GLOBAL_CACHE_DIR="$SMOKE_DIR/global-cache"
+            export ZIG_LOCAL_CACHE_DIR="$SMOKE_DIR/local-cache"
+
+            ACTUAL_VER="$("$ZIGC_BIN" version)"
+            echo "Reported version: ${ACTUAL_VER}"
+            test "${ACTUAL_VER}" = "${VERSION_STRING}"
+
+            ENV_OUT="$("$ZIGC_BIN" env)"
+            printf '%s\n' "$ENV_OUT" | grep -Fq "/zigc-${NATIVE_TARGET}-${VERSION_STRING}/lib"
+
+            cat > helper.c <<'EOF'
+          #include <stdint.h>
+          int32_t c_abs(int32_t x) { return x < 0 ? -x : x; }
+          EOF
+            "$ZIGC_BIN" translate-c \
+              -cflags -ffreestanding -- \
+              helper.c > helper_translated.zig
+            grep -q 'pub export fn c_abs' helper_translated.zig
+
+            cat > smoke.zig <<'EOF'
+          const std = @import("std");
+          const c = @import("helper_translated.zig");
+          pub fn main() void {
+              std.debug.assert(c.c_abs(-42) == 42);
+              std.debug.print("zigc native smoke ok\n", .{});
+          }
+          test "zigc bundled test_runner smoke" {
+              try std.testing.expectEqual(@as(i32, 42), c.c_abs(-42));
+          }
+          EOF
+            "$ZIGC_BIN" build-exe \
+              smoke.zig \
+              -target "${NATIVE_TARGET}" \
+              -femit-bin=smoke
+            ./smoke 2>&1 | grep -Fxq "zigc native smoke ok"
+
+            "$ZIGC_BIN" test \
+              smoke.zig \
+              -target "${NATIVE_TARGET}"
+
+            # Verify `zigc build` child invocations (Maker + configurer) work when binary is named `zigc`.
+            mkdir -p proj/src
+            cat > proj/build.zig <<'EOF'
+          const std = @import("std");
+          pub fn build(b: *std.Build) void {
+              const target = b.standardTargetOptions(.{});
+              const optimize = b.standardOptimizeOption(.{});
+              const exe = b.addExecutable(.{
+                  .name = "hello",
+                  .root_module = b.createModule(.{
+                      .root_source_file = b.path("src/main.zig"),
+                      .target = target,
+                      .optimize = optimize,
+                  }),
+              });
+              b.installArtifact(exe);
+          }
+          EOF
+            cat > proj/src/main.zig <<'EOF'
+          const std = @import("std");
+          pub fn main() void {
+              std.debug.print("zigc build ok\n", .{});
+          }
+          EOF
+            (
+              cd proj
+              "$ZIGC_BIN" build
+              ./zig-out/bin/hello 2>&1 | grep -Fxq "zigc build ok"
+            )
+
+            # Verify cross-compilation to the sibling Linux architecture and to WASI (-lc).
+            "$ZIGC_BIN" build-exe \
+              smoke.zig \
+              -target "${CROSS_TARGET}" \
+              -femit-bin=smoke_cross
+            python3 - "${CROSS_TARGET}" smoke_cross <<'PY'
+          from pathlib import Path
+          import struct, sys
+          data = Path(sys.argv[2]).read_bytes()
+          assert data[:4] == b"\x7fELF", "expected ELF binary"
+          (e_machine,) = struct.unpack_from("<H", data, 18)
+          expected = 183 if sys.argv[1] == "aarch64-linux" else 62
+          assert e_machine == expected, f"expected e_machine={expected}, got {e_machine}"
+          PY
+
+            cat > smoke_wasi.zig <<'EOF'
+          const std = @import("std");
+          extern "c" fn abs(x: c_int) c_int;
+          pub fn main() void {
+              std.debug.assert(abs(-42) == 42);
+          }
+          EOF
+            "$ZIGC_BIN" build-exe \
+              smoke_wasi.zig \
+              -lc \
+              -target wasm32-wasi \
+              -femit-bin=smoke.wasm
+            python3 - <<'PY'
+          assert open("smoke.wasm", "rb").read(4) == b"\x00asm"
+          PY
+          )
+          rm -rf "$EXTRACT_DIR" "$SMOKE_DIR"
+
+      - name: Create or update GitHub prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION_STRING: ${{ steps.meta.outputs.version_string }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          NOTES="Native Linux Zig compiler (\`zigc\`) compiled from the \`wazig\` branch without LLVM (\`-Denable-llvm=false\`) using Zig's self-hosted native backends (\`-Duse-llvm=false\`).
+
+          This release publishes unsigned \`zigc-x86_64-linux-${VERSION_STRING}.tar.zst\` and \`zigc-aarch64-linux-${VERSION_STRING}.tar.zst\` archives (no \`.minisig\` signature sidecars).
+
+          Install alongside \`zig\`, \`wazig\`, and \`wazigl\` using [ghr](https://github.com/cataggar/ghr):
+
+          \`\`\`sh
+          ghr install ${GITHUB_REPOSITORY}@${TAG} \"?id=cataggar/zig/zigc\"
+          \`\`\`"
+
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Zig $TAG" \
+              --prerelease \
+              --notes "$NOTES"
+          else
+            gh release edit "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Zig $TAG" \
+              --prerelease \
+              --draft=false \
+              --notes "$NOTES"
+          fi
+
+          shopt -s nullglob
+          MINISIG_FILES=(dist/*.minisig)
+          if [ "${#MINISIG_FILES[@]}" -ne 0 ]; then
+            echo "ERROR: Unexpected .minisig files in dist/: ${MINISIG_FILES[*]}" >&2
+            exit 1
+          fi
+
+          ASSETS=(
+            "dist/zigc-x86_64-linux-${VERSION_STRING}.tar.zst"
+            "dist/zigc-aarch64-linux-${VERSION_STRING}.tar.zst"
+          )
+          for asset in "${ASSETS[@]}"; do
+            test -f "$asset"
+          done
+          gh release upload "$TAG" "${ASSETS[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+          EXISTING_ASSETS="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          while IFS= read -r existing; do
+            [ -z "$existing" ] && continue
+            case "$existing" in
+              *.minisig)
+                gh release delete-asset "$TAG" "$existing" --repo "$GITHUB_REPOSITORY" --yes
+                ;;
+            esac
+          done <<< "$EXISTING_ASSETS"
+
+      - name: Verify ghr install from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION_STRING: ${{ steps.meta.outputs.version_string }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          VERIFY_DIR="$RUNNER_TEMP/verify install zigc"
+          VERIFY_PROJ="$RUNNER_TEMP/verify-proj-zigc"
+          rm -rf "$VERIFY_DIR" "$VERIFY_PROJ"
+          mkdir -p "$VERIFY_DIR" "$VERIFY_PROJ"
+          export GHR_BIN_DIR="$VERIFY_DIR/ghr home/bin"
+          export GHR_TOOL_DIR="$VERIFY_DIR/ghr home/tools"
+          export GHR_CACHE_DIR="$VERIFY_DIR/ghr home/cache"
+          ghr install "${GITHUB_REPOSITORY}@${TAG}" "?id=cataggar/zig/zigc"
+          INSTALLED_CMD="$GHR_BIN_DIR/zigc"
+          (
+            cd "$VERIFY_PROJ"
+            unset ZIG_LIB_DIR ZIG_GLOBAL_CACHE_DIR ZIG_LOCAL_CACHE_DIR
+            export ZIG_GLOBAL_CACHE_DIR="$VERIFY_PROJ/global-cache"
+            export ZIG_LOCAL_CACHE_DIR="$VERIFY_PROJ/local-cache"
+            ACTUAL_VER="$("$INSTALLED_CMD" version)"
+            test "$ACTUAL_VER" = "$VERSION_STRING"
+            cat > hello.zig <<'EOF'
+          const std = @import("std");
+          pub fn main() void {
+              std.debug.print("installed zigc ok\n", .{});
+          }
+          EOF
+            "$INSTALLED_CMD" build-exe hello.zig -femit-bin=hello
+            ./hello 2>&1 | grep -Fxq "installed zigc ok"
+          )
+          ghr list --ids | grep -Fxq "cataggar/zig/zigc"
+          ghr uninstall "cataggar/zig/zigc"
+          rm -rf "$VERIFY_DIR" "$VERIFY_PROJ"

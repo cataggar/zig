@@ -4213,6 +4213,50 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
 
                 const lhs_vi = try isel.use(bin_op.lhs);
                 const rhs_vi = try isel.use(bin_op.rhs);
+                if (ty.isVector(zcu)) {
+                    const vector_type = ip.indexToKey(ty.toIntern()).vector_type;
+                    const elem_ty: ZigType = .fromInterned(vector_type.child);
+                    const elem_size = elem_ty.abiSize(zcu);
+                    if (ty.bitSize(zcu) == vector_type.len * elem_size * 8) {
+                        var elem_index: u64 = vector_type.len;
+                        while (elem_index > 0) {
+                            elem_index -= 1;
+                            const elem_offset = elem_index * elem_size;
+                            var res_elem_it = res_vi.value.field(ty, elem_offset, elem_size);
+                            var lhs_elem_it = lhs_vi.field(ty, elem_offset, elem_size);
+                            var rhs_elem_it = rhs_vi.field(ty, elem_offset, elem_size);
+                            while (try res_elem_it.next(isel)) |res_part| {
+                                const lhs_part = (try lhs_elem_it.next(isel)).?;
+                                const rhs_part = (try rhs_elem_it.next(isel)).?;
+                                const res_part_ra = try res_part.vi.defReg(isel) orelse continue;
+                                const part_size = res_part.vi.size(isel);
+                                const lhs_part_mat = try lhs_part.vi.matReg(isel);
+                                const rhs_part_mat = try rhs_part.vi.matReg(isel);
+                                try isel.emit(switch (air_tag) {
+                                    else => unreachable,
+                                    .bit_and => switch (part_size) {
+                                        else => unreachable,
+                                        1...4 => .@"and"(res_part_ra.w(), lhs_part_mat.ra.w(), .{ .register = rhs_part_mat.ra.w() }),
+                                        5...8 => .@"and"(res_part_ra.x(), lhs_part_mat.ra.x(), .{ .register = rhs_part_mat.ra.x() }),
+                                    },
+                                    .bit_or => switch (part_size) {
+                                        else => unreachable,
+                                        1...4 => .orr(res_part_ra.w(), lhs_part_mat.ra.w(), .{ .register = rhs_part_mat.ra.w() }),
+                                        5...8 => .orr(res_part_ra.x(), lhs_part_mat.ra.x(), .{ .register = rhs_part_mat.ra.x() }),
+                                    },
+                                    .xor => switch (part_size) {
+                                        else => unreachable,
+                                        1...4 => .eor(res_part_ra.w(), lhs_part_mat.ra.w(), .{ .register = rhs_part_mat.ra.w() }),
+                                        5...8 => .eor(res_part_ra.x(), lhs_part_mat.ra.x(), .{ .register = rhs_part_mat.ra.x() }),
+                                    },
+                                });
+                                try rhs_part_mat.finish(isel);
+                                try lhs_part_mat.finish(isel);
+                            }
+                        }
+                        break :unused;
+                    }
+                }
                 var offset = res_vi.value.size(isel);
                 while (offset > 0) {
                     const size = @min(offset, 8);
@@ -4232,18 +4276,18 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
                             else => unreachable,
                             .bit_and => switch (part_size) {
                                 else => unreachable,
-                                1, 2, 4 => .@"and"(res_part_ra.w(), lhs_part_mat.ra.w(), .{ .register = rhs_part_mat.ra.w() }),
-                                8 => .@"and"(res_part_ra.x(), lhs_part_mat.ra.x(), .{ .register = rhs_part_mat.ra.x() }),
+                                1...4 => .@"and"(res_part_ra.w(), lhs_part_mat.ra.w(), .{ .register = rhs_part_mat.ra.w() }),
+                                5...8 => .@"and"(res_part_ra.x(), lhs_part_mat.ra.x(), .{ .register = rhs_part_mat.ra.x() }),
                             },
                             .bit_or => switch (part_size) {
                                 else => unreachable,
-                                1, 2, 4 => .orr(res_part_ra.w(), lhs_part_mat.ra.w(), .{ .register = rhs_part_mat.ra.w() }),
-                                8 => .orr(res_part_ra.x(), lhs_part_mat.ra.x(), .{ .register = rhs_part_mat.ra.x() }),
+                                1...4 => .orr(res_part_ra.w(), lhs_part_mat.ra.w(), .{ .register = rhs_part_mat.ra.w() }),
+                                5...8 => .orr(res_part_ra.x(), lhs_part_mat.ra.x(), .{ .register = rhs_part_mat.ra.x() }),
                             },
                             .xor => switch (part_size) {
                                 else => unreachable,
-                                1, 2, 4 => .eor(res_part_ra.w(), lhs_part_mat.ra.w(), .{ .register = rhs_part_mat.ra.w() }),
-                                8 => .eor(res_part_ra.x(), lhs_part_mat.ra.x(), .{ .register = rhs_part_mat.ra.x() }),
+                                1...4 => .eor(res_part_ra.w(), lhs_part_mat.ra.w(), .{ .register = rhs_part_mat.ra.w() }),
+                                5...8 => .eor(res_part_ra.x(), lhs_part_mat.ra.x(), .{ .register = rhs_part_mat.ra.x() }),
                             },
                         });
                         try rhs_part_mat.finish(isel);
@@ -4462,11 +4506,58 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
             if (air.next()) |next_air_tag| continue :air_tag next_air_tag;
         },
         .not => |air_tag| {
-            if (isel.live_values.fetchRemove(air.inst_index)) |res_vi| {
+            if (isel.live_values.fetchRemove(air.inst_index)) |res_vi| unused: {
                 defer res_vi.value.deref(isel);
 
                 const ty_op = air.data(air.inst_index).ty_op;
                 const ty = ty_op.ty;
+                if (ty.zigTypeTag(zcu) == .vector) {
+                    const vector_type = ip.indexToKey(ty.toIntern()).vector_type;
+                    const elem_ty: ZigType = .fromInterned(vector_type.child);
+                    const elem_size = elem_ty.abiSize(zcu);
+                    if (ty.bitSize(zcu) == vector_type.len * elem_size * 8) {
+                        if (!elem_ty.isAbiInt(zcu)) return isel.fail("bad {t} {f}", .{ air_tag, isel.fmtType(ty) });
+                        const elem_int_info = elem_ty.intInfo(zcu);
+                        const src_vi = try isel.use(ty_op.operand);
+                        var elem_index: u64 = vector_type.len;
+                        while (elem_index > 0) {
+                            elem_index -= 1;
+                            const elem_offset = elem_index * elem_size;
+                            var res_elem_it = res_vi.value.field(ty, elem_offset, elem_size);
+                            var src_elem_it = src_vi.field(ty, elem_offset, elem_size);
+                            while (try res_elem_it.next(isel)) |res_part| {
+                                const src_part = (try src_elem_it.next(isel)).?;
+                                const res_part_ra = try res_part.vi.defReg(isel) orelse continue;
+                                const src_part_mat = try src_part.vi.matReg(isel);
+                                const part_size = res_part.vi.size(isel);
+                                try isel.emit(switch (elem_int_info.signedness) {
+                                    .signed => switch (part_size) {
+                                        else => unreachable,
+                                        1...4 => .orn(res_part_ra.w(), .wzr, .{ .register = src_part_mat.ra.w() }),
+                                        5...8 => .orn(res_part_ra.x(), .xzr, .{ .register = src_part_mat.ra.x() }),
+                                    },
+                                    .unsigned => switch (8 * part_size) {
+                                        else => unreachable,
+                                        1...31 => |bits| .eor(res_part_ra.w(), src_part_mat.ra.w(), .{ .immediate = .{
+                                            .N = .word,
+                                            .immr = 0,
+                                            .imms = @intCast(bits - 1),
+                                        } }),
+                                        32 => .orn(res_part_ra.w(), .wzr, .{ .register = src_part_mat.ra.w() }),
+                                        33...63 => |bits| .eor(res_part_ra.x(), src_part_mat.ra.x(), .{ .immediate = .{
+                                            .N = .doubleword,
+                                            .immr = 0,
+                                            .imms = @intCast(bits - 1),
+                                        } }),
+                                        64 => .orn(res_part_ra.x(), .xzr, .{ .register = src_part_mat.ra.x() }),
+                                    },
+                                });
+                                try src_part_mat.finish(isel);
+                            }
+                        }
+                        break :unused;
+                    }
+                }
                 const int_info: std.lang.Type.Int = int_info: {
                     if (ty_op.ty.ip_index == .bool_type) break :int_info .{ .signedness = .unsigned, .bits = 1 };
                     if (ty.zigTypeTag(zcu) == .vector) break :int_info .{ .signedness = .unsigned, .bits = @intCast(ty.bitSize(zcu)) };
@@ -4481,34 +4572,47 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
                     const size = @min(offset, 8);
                     offset -= size;
                     var res_part_it = res_vi.value.field(ty, offset, size);
-                    const res_part_vi = try res_part_it.only(isel);
-                    const res_part_ra = try res_part_vi.?.defReg(isel) orelse continue;
-                    var src_part_it = src_vi.field(ty, offset, size);
-                    const src_part_vi = try src_part_it.only(isel);
-                    const src_part_mat = try src_part_vi.?.matReg(isel);
-                    try isel.emit(switch (int_info.signedness) {
-                        .signed => switch (size) {
-                            else => unreachable,
-                            1, 2, 4 => .orn(res_part_ra.w(), .wzr, .{ .register = src_part_mat.ra.w() }),
-                            8 => .orn(res_part_ra.x(), .xzr, .{ .register = src_part_mat.ra.x() }),
-                        },
-                        .unsigned => switch (@min(int_info.bits - 8 * offset, 64)) {
-                            else => unreachable,
-                            1...31 => |bits| .eor(res_part_ra.w(), src_part_mat.ra.w(), .{ .immediate = .{
-                                .N = .word,
-                                .immr = 0,
-                                .imms = @intCast(bits - 1),
-                            } }),
-                            32 => .orn(res_part_ra.w(), .wzr, .{ .register = src_part_mat.ra.w() }),
-                            33...63 => |bits| .eor(res_part_ra.x(), src_part_mat.ra.x(), .{ .immediate = .{
-                                .N = .doubleword,
-                                .immr = 0,
-                                .imms = @intCast(bits - 1),
-                            } }),
-                            64 => .orn(res_part_ra.x(), .xzr, .{ .register = src_part_mat.ra.x() }),
-                        },
-                    });
-                    try src_part_mat.finish(isel);
+                    while (try res_part_it.next(isel)) |res_part| {
+                        const res_part_ra = try res_part.vi.defReg(isel) orelse continue;
+                        const part_offset = offset + res_part.offset;
+                        const part_size = res_part.vi.size(isel);
+                        var src_part_it = src_vi.field(ty, part_offset, part_size);
+                        const src_part_vi = try src_part_it.only(isel);
+                        const src_part_mat = try src_part_vi.?.matReg(isel);
+                        if (int_info.signedness == .signed) {
+                            try isel.emit(switch (part_size) {
+                                else => unreachable,
+                                1...4 => .orn(res_part_ra.w(), .wzr, .{ .register = src_part_mat.ra.w() }),
+                                5...8 => .orn(res_part_ra.x(), .xzr, .{ .register = src_part_mat.ra.x() }),
+                            });
+                        } else {
+                            const part_bits: u64 = if (int_info.bits > 8 * part_offset)
+                                @min(int_info.bits - 8 * part_offset, 8 * part_size)
+                            else
+                                0;
+                            try isel.emit(switch (part_bits) {
+                                0 => switch (part_size) {
+                                    else => unreachable,
+                                    1...4 => .orr(res_part_ra.w(), .wzr, .{ .register = .wzr }),
+                                    5...8 => .orr(res_part_ra.x(), .xzr, .{ .register = .xzr }),
+                                },
+                                1...31 => |bits| .eor(res_part_ra.w(), src_part_mat.ra.w(), .{ .immediate = .{
+                                    .N = .word,
+                                    .immr = 0,
+                                    .imms = @intCast(bits - 1),
+                                } }),
+                                32 => .orn(res_part_ra.w(), .wzr, .{ .register = src_part_mat.ra.w() }),
+                                33...63 => |bits| .eor(res_part_ra.x(), src_part_mat.ra.x(), .{ .immediate = .{
+                                    .N = .doubleword,
+                                    .immr = 0,
+                                    .imms = @intCast(bits - 1),
+                                } }),
+                                64 => .orn(res_part_ra.x(), .xzr, .{ .register = src_part_mat.ra.x() }),
+                                else => unreachable,
+                            });
+                        }
+                        try src_part_mat.finish(isel);
+                    }
                 }
             }
             if (air.next()) |next_air_tag| continue :air_tag next_air_tag;
@@ -5850,13 +5954,17 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
                         const res_ra = try res_vi.value.defReg(isel) orelse break :unused;
                         const src_vi = try isel.use(ty_op.operand);
                         const src_mat = try src_vi.matReg(isel);
-                        try isel.emit(if (isel.target.cpu.has(.aarch64, .fullfp16))
-                            .fabs(res_ra.h(), src_mat.ra.h())
-                        else
-                            .bic(res_ra.@"4h"(), res_ra.@"4h"(), .{ .shifted_immediate = .{
+                        if (isel.target.cpu.has(.aarch64, .fullfp16)) {
+                            try isel.emit(.fabs(res_ra.h(), src_mat.ra.h()));
+                        } else {
+                            try isel.emit(.bic(res_ra.@"4h"(), res_ra.@"4h"(), .{ .shifted_immediate = .{
                                 .immediate = 0b10000000,
                                 .lsl = 8,
                             } }));
+                            if (res_ra != src_mat.ra) {
+                                try isel.emit(.dup(res_ra.h(), src_mat.ra.@"h[]"(0)));
+                            }
+                        }
                         try src_mat.finish(isel);
                     },
                     32 => {
@@ -5934,7 +6042,7 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
                         } else {
                             const neg_zero_ra = try isel.allocVecReg();
                             defer isel.freeReg(neg_zero_ra);
-                            try isel.emit(.eor(res_ra.@"8b"(), res_ra.@"8b"(), .{ .register = neg_zero_ra.@"8b"() }));
+                            try isel.emit(.eor(res_ra.@"8b"(), src_mat.ra.@"8b"(), .{ .register = neg_zero_ra.@"8b"() }));
                             try isel.emit(.movi(neg_zero_ra.@"4h"(), 0b10000000, .{ .lsl = 8 }));
                         }
                         try src_mat.finish(isel);
@@ -7074,24 +7182,26 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
             if (air.next()) |next_air_tag| continue :air_tag next_air_tag;
         },
         .optional_payload_ptr_set => {
-            if (isel.live_values.fetchRemove(air.inst_index)) |payload_ptr_vi| {
-                defer payload_ptr_vi.value.deref(isel);
-                const ty_op = air.data(air.inst_index).ty_op;
-                const opt_ty = isel.air.typeOf(ty_op.operand, ip).childType(zcu);
-                if (!opt_ty.optionalReprIsPayload(zcu)) {
-                    const opt_ptr_vi = try isel.use(ty_op.operand);
-                    const opt_ptr_mat = try opt_ptr_vi.matReg(isel);
-                    const has_value_ra = try isel.allocIntReg();
-                    defer isel.freeReg(has_value_ra);
-                    try isel.storeReg(
-                        has_value_ra,
-                        1,
-                        opt_ptr_mat.ra,
-                        opt_ty.optionalChild(zcu).abiSize(zcu),
-                    );
-                    try opt_ptr_mat.finish(isel);
-                    try isel.emit(.movz(has_value_ra.w(), 1, .{ .lsl = .@"0" }));
-                }
+            const opt_payload_ptr_vi = isel.live_values.fetchRemove(air.inst_index);
+            defer if (opt_payload_ptr_vi) |payload_ptr_vi| payload_ptr_vi.value.deref(isel);
+
+            const ty_op = air.data(air.inst_index).ty_op;
+            const opt_ty = isel.air.typeOf(ty_op.operand, ip).childType(zcu);
+            if (!opt_ty.optionalReprIsPayload(zcu)) {
+                const opt_ptr_vi = try isel.use(ty_op.operand);
+                const opt_ptr_mat = try opt_ptr_vi.matReg(isel);
+                const has_value_ra = try isel.allocIntReg();
+                defer isel.freeReg(has_value_ra);
+                try isel.storeReg(
+                    has_value_ra,
+                    1,
+                    opt_ptr_mat.ra,
+                    opt_ty.optionalChild(zcu).abiSize(zcu),
+                );
+                try opt_ptr_mat.finish(isel);
+                try isel.emit(.movz(has_value_ra.w(), 1, .{ .lsl = .@"0" }));
+            }
+            if (opt_payload_ptr_vi) |payload_ptr_vi| {
                 try payload_ptr_vi.value.move(isel, ty_op.operand);
             }
             if (air.next()) |next_air_tag| continue :air_tag next_air_tag;
@@ -7196,12 +7306,15 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
             if (air.next()) |next_air_tag| continue :air_tag next_air_tag;
         },
         .errunion_payload_ptr_set => {
-            if (isel.live_values.fetchRemove(air.inst_index)) |payload_ptr_vi| unused: {
-                defer payload_ptr_vi.value.deref(isel);
-                const ty_op = air.data(air.inst_index).ty_op;
-                const payload_ty = ty_op.ty.childType(zcu);
-                const error_union_ty = isel.air.typeOf(ty_op.operand, ip).childType(zcu);
-                const error_set_size = error_union_ty.errorUnionSet(zcu).abiSize(zcu);
+            const opt_payload_ptr_vi = isel.live_values.fetchRemove(air.inst_index);
+            defer if (opt_payload_ptr_vi) |payload_ptr_vi| payload_ptr_vi.value.deref(isel);
+
+            const ty_op = air.data(air.inst_index).ty_op;
+            const payload_ty = ty_op.ty.childType(zcu);
+            const error_union_ty = isel.air.typeOf(ty_op.operand, ip).childType(zcu);
+            const error_set_size = error_union_ty.errorUnionSet(zcu).abiSize(zcu);
+            const payload_offset = codegen.errUnionPayloadOffset(payload_ty, zcu);
+            if (error_set_size > 0 or opt_payload_ptr_vi != null) {
                 const error_union_ptr_vi = try isel.use(ty_op.operand);
                 const error_union_ptr_mat = try error_union_ptr_vi.matReg(isel);
                 if (error_set_size > 0) try isel.storeReg(
@@ -7210,21 +7323,26 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
                     error_union_ptr_mat.ra,
                     codegen.errUnionErrorOffset(payload_ty, zcu),
                 );
-                switch (codegen.errUnionPayloadOffset(payload_ty, zcu)) {
+                switch (payload_offset) {
                     0 => {
                         try error_union_ptr_mat.finish(isel);
-                        try payload_ptr_vi.value.move(isel, ty_op.operand);
+                        if (opt_payload_ptr_vi) |payload_ptr_vi| {
+                            try payload_ptr_vi.value.move(isel, ty_op.operand);
+                        }
                     },
-                    else => |payload_offset| {
-                        const payload_ptr_ra = try payload_ptr_vi.value.defReg(isel) orelse break :unused;
-                        const lo12: u12 = @truncate(payload_offset >> 0);
-                        const hi12: u12 = @intCast(payload_offset >> 12);
-                        if (hi12 > 0) try isel.emit(.add(
-                            payload_ptr_ra.x(),
-                            if (lo12 > 0) payload_ptr_ra.x() else error_union_ptr_mat.ra.x(),
-                            .{ .shifted_immediate = .{ .immediate = hi12, .lsl = .@"12" } },
-                        ));
-                        if (lo12 > 0) try isel.emit(.add(payload_ptr_ra.x(), error_union_ptr_mat.ra.x(), .{ .immediate = lo12 }));
+                    else => {
+                        if (opt_payload_ptr_vi) |payload_ptr_vi| {
+                            if (try payload_ptr_vi.value.defReg(isel)) |payload_ptr_ra| {
+                                const lo12: u12 = @truncate(payload_offset >> 0);
+                                const hi12: u12 = @intCast(payload_offset >> 12);
+                                if (hi12 > 0) try isel.emit(.add(
+                                    payload_ptr_ra.x(),
+                                    if (lo12 > 0) payload_ptr_ra.x() else error_union_ptr_mat.ra.x(),
+                                    .{ .shifted_immediate = .{ .immediate = hi12, .lsl = .@"12" } },
+                                ));
+                                if (lo12 > 0) try isel.emit(.add(payload_ptr_ra.x(), error_union_ptr_mat.ra.x(), .{ .immediate = lo12 }));
+                            }
+                        }
                         try error_union_ptr_mat.finish(isel);
                     },
                 }
@@ -8982,7 +9100,7 @@ fn leafBody(isel: *Select, air: *AirIterator, first_air_tag: Air.Inst.Tag) codeg
                 const elem_size = elem_ty.abiSize(zcu);
                 if (vec_ty.bitSize(zcu) == vector_type.len * elem_size * 8) {
                     const elem_vi = try isel.use(ty_op.operand);
-                    var elem_offset = vec_vi.value.size(isel);
+                    var elem_offset: u64 = vector_type.len * elem_size;
                     while (elem_offset > 0) {
                         elem_offset -= elem_size;
                         var vec_part_it = vec_vi.value.field(vec_ty, elem_offset, elem_size);
@@ -12440,7 +12558,7 @@ pub const Value = struct {
                     else => isel.lockReg(part_ra),
                     .zr => .empty,
                 };
-                defer switch (opts.expected_live_registers.get(part_ra)) {
+                defer switch (opts.expected_live_registers.getPtrConst(part_ra).*) {
                     _ => {},
                     .allocating => unreachable,
                     .free => part_lock.unlock(isel),
@@ -12590,7 +12708,7 @@ pub const Value = struct {
                         }
                         break :only;
                     };
-                    assert(isel.live_registers.get(mat_ra) == .allocating);
+                    assert(isel.live_registers.getPtrConst(mat_ra).* == .allocating);
                     try Value.Materialize.finish(.{ .vi = part_vi, .ra = mat_ra }, isel);
                 } else while (part_it.next()) |part_vi| try part_vi.mat(isel);
             } else {
@@ -12621,7 +12739,7 @@ pub const Value = struct {
                 }
                 break :mat_ra if (vi.isVector(isel)) try isel.allocVecReg() else try isel.allocIntReg();
             };
-            assert(isel.live_registers.get(mat_ra) == .allocating);
+            assert(isel.live_registers.getPtrConst(mat_ra).* == .allocating);
             return .{ .vi = vi, .ra = mat_ra };
         }
 
@@ -12862,7 +12980,7 @@ pub const Value = struct {
                         offset += stack_slot.offset;
                         const def_is_vector = def_vi.isVector(isel);
                         const ra = if (def_ra) |ra| ra: {
-                            assert(isel.live_registers.get(ra) == .free);
+                            assert(isel.live_registers.getPtrConst(ra).* == .free);
                             isel.live_registers.getPtr(ra).* = .allocating;
                             break :ra ra;
                         } else if (def_is_vector) try isel.allocVecReg() else try isel.allocIntReg();
@@ -13042,7 +13160,7 @@ pub const Value = struct {
                     },
                 });
                 assert(dst_live_vi.* == .allocating);
-                dst_live_vi.* = switch (expected_live_registers.get(dst_ra)) {
+                dst_live_vi.* = switch (expected_live_registers.getPtrConst(dst_ra).*) {
                     _ => .allocating,
                     .allocating => .allocating,
                     .free => .free,
@@ -13089,7 +13207,7 @@ pub const Value = struct {
             start_offset: u64,
             expected_live_registers: *const LiveRegisters,
         ) !void {
-            assert(isel.live_registers.get(src_ra) == .allocating);
+            assert(isel.live_registers.getPtrConst(src_ra).* == .allocating);
             var part_it = vi.parts(isel);
             if (part_it.only()) |part_vi| {
                 const dst_ra = part_vi.register(isel) orelse return;
@@ -13146,7 +13264,7 @@ pub const Value = struct {
                 value_ra.* = .zr;
                 const dst_live_vi = isel.live_registers.getPtr(dst_ra);
                 assert(dst_live_vi.* == part_vi);
-                dst_live_vi.* = switch (expected_live_registers.get(dst_ra)) {
+                dst_live_vi.* = switch (expected_live_registers.getPtrConst(dst_ra).*) {
                     _ => .allocating,
                     .allocating => .allocating,
                     .free => .free,
@@ -15443,7 +15561,7 @@ fn ensureFreeIntRegs(
     var ra: Register.Alias = .r0;
     while (true) : (ra = @fromBackingInt(@intCast(@backingInt(ra) + 1))) {
         if (ra != .r18 and ra != Register.Alias.fp) {
-            if (isel.live_registers.get(ra) == .free) {
+            if (isel.live_registers.getPtrConst(ra).* == .free) {
                 free_count += 1;
                 if (free_count >= count) return;
             }
@@ -15453,14 +15571,14 @@ fn ensureFreeIntRegs(
     ra = .r0;
     while (true) : (ra = @fromBackingInt(@intCast(@backingInt(ra) + 1))) {
         if (ra != .r18 and ra != Register.Alias.fp) {
-            if (expected_live_registers.get(ra) == .free and
-                switch (isel.live_registers.get(ra)) {
+            if (expected_live_registers.getPtrConst(ra).* == .free and
+                switch (isel.live_registers.getPtrConst(ra).*) {
                     _ => true,
                     .allocating, .free => false,
                 })
             {
                 assert(try isel.fillMemory(ra));
-                assert(isel.live_registers.get(ra) == .free);
+                assert(isel.live_registers.getPtrConst(ra).* == .free);
                 free_count += 1;
                 if (free_count >= count) return;
             }
@@ -15706,7 +15824,7 @@ fn merge(
 ) !void {
     var live_reg_it = isel.live_registers.iterator();
     while (live_reg_it.next()) |live_reg_entry| {
-        const expected_vi = expected_live_registers.get(live_reg_entry.key);
+        const expected_vi = expected_live_registers.getPtrConst(live_reg_entry.key).*;
         switch (expected_vi) {
             _ => try expected_vi.splitAncestorRegs(isel),
             .allocating, .free => {},
@@ -15716,7 +15834,7 @@ fn merge(
     while (live_reg_it.next()) |live_reg_entry| {
         const ra = live_reg_entry.key;
         const actual_vi = live_reg_entry.value;
-        const expected_vi = expected_live_registers.get(ra);
+        const expected_vi = expected_live_registers.getPtrConst(ra).*;
         switch (expected_vi) {
             else => switch (actual_vi.*) {
                 _ => {},
@@ -15730,7 +15848,7 @@ fn merge(
     while (live_reg_it.next()) |live_reg_entry| {
         const ra = live_reg_entry.key;
         const actual_vi = live_reg_entry.value;
-        const expected_vi = expected_live_registers.get(ra);
+        const expected_vi = expected_live_registers.getPtrConst(ra).*;
         switch (expected_vi) {
             _ => {
                 switch (actual_vi.*) {
@@ -15754,7 +15872,7 @@ fn merge(
     while (live_reg_it.next()) |live_reg_entry| {
         const ra = live_reg_entry.key;
         const actual_vi = live_reg_entry.value;
-        const expected_vi = expected_live_registers.get(ra);
+        const expected_vi = expected_live_registers.getPtrConst(ra).*;
         switch (expected_vi) {
             _ => {
                 assert(actual_vi.* == .allocating and expected_vi.register(isel) == ra);
@@ -15863,7 +15981,7 @@ const call = struct {
     });
     fn prepareReturn(isel: *Select) !void {
         var live_reg_it = isel.live_registers.iterator();
-        while (live_reg_it.next()) |live_reg_entry| switch (caller_saved_regs.get(live_reg_entry.key)) {
+        while (live_reg_it.next()) |live_reg_entry| switch (caller_saved_regs.getPtrConst(live_reg_entry.key).*) {
             else => unreachable,
             param_reg, callee_clobbered_reg => switch (live_reg_entry.value.*) {
                 _ => {},
@@ -15894,7 +16012,7 @@ const call = struct {
                     16 => {
                         assert(try isel.fillMemory(live_reg_entry.key));
                         assert(live_reg_entry.value.* == .free);
-                        switch (caller_saved_regs.get(live_reg_entry.key)) {
+                        switch (caller_saved_regs.getPtrConst(live_reg_entry.key).*) {
                             else => unreachable,
                             param_reg, callee_clobbered_reg => live_reg_entry.value.* = .allocating,
                             .free => {},
@@ -15904,7 +16022,7 @@ const call = struct {
                 },
                 .allocating, .free => {},
             }
-            switch (caller_saved_regs.get(live_reg_entry.key)) {
+            switch (caller_saved_regs.getPtrConst(live_reg_entry.key).*) {
                 else => unreachable,
                 param_reg, callee_clobbered_reg => switch (live_reg_entry.value.*) {
                     _ => {
@@ -15922,7 +16040,7 @@ const call = struct {
     fn prepareCallee(isel: *Select) !void {
         isel.saved_registers.insert(.lr);
         var live_reg_it = isel.live_registers.iterator();
-        while (live_reg_it.next()) |live_reg_entry| switch (caller_saved_regs.get(live_reg_entry.key)) {
+        while (live_reg_it.next()) |live_reg_entry| switch (caller_saved_regs.getPtrConst(live_reg_entry.key).*) {
             else => unreachable,
             param_reg => assert(live_reg_entry.value.* == .allocating),
             callee_clobbered_reg => isel.freeReg(live_reg_entry.key),

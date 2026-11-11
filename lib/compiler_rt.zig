@@ -203,6 +203,7 @@ test "memcmp" {
 }
 
 pub const PreferredLoadStoreElement = element: {
+    if (builtin.zig_backend == .stage2_aarch64) break :element usize;
     if (std.simd.suggestVectorLength(u8)) |vec_size| {
         const Vec = @Vector(vec_size, u8);
 

@@ -1,4 +1,4 @@
-# Installing Zig, `wazig`, and `wazigl` Releases
+# Installing Zig, `wazig`, `wazigl`, and `zigc` Releases
 
 Releases in `cataggar/zig` can be installed using [`ghr`](https://github.com/cataggar/ghr).
 
@@ -74,6 +74,22 @@ wasmtime run \
   --dir=/path/to/wazig/lib::/lib \
   --dir=. \
   /path/to/wazig/wazig.wasm build-exe hello.zig -target wasm32-wasi -fno-llvm
+```
+
+---
+
+## Native Linux Self-Hosted Releases (`zigc`)
+
+Pre-built native Linux (`x86_64-linux` and `aarch64-linux`) compiler releases (`v*-zigc.*`) are built from the `wazig` branch without LLVM (`-Denable-llvm=false`) using Zig's self-hosted native backends (`-Duse-llvm=false`).
+
+Each release publishes unsigned `zigc-x86_64-linux-<version>.tar.zst` and `zigc-aarch64-linux-<version>.tar.zst` archives (containing `zigc`, `lib/`, `LICENSE`, and `README.md`, with no `.minisig` files).
+
+Install `zigc` alongside `zig`, `wazig`, and `wazigl` with `ghr`:
+
+```sh
+ghr install cataggar/zig@v0.17.1-zigc.1 "?id=cataggar/zig/zigc"
+zigc version
+zigc --help
 ```
 
 ---

@@ -1144,3 +1144,32 @@ test "error union with vector type" {
     x = error.Expected;
     try expect(x == error.Expected);
 }
+
+test "error union and optional with zero-sized struct result location" {
+    const Empty = struct {
+        map: void,
+    };
+    const S = struct {
+        noinline fn clobberStack() u64 {
+            var dirty: [16]u64 = @splat(0xffff_ffff_ffff_ffff);
+            std.mem.doNotOptimizeAway(&dirty);
+            return dirty[0];
+        }
+        noinline fn initErr(fail: bool) error{Unexpected}!Empty {
+            if (fail) return error.Unexpected;
+            return .{ .map = {} };
+        }
+        noinline fn initOpt(none: bool) ?Empty {
+            if (none) return null;
+            return .{ .map = {} };
+        }
+    };
+    _ = S.clobberStack();
+    const ok = try S.initErr(false);
+    try expect(@sizeOf(@TypeOf(ok)) == 0);
+    try std.testing.expectError(error.Unexpected, S.initErr(true));
+
+    _ = S.clobberStack();
+    try expect(S.initOpt(false) != null);
+    try expect(S.initOpt(true) == null);
+}

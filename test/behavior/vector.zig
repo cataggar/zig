@@ -2277,3 +2277,39 @@ test "runtime index into comptime-known array of aggregates holding a vector" {
     try S.doTheTest();
     try comptime S.doTheTest();
 }
+
+test "non-power-of-two vector bitwise not and mask" {
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+
+    const S = struct {
+        fn removeSet(set: *[6]usize, other: [6]usize) void {
+            set.* = @as(@Vector(6, usize), set.*) & ~@as(@Vector(6, usize), other);
+        }
+
+        fn doTheTest() !void {
+            var a: [6]usize = .{ 0xff0f, 0x1234, 0xdead_beef, 0, ~@as(usize, 0), 0xaaaa };
+            var b: [6]usize = .{ 0x00f0, 0x0230, 0x0000_beef, 1, 0x0f0f, 0x5555 };
+            _ = &b;
+            removeSet(&a, b);
+            try expectEqual([6]usize{ 0xff0f, 0x1004, 0xdead_0000, 0, ~@as(usize, 0x0f0f), 0xaaaa }, a);
+
+            var a16: [3]u16 = .{ 0x00ff, 0x1234, 0xffff };
+            _ = &a16;
+            const inv16: [3]u16 = ~@as(@Vector(3, u16), a16);
+            try expectEqual([3]u16{ 0xff00, 0xedcb, 0x0000 }, inv16);
+
+            var ai32: [6]i32 = .{ 0, -1, 42, -43, 0x7fff_ffff, -0x8000_0000 };
+            _ = &ai32;
+            const invi32: [6]i32 = ~@as(@Vector(6, i32), ai32);
+            try expectEqual([6]i32{ -1, 0, -43, 42, -0x8000_0000, 0x7fff_ffff }, invi32);
+
+            var a8: [5]u8 = .{ 0x00, 0xff, 0x5a, 0xa5, 0x0f };
+            _ = &a8;
+            const inv8: [5]u8 = ~@as(@Vector(5, u8), a8);
+            try expectEqual([5]u8{ 0xff, 0x00, 0xa5, 0x5a, 0xf0 }, inv8);
+        }
+    };
+    try S.doTheTest();
+    try comptime S.doTheTest();
+}
