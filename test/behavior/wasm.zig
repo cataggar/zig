@@ -2697,6 +2697,75 @@ test "wasm shift mask elision and rotate synthesis (#234)" {
             std.math.rotr(u64, y, 19) ^ std.math.rotr(u64, y, 11)));
 }
 
+test "wasm inline byteSwap across signed/unsigned widths and SIMD vector select" {
+    if (builtin.cpu.arch != .wasm32 and builtin.cpu.arch != .wasm64) return error.SkipZigTest;
 
+    const S = struct {
+        noinline fn swapU8(v: u8) u8 {
+            return @byteSwap(v);
+        }
+        noinline fn swapI8(v: i8) i8 {
+            return @byteSwap(v);
+        }
+        noinline fn swapU16(v: u16) u16 {
+            return @byteSwap(v);
+        }
+        noinline fn swapI16(v: i16) i16 {
+            return @byteSwap(v);
+        }
+        noinline fn swapU24(v: u24) u24 {
+            return @byteSwap(v);
+        }
+        noinline fn swapI24(v: i24) i24 {
+            return @byteSwap(v);
+        }
+        noinline fn swapU32(v: u32) u32 {
+            return @byteSwap(v);
+        }
+        noinline fn swapI32(v: i32) i32 {
+            return @byteSwap(v);
+        }
+        noinline fn swapU48(v: u48) u48 {
+            return @byteSwap(v);
+        }
+        noinline fn swapI48(v: i48) i48 {
+            return @byteSwap(v);
+        }
+        noinline fn swapU64(v: u64) u64 {
+            return @byteSwap(v);
+        }
+        noinline fn swapI64(v: i64) i64 {
+            return @byteSwap(v);
+        }
+        noinline fn swapU128(v: u128) u128 {
+            return @byteSwap(v);
+        }
+        noinline fn clampVec4(v: @Vector(4, f32), lo: @Vector(4, f32), hi: @Vector(4, f32)) @Vector(4, f32) {
+            const cond_lo = v < lo;
+            const t = @select(f32, cond_lo, lo, v);
+            const cond_hi = t > hi;
+            return @select(f32, cond_hi, hi, t);
+        }
+    };
 
+    try expect(S.swapU8(0xAB) == 0xAB);
+    try expect(S.swapI8(-5) == -5);
+    try expect(S.swapU16(0x1234) == 0x3412);
+    try expect(S.swapI16(@bitCast(@as(u16, 0xFFFE))) == @as(i16, @bitCast(@as(u16, 0xFEFF))));
+    try expect(S.swapU24(0x123456) == 0x563412);
+    try expect(S.swapI24(@bitCast(@as(u24, 0x1234FE))) == @as(i24, @bitCast(@as(u24, 0xFE3412))));
+    try expect(S.swapU32(0x1234_5678) == 0x7856_3412);
+    try expect(S.swapI32(@bitCast(@as(u32, 0x89AB_CDEF))) == @as(i32, @bitCast(@as(u32, 0xEFCD_AB89))));
+    try expect(S.swapU48(0x0123_4567_89AB) == 0xAB89_6745_2301);
+    try expect(S.swapI48(@bitCast(@as(u48, 0x0123_4567_89FE))) == @as(i48, @bitCast(@as(u48, 0xFE89_6745_2301))));
+    try expect(S.swapU64(0x0123_4567_89AB_CDEF) == 0xEFCD_AB89_6745_2301);
+    try expect(S.swapI64(@bitCast(@as(u64, 0x0123_4567_89AB_CDFE))) == @as(i64, @bitCast(@as(u64, 0xFECD_AB89_6745_2301))));
+    try expect(S.swapU128(0x0123456789ABCDEF_FEDCBA9876543210) == 0x1032547698BADCFE_EFCDAB8967452301);
 
+    const clamped = S.clampVec4(
+        .{ -3.0, 0.5, 4.0, 12.0 },
+        .{ 0.0, 0.0, 0.0, 0.0 },
+        .{ 10.0, 10.0, 10.0, 10.0 },
+    );
+    try expect(clamped[0] == 0.0 and clamped[1] == 0.5 and clamped[2] == 4.0 and clamped[3] == 10.0);
+}

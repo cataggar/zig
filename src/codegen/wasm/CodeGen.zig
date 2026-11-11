@@ -5904,54 +5904,98 @@ fn intBitReverse(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
     }
 }
 
+fn emitByteSwap32(cg: *CodeGen, operand: WValue) InnerError!WValue {
+    var x = if (operand == .stack) try operand.toLocal(cg, Type.u32) else operand;
+    defer if (operand == .stack) x.free(cg);
+
+    try cg.emitWValue(x);
+    try cg.addImm32(0x00FF00FF);
+    try cg.addTag(.i32_and);
+    try cg.addImm32(24);
+    try cg.addTag(.i32_rotl);
+
+    try cg.emitWValue(x);
+    try cg.addImm32(@bitCast(@as(u32, 0xFF00FF00)));
+    try cg.addTag(.i32_and);
+    try cg.addImm32(8);
+    try cg.addTag(.i32_rotl);
+
+    try cg.addTag(.i32_or);
+    return .stack;
+}
+
+fn emitByteSwap64(cg: *CodeGen, operand: WValue) InnerError!WValue {
+    var x = if (operand == .stack) try operand.toLocal(cg, Type.u64) else operand;
+    defer if (operand == .stack) x.free(cg);
+
+    try cg.emitWValue(x);
+    try cg.addTag(.i32_wrap_i64);
+    _ = try cg.emitByteSwap32(.stack);
+    try cg.addTag(.i64_extend_i32_u);
+    try cg.addImm64(32);
+    try cg.addTag(.i64_shl);
+
+    try cg.emitWValue(x);
+    try cg.addImm64(32);
+    try cg.addTag(.i64_shr_u);
+    try cg.addTag(.i32_wrap_i64);
+    _ = try cg.emitByteSwap32(.stack);
+    try cg.addTag(.i64_extend_i32_u);
+
+    try cg.addTag(.i64_or);
+    return .stack;
+}
+
 fn intByteSwap(cg: *CodeGen, ty: IntType, operand: WValue) InnerError!WValue {
     switch (ty.bits) {
         0 => unreachable,
         1...32 => {
-            const intrin_ret = try cg.callIntrinsic(
-                .__bswapsi2,
-                &.{.u32_type},
-                Type.u32,
-                &.{operand},
-            );
-            if (ty.bits == 32) return intrin_ret;
-            return cg.intShr(ty, intrin_ret, .{ .imm32 = 32 - ty.bits });
+            if (ty.bits == 8) return operand;
+            if (ty.bits == 16 and !ty.is_signed) {
+                var x = if (operand == .stack) try operand.toLocal(cg, Type.u32) else operand;
+                defer if (operand == .stack) x.free(cg);
+
+                try cg.emitWValue(x);
+                try cg.addImm32(0xFF);
+                try cg.addTag(.i32_and);
+                try cg.addImm32(8);
+                try cg.addTag(.i32_shl);
+
+                try cg.emitWValue(x);
+                try cg.addImm32(8);
+                try cg.addTag(.i32_shr_u);
+                try cg.addImm32(0xFF);
+                try cg.addTag(.i32_and);
+
+                try cg.addTag(.i32_or);
+                return .stack;
+            }
+            const swapped = try cg.emitByteSwap32(operand);
+            if (ty.bits == 32) return swapped;
+            return cg.intShr(ty, swapped, .{ .imm32 = 32 - ty.bits });
         },
         33...64 => {
-            const intrin_ret = try cg.callIntrinsic(
-                .__bswapdi2,
-                &.{.u64_type},
-                Type.u64,
-                &.{operand},
-            );
-            if (ty.bits == 64) return intrin_ret;
-            return cg.intShr(ty, intrin_ret, .{ .imm32 = 64 - ty.bits });
+            const swapped = try cg.emitByteSwap64(operand);
+            if (ty.bits == 64) return swapped;
+            return cg.intShr(ty, swapped, .{ .imm32 = 64 - ty.bits });
         },
         65...128 => {
             const result = try cg.allocStack(Type.u128);
-
             const result_offset = result.memOffset();
-            try cg.emitMemBase(result);
 
             const low = try cg.load(operand, .u64, .{});
-            const swap_low = try cg.callIntrinsic(
-                .__bswapdi2,
-                &.{.u64_type},
-                Type.u64,
-                &.{low},
-            );
-            try cg.store(.stack, swap_low, .u64, .{ .offset = result_offset + 8 });
-
+            const swap_low = try cg.emitByteSwap64(low);
+            var swap_low_loc = try swap_low.toLocal(cg, Type.u64);
+            defer swap_low_loc.free(cg);
             try cg.emitMemBase(result);
+            try cg.store(.stack, swap_low_loc, .u64, .{ .offset = result_offset + 8 });
 
             const high = try cg.load(operand, .u64, .{ .offset = 8 });
-            const swap_high = try cg.callIntrinsic(
-                .__bswapdi2,
-                &.{.u64_type},
-                Type.u64,
-                &.{high},
-            );
-            try cg.store(.stack, swap_high, .u64, .{ .offset = result_offset });
+            const swap_high = try cg.emitByteSwap64(high);
+            var swap_high_loc = try swap_high.toLocal(cg, Type.u64);
+            defer swap_high_loc.free(cg);
+            try cg.emitMemBase(result);
+            try cg.store(.stack, swap_high_loc, .u64, .{ .offset = result_offset });
 
             if (ty.bits < 128) {
                 const shift_ty: IntType = .{ .is_signed = ty.is_signed, .bits = 128 };
@@ -10844,6 +10888,23 @@ fn airSelect(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
     const elem_ty = res_ty.childType(zcu);
     const vec_len: usize = @intCast(res_ty.vectorLen(zcu));
+    const pred_is_simd_mask = if (pl_op.operand.toIndex()) |pred_idx|
+        cg.cmp_vector_reduce_only.contains(pred_idx)
+    else
+        false;
+
+    if (pred_is_simd_mask and determineSimdStoreStrategy(res_ty, zcu, cg.target) == .direct) {
+        var rhs_val = if (rhs == .stack) try rhs.toLocal(cg, res_ty) else rhs;
+        defer if (rhs == .stack) rhs_val.free(cg);
+        var lhs_val = if (lhs == .stack) try lhs.toLocal(cg, res_ty) else lhs;
+        defer if (lhs == .stack) lhs_val.free(cg);
+
+        try cg.emitWValue(lhs_val);
+        try cg.emitWValue(rhs_val);
+        try cg.emitWValue(pred);
+        try cg.addSimd(.v128_bitselect);
+        return cg.finishAir(inst, .stack, &.{ pl_op.operand, extra.lhs, extra.rhs });
+    }
 
     var pred_val = if (pred == .stack) try pred.toLocal(cg, pred_ty) else pred;
     defer if (pred == .stack) pred_val.free(cg);
@@ -13353,9 +13414,21 @@ const SroaAnalysis = struct {
 
             .prefetch => self.markEscaped(data.prefetch.ptr),
 
-            .mul_add, .select, .legalize_vec_store_elem => {
+            .mul_add, .legalize_vec_store_elem => {
                 const bin = self.cg.air.extraData(Air.Bin, data.pl_op.payload).data;
                 self.markEscaped(data.pl_op.operand);
+                self.markEscaped(bin.lhs);
+                self.markEscaped(bin.rhs);
+            },
+            .select => {
+                const bin = self.cg.air.extraData(Air.Bin, data.pl_op.payload).data;
+                if (data.pl_op.operand.toIndex()) |pred_idx| {
+                    if (!self.cg.cmp_vector_reduce_only.contains(pred_idx)) {
+                        self.markEscaped(data.pl_op.operand);
+                    }
+                } else {
+                    self.markEscaped(data.pl_op.operand);
+                }
                 self.markEscaped(bin.lhs);
                 self.markEscaped(bin.rhs);
             },
@@ -15114,11 +15187,30 @@ const CmpVectorReduceAnalysis = struct {
 
             .prefetch => self.noteUse(data.prefetch.ptr),
 
-            .mul_add, .select, .legalize_vec_store_elem => {
+            .mul_add, .legalize_vec_store_elem => {
                 const bin = self.cg.air.extraData(Air.Bin, data.pl_op.payload).data;
                 self.noteUse(data.pl_op.operand);
                 self.noteUse(bin.lhs);
                 self.noteUse(bin.rhs);
+            },
+            .select => {
+                const bin = self.cg.air.extraData(Air.Bin, data.pl_op.payload).data;
+                self.noteUse(data.pl_op.operand);
+                self.noteUse(bin.lhs);
+                self.noteUse(bin.rhs);
+                const res_ty = self.cg.typeOfIndex(inst);
+                if (determineSimdStoreStrategy(res_ty, zcu, self.cg.target) == .direct) {
+                    if (data.pl_op.operand.toIndex()) |pred_idx| {
+                        if (self.candidates.getPtr(pred_idx)) |counts| {
+                            const cmp_ty_pl = self.cg.air.instructions.items(.data)[@backingInt(pred_idx)].ty_pl;
+                            const cmp_pl = self.cg.air.extraData(Air.VectorCmp, cmp_ty_pl.payload).data;
+                            const cmp_elem_bits = self.cg.typeOf(cmp_pl.lhs).childType(zcu).bitSize(zcu);
+                            if (cmp_elem_bits == res_ty.childType(zcu).bitSize(zcu)) {
+                                counts.reduce_and_or_uses += 1;
+                            }
+                        }
+                    }
+                }
             },
 
             .shuffle_one => {
