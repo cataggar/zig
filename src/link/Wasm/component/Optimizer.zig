@@ -5250,6 +5250,108 @@ fn isPureBinaryNumericOp(op: u8) bool {
     };
 }
 
+fn isPureNonTrappingInstr(inst: Instr) bool {
+    return switch (inst) {
+        .local_get, .i32_const, .i64_const, .ref_func => true,
+        .numeric_op => |op| isPureUnaryNumericOp(op) or isPureBinaryNumericOp(op),
+        .raw => |r| r.len > 0 and switch (r[0]) {
+            0x1b, 0x23, 0x43, 0x44, 0xd0 => true,
+            else => false,
+        },
+        else => false,
+    };
+}
+
+fn tryPopPureSingleValueExpr(out: *InstrList) bool {
+    const start = findPrevSingleValueExprStart(out.items, out.items.len) orelse return false;
+    for (out.items[start..]) |item| {
+        if (!isPureNonTrappingInstr(item)) return false;
+    }
+    out.items.len = start;
+    return true;
+}
+
+fn eliminateOverwrittenLocalStores(
+    arena: std.mem.Allocator,
+    list: *InstrList,
+    is_root: bool,
+) Error!bool {
+    var changed = false;
+    var exit_below = is_root;
+    var live: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    var overwritten: std.AutoHashMapUnmanaged(u32, void) = .empty;
+
+    var i: usize = list.items.len;
+    while (i > 0) {
+        i -= 1;
+        switch (list.items[i]) {
+            .unreachable_, .return_, .return_call, .return_call_indirect => {
+                exit_below = true;
+                live.clearRetainingCapacity();
+                overwritten.clearRetainingCapacity();
+            },
+            .br, .br_if, .br_table => {
+                exit_below = false;
+                live.clearRetainingCapacity();
+                overwritten.clearRetainingCapacity();
+            },
+            .block => |*b| {
+                if (try eliminateOverwrittenLocalStores(arena, &b.body, false)) changed = true;
+                exit_below = false;
+                live.clearRetainingCapacity();
+                overwritten.clearRetainingCapacity();
+            },
+            .loop => |*l| {
+                if (try eliminateOverwrittenLocalStores(arena, &l.body, false)) changed = true;
+                exit_below = false;
+                live.clearRetainingCapacity();
+                overwritten.clearRetainingCapacity();
+            },
+            .if_ => |*if_inst| {
+                if (try eliminateOverwrittenLocalStores(arena, &if_inst.then_body, false)) changed = true;
+                if (if_inst.has_else and try eliminateOverwrittenLocalStores(arena, &if_inst.else_body, false)) changed = true;
+                exit_below = false;
+                live.clearRetainingCapacity();
+                overwritten.clearRetainingCapacity();
+            },
+            .local_get => |x| {
+                if (exit_below) {
+                    live.put(arena, x, {}) catch return error.OutOfMemory;
+                } else {
+                    _ = overwritten.remove(x);
+                }
+            },
+            .local_set => |x| {
+                const is_dead = if (exit_below) !live.contains(x) else overwritten.contains(x);
+                if (is_dead) {
+                    list.items[i] = .{ .local_set = types.invalid_index };
+                    changed = true;
+                }
+                if (exit_below) {
+                    _ = live.remove(x);
+                } else {
+                    overwritten.put(arena, x, {}) catch return error.OutOfMemory;
+                }
+            },
+            .local_tee => |x| {
+                const is_dead = if (exit_below) !live.contains(x) else overwritten.contains(x);
+                if (is_dead) {
+                    list.items[i] = .nop;
+                    changed = true;
+                }
+                if (exit_below) {
+                    _ = live.remove(x);
+                } else {
+                    overwritten.put(arena, x, {}) catch return error.OutOfMemory;
+                }
+            },
+            else => {},
+        }
+    }
+
+    return changed;
+}
+
 fn eliminateDeadLocalStores(
     arena: std.mem.Allocator,
     list: *InstrList,
@@ -5261,6 +5363,10 @@ fn eliminateDeadLocalStores(
 
     for (list.items) |inst| {
         switch (inst) {
+            .nop => {
+                changed = true;
+                continue;
+            },
             .local_tee => |x| {
                 if ((read_counts.get(x) orelse 0) == 0) {
                     changed = true;
@@ -5269,23 +5375,8 @@ fn eliminateDeadLocalStores(
                 out.append(arena, inst) catch return error.OutOfMemory;
             },
             .local_set => |x| {
-                if ((read_counts.get(x) orelse 0) == 0) {
-                    if (out.items.len > 0 and isPureZeroPopInstr(out.items[out.items.len - 1])) {
-                        _ = out.pop();
-                    } else if (out.items.len >= 2 and
-                        isPureZeroPopInstr(out.items[out.items.len - 2]) and
-                        out.items[out.items.len - 1] == .numeric_op and
-                        isPureUnaryNumericOp(out.items[out.items.len - 1].numeric_op))
-                    {
-                        out.items.len -= 2;
-                    } else if (out.items.len >= 3 and
-                        isPureZeroPopInstr(out.items[out.items.len - 3]) and
-                        isPureZeroPopInstr(out.items[out.items.len - 2]) and
-                        out.items[out.items.len - 1] == .numeric_op and
-                        isPureBinaryNumericOp(out.items[out.items.len - 1].numeric_op))
-                    {
-                        out.items.len -= 3;
-                    } else {
+                if (x == types.invalid_index or (read_counts.get(x) orelse 0) == 0) {
+                    if (!tryPopPureSingleValueExpr(&out)) {
                         out.append(arena, .{ .raw = &[_]u8{0x1a} }) catch return error.OutOfMemory;
                     }
                     changed = true;
@@ -5460,9 +5551,12 @@ fn simplifyLocals(
     if (try simplifyLocalsBlock(arena, root_list, &bindings, optimize_mode, &initial_reads)) changed = true;
 
     while (true) {
+        var step_changed = false;
+        if (try eliminateOverwrittenLocalStores(arena, root_list, true)) step_changed = true;
         var read_counts: std.AutoHashMapUnmanaged(u32, u32) = .empty;
         try countLocalReads(root_list, arena, &read_counts);
-        if (try eliminateDeadLocalStores(arena, root_list, &read_counts)) {
+        if (try eliminateDeadLocalStores(arena, root_list, &read_counts)) step_changed = true;
+        if (step_changed) {
             changed = true;
         } else {
             break;
@@ -7222,7 +7316,7 @@ fn rewriteExprFuncIndices(
 
 const max_inline_params = 16;
 const max_inline_locals = 32;
-const max_inline_results = 4;
+const max_inline_results = 8;
 const max_inline_total_locals = max_inline_params + max_inline_locals;
 
 const TrivialLeaf = struct {
@@ -7396,7 +7490,7 @@ fn classifyTrivialFunc(
 ) TrivialKind {
     if (func.is_import or func.code_bytes.len == 0) return .none;
     const mode_max_params: usize = switch (optimize_mode) {
-        .small => 6,
+        .small => 8,
         .fast => max_inline_params,
     };
     const mode_max_locals: usize = switch (optimize_mode) {
@@ -7404,7 +7498,7 @@ fn classifyTrivialFunc(
         .fast => max_inline_locals,
     };
     const mode_max_results: usize = switch (optimize_mode) {
-        .small => 2,
+        .small => 4,
         .fast => max_inline_results,
     };
     if (func.local_types.items.len > mode_max_locals) return .none;
@@ -7524,9 +7618,11 @@ fn classifyTrivialFunc(
                     leading_still_matching = false;
                     const callee = readU32(bytes, &pos) catch return .none;
                     const is_cond_call = (depth > 0 or has_early_return) and seen_cond_branch;
-                    const max_inner_calls: u8 = if (call_count == 1 and !is_externally_used) 4 else 2;
-                    if (optimize_mode != .fast or
-                        has_loop or
+                    const max_inner_calls: u8 = switch (optimize_mode) {
+                        .small => 1,
+                        .fast => 4,
+                    };
+                    if (has_loop or
                         inner_calls_count >= max_inner_calls or
                         callee >= module.funcs.items.len or
                         callee == fidx or
@@ -7710,19 +7806,30 @@ fn classifyTrivialFunc(
 
     switch (optimize_mode) {
         .small => {
-            if (inner_calls_count > 0) return .none;
-            if (call_count == 1 and !is_externally_used) {
-                if (op_count > 45 or func.local_types.items.len > 8 or sig.params.len > 6) return .none;
+            if (inner_calls_count > 0) {
+                if (inner_calls_count > 1 or
+                    has_loop or
+                    uses_global_op or
+                    needs_result_block or
+                    func.local_types.items.len > 0 or
+                    op_count > 7 or
+                    bytes.len > 20)
+                {
+                    return .none;
+                }
+            } else if (call_count == 1 and !is_externally_used) {
+                if (op_count > 45 or func.local_types.items.len > 8 or sig.params.len > 8) return .none;
             } else {
                 if (uses_global_op) return .none;
                 const allow_zero_local = func.local_types.items.len == 0 and
-                    op_count <= 7 and
-                    sig.params.len <= 2;
-                const allow_one_local = func.local_types.items.len <= 1 and
-                    !needs_result_block and
-                    ((op_count <= 10 and sig.params.len <= 3 and (prefix_params == sig.params.len or (sig.params.len <= 2 and op_count <= 9))) or
-                        (sig.params.len >= 1 and sig.params.len <= 2 and op_count <= 12 and bytes.len <= 32));
-                if (!allow_zero_local and !allow_one_local) return .none;
+                    op_count <= 8 and
+                    sig.params.len <= 5;
+                const allow_small_leaf = !needs_result_block and
+                    !has_loop and
+                    func.local_types.items.len <= 2 and
+                    ((op_count <= 10 and sig.params.len <= 6 and (prefix_params == sig.params.len or (sig.params.len <= 3 and op_count <= 9))) or
+                        (sig.params.len >= 1 and sig.params.len <= 5 and op_count <= 12 and bytes.len <= 38));
+                if (!allow_zero_local and !allow_small_leaf) return .none;
             }
         },
         .fast => {
@@ -7739,14 +7846,16 @@ fn classifyTrivialFunc(
                 if (single_internal) {
                     if (op_count > 180 or bytes.len > 500) return .none;
                 } else {
-                    if (uses_global_op or op_count > 85 or bytes.len > 240) return .none;
+                    if (uses_global_op or op_count > 115 or bytes.len > 240) return .none;
                 }
             } else {
                 if (has_loop) return .none;
                 if (single_internal) {
                     if (inner_calls_count > 4 or uses_global_set or op_count > 180 or bytes.len > 500) return .none;
+                } else if (inner_calls_count <= 2) {
+                    if (uses_global_op or op_count > 95 or bytes.len > 260) return .none;
                 } else {
-                    if (inner_calls_count > 2 or uses_global_op or op_count > 95 or bytes.len > 260) return .none;
+                    if (inner_calls_count > 4 or uses_global_op or op_count > 40 or bytes.len > 96) return .none;
                 }
             }
         },
@@ -12600,8 +12709,12 @@ test "Optimizer: .fast mode 8-param 4-result inlining and 2-call wrapper inlinin
             0x20, 0x04, 0x20, 0x05, 0x20, 0x06, 0x20, 0x07,
             0x10, 0x00, // call $lerp4_early (1)
             0x6a, 0x6a, 0x6a, // sum 4 results
-            0x20, 0x07, 0x20, 0x06, 0x20, 0x05, 0x20, 0x04,
-            0x20, 0x03, 0x20, 0x02, 0x20, 0x01, 0x20, 0x00,
+            0x20, 0x07, 0x20,
+            0x06, 0x20, 0x05,
+            0x20, 0x04, 0x20,
+            0x03, 0x20, 0x02,
+            0x20, 0x01, 0x20,
+            0x00,
             0x10, 0x00, // call $lerp4_early (2)
             0x6a, 0x6a, 0x6a, // sum 4 results
             0x6a, // combine
@@ -12662,16 +12775,14 @@ test "Optimizer: .fast mode 8-param 4-result inlining and 2-call wrapper inlinin
             0x20, 0x01,
             0x10, 0x00, // call $imp (unconditional call to import -> not inlined)
             0x41, 0x01,
-            0x6a,
-            0x0b,
+            0x6a, 0x0b,
         };
         const callee_b = [_]u8{
             0x20, 0x01,
             0x20, 0x00,
             0x10, 0x00, // call $imp (unconditional call to import -> not inlined)
             0x41, 0x02,
-            0x6a,
-            0x0b,
+            0x6a, 0x0b,
         };
 
         // func 3 (`two_call_wrapper`): makes 2 direct calls (`call 1` and `call 2`) and combines results
@@ -12695,16 +12806,15 @@ test "Optimizer: .fast mode 8-param 4-result inlining and 2-call wrapper inlinin
             0x20, 0x01,
             0x20, 0x00,
             0x10, 0x03, // call $two_call_wrapper (2)
-            0x6a,
-            0x20, 0x00,
-            0x20, 0x01,
+            0x6a, 0x20,
+            0x00, 0x20,
+            0x01,
             0x10, 0x01, // extra call to 1
-            0x6a,
-            0x20, 0x00,
-            0x20, 0x01,
+            0x6a, 0x20,
+            0x00, 0x20,
+            0x01,
             0x10, 0x02, // extra call to 2
-            0x6a,
-            0x0b,
+            0x6a, 0x0b,
         };
 
         try mod.funcs.append(allocator, .{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &callee_a });
@@ -13169,11 +13279,15 @@ test "Optimizer: shift and rotate redundant bitmask elision and wide_arithmetic 
         0x20, 0x00,
         0x20, 0x01,
         0x74, // i32.shl
-        0x20, 0x01,
+        0x20,
+        0x01,
         0x76, // i32.shr_u
-        0x20, 0x00,
-        0x20, 0x01,
-        0x41, 0x0f,
+        0x20,
+        0x00,
+        0x20,
+        0x01,
+        0x41,
+        0x0f,
         0x71, // i32.and 15
         0x77, // i32.rotl
         0x73, // i32.xor
@@ -13187,11 +13301,14 @@ test "Optimizer: shift and rotate redundant bitmask elision and wide_arithmetic 
         0x20, 0x00,
         0x20, 0x01,
         0x86, // i64.shl
-        0x20, 0x02,
+        0x20,
+        0x02,
         0xad, // i64.extend_i32_u
         0x88, // i64.shr_u
-        0x20, 0x02,
-        0x41, 0x1f,
+        0x20,
+        0x02,
+        0x41,
+        0x1f,
         0x71, // i32.and 31
         0xad, // i64.extend_i32_u
         0x8a, // i64.rotr
@@ -13203,4 +13320,54 @@ test "Optimizer: shift and rotate redundant bitmask elision and wide_arithmetic 
     try testing.expectEqualSlices(u8, &f2_code, opt_mod.funcs.items[2].code_bytes);
 }
 
+test "Optimizer: eliminates overwritten local stores on reused locals and pops pure expressions" {
+    const allocator = testing.allocator;
 
+    var mod = Mod.Module.init(allocator);
+    defer mod.deinit();
+
+    // (param i32 i32) -> (result i32)
+    try mod.module_types.append(allocator, .{ .func_type = .{
+        .params = try allocator.dupe(types.ValType, &.{ .i32, .i32 }),
+        .results = try allocator.dupe(types.ValType, &.{.i32}),
+    } });
+    try mod.type_meta.append(allocator, .{});
+
+    // Local 2 is written three times; first two writes (`p0 + 4` and `local.tee 2` of `p1 + 8`)
+    // are overwritten before any read, while third write (`p1 - 1`) is read and returned.
+    const f0_code = [_]u8{
+        0x20, 0x00, // local.get 0
+        0x41, 0x04, // i32.const 4
+        0x6a, // i32.add
+        0x21, 0x02, // local.set 2 (dead overwrite #1)
+        0x20, 0x01, // local.get 1
+        0x41, 0x08, // i32.const 8
+        0x6a, // i32.add
+        0x22, 0x02, // local.tee 2 (dead tee -> nop, value consumed by i32.add below)
+        0x20, 0x00, // local.get 0
+        0x6a, // i32.add
+        0x21, 0x03, // local.set 3 (dead at function exit!)
+        0x20, 0x01, // local.get 1
+        0x41, 0x01, // i32.const 1
+        0x6b, // i32.sub
+        0x21, 0x02, // local.set 2 (live!)
+        0x20, 0x02, // local.get 2
+        0x0b, // end
+    };
+    var f0 = Mod.Func{ .decl = .{ .type_var = .{ .index = 0 } }, .code_bytes = &f0_code };
+    try f0.local_types.appendSlice(allocator, &[_]types.ValType{ .i32, .i32 });
+    try mod.funcs.append(allocator, f0);
+    try mod.exports.append(allocator, .{ .name = "reused_locals", .kind = .func, .var_ = .{ .index = 0 } });
+
+    const wasm = try writer.writeModule(allocator, &mod);
+    defer allocator.free(wasm);
+    const opt = try optimize(allocator, wasm, .{ .optimize_mode = .small });
+    defer allocator.free(opt);
+    var opt_mod = try reader.readModule(allocator, opt);
+    defer opt_mod.deinit();
+
+    // All three dead local writes and their pure producer expressions are eliminated,
+    // leaving `local.get 1; i32.const -1 (0x7f); i32.add; end` (or `i32.const 1; i32.sub`) with 0 locals!
+    try testing.expectEqual(@as(usize, 0), opt_mod.funcs.items[0].local_types.items.len);
+    try testing.expect(opt_mod.funcs.items[0].code_bytes.len <= 8);
+}
