@@ -6,7 +6,7 @@ const builtin = @import("builtin");
 
 comptime {
     if (builtin.object_format != .c) {
-        symbol(if (builtin.mode == .small or builtin.zig_backend == .stage2_aarch64) &memcpySmall else &memcpyFast, "memcpy");
+        symbol(if (builtin.mode == .small) &memcpySmall else &memcpyFast, "memcpy");
     }
 }
 
@@ -212,10 +212,8 @@ fn testMemcpyImpl(comptime memcpyImpl: anytype) !void {
     }
 }
 test memcpySmall {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     try testMemcpyImpl(memcpySmall);
 }
 test memcpyFast {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     try testMemcpyImpl(memcpyFast);
 }

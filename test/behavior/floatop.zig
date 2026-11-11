@@ -1711,3 +1711,38 @@ test "result location forwarded through unary float builtins" {
     y = @trunc(@floatFromInt(S.x));
     y = @round(@floatFromInt(S.x));
 }
+
+test "f16 abs and neg preserve live source operand" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_riscv64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_spirv) return error.SkipZigTest;
+
+    const S = struct {
+        noinline fn absAndNegKeepSrc(x: f16) struct { orig: f16, abs_val: f16, neg_val: f16 } {
+            const a = @abs(x);
+            const n = -x;
+            return .{ .orig = x, .abs_val = a, .neg_val = n };
+        }
+    };
+
+    const r1 = S.absAndNegKeepSrc(-1.0);
+    try expect(r1.orig == -1.0);
+    try expect(r1.abs_val == 1.0);
+    try expect(r1.neg_val == 1.0);
+
+    const r2 = S.absAndNegKeepSrc(1.0);
+    try expect(r2.orig == 1.0);
+    try expect(r2.abs_val == 1.0);
+    try expect(r2.neg_val == -1.0);
+
+    var limbs: [4]std.math.big.Limb = undefined;
+    var x: f16 = 1.0;
+    _ = &x;
+    var m: std.math.big.int.Mutable = .{
+        .limbs = limbs[0..std.math.big.int.calcLimbLen(x)],
+        .len = undefined,
+        .positive = undefined,
+    };
+    try expect(m.setFloat(x, .nearest_even) == .exact);
+    try expect(m.toConst().eql(std.math.big.int.Const{ .limbs = &.{1}, .positive = true }));
+}

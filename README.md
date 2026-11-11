@@ -12,8 +12,9 @@ A personal mirror and build of the [Zig](https://ziglang.org) compiler.
 ### Branches
 
 - **`wazig`** (default) — WebAssembly (`wasm64-wasip3`) Zig compiler (`wazig` and
-  `wazigl`) source tree, plus the release and CI workflows that mirror official
-  Zig releases and build development binaries.
+  `wazigl`) and native Linux self-hosted Zig compiler (`zigc`) source tree, plus
+  the release and CI workflows that mirror official Zig releases and build
+  development binaries.
 - **`master`** — a mirror of the upstream Zig source from
   [codeberg.org/ziglang/zig](https://codeberg.org/ziglang/zig) (the Zig project
   migrated from GitHub to Codeberg). Synced daily at 5:15 AM Central Time
@@ -58,11 +59,21 @@ wazig version
 wazig --help
 ```
 
+#### Native Linux Self-Hosted Releases (`zigc`)
+
+Pre-built native Linux (`x86_64-linux` and `aarch64-linux`) Zig compiler
+releases built without LLVM using Zig's self-hosted native backends:
+
+```sh
+ghr install cataggar/zig@v0.17.1-zigc.1 "?id=cataggar/zig/zigc"
+zigc version
+```
+
 ## Documentation
 
-* [`doc/installation.md`](doc/installation.md) — Installing `wazig`, `wazigl`, and native Zig releases with `ghr`, minisign verification keys, and running directly with `wasmtime`.
+* [`doc/installation.md`](doc/installation.md) — Installing `wazig`, `wazigl`, `zigc`, and native Zig releases with `ghr`, minisign verification keys, and running directly with `wasmtime`.
 * [`doc/wazig-changes.md`](doc/wazig-changes.md) — Summary of all compiler, linker, standard library, and `lib/c` changes in `wazig` (based on Zig 0.17.1).
-* [`doc/building.md`](doc/building.md) — Building `wazig`/`wazigl`, Zig, and LLVM/Clang/LLD from source across POSIX and Windows.
+* [`doc/building.md`](doc/building.md) — Building `wazig`/`wazigl`, `zigc`, Zig, and LLVM/Clang/LLD from source across POSIX and Windows.
 * [`doc/debugging-and-testing.md`](doc/debugging-and-testing.md) — Editing source code, running the test suite (native, QEMU, Wine, Wasmtime), Autodoc, `translate-c`, and debugging with LLDB.
 * [`doc/build.zig.zon.md`](doc/build.zig.zon.md) — `build.zig.zon` package manifest specification.
 

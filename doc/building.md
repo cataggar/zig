@@ -61,6 +61,42 @@ python3 scripts/package_wazig_bundle.py \
   --out-dir dist
 ```
 
+## Building `zigc` (`x86_64-linux` and `aarch64-linux`, without LLVM)
+
+To build the native Linux self-hosted compiler (`zigc`) using Zig's native backends (`-Denable-llvm=false -Duse-llvm=false`) and a host Zig 0.17.1 binary (`$HOST_ZIG`):
+
+```sh
+# 1. Build fast stage3-host compiler (have_llvm=false)
+ZIG_LIB_DIR="$PWD/lib" "$HOST_ZIG" build \
+  --prefix stage3-host \
+  -Denable-llvm=false \
+  -Duse-llvm=true \
+  -Doptimize=ReleaseFast \
+  -Dno-langref \
+  -Dversion-string=0.17.1
+
+# 2. Build flat Linux release prefixes for x86_64-linux and aarch64-linux
+for TARGET in x86_64-linux aarch64-linux; do
+  ./stage3-host/bin/zig build \
+    --prefix "stage3-${TARGET}" \
+    -Dtarget="${TARGET}" \
+    -Dcpu=baseline \
+    -Dflat \
+    -Denable-llvm=false \
+    -Duse-llvm=false \
+    -Doptimize=ReleaseSafe \
+    -Dstrip \
+    -Dno-langref \
+    -Dversion-string=0.17.1-zigc.1
+
+  python3 scripts/package_zigc_bundle.py \
+    --target "${TARGET}" \
+    --version 0.17.1-zigc.1 \
+    --stage-prefix "stage3-${TARGET}" \
+    --out-dir dist
+done
+```
+
 ## Building from Source (CMake)
 
 Ensure you have the required dependencies:
