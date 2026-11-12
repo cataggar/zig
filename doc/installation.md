@@ -38,13 +38,13 @@ Each release publishes an unsigned `<flavor>.tar.zst` archive (containing `<flav
 Install `wazig` using `ghr` v0.10.2+:
 
 ```sh
-ghr install cataggar/zig@v0.17.0-wazig.6
+ghr install cataggar/zig@v0.17.1-wazig.1
 ```
 
 Or install `wazigl` (with LLVM included):
 
 ```sh
-ghr install cataggar/zig@v0.17.0-wazigl.6
+ghr install cataggar/zig@v0.17.1-wazigl.1
 ```
 
 Verify the installed CLI shim:
